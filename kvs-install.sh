@@ -6,14 +6,14 @@
 # URL : https://www.kernel-video-sharing.com
 #
 # This script is intended for a quick and easy installation :
-# wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/kvs-install.sh
+# wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
 # chmod +x kvs-install.sh
 # ./kvs-install.sh
 #
 # KVS-install Copyright (c) 2020 Maxime Michaud
 # Licensed under GNU General Public License v3.0
 #################################################################################
-#Couleurs
+#Colors
 black=$(tput setaf 0)
 red=$(tput setaf 1)
 green=$(tput setaf 2)
@@ -279,7 +279,7 @@ function aptinstall_mysql() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MYSQL Installation"
     if [[ "$database_ver" == "8.0" ]]; then
-    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
     fi
     if [[ "$VERSION_ID" == "9" ]]; then
       echo "deb http://repo.mysql.com/apt/debian/ stretch mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
@@ -404,7 +404,7 @@ function aptinstall_phpmyadmin() {
     chmod 700 /usr/share/phpmyadmin/tmp
     randomBlowfishSecret=$(openssl rand -base64 32)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" config.sample.inc.php >config.inc.php
-    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/phpmyadmin.conf
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf
     ln -s /usr/share/phpmyadmin /var/www/phpmyadmin
     mv phpmyadmin.conf /etc/apache2/sites-available/
     a2ensite phpmyadmin
@@ -431,7 +431,7 @@ function install_KVS() {
   #cd /var/www/html || exit
   #apt install cron -y
   #crontab -l > cron
-  #wget -O cron https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/cron/cron
+  #wget -O cron https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cron/cron
   #crontab cron
   #rm cron
 #}
@@ -446,10 +446,10 @@ function install_composer() {
   #Disabled for the moment
   #a2enmod remoteip
   #cd /etc/apache2 || exit
-  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/cloudflare/apache2.conf
-  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/cloudflare/000-default.conf
+  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/apache2.conf
+  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/000-default.conf
   #cd /etc/apache2/conf-available || exit
-  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/cloudflare/remoteip.conf
+  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/remoteip.conf
   #systemctl restart apache2
 #}
 
@@ -498,7 +498,7 @@ function manageMenu() {
 }
 
 function update() {
-  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/kvs-install.sh -O kvs-install.sh
+  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh -O kvs-install.sh
   chmod +x kvs-install.sh
   echo ""
   echo "Update Done."
