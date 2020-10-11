@@ -207,27 +207,39 @@ function aptinstall_nginx() {
 	apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
     if [[ "$VERSION_ID" == "9" ]]; then
       echo "deb https://nginx.org/packages/mainline/debian/ stretch nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/debian/ stretch nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb-src https://nginx.org/packages/mainline/debian/ stretch nginx" >>/etc/apt/sources.list.d/nginx.list
+	  apt-get update
+      apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "10" ]]; then
       echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
+	  apt-get update
+      apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "11" ]]; then
 	  echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
+	  apt-get update
+      apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "16.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >>/etc/apt/sources.list.d/nginx.list
+	  apt-get update
+      apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "18.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >>/etc/apt/sources.list.d/nginx.list
+	  apt-get update
+      apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "20.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ focal nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ focal nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ focal nginx" >>/etc/apt/sources.list.d/nginx.list
+	  apt-get update
+      apt install nginx -y
     fi
   fi
 }
