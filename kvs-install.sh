@@ -426,7 +426,7 @@ function install_KVS() {
   chown -R www-data:www-data /var/www/html
 }
 
-function install_cron() {
+#function install_cron() {
   #Disabled for the moment
   #cd /var/www/html || exit
   #apt install cron -y
@@ -434,7 +434,7 @@ function install_cron() {
   #wget -O cron https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/cron/cron
   #crontab cron
   #rm cron
-}
+#}
 
 function install_composer() {
   curl -sS https://getcomposer.org/installer | php
@@ -442,7 +442,7 @@ function install_composer() {
   chmod +x /usr/local/bin/composer
 }
 
-function mod_cloudflare() {
+#function mod_cloudflare() {
   #Disabled for the moment
   #a2enmod remoteip
   #cd /etc/apache2 || exit
@@ -451,13 +451,13 @@ function mod_cloudflare() {
   #cd /etc/apache2/conf-available || exit
   #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/cloudflare/remoteip.conf
   #systemctl restart apache2
-}
+#}
 
-function autoUpdate() {
+#function autoUpdate() {
   #Disable for the moment
   #echo "Enable Automatic Updates..."
   #apt-get install -y unattended-upgrades
-}
+#}
 
 function setupdone() {
   IP=$(curl 'https://api.ipify.org')
