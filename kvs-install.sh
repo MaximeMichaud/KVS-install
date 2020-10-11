@@ -198,7 +198,7 @@ function aptupdate() {
   apt-get update
 }
 function aptinstall() {
-  apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl wget memcached
+  apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl wget memcached zlib1g-dev
 }
 
 function aptinstall_nginx() {
