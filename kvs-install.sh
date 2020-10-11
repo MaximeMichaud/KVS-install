@@ -151,40 +151,40 @@ function installQuestions() {
     ;;
   esac
   if [[ "$database" =~ (mysql) ]]; then
-  echo "Which version of MySQL ?"
-  echo "   1) MySQL 5.7"
-  echo "   2) MySQL 8.0"
-  until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
-    read -rp "Version [1-2]: " -e -i 2 DATABASE_VER
-  done
-  case $DATABASE_VER in
-  1)
-    database_ver="5.7"
-    ;;
-  2)
-    database_ver="8.0"
-    ;;
-  esac
+    echo "Which version of MySQL ?"
+    echo "   1) MySQL 5.7"
+    echo "   2) MySQL 8.0"
+    until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
+      read -rp "Version [1-2]: " -e -i 2 DATABASE_VER
+    done
+    case $DATABASE_VER in
+    1)
+      database_ver="5.7"
+      ;;
+    2)
+      database_ver="8.0"
+      ;;
+    esac
   fi
   if [[ "$database" =~ (mariadb) ]]; then
-  echo "Which version of MySQL ?"
-  echo "${yellow}   1) MariaDB 10.3 (Old Stable)${normal}"
-  echo "${yellow}   2) MariaDB 10.4 (Old Stable)${normal}"
-  echo "${green}   3) MariaDB 10.5 (Stable)${normal}"
-  until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
-    read -rp "Version [1-3]: " -e -i 3 DATABASE_VER
-  done
-  case $DATABASE_VER in
-  1)
-    database_ver="10.3"
-    ;;
-  2)
-    database_ver="10.4"
-    ;;
-  3)
-    database_ver="10.5"
-    ;;
-  esac
+    echo "Which version of MySQL ?"
+    echo "${yellow}   1) MariaDB 10.3 (Old Stable)${normal}"
+    echo "${yellow}   2) MariaDB 10.4 (Old Stable)${normal}"
+    echo "${green}   3) MariaDB 10.5 (Stable)${normal}"
+    until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
+      read -rp "Version [1-3]: " -e -i 3 DATABASE_VER
+    done
+    case $DATABASE_VER in
+    1)
+      database_ver="10.3"
+      ;;
+    2)
+      database_ver="10.4"
+      ;;
+    3)
+      database_ver="10.5"
+      ;;
+    esac
   fi
   echo ""
   echo "We are ready to start the installation !"
@@ -204,41 +204,41 @@ function aptinstall() {
 function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "Nginx Installation"
-	apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
+    apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
     if [[ "$VERSION_ID" == "9" ]]; then
       echo "deb https://nginx.org/packages/mainline/debian/ stretch nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/debian/ stretch nginx" >>/etc/apt/sources.list.d/nginx.list
-	  apt-get update
+      apt-get update
       apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "10" ]]; then
       echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
-	  apt-get update
+      apt-get update
       apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "11" ]]; then
-	  echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
-	  apt-get update
+      apt-get update
       apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "16.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >>/etc/apt/sources.list.d/nginx.list
-	  apt-get update
+      apt-get update
       apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "18.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >>/etc/apt/sources.list.d/nginx.list
-	  apt-get update
+      apt-get update
       apt install nginx -y
     fi
     if [[ "$VERSION_ID" == "20.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ focal nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/ubuntu/ focal nginx" >>/etc/apt/sources.list.d/nginx.list
-	  apt-get update
+      apt-get update
       apt install nginx -y
     fi
   fi
@@ -247,7 +247,7 @@ function aptinstall_nginx() {
 function aptinstall_mariadb() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MariaDB Installation"
-	apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
+    apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
     if [[ "$VERSION_ID" == "9" ]]; then
       echo "deb [arch=amd64] https://mirrors.gethosted.online/mariadb/repo/$database_ver/debian stretch main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
@@ -261,7 +261,7 @@ function aptinstall_mariadb() {
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "11" ]]; then
-	  echo "deb [arch=amd64] https://mirrors.gethosted.online/mariadb/repo/$database_ver/debian buster main" >/etc/apt/sources.list.d/mariadb.list
+      echo "deb [arch=amd64] https://mirrors.gethosted.online/mariadb/repo/$database_ver/debian buster main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
       apt install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
@@ -291,7 +291,7 @@ function aptinstall_mysql() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MYSQL Installation"
     if [[ "$database_ver" == "8.0" ]]; then
-    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
     fi
     if [[ "$VERSION_ID" == "9" ]]; then
       echo "deb http://repo.mysql.com/apt/debian/ stretch mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
@@ -354,7 +354,7 @@ function aptinstall_php() {
       apt-get install php$PHP php$PHP-bcmath php$PHP-json php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	  sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
       systemctl restart nginx
     fi
     if [[ "$VERSION_ID" == "10" ]]; then
@@ -363,7 +363,7 @@ function aptinstall_php() {
       apt-get install php$PHP php$PHP-bcmath php$PHP-json php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm php$PHP-memcached -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	  sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
       systemctl restart nginx
     fi
     if [[ "$VERSION_ID" == "11" ]]; then
@@ -372,7 +372,7 @@ function aptinstall_php() {
       apt-get install php$PHP php$PHP-bcmath php$PHP-json php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	  sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
       systemctl restart nginx
     fi
     if [[ "$VERSION_ID" == "16.04" ]]; then
@@ -381,7 +381,7 @@ function aptinstall_php() {
       apt-get install php$PHP php$PHP-bcmath php$PHP-json php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	  sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
       systemctl restart nginx
     fi
     if [[ "$VERSION_ID" == "18.04" ]]; then
@@ -390,7 +390,7 @@ function aptinstall_php() {
       apt-get install php$PHP php$PHP-bcmath php$PHP-json php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	  sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
       systemctl restart nginx
     fi
     if [[ "$VERSION_ID" == "20.04" ]]; then
@@ -399,7 +399,7 @@ function aptinstall_php() {
       apt-get install php$PHP php$PHP-bcmath php$PHP-json php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	  sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
       systemctl restart nginx
     fi
   fi
@@ -410,7 +410,7 @@ function aptinstall_phpmyadmin() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     mkdir /usr/share/phpmyadmin/ || exit
     cd /usr/share/phpmyadmin/ || exit
-	PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
+    PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
     wget https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
     tar xzf phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
     mv phpMyAdmin-$PHPMYADMIN_VER-all-languages/* /usr/share/phpmyadmin
@@ -445,13 +445,13 @@ function install_KVS() {
 }
 
 #function install_cron() {
-  #Disabled for the moment
-  #cd /var/www/html || exit
-  #apt install cron -y
-  #crontab -l > cron
-  #wget -O cron https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cron/cron
-  #crontab cron
-  #rm cron
+#Disabled for the moment
+#cd /var/www/html || exit
+#apt install cron -y
+#crontab -l > cron
+#wget -O cron https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cron/cron
+#crontab cron
+#rm cron
 #}
 
 function install_composer() {
@@ -461,20 +461,20 @@ function install_composer() {
 }
 
 #function mod_cloudflare() {
-  #Disabled for the moment
-  #a2enmod remoteip
-  #cd /etc/apache2 || exit
-  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/apache2.conf
-  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/000-default.conf
-  #cd /etc/apache2/conf-available || exit
-  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/remoteip.conf
-  #systemctl restart apache2
+#Disabled for the moment
+#a2enmod remoteip
+#cd /etc/apache2 || exit
+#wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/apache2.conf
+#wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/000-default.conf
+#cd /etc/apache2/conf-available || exit
+#wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/remoteip.conf
+#systemctl restart apache2
 #}
 
 #function autoUpdate() {
-  #Disable for the moment
-  #echo "Enable Automatic Updates..."
-  #apt-get install -y unattended-upgrades
+#Disable for the moment
+#echo "Enable Automatic Updates..."
+#apt-get install -y unattended-upgrades
 #}
 
 function setupdone() {
