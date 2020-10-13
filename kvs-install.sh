@@ -106,7 +106,8 @@ function script() {
   aptinstall_$database
   aptinstall_php
   #aptinstall_phpmyadmin
-  install_KVS
+  #install_KVS
+  install_ioncube
   setupdone
 
 }
@@ -441,6 +442,15 @@ function install_KVS() {
   rm -rf KVSInstaller.zip
   chmod -R 755 /var/www/html
   chown -R www-data:www-data /var/www/html
+}
+
+function install_ioncube() {
+  wget https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz
+  tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
+  cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
+  echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/apache2/php.ini
+  echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
+  systemctl restart apache2
 }
 
 #function install_cron() {
