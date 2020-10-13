@@ -106,7 +106,6 @@ function script() {
   aptinstall_$database
   aptinstall_php
   #aptinstall_phpmyadmin
-  install_composer
   install_KVS
   setupdone
 
@@ -453,12 +452,6 @@ function install_KVS() {
 #crontab cron
 #rm cron
 #}
-
-function install_composer() {
-  curl -sS https://getcomposer.org/installer | php
-  mv composer.phar /usr/local/bin/composer
-  chmod +x /usr/local/bin/composer
-}
 
 #function mod_cloudflare() {
 #Disabled for the moment
