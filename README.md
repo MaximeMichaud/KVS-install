@@ -32,4 +32,4 @@ https://github.com/MaximeMichaud/KVS-install/projects/1
 * NGINX
 * MySQL 5.7 - 8.0 & MariaDB 10.3 - 10.5
 * PHP 7.3 to 7.4
-* phpMyAdmin 5.0.3
+* phpMyAdmin 5.0.4
