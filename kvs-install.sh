@@ -209,37 +209,37 @@ function aptinstall_nginx() {
       echo "deb https://nginx.org/packages/mainline/debian/ stretch nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/debian/ stretch nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update
-      apt install nginx -y
+      apt-get install nginx -y
     fi
     if [[ "$VERSION_ID" == "10" ]]; then
       echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update
-      apt install nginx -y
+      apt-get install nginx -y
     fi
     if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update
-      apt install nginx -y
+      apt-get install nginx -y
     fi
     if [[ "$VERSION_ID" == "16.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update
-      apt install nginx -y
+      apt-get install nginx -y
     fi
     if [[ "$VERSION_ID" == "18.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update
-      apt install nginx -y
+      apt-get install nginx -y
     fi
     if [[ "$VERSION_ID" == "20.04" ]]; then
       echo "deb https://nginx.org/packages/mainline/ubuntu/ focal nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/ubuntu/ focal nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update
-      apt install nginx -y
+      apt-get install nginx -y
     fi
   fi
 }
@@ -251,37 +251,37 @@ function aptinstall_mariadb() {
     if [[ "$VERSION_ID" == "9" ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian stretch main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
-      apt install mariadb-server -y
+      apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "10" ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian buster main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
-      apt install mariadb-server -y
+      apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian buster main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
-      apt install mariadb-server -y
+      apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "16.04" ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian xenial main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
-      apt install mariadb-server -y
+      apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "18.04" ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian bionic main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
-      apt install mariadb-server -y
+      apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "20.04" ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian focal main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
-      apt install mariadb-server -y
+      apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
   fi
@@ -456,7 +456,7 @@ function install_ioncube() {
 #function install_cron() {
 #Disabled for the moment
 #cd /var/www/html || exit
-#apt install cron -y
+#apt-get install cron -y
 #crontab -l > cron
 #wget -O cron https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cron/cron
 #crontab cron
