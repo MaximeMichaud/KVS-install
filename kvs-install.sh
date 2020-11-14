@@ -14,19 +14,12 @@
 # Licensed under GNU General Public License v3.0
 #################################################################################
 #Colors
-black=$(tput setaf 0)
 red=$(tput setaf 1)
 green=$(tput setaf 2)
 yellow=$(tput setaf 3)
 cyan=$(tput setaf 6)
-white=$(tput setaf 7)
-bold=$(tput bold)
-standout=$(tput smso)
 normal=$(tput sgr0)
 alert=${white}${on_red}
-sub_title=${bold}${yellow}
-repo_title=${black}${on_green}
-message_title=${white}${on_magenta}
 #################################################################################
 function isRoot() {
   if [ "$EUID" -ne 0 ]; then
