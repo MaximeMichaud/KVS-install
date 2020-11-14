@@ -284,7 +284,7 @@ function aptinstall_mysql() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MYSQL Installation"
     if [[ "$database_ver" == "8.0" ]]; then
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
+      wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/mysql/default-auth-override.cnf' -P /etc/mysql/mysql.conf.d
     fi
     if [[ "$VERSION_ID" == "9" ]]; then
       echo "deb http://repo.mysql.com/apt/debian/ stretch mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
@@ -340,7 +340,7 @@ function aptinstall_mysql() {
 function aptinstall_php() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "PHP Installation"
-    wget -q https://packages.sury.org/php/apt.gpg -O- | apt-key add -
+    wget -q 'https://packages.sury.org/php/apt.gpg' -O- | apt-key add -
     if [[ "$VERSION_ID" == "9" ]]; then
       echo "deb https://packages.sury.org/php/ stretch main" | tee /etc/apt/sources.list.d/php.list
       apt-get update >/dev/null
@@ -404,7 +404,7 @@ function aptinstall_phpmyadmin() {
     mkdir /usr/share/phpmyadmin/ || exit
     cd /usr/share/phpmyadmin/ || exit
     PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
-    wget https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
+    wget 'https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz'
     tar xzf phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
     mv phpMyAdmin-$PHPMYADMIN_VER-all-languages/* /usr/share/phpmyadmin
     rm /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
@@ -415,7 +415,7 @@ function aptinstall_phpmyadmin() {
     chmod 700 /usr/share/phpmyadmin/tmp
     randomBlowfishSecret=$(openssl rand -base64 32)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" config.sample.inc.php >config.inc.php
-    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf
+    wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf'
     ln -s /usr/share/phpmyadmin /var/www/phpmyadmin
     mv phpmyadmin.conf /etc/apache2/sites-available/
     a2ensite phpmyadmin
@@ -438,7 +438,7 @@ function install_KVS() {
 }
 
 function install_ioncube() {
-  wget https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz
+  wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
   tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
   cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
   echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/apache2/php.ini
@@ -451,7 +451,7 @@ function install_ioncube() {
 #cd /var/www/html || exit
 #apt-get install cron -y
 #crontab -l > cron
-#wget -O cron https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cron/cron
+#wget -O cron 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cron/cron'
 #crontab cron
 #rm cron
 #}
@@ -460,10 +460,10 @@ function install_ioncube() {
 #Disabled for the moment
 #a2enmod remoteip
 #cd /etc/apache2 || exit
-#wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/apache2.conf
-#wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/000-default.conf
+#wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/apache2.conf'
+#wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/000-default.conf'
 #cd /etc/apache2/conf-available || exit
-#wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/remoteip.conf
+#wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/remoteip.conf'
 #systemctl restart apache2
 #}
 
