@@ -260,19 +260,19 @@ function aptinstall_mariadb() {
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "16.04" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian xenial main" >/etc/apt/sources.list.d/mariadb.list
+      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/ubuntu xenial main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
       apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "18.04" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian bionic main" >/etc/apt/sources.list.d/mariadb.list
+      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/ubuntu bionic main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
       apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
     if [[ "$VERSION_ID" == "20.04" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian focal main" >/etc/apt/sources.list.d/mariadb.list
+      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/ubuntu focal main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update
       apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
