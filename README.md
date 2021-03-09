@@ -5,7 +5,7 @@
 [![MIT Licence](https://badges.frapsoft.com/os/mit/mit.svg?v=103)](https://github.com/MaximeMichaud/KVS-install/blob/main/LICENSE)
 ## Usage
 ```sh
-wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
+curl -O https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
 chmod +x kvs-install.sh
 ./kvs-install.sh
 ```
