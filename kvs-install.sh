@@ -6,7 +6,7 @@
 # URL : https://www.kernel-video-sharing.com
 #
 # This script is intended for a quick and easy installation :
-# wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
+# curl -O https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
 # chmod +x kvs-install.sh
 # ./kvs-install.sh
 #
@@ -188,51 +188,29 @@ function installQuestions() {
 }
 
 function aptupdate() {
+  if [[ "$OS" =~ (debian|ubuntu) ]]; then
   apt-get update
+  fi
 }
 function aptinstall() {
-  apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl wget memcached zlib1g-dev ffmpeg imagemagick
+  if [[ "$OS" =~ (debian|ubuntu) ]]; then
+  apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl
+  fi
 }
 
 function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "Nginx Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
-    if [[ "$VERSION_ID" == "9" ]]; then
-      echo "deb https://nginx.org/packages/mainline/debian/ stretch nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/debian/ stretch nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update
-      apt-get install nginx -y
-    fi
-    if [[ "$VERSION_ID" == "10" ]]; then
-      echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update
-      apt-get install nginx -y
+    if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
+      echo "deb https://nginx.org/packages/mainline/$ID/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb-src https://nginx.org/packages/mainline/$ID/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
+      apt-get update && apt-get install nginx -y
     fi
     if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update
-      apt-get install nginx -y
-    fi
-    if [[ "$VERSION_ID" == "16.04" ]]; then
-      echo "deb https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ xenial nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update
-      apt-get install nginx -y
-    fi
-    if [[ "$VERSION_ID" == "18.04" ]]; then
-      echo "deb https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ bionic nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update
-      apt-get install nginx -y
-    fi
-    if [[ "$VERSION_ID" == "20.04" ]]; then
-      echo "deb https://nginx.org/packages/mainline/ubuntu/ focal nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/ubuntu/ focal nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update
-      apt-get install nginx -y
+      apt-get update && apt-get install nginx -y
     fi
   fi
 }
@@ -241,40 +219,14 @@ function aptinstall_mariadb() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MariaDB Installation"
     apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
-    if [[ "$VERSION_ID" == "9" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian stretch main" >/etc/apt/sources.list.d/mariadb.list
-      apt-get update
-      apt-get install mariadb-server -y
+    if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
+      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
+      apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
-    if [[ "$VERSION_ID" == "10" ]]; then
+	if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian buster main" >/etc/apt/sources.list.d/mariadb.list
-      apt-get update
-      apt-get install mariadb-server -y
-      systemctl enable mariadb && systemctl start mariadb
-    fi
-    if [[ "$VERSION_ID" == "11" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian buster main" >/etc/apt/sources.list.d/mariadb.list
-      apt-get update
-      apt-get install mariadb-server -y
-      systemctl enable mariadb && systemctl start mariadb
-    fi
-    if [[ "$VERSION_ID" == "16.04" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/ubuntu xenial main" >/etc/apt/sources.list.d/mariadb.list
-      apt-get update
-      apt-get install mariadb-server -y
-      systemctl enable mariadb && systemctl start mariadb
-    fi
-    if [[ "$VERSION_ID" == "18.04" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/ubuntu bionic main" >/etc/apt/sources.list.d/mariadb.list
-      apt-get update
-      apt-get install mariadb-server -y
-      systemctl enable mariadb && systemctl start mariadb
-    fi
-    if [[ "$VERSION_ID" == "20.04" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/ubuntu focal main" >/etc/apt/sources.list.d/mariadb.list
-      apt-get update
-      apt-get install mariadb-server -y
+      apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
   fi
@@ -284,54 +236,20 @@ function aptinstall_mysql() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MYSQL Installation"
     if [[ "$database_ver" == "8.0" ]]; then
-      wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/mysql/default-auth-override.cnf' -P /etc/mysql/mysql.conf.d
+	  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
     fi
-    if [[ "$VERSION_ID" == "9" ]]; then
-      echo "deb http://repo.mysql.com/apt/debian/ stretch mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
-      echo "deb-src http://repo.mysql.com/apt/debian/ stretch mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
+    if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
+      echo "deb http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
+      echo "deb-src http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
       apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
-      apt-get update
-      apt-get install mysql-server mysql-client -y
+      apt-get update && apt-get install mysql-server mysql-client -y
       systemctl enable mysql && systemctl start mysql
     fi
-    if [[ "$VERSION_ID" == "10" ]]; then
+	if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb http://repo.mysql.com/apt/debian/ buster mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
       echo "deb-src http://repo.mysql.com/apt/debian/ buster mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
       apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
-      apt-get update
-      apt-get install mysql-server mysql-client -y
-      systemctl enable mysql && systemctl start mysql
-    fi
-    if [[ "$VERSION_ID" == "11" ]]; then
-      echo "deb http://repo.mysql.com/apt/debian/ buster mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
-      echo "deb-src http://repo.mysql.com/apt/debian/ buster mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
-      apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
-      apt-get update
-      apt-get install mysql-server mysql-client -y
-      systemctl enable mysql && systemctl start mysql
-    fi
-    if [[ "$VERSION_ID" == "16.04" ]]; then
-      echo "deb http://repo.mysql.com/apt/ubuntu/ xenial mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
-      echo "deb-src http://repo.mysql.com/apt/ubuntu/ xenial mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
-      apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
-      apt-get update
-      apt-get install mysql-server mysql-client -y
-      systemctl enable mysql && systemctl start mysql
-    fi
-    if [[ "$VERSION_ID" == "18.04" ]]; then
-      echo "deb http://repo.mysql.com/apt/ubuntu/ bionic mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
-      echo "deb-src http://repo.mysql.com/apt/ubuntu/ bionic mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
-      apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
-      apt-get update
-      apt-get install mysql-server mysql-client -y
-      systemctl enable mysql && systemctl start mysql
-    fi
-    if [[ "$VERSION_ID" == "20.04" ]]; then
-      echo "deb http://repo.mysql.com/apt/ubuntu/ focal mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
-      echo "deb-src http://repo.mysql.com/apt/ubuntu/ focal mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
-      apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
-      apt-get update
-      apt-get install mysql-server mysql-client -y
+      apt-get update && apt-get install mysql-server mysql-client -y
       systemctl enable mysql && systemctl start mysql
     fi
   fi
@@ -340,60 +258,27 @@ function aptinstall_mysql() {
 function aptinstall_php() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "PHP Installation"
-    wget -q 'https://packages.sury.org/php/apt.gpg' -O- | apt-key add -
-    if [[ "$VERSION_ID" == "9" ]]; then
-      echo "deb https://packages.sury.org/php/ stretch main" | tee /etc/apt/sources.list.d/php.list
-      apt-get update >/dev/null
-      apt-get install php$PHP php$PHP-bcmath php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm php$PHP-memcached -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-      systemctl restart nginx
+    curl -sSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
+    if [[ "$VERSION_ID" =~ (9|10) ]]; then
+      echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
+      apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
+      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
+      sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+      systemctl restart apache2
     fi
-    if [[ "$VERSION_ID" == "10" ]]; then
+	if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb https://packages.sury.org/php/ buster main" | tee /etc/apt/sources.list.d/php.list
-      apt-get update >/dev/null
-      apt-get install php$PHP php$PHP-bcmath php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm php$PHP-memcached -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-      systemctl restart nginx
+      apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
+      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
+      sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+      systemctl restart apache2
     fi
-    if [[ "$VERSION_ID" == "11" ]]; then
-      echo "deb https://packages.sury.org/php/ buster main" | tee /etc/apt/sources.list.d/php.list
-      apt-get update >/dev/null
-      apt-get install php$PHP php$PHP-bcmath php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm php$PHP-memcached -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-      systemctl restart nginx
-    fi
-    if [[ "$VERSION_ID" == "16.04" ]]; then
+    if [[ "$VERSION_ID" =~ (16.04|18.04|20.04) ]]; then
       add-apt-repository -y ppa:ondrej/php
-      apt-get update >/dev/null
-      apt-get install php$PHP php$PHP-bcmath php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm php$PHP-memcached -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-      systemctl restart nginx
-    fi
-    if [[ "$VERSION_ID" == "18.04" ]]; then
-      add-apt-repository -y ppa:ondrej/php
-      apt-get update >/dev/null
-      apt-get install php$PHP php$PHP-bcmath php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm php$PHP-memcached -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-      systemctl restart nginx
-    fi
-    if [[ "$VERSION_ID" == "20.04" ]]; then
-      add-apt-repository -y ppa:ondrej/php
-      apt-get update >/dev/null
-      apt-get install php$PHP php$PHP-bcmath php$PHP-mbstring php$PHP-common php$PHP-xml php$PHP-curl php$PHP-gd php$PHP-zip php$PHP-mysql php$PHP-sqlite php$PHP-fpm php$PHP-memcached -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-      sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-      systemctl restart nginx
+      apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
+      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
+      sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+      systemctl restart apache2
     fi
   fi
 }
@@ -401,21 +286,18 @@ function aptinstall_php() {
 function aptinstall_phpmyadmin() {
   echo "phpMyAdmin Installation"
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    mkdir /usr/share/phpmyadmin/ || exit
-    cd /usr/share/phpmyadmin/ || exit
     PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
-    wget "https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz"
-    tar xzf phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
-    mv phpMyAdmin-$PHPMYADMIN_VER-all-languages/* /usr/share/phpmyadmin
-    rm /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
-    rm -rf /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages
-    # Create TempDir
+    mkdir /usr/share/phpmyadmin/ || exit
+	wget https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
+    tar xzf /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
+    rm -f /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages
+    # Create phpMyAdmin TempDir
     mkdir /usr/share/phpmyadmin/tmp || exit
     chown www-data:www-data /usr/share/phpmyadmin/tmp
     chmod 700 /usr/share/phpmyadmin/tmp
     randomBlowfishSecret=$(openssl rand -base64 32)
-    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" config.sample.inc.php >config.inc.php
-    wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf'
+    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf
     ln -s /usr/share/phpmyadmin /var/www/phpmyadmin
     mv phpmyadmin.conf /etc/apache2/sites-available/
     a2ensite phpmyadmin
@@ -448,12 +330,14 @@ function install_ioncube() {
 
 #function install_cron() {
 #Disabled for the moment
+#if [[ "$OS" =~ (debian|ubuntu) ]]; then
 #cd /var/www/html || exit
 #apt-get install cron -y
 #crontab -l > cron
 #wget -O cron 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cron/cron'
 #crontab cron
 #rm cron
+#fi
 #}
 
 #function mod_cloudflare() {
@@ -468,9 +352,11 @@ function install_ioncube() {
 #}
 
 #function autoUpdate() {
+#if [[ "$OS" =~ (debian|ubuntu) ]]; then
 #Disable for the moment
 #echo "Enable Automatic Updates..."
 #apt-get install -y unattended-upgrades
+#fi
 #}
 
 function setupdone() {
@@ -522,21 +408,20 @@ function update() {
 }
 
 function updatephpMyAdmin() {
-  rm -rf /usr/share/phpmyadmin/
-  mkdir /usr/share/phpmyadmin/
+  rm -rf /usr/share/phpmyadmin/*
   cd /usr/share/phpmyadmin/ || exit
-  wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip
-  unzip phpMyAdmin-latest-all-languages.zip
+  wget https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
+  tar xzf /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
+  rm -f /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages
   PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
   mv phpMyAdmin-$PHPMYADMIN_VER-all-languages/* /usr/share/phpmyadmin
-  rm /usr/share/phpmyadmin/phpMyAdmin-latest-all-languages.zip
-  rm -rf /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages
+  rm /usr/share/phpmyadmin/phpMyAdmin-latest-all-languages.tar
   # Create TempDir
   mkdir /usr/share/phpmyadmin/tmp || exit
   chown www-data:www-data /usr/share/phpmyadmin/tmp
   chmod 700 /var/www/phpmyadmin/tmp
   randomBlowfishSecret=$(openssl rand -base64 32)
-  sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" config.sample.inc.php >config.inc.php
+  sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
 }
 
 initialCheck
