@@ -126,18 +126,18 @@ function installQuestions() {
     ;;
   esac
   echo "Which type of database ?"
-  echo "   1) MySQL"
-  echo "   2) MariaDB"
+  echo "   1) MariaDB"
+  echo "   2) MySQL"
   echo "   3) SQLite"
   until [[ "$DATABASE" =~ ^[1-3]$ ]]; do
     read -rp "Version [1-3]: " -e -i 1 DATABASE
   done
   case $DATABASE in
   1)
-    database="mysql"
+    database="mariadb"
     ;;
   2)
-    database="mariadb"
+    database="mysql"
     ;;
   3)
     database="sqlite"
@@ -145,37 +145,37 @@ function installQuestions() {
   esac
   if [[ "$database" =~ (mysql) ]]; then
     echo "Which version of MySQL ?"
-    echo "   1) MySQL 5.7"
-    echo "   2) MySQL 8.0"
+    echo "   1) MySQL 8.0"
+    echo "   2) MySQL 5.7"
     until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
-      read -rp "Version [1-2]: " -e -i 2 DATABASE_VER
+      read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
     done
     case $DATABASE_VER in
     1)
-      database_ver="5.7"
+      database_ver="8.0"
       ;;
     2)
-      database_ver="8.0"
+      database_ver="5.7"
       ;;
     esac
   fi
   if [[ "$database" =~ (mariadb) ]]; then
-    echo "Which version of MySQL ?"
-    echo "${yellow}   1) MariaDB 10.3 (Old Stable)${normal}"
+    echo "Which version of MariaDB ?"
+    echo "${green}   1) MariaDB 10.5 (Stable)${normal}"
     echo "${yellow}   2) MariaDB 10.4 (Old Stable)${normal}"
-    echo "${green}   3) MariaDB 10.5 (Stable)${normal}"
+    echo "${yellow}   2) MariaDB 10.3 (Old Stable)${normal}"
     until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
-      read -rp "Version [1-3]: " -e -i 3 DATABASE_VER
+      read -rp "Version [1-3]: " -e -i 1 DATABASE_VER
     done
     case $DATABASE_VER in
     1)
-      database_ver="10.3"
+      database_ver="10.5"
       ;;
     2)
       database_ver="10.4"
       ;;
     3)
-      database_ver="10.5"
+      database_ver="10.3"
       ;;
     esac
   fi
