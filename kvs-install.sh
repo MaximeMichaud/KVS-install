@@ -264,6 +264,7 @@ function aptinstall_php() {
       apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+	  sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
       systemctl restart apache2
     fi
 	if [[ "$VERSION_ID" == "11" ]]; then
@@ -271,6 +272,7 @@ function aptinstall_php() {
       apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+	  sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
       systemctl restart apache2
     fi
     if [[ "$VERSION_ID" =~ (16.04|18.04|20.04) ]]; then
@@ -278,6 +280,7 @@ function aptinstall_php() {
       apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+	  sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
       systemctl restart apache2
     fi
   fi
