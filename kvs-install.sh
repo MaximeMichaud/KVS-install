@@ -480,12 +480,10 @@ function updatephpMyAdmin() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
   rm -rf /usr/share/phpmyadmin/*
   cd /usr/share/phpmyadmin/ || exit
+  PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
   wget https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
   tar xzf /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
-  rm -f /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages
-  PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
-  mv phpMyAdmin-$PHPMYADMIN_VER-all-languages/* /usr/share/phpmyadmin
-  rm /usr/share/phpmyadmin/phpMyAdmin-latest-all-languages.tar
+  rm -f /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
   # Create TempDir
   mkdir /usr/share/phpmyadmin/tmp || exit
   chown www-data:www-data /usr/share/phpmyadmin/tmp
