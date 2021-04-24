@@ -95,11 +95,10 @@ function script() {
   installQuestions
   aptupdate
   aptinstall
-  #aptinstall_$webserver
+  aptinstall_php
   aptinstall_nginx
   aptinstall_"$database"
-  aptinstall_php
-  #aptinstall_phpmyadmin
+  aptinstall_phpmyadmin
   #install_KVS
   install_ioncube
   install_composer
@@ -118,7 +117,7 @@ function installQuestions() {
   echo "${cyan}Which Version of PHP ?"
   echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
   echo "   1) PHP 7.4 (recommended) ${normal}${cyan}"
-  echo "${yellow}   2) PHP 7.3 "
+  echo "${yellow}   2) PHP 7.3 ${normal}${cyan} "
   until [[ "$PHP_VERSION" =~ ^[1-2]$ ]]; do
     read -rp "Version [1-2]: " -e -i 1 PHP_VERSION
   done
@@ -133,6 +132,36 @@ function installQuestions() {
     PHP="7.3"
     ;;
   esac
+  echo "Which type of webserver ?"
+  echo "   1) NGINX"
+  echo "   2) Apache2"
+  until [[ "$WEBSERVER" =~ ^[1-2]$ ]]; do
+    read -rp "Version [1-2]: " -e -i 1 WEBSERVER
+  done
+  case $WEBSERVER in
+  1)
+    webserver="nginx"
+    ;;
+  2)
+    webserver="apache2"
+    ;;
+  esac
+  if [[ "$webserver" =~ (nginx) ]]; then
+    echo "Which branch of NGINX ?"
+    echo "${green}   1) Mainline ${normal}"
+    echo "${green}   2) Stable ${normal}${cyan}"
+    until [[ "$NGINX_BRANCH" =~ ^[1-2]$ ]]; do
+      read -rp "Version [1-2]: " -e -i 1 NGINX_BRANCH
+    done
+    case $NGINX_BRANCH in
+    1)
+      nginx_branch="mainline"
+      ;;
+    2)
+      nginx_branch="stable"
+      ;;
+    esac
+  fi
   echo "Which type of database ?"
   echo "   1) MariaDB"
   echo "   2) MySQL"
@@ -153,8 +182,8 @@ function installQuestions() {
   esac
   if [[ "$database" =~ (mysql) ]]; then
     echo "Which version of MySQL ?"
-    echo "   1) MySQL 8.0"
-    echo "   2) MySQL 5.7"
+    echo "${green}   1) MySQL 8.0 ${normal}"
+    echo "${red}   2) MySQL 5.7 ${normal}${cyan}"
     until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
       read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
     done
@@ -171,7 +200,7 @@ function installQuestions() {
     echo "Which version of MariaDB ?"
     echo "${green}   1) MariaDB 10.5 (Stable)${normal}"
     echo "${yellow}   2) MariaDB 10.4 (Old Stable)${normal}"
-    echo "${yellow}   2) MariaDB 10.3 (Old Stable)${normal}"
+    echo "${yellow}   2) MariaDB 10.3 (Old Stable)${normal}${cyan}"
     until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
       read -rp "Version [1-3]: " -e -i 1 DATABASE_VER
     done
@@ -204,36 +233,37 @@ function aptupdate() {
 }
 function aptinstall() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg
+    apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
 }
 
+#function aptinstall_apache2() {
+#  if [[ "$OS" =~ (debian|ubuntu) ]]; then
+#    apt-get install -y apache2
+#    a2enmod rewrite
+#    service apache2 restart
+#  fi
+#}
+
 function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    echo "Nginx Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
-    if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
-      echo "deb https://nginx.org/packages/mainline/$ID/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/$ID/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update && apt-get install nginx -y
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
-      #update CF IPV4/V6
-      #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /etc/nginx/scripts/update-cloudflare-ip-list.sh
-    fi
-    if [[ "$VERSION_ID" == "11" ]]; then
-      echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update && apt-get install nginx -y
-    fi
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
+    echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
+    echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
+    apt-get update && apt-get install nginx -y
+    systemctl enable nginx && systemctl start nginx
+    rm -rf /etc/nginx/conf.d/default.conf
+    mkdir -p /etc/nginx/globals/ || exit
+    mkdir -p /etc/nginx/sites-available/ || exit
+    mkdir -p /etc/nginx/sites-enabled/ || exit
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
+    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
   fi
 }
 
@@ -281,35 +311,75 @@ function aptinstall_mysql() {
   fi
 }
 
+#function aptinstall_sqlite() {
+#  if [[ "$OS" =~ (debian|ubuntu) ]]; then
+#    echo "SQLite Installation"
+#    if [[ "$VERSION_ID" =~ (9|10|11|16.04|18.04|20.04) ]]; then
+#      apt-get update && apt-get install php$PHP{,-sqlite} -y
+#    elif [[ "$OS" == "centos" ]]; then
+#      echo "No Support"
+#    fi
+#  fi
+#}
+
 function aptinstall_php() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "PHP Installation"
     curl -sSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
-    if [[ "$VERSION_ID" =~ (9|10) ]]; then
-      echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
-      apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-      sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
-      systemctl restart apache2
+    if [[ "$webserver" =~ (nginx) ]]; then
+      if [[ "$VERSION_ID" =~ (9|10) ]]; then
+        echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
+        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
+        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/fpm/php.ini
+        sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/fpm/php.ini
+        sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/fpm/php.ini
+        apt-get remove apache2 -y
+        systemctl restart nginx
+      fi
+      if [[ "$VERSION_ID" == "11" ]]; then
+        echo "deb https://packages.sury.org/php/ buster main" | tee /etc/apt/sources.list.d/php.list
+        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
+        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/fpm/php.ini
+        sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/fpm/php.ini
+        sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/fpm/php.ini
+        apt-get remove apache2 -y
+        systemctl restart nginx
+      fi
+      if [[ "$VERSION_ID" =~ (16.04|18.04|20.04) ]]; then
+        add-apt-repository -y ppa:ondrej/php
+        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
+        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/fpm/php.ini
+        sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/fpm/php.ini
+        sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/fpm/php.ini
+        apt-get remove apache2 -y
+        systemctl restart nginx
+      fi
     fi
-    if [[ "$VERSION_ID" == "11" ]]; then
-      echo "deb https://packages.sury.org/php/ buster main" | tee /etc/apt/sources.list.d/php.list
-      apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-      sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
-      systemctl restart apache2
-    fi
-    if [[ "$VERSION_ID" =~ (16.04|18.04|20.04) ]]; then
-      add-apt-repository -y ppa:ondrej/php
-      apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
-      sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
-      sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-      sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
-      systemctl restart apache2
-    elif [[ "$OS" == "centos" ]]; then
-      echo "No Support"
+    if [[ "$webserver" =~ (apache2) ]]; then
+      if [[ "$VERSION_ID" =~ (9|10) ]]; then
+        echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
+        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
+        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
+        sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+        sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
+        systemctl restart apache2
+      fi
+      if [[ "$VERSION_ID" == "11" ]]; then
+        echo "deb https://packages.sury.org/php/ buster main" | tee /etc/apt/sources.list.d/php.list
+        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
+        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
+        sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+        sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
+        systemctl restart apache2
+      fi
+      if [[ "$VERSION_ID" =~ (16.04|18.04|20.04) ]]; then
+        add-apt-repository -y ppa:ondrej/php
+        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
+        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
+        sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+        sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
+        systemctl restart apache2
+      fi
     fi
   fi
 }
@@ -318,21 +388,27 @@ function aptinstall_phpmyadmin() {
   echo "phpMyAdmin Installation"
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
-    mkdir /usr/share/phpmyadmin/ || exit
+    mkdir -p /usr/share/phpmyadmin/ || exit
     wget https://files.phpmyadmin.net/phpMyAdmin/"$PHPMYADMIN_VER"/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz
     tar xzf /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
     rm -f /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages
     # Create phpMyAdmin TempDir
-    mkdir /usr/share/phpmyadmin/tmp || exit
+    mkdir -p /usr/share/phpmyadmin/tmp || exit
     chown www-data:www-data /usr/share/phpmyadmin/tmp
     chmod 700 /usr/share/phpmyadmin/tmp
     randomBlowfishSecret=$(openssl rand -base64 32)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
     wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf
     ln -s /usr/share/phpmyadmin /var/www/phpmyadmin
-    mv phpmyadmin.conf /etc/apache2/sites-available/
-    a2ensite phpmyadmin
-    systemctl restart apache2
+    if [[ "$webserver" =~ (nginx) ]]; then
+      apt-get update && apt-get install php7.4{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
+      service nginx restart
+    elif [[ "$webserver" =~ (apache2) ]]; then
+      wget https://raw.githubusercontent.com/MaximeMichaud/Azuriom-install/master/conf/apache2/phpmyadmin.conf
+      mv phpmyadmin.conf /etc/apache2/sites-available/
+      a2ensite phpmyadmin
+      systemctl restart apache2
+    fi
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
@@ -414,13 +490,6 @@ function install_composer() {
 #systemctl restart apache2
 #}
 
-#function autoUpdate() {
-#if [[ "$OS" =~ (debian|ubuntu) ]]; then
-#Disable for the moment
-#echo "Enable Automatic Updates..."
-#apt-get install -y unattended-upgrades
-#fi
-#}
 function autoUpdate() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "Enable Automatic Updates..."
@@ -432,10 +501,10 @@ function autoUpdate() {
 
 function setupdone() {
   IP=$(curl 'https://api.ipify.org')
-  echo "It done!"
-  echo "Configuration Database/User: http://$IP/"
-  echo "phpMyAdmin: http://$IP/phpmyadmin"
-  echo "For the moment, If you choose to use MariaDB, you will need to execute ${cyan}mysql_secure_installation${normal} for setting the password"
+  echo "${cyan}It done!"
+  echo "${cyan}Configuration Database/User: ${red}http://$IP/"
+  echo "${cyan}phpMyAdmin: ${red}http://$IP/phpmyadmin"
+  echo "${cyan}For the moment, If you choose to use MariaDB, you will need to execute ${normal}${on_red}${white}mysql_secure_installation${normal}${cyan} for setting the password"
 }
 function manageMenu() {
   clear
