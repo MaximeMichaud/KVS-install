@@ -454,7 +454,7 @@ function manageMenu() {
   done
   case $MENU_OPTION in
   1)
-    install_KVS
+    script
     ;;
   2)
     updatephpMyAdmin
