@@ -18,8 +18,10 @@ red=$(tput setaf 1)
 green=$(tput setaf 2)
 yellow=$(tput setaf 3)
 cyan=$(tput setaf 6)
+white=$(tput setaf 7)
 normal=$(tput sgr0)
 alert=${white}${on_red}
+on_red=$(tput setab 1)
 #################################################################################
 function isRoot() {
   if [ "$EUID" -ne 0 ]; then
@@ -95,7 +97,7 @@ function script() {
   aptinstall
   #aptinstall_$webserver
   aptinstall_nginx
-  aptinstall_$database
+  aptinstall_"$database"
   aptinstall_php
   #aptinstall_phpmyadmin
   #install_KVS
@@ -122,8 +124,8 @@ function installQuestions() {
   done
   case $PHP_VERSION in
   #1)
-    #PHP="8.0"
-    #;;
+  #PHP="8.0"
+  #;;
   1)
     PHP="7.4"
     ;;
@@ -195,14 +197,14 @@ function installQuestions() {
 
 function aptupdate() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-  apt-get update
+    apt-get update
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
 }
 function aptinstall() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-  apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg
+    apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
@@ -216,23 +218,23 @@ function aptinstall_nginx() {
       echo "deb https://nginx.org/packages/mainline/$ID/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/$ID/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
-	  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
-	  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
-	  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf 
-	  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
-	  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
-	  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
-	  #update CF IPV4/V6
-	  #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /etc/nginx/scripts/update-cloudflare-ip-list.sh
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
+      #update CF IPV4/V6
+      #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /etc/nginx/scripts/update-cloudflare-ip-list.sh
     fi
     if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb https://nginx.org/packages/mainline/debian/ buster nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/debian/ buster nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
     fi
-	elif [[ "$OS" == "centos" ]]; then
+  elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
-    fi
+  fi
 }
 
 function aptinstall_mariadb() {
@@ -244,21 +246,21 @@ function aptinstall_mariadb() {
       apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
-	if [[ "$VERSION_ID" == "11" ]]; then
+    if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian buster main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
+    elif [[ "$OS" == "centos" ]]; then
+      echo "No Support"
+    fi
   fi
-fi
 }
 
 function aptinstall_mysql() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MYSQL Installation"
     if [[ "$database_ver" == "8.0" ]]; then
-	  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
     fi
     if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
       echo "deb http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
@@ -267,16 +269,16 @@ function aptinstall_mysql() {
       apt-get update && apt-get install mysql-server mysql-client -y
       systemctl enable mysql && systemctl start mysql
     fi
-	if [[ "$VERSION_ID" == "11" ]]; then
+    if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb http://repo.mysql.com/apt/debian/ buster mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
       echo "deb-src http://repo.mysql.com/apt/debian/ buster mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
       apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
       apt-get update && apt-get install mysql-server mysql-client -y
       systemctl enable mysql && systemctl start mysql
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
+    elif [[ "$OS" == "centos" ]]; then
+      echo "No Support"
+    fi
   fi
-fi
 }
 
 function aptinstall_php() {
@@ -288,15 +290,15 @@ function aptinstall_php() {
       apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-	  sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
+      sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
       systemctl restart apache2
     fi
-	if [[ "$VERSION_ID" == "11" ]]; then
+    if [[ "$VERSION_ID" == "11" ]]; then
       echo "deb https://packages.sury.org/php/ buster main" | tee /etc/apt/sources.list.d/php.list
       apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-	  sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
+      sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
       systemctl restart apache2
     fi
     if [[ "$VERSION_ID" =~ (16.04|18.04|20.04) ]]; then
@@ -304,12 +306,12 @@ function aptinstall_php() {
       apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-sqlite} -y
       sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
       sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-	  sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
+      sed -i 's|;max_input_vars = 1000|max_input_vars = 5000|' /etc/php/$PHP/apache2/php.ini
       systemctl restart apache2
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
+    elif [[ "$OS" == "centos" ]]; then
+      echo "No Support"
+    fi
   fi
-fi
 }
 
 function aptinstall_phpmyadmin() {
@@ -317,9 +319,9 @@ function aptinstall_phpmyadmin() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
     mkdir /usr/share/phpmyadmin/ || exit
-	wget https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
-    tar xzf /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
-    rm -f /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages
+    wget https://files.phpmyadmin.net/phpMyAdmin/"$PHPMYADMIN_VER"/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz
+    tar xzf /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
+    rm -f /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages
     # Create phpMyAdmin TempDir
     mkdir /usr/share/phpmyadmin/tmp || exit
     chown www-data:www-data /usr/share/phpmyadmin/tmp
@@ -338,54 +340,54 @@ function aptinstall_phpmyadmin() {
 
 function install_KVS() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-  rm -rf /var/www/html/*
-  #mkdir /var/www/html
-  mv /var/KVS_* /var/www/$DOMAIN
-  unzip -o /var/www/$DOMAIN/KVS_*
-  rm -r /var/www/$DOMAIN/KVS_*
-  chown -R www-data:www-data /var/www/$DOMAIN
-  chmod -R 755 /var/www/$DOMAIN
-  #cd /var/www/html || exit
-  #unzip KVSInstaller.zip
-  #rm -rf KVSInstaller.zip
-  #chmod -R 755 /var/www/html
-  #chown -R www-data:www-data /var/www/html
-  #chmod for kvs
-  chmod 777 tmp
-  chmod 777 admin/smarty/cache
-  chmod 777 admin/smarty/template-c
-  chmod 777 admin/smarty/template-c-site
-  find admin/logs -type d | xargs chmod 777
-  find admin/logs -type f \( ! -iname ".htaccess" \) | xargs chmod 666
-  find contents -type d | xargs chmod 777
-  chmod 755 contents
-  find template -type d | xargs chmod 777
-  find template -type f \( ! -iname ".htaccess" \) | xargs chmod 666
-  find admin/data -type d | xargs chmod 777
-  chmod 755 admin/data
-  find admin/data -type f \( -iname "*.dat" \) | xargs chmod 666
-  find admin/data -type f \( -iname "*.tpl" \) | xargs chmod 666
-  chmod 777 langs
-  find langs -type f \( -iname "*.lang" \) | xargs chmod 666
+    rm -rf /var/www/html/*
+    #mkdir /var/www/html
+    mv /var/KVS_* /var/www/"$DOMAIN"
+    unzip -o /var/www/"$DOMAIN"/KVS_*
+    rm -r /var/www/"$DOMAIN"/KVS_*
+    chown -R www-data:www-data /var/www/"$DOMAIN"
+    chmod -R 755 /var/www/"$DOMAIN"
+    #cd /var/www/html || exit
+    #unzip KVSInstaller.zip
+    #rm -rf KVSInstaller.zip
+    #chmod -R 755 /var/www/html
+    #chown -R www-data:www-data /var/www/html
+    #chmod for kvs
+    chmod 777 tmp
+    chmod 777 admin/smarty/cache
+    chmod 777 admin/smarty/template-c
+    chmod 777 admin/smarty/template-c-site
+    find admin/logs -type d | xargs chmod 777
+    find admin/logs -type f \( ! -iname ".htaccess" \) | xargs chmod 666
+    find contents -type d | xargs chmod 777
+    chmod 755 contents
+    find template -type d | xargs chmod 777
+    find template -type f \( ! -iname ".htaccess" \) | xargs chmod 666
+    find admin/data -type d | xargs chmod 777
+    chmod 755 admin/data
+    find admin/data -type f \( -iname "*.dat" \) | xargs chmod 666
+    find admin/data -type f \( -iname "*.tpl" \) | xargs chmod 666
+    chmod 777 langs
+    find langs -type f \( -iname "*.lang" \) | xargs chmod 666
   fi
 }
 
 function install_ioncube() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-  wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
-  tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
-  cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
-  echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/apache2/php.ini
-  echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
-  systemctl restart apache2
+    wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
+    tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
+    cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
+    echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/apache2/php.ini
+    echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
+    systemctl restart apache2
   fi
 }
 
 function install_composer() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-  curl -sS https://getcomposer.org/installer | php
-  mv composer.phar /usr/local/bin/composer
-  chmod +x /usr/local/bin/composer
+    curl -sS https://getcomposer.org/installer | php
+    mv composer.phar /usr/local/bin/composer
+    chmod +x /usr/local/bin/composer
   fi
 }
 
@@ -421,8 +423,8 @@ function install_composer() {
 #}
 function autoUpdate() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-  echo "Enable Automatic Updates..."
-  apt-get install -y unattended-upgrades
+    echo "Enable Automatic Updates..."
+    apt-get install -y unattended-upgrades
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
@@ -478,18 +480,18 @@ function update() {
 
 function updatephpMyAdmin() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-  rm -rf /usr/share/phpmyadmin/*
-  cd /usr/share/phpmyadmin/ || exit
-  PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
-  wget https://files.phpmyadmin.net/phpMyAdmin/$PHPMYADMIN_VER/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
-  tar xzf /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
-  rm -f /usr/share/phpmyadmin/phpMyAdmin-$PHPMYADMIN_VER-all-languages.tar.gz
-  # Create TempDir
-  mkdir /usr/share/phpmyadmin/tmp || exit
-  chown www-data:www-data /usr/share/phpmyadmin/tmp
-  chmod 700 /var/www/phpmyadmin/tmp
-  randomBlowfishSecret=$(openssl rand -base64 32)
-  sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
+    rm -rf /usr/share/phpmyadmin/*
+    cd /usr/share/phpmyadmin/ || exit
+    PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
+    wget https://files.phpmyadmin.net/phpMyAdmin/"$PHPMYADMIN_VER"/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz
+    tar xzf /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
+    rm -f /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz
+    # Create TempDir
+    mkdir /usr/share/phpmyadmin/tmp || exit
+    chown www-data:www-data /usr/share/phpmyadmin/tmp
+    chmod 700 /var/www/phpmyadmin/tmp
+    randomBlowfishSecret=$(openssl rand -base64 32)
+    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
