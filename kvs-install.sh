@@ -95,10 +95,10 @@ function script() {
   installQuestions
   aptupdate
   aptinstall
+  aptinstall_php
   #aptinstall_"$webserver"
   aptinstall_nginx
   aptinstall_"$database"
-  aptinstall_php
   #aptinstall_phpmyadmin
   #install_KVS
   install_ioncube
@@ -220,6 +220,7 @@ function aptinstall_nginx() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
+	  openssl dhparam -out /etc/nginx/dhparam.pem 2048
       #update CF IPV4/V6
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /etc/nginx/scripts/update-cloudflare-ip-list.sh
     fi
