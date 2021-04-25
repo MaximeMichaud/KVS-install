@@ -337,7 +337,7 @@ function aptinstall_php() {
         #systemctl restart apache2
       #fi
     #fi
-  #fi
+  fi
 }
 
 
