@@ -208,7 +208,7 @@ function aptinstall() {
 
 function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    echo "Nginx Installation"
+    echo "NGINX Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
     if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
       echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
