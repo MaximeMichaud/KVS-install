@@ -243,7 +243,7 @@ function aptinstall_mariadb() {
     echo "MariaDB Installation"
     apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
     if [[ "$VERSION_ID" =~ (10|11|18.04|20.04) ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
+      echo "deb [arch=amd64] https://mirror.mva-n.net/mariadb/repo/$database_ver/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
