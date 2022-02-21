@@ -58,7 +58,7 @@ function checkOS() {
       fi
     elif [[ "$ID" == "ubuntu" ]]; then
       OS="ubuntu"
-      if [[ ! $VERSION_ID =~ (16.04|18.04|20.04) ]]; then
+      if [[ ! $VERSION_ID =~ (18.04|20.04) ]]; then
         echo "⚠️ ${alert}Your version of Ubuntu is not supported.${normal}"
         echo ""
         echo "However, if you're using Ubuntu > 17 or beta, then you can continue."
@@ -214,7 +214,7 @@ function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "NGINX Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
-    if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
+    if [[ "$VERSION_ID" =~ (9|10|18.04|20.04) ]]; then
       echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
@@ -242,7 +242,7 @@ function aptinstall_mariadb() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MariaDB Installation"
     apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
-    if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
+    if [[ "$VERSION_ID" =~ (9|10|18.04|20.04) ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
@@ -263,7 +263,7 @@ function aptinstall_mysql() {
     if [[ "$database_ver" == "8.0" ]]; then
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
     fi
-    if [[ "$VERSION_ID" =~ (9|10|16.04|18.04|20.04) ]]; then
+    if [[ "$VERSION_ID" =~ (9|10|18.04|20.04) ]]; then
       echo "deb http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
       echo "deb-src http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
       apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
@@ -305,7 +305,7 @@ function aptinstall_php() {
         apt-get remove apache2 -y
         systemctl restart nginx
       fi
-      if [[ "$VERSION_ID" =~ (16.04|18.04|20.04) ]]; then
+      if [[ "$VERSION_ID" =~ (18.04|20.04) ]]; then
         add-apt-repository -y ppa:ondrej/php
         apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
         sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
@@ -332,7 +332,7 @@ function aptinstall_php() {
         #sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
         #systemctl restart apache2
       #fi
-      #if [[ "$VERSION_ID" =~ (16.04|18.04|20.04) ]]; then
+      #if [[ "$VERSION_ID" =~ (18.04|20.04) ]]; then
         #add-apt-repository -y ppa:ondrej/php
         #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
         #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
