@@ -165,20 +165,24 @@ function installQuestions() {
   fi
   if [[ "$database" =~ (mariadb) ]]; then
     echo "Which version of MariaDB ?"
-    echo "${green}   1) MariaDB 10.5 (Stable)${normal}"
-    echo "${yellow}   2) MariaDB 10.4 (Old Stable)${normal}"
-    echo "${yellow}   2) MariaDB 10.3 (Old Stable)${normal}${cyan}"
-    until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
-      read -rp "Version [1-3]: " -e -i 1 DATABASE_VER
+    echo "${green}   1) MariaDB 10.6 (Stable)${normal}"
+    echo "${yellow}   2) MariaDB 10.5 (Old Stable)${normal}"
+    echo "${yellow}   3) MariaDB 10.4 (Old Stable)${normal}"
+    echo "${yellow}   4) MariaDB 10.3 (Old Stable)${normal}${cyan}"
+    until [[ "$DATABASE_VER" =~ ^[1-4]$ ]]; do
+      read -rp "Version [1-4]: " -e -i 1 DATABASE_VER
     done
     case $DATABASE_VER in
     1)
-      database_ver="10.5"
+      database_ver="10.6"
       ;;
     2)
-      database_ver="10.4"
+      database_ver="10.5"
       ;;
     3)
+      database_ver="10.4"
+      ;;
+    4)
       database_ver="10.3"
       ;;
     esac
