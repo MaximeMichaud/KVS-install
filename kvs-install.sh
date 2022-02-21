@@ -10,7 +10,7 @@
 # chmod +x kvs-install.sh
 # ./kvs-install.sh
 #
-# KVS-install Copyright (c) 2020-2021 Maxime Michaud
+# KVS-install Copyright (c) 2020-2022 Maxime Michaud
 # Licensed under GNU General Public License v3.0
 #################################################################################
 #Colors
