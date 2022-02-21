@@ -214,7 +214,7 @@ function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "NGINX Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
-    if [[ "$VERSION_ID" =~ (10|18.04|20.04) ]]; then
+    if [[ "$VERSION_ID" =~ (10|11|18.04|20.04) ]]; then
       echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
@@ -242,7 +242,7 @@ function aptinstall_mariadb() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MariaDB Installation"
     apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
-    if [[ "$VERSION_ID" =~ (10|18.04|20.04) ]]; then
+    if [[ "$VERSION_ID" =~ (10|11|18.04|20.04) ]]; then
       echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
       apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
@@ -263,16 +263,9 @@ function aptinstall_mysql() {
     if [[ "$database_ver" == "8.0" ]]; then
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
     fi
-    if [[ "$VERSION_ID" =~ (10|18.04|20.04) ]]; then
+    if [[ "$VERSION_ID" =~ (10|11|18.04|20.04) ]]; then
       echo "deb http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
       echo "deb-src http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
-      apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
-      apt-get update && apt-get install mysql-server mysql-client -y
-      systemctl enable mysql && systemctl start mysql
-    fi
-    if [[ "$VERSION_ID" == "11" ]]; then
-      echo "deb http://repo.mysql.com/apt/debian/ buster mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
-      echo "deb-src http://repo.mysql.com/apt/debian/ buster mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
       apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
       apt-get update && apt-get install mysql-server mysql-client -y
       systemctl enable mysql && systemctl start mysql
@@ -296,15 +289,6 @@ function aptinstall_php() {
         apt-get remove apache2 -y
         systemctl restart nginx
       fi
-      if [[ "$VERSION_ID" == "11" ]]; then
-        echo "deb https://packages.sury.org/php/ buster main" | tee /etc/apt/sources.list.d/php.list
-        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
-        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-        sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	    sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-        apt-get remove apache2 -y
-        systemctl restart nginx
-      fi
       if [[ "$VERSION_ID" =~ (18.04|20.04) ]]; then
         add-apt-repository -y ppa:ondrej/php
         apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
@@ -316,16 +300,8 @@ function aptinstall_php() {
       fi
     fi
     #if [[ "$webserver" =~ (apache2) ]]; then
-      #if [[ "$VERSION_ID" =~ (10) ]]; then
+      #if [[ "$VERSION_ID" =~ (10|11) ]]; then
         #echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
-        #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
-        #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
-        #sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-        #sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
-        #systemctl restart apache2
-      #fi
-      #if [[ "$VERSION_ID" == "11" ]]; then
-        #echo "deb https://packages.sury.org/php/ buster main" | tee /etc/apt/sources.list.d/php.list
         #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
         #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
         #sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
