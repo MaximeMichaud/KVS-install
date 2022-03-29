@@ -280,7 +280,7 @@ function aptinstall_php() {
     echo "PHP Installation"
     curl -sSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
     if [[ "$webserver" =~ (nginx) ]]; then
-      if [[ "$VERSION_ID" =~ (10) ]]; then
+      if [[ "$VERSION_ID" =~ (10|11) ]]; then
         echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
         apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
         sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
