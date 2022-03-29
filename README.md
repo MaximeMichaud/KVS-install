@@ -14,7 +14,6 @@ This script supports the following Linux distributions:
 
 |Operating System	      |Support|
 |--------                 |---    |
-| Debian 9                |✅     |
 | Debian 10               |✅     |
 | Debian 11               |✅     |
 | Ubuntu 18.04            |✅     |
