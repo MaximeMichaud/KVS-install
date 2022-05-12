@@ -6,9 +6,7 @@
 # URL : https://www.kernel-video-sharing.com
 #
 # This script is intended for a quick and easy installation :
-# curl -O https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
-# chmod +x kvs-install.sh
-# ./kvs-install.sh
+# bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
 #
 # KVS-install Copyright (c) 2020-2022 Maxime Michaud
 # Licensed under GNU General Public License v3.0
@@ -22,6 +20,15 @@ white=$(tput setaf 7)
 normal=$(tput sgr0)
 alert=${white}${on_red}
 on_red=$(tput setab 1)
+# Define installation parameters for headless install (fallback if unspecifed)
+if [[ $HEADLESS == "y" ]]; then
+  # Define options
+  PHP=8.1
+  webserver=nginx
+  nginx_branch=mainline
+  database=mariadb
+  database_ver=10.6
+fi
 #################################################################################
 function isRoot() {
   if [ "$EUID" -ne 0 ]; then
@@ -108,90 +115,92 @@ function script() {
 
 }
 function installQuestions() {
-  echo "${cyan}Welcome to KVS-install !"
-  echo "https://github.com/MaximeMichaud/KVS-install"
-  echo "I need to ask some questions before starting the configuration."
-  echo "You can leave the default options and just press Enter if that's right for you."
-  echo ""
-  echo "${cyan}What is your DOMAIN which will be use for KVS ?"
-  echo "${cyan}Do you want to create a SSL certs ?"
-  echo "${cyan}Which Version of PHP ?"
-  echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
-  echo "   1) PHP 7.4 (recommended) ${normal}${cyan}"
-  echo "${yellow}   2) PHP 7.3 ${normal}${cyan}"
-  until [[ "$PHP_VERSION" =~ ^[1-2]$ ]]; do
-    read -rp "Version [1-2]: " -e -i 1 PHP_VERSION
-  done
-  case $PHP_VERSION in
-  #1)
-  #PHP="8.0"
-  #;;
-  1)
-    PHP="7.4"
-    ;;
-  2)
-    PHP="7.3"
-    ;;
-  esac
-  echo "Which type of database ?"
-  echo "   1) MariaDB"
-  echo "   2) MySQL"
-  until [[ "$DATABASE" =~ ^[1-2]$ ]]; do
-    read -rp "Version [1-2]: " -e -i 1 DATABASE
-  done
-  case $DATABASE in
-  1)
-    database="mariadb"
-    ;;
-  2)
-    database="mysql"
-    ;;
-  esac
-  if [[ "$database" =~ (mysql) ]]; then
-    echo "Which version of MySQL ?"
-    echo "${green}   1) MySQL 8.0 ${normal}"
-    echo "${red}   2) MySQL 5.7 ${normal}${cyan}"
-    until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
-      read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
+  if [[ $HEADLESS != "y" ]]; then
+    echo "${cyan}Welcome to KVS-install !"
+    echo "https://github.com/MaximeMichaud/KVS-install"
+    echo "I need to ask some questions before starting the configuration."
+    echo "You can leave the default options and just press Enter if that's right for you."
+    echo ""
+    echo "${cyan}What is your DOMAIN which will be use for KVS ?"
+    echo "${cyan}Do you want to create a SSL certs ?"
+    echo "${cyan}Which Version of PHP ?"
+    echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
+    echo "${yellow}    1) PHP 7.4 (recommended) ${normal}${cyan}"
+    echo "${red}   2) PHP 7.3 ${normal}${cyan}"
+    until [[ "$PHP_VERSION" =~ ^[1-2]$ ]]; do
+      read -rp "Version [1-2]: " -e -i 1 PHP_VERSION
     done
-    case $DATABASE_VER in
+    case $PHP_VERSION in
+    #1)
+    #PHP="8.0"
+    #;;
     1)
-      database_ver="8.0"
+      PHP="7.4"
       ;;
     2)
-      database_ver="5.7"
+      PHP="7.3"
       ;;
     esac
-  fi
-  if [[ "$database" =~ (mariadb) ]]; then
-    echo "Which version of MariaDB ?"
-    echo "${green}   1) MariaDB 10.6 (Stable)${normal}"
-    echo "${yellow}   2) MariaDB 10.5 (Old Stable)${normal}"
-    echo "${yellow}   3) MariaDB 10.4 (Old Stable)${normal}"
-    echo "${yellow}   4) MariaDB 10.3 (Old Stable)${normal}${cyan}"
-    until [[ "$DATABASE_VER" =~ ^[1-4]$ ]]; do
-      read -rp "Version [1-4]: " -e -i 1 DATABASE_VER
+    echo "Which type of database ?"
+    echo "   1) MariaDB"
+    echo "   2) MySQL"
+    until [[ "$DATABASE" =~ ^[1-2]$ ]]; do
+      read -rp "Version [1-2]: " -e -i 1 DATABASE
     done
-    case $DATABASE_VER in
+    case $DATABASE in
     1)
-      database_ver="10.6"
+      database="mariadb"
       ;;
     2)
-      database_ver="10.5"
-      ;;
-    3)
-      database_ver="10.4"
-      ;;
-    4)
-      database_ver="10.3"
+      database="mysql"
       ;;
     esac
-  fi
-  echo ""
-  echo "We are ready to start the installation !"
-  APPROVE_INSTALL=${APPROVE_INSTALL:-n}
-  if [[ $APPROVE_INSTALL =~ n ]]; then
-    read -n1 -r -p "Press any key to continue..."
+    if [[ "$database" =~ (mysql) ]]; then
+      echo "Which version of MySQL ?"
+      echo "${green}   1) MySQL 8.0 ${normal}"
+      echo "${red}   2) MySQL 5.7 ${normal}${cyan}"
+      until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
+        read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
+      done
+      case $DATABASE_VER in
+      1)
+        database_ver="8.0"
+        ;;
+      2)
+        database_ver="5.7"
+        ;;
+      esac
+    fi
+    if [[ "$database" =~ (mariadb) ]]; then
+      echo "Which version of MariaDB ?"
+      echo "${green}   1) MariaDB 10.6 (Stable)${normal}"
+      echo "${yellow}   2) MariaDB 10.5 (Old Stable)${normal}"
+      echo "${yellow}   3) MariaDB 10.4 (Old Stable)${normal}"
+      echo "${yellow}   4) MariaDB 10.3 (Old Stable)${normal}${cyan}"
+      until [[ "$DATABASE_VER" =~ ^[1-4]$ ]]; do
+        read -rp "Version [1-4]: " -e -i 1 DATABASE_VER
+      done
+      case $DATABASE_VER in
+      1)
+        database_ver="10.6"
+        ;;
+      2)
+        database_ver="10.5"
+        ;;
+      3)
+        database_ver="10.4"
+        ;;
+      4)
+        database_ver="10.3"
+        ;;
+      esac
+    fi
+    echo ""
+    echo "We are ready to start the installation !"
+    APPROVE_INSTALL=${APPROVE_INSTALL:-n}
+    if [[ $APPROVE_INSTALL =~ n ]]; then
+      read -n1 -r -p "Press any key to continue..."
+    fi
   fi
 }
 
@@ -224,7 +233,7 @@ function aptinstall_nginx() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
-	  openssl dhparam -out /etc/nginx/dhparam.pem 2048
+      openssl dhparam -out /etc/nginx/dhparam.pem 2048
       #update CF IPV4/V6
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /etc/nginx/scripts/update-cloudflare-ip-list.sh
     fi
@@ -264,8 +273,8 @@ function aptinstall_mysql() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
     fi
     if [[ "$VERSION_ID" =~ (10|11|20.04|22.04) ]]; then
-      echo "deb http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
-      echo "deb-src http://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
+      echo "deb https://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
+      echo "deb-src https://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
       apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
       apt-get update && apt-get install mysql-server mysql-client -y
       systemctl enable mysql && systemctl start mysql
@@ -285,7 +294,7 @@ function aptinstall_php() {
         apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick} -y
         sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
         sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	    sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+        sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
         apt-get remove apache2 -y
         systemctl restart nginx
       fi
@@ -294,32 +303,31 @@ function aptinstall_php() {
         apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick} -y
         sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
         sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-	    sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+        sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
         apt-get remove apache2 -y
         systemctl restart nginx
       fi
     fi
     #if [[ "$webserver" =~ (apache2) ]]; then
-      #if [[ "$VERSION_ID" =~ (10|11) ]]; then
-        #echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
-        #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
-        #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
-        #sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-        #sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
-        #systemctl restart apache2
-      #fi
-      #if [[ "$VERSION_ID" =~ (20.04|22.04) ]]; then
-        #add-apt-repository -y ppa:ondrej/php
-        #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
-        #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
-        #sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-        #sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
-        #systemctl restart apache2
-      #fi
+    #if [[ "$VERSION_ID" =~ (10|11) ]]; then
+    #echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
+    #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
+    #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
+    #sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+    #sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
+    #systemctl restart apache2
+    #fi
+    #if [[ "$VERSION_ID" =~ (20.04|22.04) ]]; then
+    #add-apt-repository -y ppa:ondrej/php
+    #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
+    #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
+    #sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
+    #sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
+    #systemctl restart apache2
+    #fi
     #fi
   fi
 }
-
 
 function aptinstall_phpmyadmin() {
   echo "phpMyAdmin Installation"
