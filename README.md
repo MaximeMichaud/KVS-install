@@ -7,6 +7,19 @@
 ```bash
 bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
 ```
+## Headless Usage
+```bash
+wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
+chmod +x kvs-install.sh
+HEADLESS=y \
+PHP=8.1 \
+webserver=nginx \
+nginx_branch=mainline \
+database=mariadb \
+database_ver=10.6 \
+./kvs-install.sh
+
+```
 ## Compatibility
 The latest versions are more stable.
 
@@ -18,12 +31,10 @@ This script supports the following Linux distributions:
 | Debian 11               |✅     |
 | Ubuntu 20.04            |✅     |
 | Ubuntu 22.04            |✅     |
-| CentOS 7                |🔜     |
-| CentOS 8                |🔜     |
 ## To-Do
 https://github.com/MaximeMichaud/KVS-install/projects/1
 ## Supports
-* NGINX 1.20.X
+* NGINX 1.21.X
 * MySQL 5.7 - 8.0 or MariaDB 10.3 - 10.6
 * PHP 7.4
 * phpMyAdmin 5.2.0
