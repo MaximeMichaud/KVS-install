@@ -17,8 +17,8 @@ This script supports the following Linux distributions:
 | Debian 9                |✅     |
 | Debian 10               |✅     |
 | Debian 11               |✅     |
-| Ubuntu 18.04            |✅     |
 | Ubuntu 20.04            |✅     |
+| Ubuntu 22.04            |✅     |
 | CentOS 7                |🔜     |
 | CentOS 8                |🔜     |
 ## To-Do
@@ -27,4 +27,4 @@ https://github.com/MaximeMichaud/KVS-install/projects/1
 * NGINX 1.20.X
 * MySQL 5.7 - 8.0 or MariaDB 10.3 - 10.6
 * PHP 7.4
-* phpMyAdmin 5.1.3
+* phpMyAdmin 5.2.0
