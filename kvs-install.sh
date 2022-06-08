@@ -404,37 +404,6 @@ function install_ioncube() {
   fi
 }
 
-function install_composer() {
-  if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    curl -sS https://getcomposer.org/installer | php
-    mv composer.phar /usr/local/bin/composer
-    chmod +x /usr/local/bin/composer
-  fi
-}
-
-#function install_cron() {
-#Disabled for the moment
-#if [[ "$OS" =~ (debian|ubuntu) ]]; then
-#cd /var/www/html || exit
-#apt-get install cron -y
-#crontab -l > cron
-#wget -O cron 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cron/cron'
-#crontab cron
-#rm cron
-#fi
-#}
-
-#function mod_cloudflare() {
-#Disabled for the moment
-#a2enmod remoteip
-#cd /etc/apache2 || exit
-#wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/apache2.conf'
-#wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/000-default.conf'
-#cd /etc/apache2/conf-available || exit
-#wget 'https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/cloudflare/remoteip.conf'
-#systemctl restart apache2
-#}
-
 function autoUpdate() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "Enable Automatic Updates..."
