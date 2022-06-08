@@ -295,7 +295,6 @@ function aptinstall_php() {
         sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
         sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
         sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-        apt-get remove apache2 -y
         systemctl restart nginx
       fi
       if [[ "$VERSION_ID" =~ (20.04|22.04) ]]; then
@@ -304,28 +303,9 @@ function aptinstall_php() {
         sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
         sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
         sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-        apt-get remove apache2 -y
         systemctl restart nginx
       fi
     fi
-    #if [[ "$webserver" =~ (apache2) ]]; then
-    #if [[ "$VERSION_ID" =~ (10|11) ]]; then
-    #echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
-    #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
-    #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
-    #sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-    #sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
-    #systemctl restart apache2
-    #fi
-    #if [[ "$VERSION_ID" =~ (20.04|22.04) ]]; then
-    #add-apt-repository -y ppa:ondrej/php
-    #apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql} -y
-    #sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 50M|' /etc/php/$PHP/apache2/php.ini
-    #sed -i 's|post_max_size = 8M|post_max_size = 50M|' /etc/php/$PHP/apache2/php.ini
-    #sed -i 's|;max_input_vars = 1000|max_input_vars = 2000|' /etc/php/$PHP/apache2/php.ini
-    #systemctl restart apache2
-    #fi
-    #fi
   fi
 }
 
@@ -348,11 +328,6 @@ function aptinstall_phpmyadmin() {
     if [[ "$webserver" =~ (nginx) ]]; then
       apt-get update && apt-get install php7.4{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
       service nginx restart
-    elif [[ "$webserver" =~ (apache2) ]]; then
-      wget https://raw.githubusercontent.com/MaximeMichaud/Azuriom-install/master/conf/apache2/phpmyadmin.conf
-      mv phpmyadmin.conf /etc/apache2/sites-available/
-      a2ensite phpmyadmin
-      systemctl restart apache2
     fi
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
@@ -398,9 +373,9 @@ function install_ioncube() {
     wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
     tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
     cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
-    echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/apache2/php.ini
+    echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/fpm/php.ini
     echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
-    systemctl restart apache2
+    systemctl restart php7.4-fpm
   fi
 }
 
