@@ -23,7 +23,7 @@ on_red=$(tput setab 1)
 # Define installation parameters for headless install (fallback if unspecifed)
 if [[ $HEADLESS == "y" ]]; then
   # Define options
-  PHP=8.1
+  PHP=7.4
   webserver=nginx
   nginx_branch=mainline
   database=mariadb
