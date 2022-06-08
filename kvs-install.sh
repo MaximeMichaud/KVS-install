@@ -103,14 +103,12 @@ function script() {
   aptupdate
   aptinstall
   aptinstall_php
-  #aptinstall_"$webserver"
   aptinstall_nginx
   aptinstall_"$database"
-  #aptinstall_phpmyadmin
-  #install_KVS
+  aptinstall_phpmyadmin
+  install_KVS
   install_ioncube
-  install_composer
-  autoUpdate
+  #autoUpdate
   setupdone
 
 }
@@ -123,6 +121,7 @@ function installQuestions() {
     echo ""
     echo "${cyan}What is your DOMAIN which will be use for KVS ?"
     echo "${cyan}Do you want to create a SSL certs ?"
+
     echo "${cyan}Which Version of PHP ?"
     echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
     echo "${yellow}    1) PHP 7.4 (recommended) ${normal}${cyan}"
@@ -131,7 +130,7 @@ function installQuestions() {
       read -rp "Version [1-2]: " -e -i 1 PHP_VERSION
     done
     case $PHP_VERSION in
-    #1)
+    #1) PHP 8.0 not supported in KVS
     #PHP="8.0"
     #;;
     1)
@@ -141,6 +140,20 @@ function installQuestions() {
       PHP="7.3"
       ;;
     esac
+    echo "Which branch of NGINX ?"
+      echo "${green}   1) Mainline ${normal}"
+      echo "${green}   2) Stable ${normal}${cyan}"
+      until [[ "$NGINX_BRANCH" =~ ^[1-2]$ ]]; do
+        read -rp "Version [1-2]: " -e -i 1 NGINX_BRANCH
+      done
+      case $NGINX_BRANCH in
+      1)
+        nginx_branch="mainline"
+        ;;
+      2)
+        nginx_branch="stable"
+        ;;
+      esac
     echo "Which type of database ?"
     echo "   1) MariaDB"
     echo "   2) MySQL"
@@ -256,10 +269,6 @@ function aptinstall_mariadb() {
       apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
-    if [[ "$VERSION_ID" == "11" ]]; then
-      echo "deb [arch=amd64] https://ftp.igh.cnrs.fr/pub/mariadb/repo/$database_ver/debian buster main" >/etc/apt/sources.list.d/mariadb.list
-      apt-get update && apt-get install mariadb-server -y
-      systemctl enable mariadb && systemctl start mariadb
     elif [[ "$OS" == "centos" ]]; then
       echo "No Support"
     fi
@@ -336,18 +345,11 @@ function aptinstall_phpmyadmin() {
 
 function install_KVS() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    rm -rf /var/www/html/*
-    #mkdir /var/www/html
     mv /var/KVS_* /var/www/"$DOMAIN"
     unzip -o /var/www/"$DOMAIN"/KVS_*
     rm -r /var/www/"$DOMAIN"/KVS_*
     chown -R www-data:www-data /var/www/"$DOMAIN"
     chmod -R 755 /var/www/"$DOMAIN"
-    #cd /var/www/html || exit
-    #unzip KVSInstaller.zip
-    #rm -rf KVSInstaller.zip
-    #chmod -R 755 /var/www/html
-    #chown -R www-data:www-data /var/www/html
     #chmod for kvs
     chmod 777 tmp
     chmod 777 admin/smarty/cache
