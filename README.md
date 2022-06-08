@@ -12,7 +12,7 @@ bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/
 wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
 chmod +x kvs-install.sh
 HEADLESS=y \
-PHP=8.1 \
+PHP=7.4 \
 webserver=nginx \
 nginx_branch=mainline \
 database=mariadb \
