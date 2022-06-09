@@ -251,11 +251,6 @@ function aptinstall_nginx() {
       #update CF IPV4/V6
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /etc/nginx/scripts/update-cloudflare-ip-list.sh
     fi
-    if [[ "$VERSION_ID" == "11" ]]; then
-      echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update && apt-get install nginx -y
-    fi
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
