@@ -110,6 +110,7 @@ function script() {
   aptinstall_phpmyadmin
   install_KVS
   install_ioncube
+  insert_cronjob
   autoUpdate
   setupdone
 
@@ -354,6 +355,18 @@ function install_KVS() {
     #GRANT ALL PRIVILEGES ON $DOMAIN.* TO '$DOMAIN'@'localhost'
     #FLUSH PRIVILEGES
   fi
+}
+
+insert_cronjob() {
+  echo "* Installing cronjob.. "
+
+  crontab -l | {
+    cat
+    echo "#KVS"
+    echo "* * * * * cd /var/www/$DOMAIN/admin/include && /usr/bin/php$PHP cron.php > /dev/null 2>&1"
+  } | crontab -
+
+  echo "* Cronjob installed!"
 }
 
 function install_ioncube() {
