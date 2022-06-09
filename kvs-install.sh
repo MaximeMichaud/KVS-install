@@ -29,6 +29,8 @@ if [[ $HEADLESS == "y" ]]; then
   database=mariadb
   database_ver=10.6
 fi
+MYSQL_USER="$DOMAIN"
+MYSQL_PASSWORD="password"
 #################################################################################
 function isRoot() {
   if [ "$EUID" -ne 0 ]; then
@@ -227,7 +229,7 @@ function aptupdate() {
 }
 function aptinstall() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget
+    apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget yt-dlp
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
@@ -295,21 +297,16 @@ function aptinstall_php() {
     if [[ "$webserver" =~ (nginx) ]]; then
       if [[ "$VERSION_ID" =~ (10|11) ]]; then
         echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
-        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick} -y
-        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-        sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-        sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-        systemctl restart nginx
       fi
       if [[ "$VERSION_ID" =~ (20.04|22.04) ]]; then
         add-apt-repository -y ppa:ondrej/php
-        apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick} -y
-        sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2000M|' /etc/php/$PHP/fpm/php.ini
-        sed -i 's|post_max_size = 8M|post_max_size = 2000M|' /etc/php/$PHP/fpm/php.ini
-        sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-        systemctl restart nginx
       fi
     fi
+    apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick} -y
+    sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2048M|' /etc/php/$PHP/fpm/php.ini
+    sed -i 's|post_max_size = 8M|post_max_size = 2048M|' /etc/php/$PHP/fpm/php.ini
+    sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+    systemctl restart nginx
   fi
 }
 
