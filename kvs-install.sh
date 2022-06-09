@@ -108,7 +108,7 @@ function script() {
   aptinstall_phpmyadmin
   install_KVS
   install_ioncube
-  #autoUpdate
+  autoUpdate
   setupdone
 
 }
@@ -120,12 +120,13 @@ function installQuestions() {
     echo "You can leave the default options and just press Enter if that's right for you."
     echo ""
     echo "${cyan}What is your DOMAIN which will be use for KVS ?"
+    read -r DOMAIN
     echo "${cyan}Do you want to create a SSL certs ?"
 
     echo "${cyan}Which Version of PHP ?"
     echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
     echo "${yellow}    1) PHP 7.4 (recommended) ${normal}${cyan}"
-    echo "${red}   2) PHP 7.3 ${normal}${cyan}"
+    echo "${red}    2) PHP 7.3 ${normal}${cyan}"
     until [[ "$PHP_VERSION" =~ ^[1-2]$ ]]; do
       read -rp "Version [1-2]: " -e -i 1 PHP_VERSION
     done
@@ -141,19 +142,19 @@ function installQuestions() {
       ;;
     esac
     echo "Which branch of NGINX ?"
-      echo "${green}   1) Mainline ${normal}"
-      echo "${green}   2) Stable ${normal}${cyan}"
-      until [[ "$NGINX_BRANCH" =~ ^[1-2]$ ]]; do
-        read -rp "Version [1-2]: " -e -i 1 NGINX_BRANCH
-      done
-      case $NGINX_BRANCH in
-      1)
-        nginx_branch="mainline"
-        ;;
-      2)
-        nginx_branch="stable"
-        ;;
-      esac
+    echo "   1) Mainline"
+    echo "   2) Stable"
+    until [[ "$NGINX_BRANCH" =~ ^[1-2]$ ]]; do
+      read -rp "Version [1-2]: " -e -i 1 NGINX_BRANCH
+    done
+    case $NGINX_BRANCH in
+    1)
+      nginx_branch="mainline"
+      ;;
+    2)
+      nginx_branch="stable"
+      ;;
+    esac
     echo "Which type of database ?"
     echo "   1) MariaDB"
     echo "   2) MySQL"
@@ -269,9 +270,8 @@ function aptinstall_mariadb() {
       apt-get update && apt-get install mariadb-server -y
       systemctl enable mariadb && systemctl start mariadb
     fi
-    elif [[ "$OS" == "centos" ]]; then
-      echo "No Support"
-    fi
+  elif [[ "$OS" == "centos" ]]; then
+    echo "No Support"
   fi
 }
 
@@ -345,28 +345,22 @@ function aptinstall_phpmyadmin() {
 
 function install_KVS() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    mv /var/KVS_* /var/www/"$DOMAIN"
-    unzip -o /var/www/"$DOMAIN"/KVS_*
+    mkdir -p /var/www/"$DOMAIN"
+    mv KVS_* /var/www/"$DOMAIN"
+    cd /var/www/"$DOMAIN" && unzip -o /var/www/"$DOMAIN"/KVS_*
     rm -r /var/www/"$DOMAIN"/KVS_*
     chown -R www-data:www-data /var/www/"$DOMAIN"
     chmod -R 755 /var/www/"$DOMAIN"
-    #chmod for kvs
-    chmod 777 tmp
-    chmod 777 admin/smarty/cache
-    chmod 777 admin/smarty/template-c
-    chmod 777 admin/smarty/template-c-site
-    find admin/logs -type d | xargs chmod 777
-    find admin/logs -type f \( ! -iname ".htaccess" \) | xargs chmod 666
-    find contents -type d | xargs chmod 777
-    chmod 755 contents
-    find template -type d | xargs chmod 777
-    find template -type f \( ! -iname ".htaccess" \) | xargs chmod 666
-    find admin/data -type d | xargs chmod 777
-    chmod 755 admin/data
-    find admin/data -type f \( -iname "*.dat" \) | xargs chmod 666
-    find admin/data -type f \( -iname "*.tpl" \) | xargs chmod 666
-    chmod 777 langs
-    find langs -type f \( -iname "*.lang" \) | xargs chmod 666
+    sed -i '/xargs chmod 666/d' /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
+    cd _INSTALL && /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
+    sed -i "s|/PATH|/var/www/"$DOMAIN"|" /var/www/"$DOMAIN"/admin/include/setup.php
+    sed -i "s|/usr/local/bin/|/usr/bin/|" /var/www/"$DOMAIN"/admin/include/setup.php
+    sed -i "s|/usr/bin/php|/usr/bin/php$PHP|" /var/www/$DOMAIN/admin/include/setup.php
+    sed -i "s|KVS|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup.php
+    #CREATE DATABASE $DOMAIN CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    #CREATE USER '$DOMAIN'@'localhost' IDENTIFIED BY 'password'
+    #GRANT ALL PRIVILEGES ON $DOMAIN.* TO '$DOMAIN'@'localhost'
+    #FLUSH PRIVILEGES
   fi
 }
 
