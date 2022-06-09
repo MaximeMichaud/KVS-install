@@ -444,7 +444,7 @@ function updatephpMyAdmin() {
     mkdir /usr/share/phpmyadmin/tmp || exit
     chown www-data:www-data /usr/share/phpmyadmin/tmp
     chmod 700 /var/www/phpmyadmin/tmp
-    randomBlowfishSecret=$(openssl rand -base64 32)
+    randomBlowfishSecret=$(openssl rand -base64 22)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
