@@ -303,10 +303,11 @@ function aptinstall_php() {
         add-apt-repository -y ppa:ondrej/php
       fi
     fi
-    apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick} -y
+    apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcache} -y
     sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2048M|' /etc/php/$PHP/fpm/php.ini
     sed -i 's|post_max_size = 8M|post_max_size = 2048M|' /etc/php/$PHP/fpm/php.ini
     sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
+    sed -i 's|;max_input_vars = 1000|max_input_vars = 10000|' /etc/php/$PHP/fpm/php.ini
     systemctl restart nginx
   fi
 }
