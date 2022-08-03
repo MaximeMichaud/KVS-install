@@ -396,7 +396,9 @@ function install_ioncube() {
 function autoUpdate() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "Enable Automatic Updates..."
-    apt-get install -y unattended-upgrades
+    DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades
+	sed -i 's|APT::Periodic::Update-Package-Lists "0";|APT::Periodic::Update-Package-Lists "1";|' /etc/apt/apt.conf.d/20auto-upgrades
+    sed -i 's|APT::Periodic::Unattended-Upgrade "0";|APT::Periodic::Unattended-Upgrade "1";|' /etc/apt/apt.conf.d/20auto-upgrades
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
