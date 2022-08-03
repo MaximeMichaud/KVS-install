@@ -81,19 +81,6 @@ function checkOS() {
         fi
       fi
     fi
-  elif [[ -e /etc/centos-release ]]; then
-    if ! grep -qs "^CentOS Linux release 7" /etc/centos-release; then
-      echo "${alert}Your version of CentOS is not supported.${normal}"
-      echo "${red}Keep in mind they are not supported, though.${normal}"
-      echo ""
-      unset CONTINUE
-      until [[ $CONTINUE =~ (y|n) ]]; do
-        read -rp "Continue? [y/n] : " -e CONTINUE
-      done
-      if [[ "$CONTINUE" == "n" ]]; then
-        exit 1
-      fi
-    fi
   else
     echo "Looks like you aren't running this script on a Debian, Ubuntu or CentOS system ${normal}"
     exit 1
@@ -262,15 +249,10 @@ function aptinstall_nginx() {
 function aptinstall_mariadb() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MariaDB Installation"
-    apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
-    if [[ "$VERSION_ID" =~ (10|11|20.04|22.04) ]]; then
-      echo "deb [arch=amd64] https://mirror.mva-n.net/mariadb/repo/$database_ver/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
-      apt-get update && apt-get install mariadb-server -y
-      systemctl enable mariadb && systemctl start mariadb
+    curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version="mariadb-$ID"
+    systemctl enable mariadb && systemctl start mariadb
+	rm -f /etc/apt/sources.list.d/mariadb.list.old*
     fi
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
-  fi
 }
 
 function aptinstall_mysql() {
