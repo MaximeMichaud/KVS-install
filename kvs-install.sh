@@ -355,6 +355,9 @@ insert_cronjob() {
     cat
     echo "#KVS"
     echo "* * * * * cd /var/www/$DOMAIN/admin/include && /usr/bin/php$PHP cron.php > /dev/null 2>&1"
+	echo "#yt-dlp Automatic Update"
+    echo "0 0 * * * yt-dlp -U > /dev/null 2>&1"
+	
   } | crontab -
 
   echo "* Cronjob installed!"
@@ -368,6 +371,7 @@ function install_ioncube() {
     echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/fpm/php.ini
     echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
     systemctl restart php7.4-fpm
+	rm -rf ioncube_loaders_lin_x86-64.tar.gz ioncube
   fi
 }
 
