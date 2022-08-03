@@ -91,6 +91,7 @@ function script() {
   installQuestions
   aptupdate
   aptinstall
+  install_yt-dlp
   aptinstall_php
   aptinstall_nginx
   aptinstall_"$database"
@@ -217,10 +218,15 @@ function aptupdate() {
 }
 function aptinstall() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget yt-dlp
+    apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget sudo
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
+}
+
+function install_yt-dlp() {
+    sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+    sudo chmod a+rx /usr/local/bin/yt-dlp
 }
 
 function aptinstall_nginx() {
@@ -231,6 +237,7 @@ function aptinstall_nginx() {
       echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
+	  mkdir /etc/nginx/globals
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
@@ -249,7 +256,8 @@ function aptinstall_nginx() {
 function aptinstall_mariadb() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MariaDB Installation"
-    curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version="mariadb-$ID"
+    curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version="mariadb-$database_ver"
+	apt-get install mariadb-server -y
     systemctl enable mariadb && systemctl start mariadb
 	rm -f /etc/apt/sources.list.d/mariadb.list.old*
     fi
