@@ -91,6 +91,7 @@ function script() {
   installQuestions
   aptupdate
   aptinstall
+  whatisdomain
   install_yt-dlp
   aptinstall_php
   aptinstall_nginx
@@ -110,10 +111,6 @@ function installQuestions() {
     echo "I need to ask some questions before starting the configuration."
     echo "You can leave the default options and just press Enter if that's right for you."
     echo ""
-    echo "${cyan}What is your DOMAIN which will be use for KVS ?"
-    read -r DOMAIN
-    echo "${cyan}Do you want to create a SSL certs ?"
-
     echo "${cyan}Which Version of PHP ?"
     echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
     echo "${yellow}    1) PHP 7.4 (recommended) ${normal}${cyan}"
@@ -122,7 +119,7 @@ function installQuestions() {
       read -rp "Version [1-2]: " -e -i 1 PHP_VERSION
     done
     case $PHP_VERSION in
-    #1) PHP 8.0 not supported in KVS
+    #1) PHP 8.0 not supported in KVS , IonCube Missing
     #PHP="8.0"
     #;;
     1)
@@ -177,25 +174,38 @@ function installQuestions() {
       esac
     fi
     if [[ "$database" =~ (mariadb) ]]; then
-      echo "Which version of MariaDB ?"
-      echo "${green}   1) MariaDB 10.6 (Stable)${normal}"
-      echo "${yellow}   2) MariaDB 10.5 (Old Stable)${normal}"
-      echo "${yellow}   3) MariaDB 10.4 (Old Stable)${normal}"
-      echo "${yellow}   4) MariaDB 10.3 (Old Stable)${normal}${cyan}"
-      until [[ "$DATABASE_VER" =~ ^[1-4]$ ]]; do
-        read -rp "Version [1-4]: " -e -i 1 DATABASE_VER
+      echo "Which version of MariaDB ? https://endoflife.date/mariadb"
+	  echo "${red}   1) MariaDB 10.9 (Alpha)${normal}"
+	  echo "${green}   2) MariaDB 10.8 (Stable)${normal}"
+	  echo "${green}   3) MariaDB 10.7 (Stable)${normal}"
+      echo "${green}   4) MariaDB 10.6 (Stable) (LTS) (Default)${normal}"
+      echo "${yellow}   5) MariaDB 10.5 (Old Stable)${normal}"
+      echo "${yellow}   6) MariaDB 10.4 (Old Stable)${normal}"
+      echo "${yellow}   7) MariaDB 10.3 (Old Stable)${normal}${cyan}"
+      until [[ "$DATABASE_VER" =~ ^[1-7]$ ]]; do
+        read -rp "Version [1-4]: " -e -i 4 DATABASE_VER
       done
       case $DATABASE_VER in
-      1)
+	  1)
+        database_ver="10.9"
+        ;;
+	  2)
+        database_ver="10.8"
+        ;;
+	  3)
+        database_ver="10.7"
+        ;;
+		
+      4)
         database_ver="10.6"
         ;;
-      2)
+      5)
         database_ver="10.5"
         ;;
-      3)
+      6)
         database_ver="10.4"
         ;;
-      4)
+      7)
         database_ver="10.3"
         ;;
       esac
@@ -229,6 +239,13 @@ function install_yt-dlp() {
     sudo chmod a+rx /usr/local/bin/yt-dlp
 }
 
+function whatisdomain() {
+    mkdir -p /root/tmp && mv KVS_* tmp
+	cd /root/tmp && unzip -o KVS_*
+    DOMAIN=$(sed -e '/[A-Z]/d' -e '/*/d' /root/tmp/admin/include/setup.php | grep -oP '[a-z0-9]+\.[a-z]+\.[a-z]+')
+	rm -rf /root/tmp
+}
+
 function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "NGINX Installation"
@@ -245,6 +262,7 @@ function aptinstall_nginx() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
+	  service nginx restart
       #update CF IPV4/V6
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /etc/nginx/scripts/update-cloudflare-ip-list.sh
     fi
@@ -388,6 +406,7 @@ function setupdone() {
   IP=$(curl 'https://api.ipify.org')
   echo "${cyan}It done!"
   echo "${cyan}Configuration Database/User: ${red}http://$IP/"
+  echo "${cyan}Website: ${red}http://$DOMAIN"
   echo "${cyan}phpMyAdmin: ${red}http://$IP/phpmyadmin"
   echo "${cyan}For the moment, If you choose to use MariaDB, you will need to execute ${normal}${on_red}${white}mysql_secure_installation${normal}${cyan} for setting the password"
 }
