@@ -29,8 +29,6 @@ if [[ $HEADLESS == "y" ]]; then
   database=mariadb
   database_ver=10.6
 fi
-MYSQL_USER="$DOMAIN"
-MYSQL_PASSWORD="password"
 #################################################################################
 function isRoot() {
   if [ "$EUID" -ne 0 ]; then
@@ -111,20 +109,20 @@ function installQuestions() {
     echo "I need to ask some questions before starting the configuration."
     echo "You can leave the default options and just press Enter if that's right for you."
     echo ""
-	echo "Do you want to enable automatic updates (All Packages) (Recommanded) ?"
-  echo "   1) Yes"
-  echo "   2) No"
-  until [[ "$AUTOUPDATE" =~ ^[1-2]$ ]]; do
-    read -rp "[1-2]: " -e -i 1 AUTOUPDATE
-  done
-  case $AUTOUPDATE in
-  1)
-    AUTOUPDATE="YES"
-    ;;
-  2)
-    AUTOUPDATE="NO"
-    ;;
-  esac
+    echo "Do you want to enable automatic updates (All Packages) (Recommanded) ?"
+    echo "   1) Yes"
+    echo "   2) No"
+    until [[ "$AUTOUPDATE" =~ ^[1-2]$ ]]; do
+      read -rp "[1-2]: " -e -i 1 AUTOUPDATE
+    done
+    case $AUTOUPDATE in
+    1)
+      AUTOUPDATE="YES"
+      ;;
+    2)
+      AUTOUPDATE="NO"
+      ;;
+    esac
     echo "${cyan}Which Version of PHP ?"
     echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
     echo "${yellow}    1) PHP 7.4 (recommended) ${normal}${cyan}"
@@ -189,9 +187,9 @@ function installQuestions() {
     fi
     if [[ "$database" =~ (mariadb) ]]; then
       echo "Which version of MariaDB ? https://endoflife.date/mariadb"
-	  echo "${red}   1) MariaDB 10.9 (Alpha)${normal}"
-	  echo "${green}   2) MariaDB 10.8 (Stable)${normal}"
-	  echo "${green}   3) MariaDB 10.7 (Stable)${normal}"
+      echo "${red}   1) MariaDB 10.9 (Alpha)${normal}"
+      echo "${green}   2) MariaDB 10.8 (Stable)${normal}"
+      echo "${green}   3) MariaDB 10.7 (Stable)${normal}"
       echo "${green}   4) MariaDB 10.6 (Stable) (LTS) (Default)${normal}"
       echo "${yellow}   5) MariaDB 10.5 (Old Stable)${normal}"
       echo "${yellow}   6) MariaDB 10.4 (Old Stable)${normal}"
@@ -200,13 +198,13 @@ function installQuestions() {
         read -rp "Version [1-4]: " -e -i 4 DATABASE_VER
       done
       case $DATABASE_VER in
-	  1)
+      1)
         database_ver="10.9"
         ;;
-	  2)
+      2)
         database_ver="10.8"
         ;;
-	  3)
+      3)
         database_ver="10.7"
         ;;
       4)
@@ -248,16 +246,16 @@ function aptinstall() {
 }
 
 function install_yt-dlp() {
-    sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-    sudo chmod a+rx /usr/local/bin/yt-dlp
+  sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+  sudo chmod a+rx /usr/local/bin/yt-dlp
 }
 
 function whatisdomain() {
-    mkdir -p /root/tmp && cp KVS_* tmp
-	cd /root/tmp && unzip -o KVS_*
-	DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' /root/tmp/admin/include/setup.php)
-    DOMAIN=`echo "$DOMAIN" | cut -d'"' -f 2`
-	rm -rf /root/tmp
+  mkdir -p /root/tmp && cp KVS_* tmp
+  cd /root/tmp && unzip -o KVS_*
+  DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' /root/tmp/admin/include/setup.php)
+  DOMAIN=$(echo "$DOMAIN" | cut -d'"' -f 2)
+  rm -rf /root/tmp
 }
 
 function aptinstall_nginx() {
@@ -268,7 +266,7 @@ function aptinstall_nginx() {
       echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
-	  rm -rf conf.d && mkdir /etc/nginx/globals
+      rm -rf conf.d && mkdir /etc/nginx/globals
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
@@ -276,7 +274,7 @@ function aptinstall_nginx() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
-	  service nginx restart
+      service nginx restart
       #update CF IPV4/V6
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /usr/bin/update-cloudflare-ip-list.sh
     fi
@@ -289,10 +287,10 @@ function aptinstall_mariadb() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MariaDB Installation"
     curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version="mariadb-$database_ver"
-	apt-get install mariadb-server -y
+    apt-get install mariadb-server -y
     systemctl enable mariadb && systemctl start mariadb
-	rm -f /etc/apt/sources.list.d/mariadb.list.old*
-    fi
+    rm -f /etc/apt/sources.list.d/mariadb.list.old*
+  fi
 }
 
 function aptinstall_mysql() {
@@ -369,24 +367,24 @@ function install_KVS() {
     chmod -R 755 /var/www/"$DOMAIN"
     sed -i '/xargs chmod 666/d' /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
     cd _INSTALL && /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
-    sed -i "s|/PATH|/var/www/"$DOMAIN"|" /var/www/"$DOMAIN"/admin/include/setup.php
+    sed -i "s|/PATH|/var/www/""$DOMAIN""|" /var/www/"$DOMAIN"/admin/include/setup.php
     sed -i "s|/usr/local/bin/|/usr/bin/|" /var/www/"$DOMAIN"/admin/include/setup.php
     sed -i "s|/usr/bin/php|/usr/bin/php$PHP|" /var/www/$DOMAIN/admin/include/setup.php
     sed -i "s|KVS|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup.php
-	# EXPERIMENTAL HERE
-	databasepassword="$(openssl rand -base64 12)"
-	mysql -e "CREATE DATABASE \`$DOMAIN\`;"
-	mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
-	mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
-	mysql -e "FLUSH PRIVILEGES;"
-	mysql -u $DOMAIN -p$databasepassword $DOMAIN < /var/www/$DOMAIN/_INSTALL/install_db.sql;
-	rm -rf /var/www/$DOMAIN/_INSTALL/
-	sed -i "s|login|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-	sed -i "s|pass|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-	sed -i "s|'DB_DEVICE','base'|'DB_DEVICE','$databasepassword'|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-	
-	
+    # EXPERIMENTAL HERE
+    databasepassword="$(openssl rand -base64 12)"
+    mysql -e "CREATE DATABASE \`$DOMAIN\`;"
+    mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
+    mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
+    mysql -u $DOMAIN -p$databasepassword $DOMAIN </var/www/$DOMAIN/_INSTALL/install_db.sql
+    rm -rf /var/www/$DOMAIN/_INSTALL/
+    sed -i "s|login|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
+    sed -i "s|pass|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
+    sed -i "s|'DB_DEVICE','base'|'DB_DEVICE','$databasepassword'|" /var/www/"$DOMAIN"/admin/include/setup_db.php
+
   fi
+
 }
 
 insert_cronjob() {
@@ -396,9 +394,9 @@ insert_cronjob() {
     cat
     echo "#KVS"
     echo "* * * * * cd /var/www/$DOMAIN/admin/include && /usr/bin/php$PHP cron.php > /dev/null 2>&1"
-	echo "#yt-dlp Automatic Update"
+    echo "#yt-dlp Automatic Update"
     echo "0 0 * * * yt-dlp -U > /dev/null 2>&1"
-	
+
   } | crontab -
 
   echo "* Cronjob installed!"
@@ -406,19 +404,19 @@ insert_cronjob() {
 
 function install_ioncube() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    cd /root
+    cd /root || exit
     wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
     tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
     cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
     echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/fpm/php.ini
     echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
     systemctl restart php7.4-fpm
-	rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
+    rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
   fi
 }
 
 function autoUpdate() {
-if [[ "$AUTOUPDATE" =~ (YES) ]]; then
+  if [[ "$AUTOUPDATE" =~ (YES) ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades
     sed -i 's|APT::Periodic::Update-Package-Lists "0";|APT::Periodic::Update-Package-Lists "1";|' /etc/apt/apt.conf.d/20auto-upgrades
     sed -i 's|APT::Periodic::Unattended-Upgrade "0";|APT::Periodic::Unattended-Upgrade "1";|' /etc/apt/apt.conf.d/20auto-upgrades
