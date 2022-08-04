@@ -34,7 +34,7 @@ This script supports the following Linux distributions:
 ## To-Do
 https://github.com/MaximeMichaud/KVS-install/projects/1
 ## Supports
-* NGINX 1.22.X
-* MySQL 5.7 - 8.0 or MariaDB 10.3 - 10.6
+* NGINX 1.23.X
+* MySQL 5.7 - 8.0 or MariaDB 10.3 - 10.9
 * PHP 7.4
 * phpMyAdmin 5.2.0
