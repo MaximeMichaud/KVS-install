@@ -253,6 +253,7 @@ function install_yt-dlp() {
 function whatisdomain() {
   mkdir -p /root/tmp && cp KVS_* tmp
   cd /root/tmp && unzip -o KVS_*
+  # shellcheck disable=SC2016
   DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' /root/tmp/admin/include/setup.php)
   DOMAIN=$(echo "$DOMAIN" | cut -d'"' -f 2)
   rm -rf /root/tmp
