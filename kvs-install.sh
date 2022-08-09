@@ -13,7 +13,7 @@
 #################################################################################
 #Logs
 exec 3<&1
-coproc mytee { tee /root/kvs-install.log >&3;  }
+coproc mytee { tee /root/kvs-install.log >&3; }
 exec >&${mytee[1]} 2>&1
 #Colors
 red=$(tput setaf 1)
@@ -229,14 +229,13 @@ function installQuestions() {
     fi
     echo "Mail for SSL"
     read -r EMAIL
-	echo "Upload KVS Archive File in /root"
-	echo "Ex : KVS_X.X.X_[domain.tld].zip"
+    echo "Upload KVS Archive File in /root"
+    echo "Ex : KVS_X.X.X_[domain.tld].zip"
     # shellcheck disable=SC2144
-    while [ ! -f /root/KVS_*.zip ]
-    do
+    while [ ! -f /root/KVS_*.zip ]; do
       sleep 2
       echo "Waiting for KVS .ZIP file in /root"
-	  echo "Press CTRL + C for exiting"
+      echo "Press CTRL + C for exiting"
     done
     ls -l /root/KVS_*.zip
     echo "We are ready to start the installation !"
@@ -317,7 +316,7 @@ function aptinstall_nginx() {
 function aptinstall_mariadb() {
   echo "MariaDB Installation"
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-	apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
+    apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
     echo "deb [arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
     apt-get update && apt-get install mariadb-server -y
     systemctl enable mariadb && systemctl start mariadb
@@ -422,7 +421,7 @@ function install_KVS() {
 function install_acme.sh() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
     git clone https://github.com/acmesh-official/acme.sh.git
-    cd ./acme.sh
+    cd ./acme.sh || exit
     ./acme.sh --install -m $EMAIL
     mkdir -p /var/www/_letsencrypt && chown www-data /var/www/_letsencrypt
     sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key|trusted_certificate) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-enabled/$DOMAIN.conf
