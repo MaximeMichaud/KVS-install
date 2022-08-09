@@ -104,6 +104,7 @@ function script() {
 }
 function installQuestions() {
   if [[ $HEADLESS != "y" ]]; then
+    yes '' | sed 10q
     echo "${cyan}Welcome to KVS-install !"
     echo "https://github.com/MaximeMichaud/KVS-install"
     echo "I need to ask some questions before starting the configuration."
@@ -222,6 +223,14 @@ function installQuestions() {
       esac
     fi
     echo ""
+    echo "Now Upload the ZIP KVS Archive File"
+    #echo "Ex : KVS_X.X.X_[domain.tld].zip"
+    echo "kvs.zip in /root"
+    while ! test -f "/root/kvs.zip"; do
+      sleep 10
+      echo "Still waiting for kvs.zip in /root/"
+      echo "Press CTRL + C for exiting"
+    done
     echo "We are ready to start the installation !"
     APPROVE_INSTALL=${APPROVE_INSTALL:-n}
     if [[ $APPROVE_INSTALL =~ n ]]; then
@@ -288,6 +297,9 @@ function aptinstall_mariadb() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "MariaDB Installation"
     curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version="mariadb-$database_ver"
+    apt-get update && apt-get upgrade -y
+    sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys CE1A3DD5E3C94F49
+    sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys F1656F24C74CD1D8
     apt-get install mariadb-server -y
     systemctl enable mariadb && systemctl start mariadb
     rm -f /etc/apt/sources.list.d/mariadb.list.old*
@@ -388,6 +400,7 @@ function install_KVS() {
 
 }
 
+
 insert_cronjob() {
   echo "* Installing cronjob.. "
 
@@ -439,7 +452,7 @@ function setupdone() {
   echo "${cyan}Database: ${green}$DOMAIN"
   echo "${cyan}User: ${green}$DOMAIN"
   echo "${cyan}Password: ${green}$databasepassword"
-  echo "${cyan}For the moment, If you choose to use MariaDB, you will need to execute ${normal}${on_red}${white}mysql_secure_installation${normal}${cyan} for setting the root password and enforcing security"
+  echo "${cyan}For the moment, If you choose to use MariaDB, you will need to execute ${normal}${on_red}${white}mysql_secure_installation${normal}${cyan} for setting the root password and enforcing security."
   if [[ "$AUTOUPDATE" =~ (YES) ]]; then
     echo "${green}Automatic updates enabled${normal}"
   fi
