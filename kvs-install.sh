@@ -11,6 +11,10 @@
 # KVS-install Copyright (c) 2020-2022 Maxime Michaud
 # Licensed under GNU General Public License v3.0
 #################################################################################
+#Logs
+exec 3<&1
+coproc mytee { tee kvs-install.log >&3;  }
+exec >&${mytee[1]} 2>&1
 #Colors
 red=$(tput setaf 1)
 green=$(tput setaf 2)
@@ -98,13 +102,14 @@ function script() {
   install_KVS
   install_ioncube
   insert_cronjob
+  install_acme.sh
   autoUpdate
   setupdone
 
 }
 function installQuestions() {
   if [[ $HEADLESS != "y" ]]; then
-    yes '' | sed 10q
+    yes '' | sed 20q
     echo "${cyan}Welcome to KVS-install !"
     echo "https://github.com/MaximeMichaud/KVS-install"
     echo "I need to ask some questions before starting the configuration."
@@ -222,15 +227,17 @@ function installQuestions() {
         ;;
       esac
     fi
-    echo ""
-    echo "Now Upload the ZIP KVS Archive File"
-    #echo "Ex : KVS_X.X.X_[domain.tld].zip"
-    echo "kvs.zip in /root"
-    while ! test -f "/root/kvs.zip"; do
-      sleep 10
-      echo "Still waiting for kvs.zip in /root/"
-      echo "Press CTRL + C for exiting"
+    echo "Mail for SSL"
+    read -r EMAIL
+	echo "Upload KVS Archive File in /root"
+	echo "Ex : KVS_X.X.X_[domain.tld].zip"
+    while [ ! -f /root/KVS_*.zip ]
+    do
+      sleep 2
+      echo "Waiting for KVS .ZIP file in /root"
+	  echo "Press CTRL + C for exiting"
     done
+    ls -l /root/KVS_*.zip
     echo "We are ready to start the installation !"
     APPROVE_INSTALL=${APPROVE_INSTALL:-n}
     if [[ $APPROVE_INSTALL =~ n ]]; then
@@ -248,7 +255,7 @@ function aptupdate() {
 }
 function aptinstall() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget sudo
+    DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget sudo memcached
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
@@ -257,6 +264,7 @@ function aptinstall() {
 function install_yt-dlp() {
   sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
   sudo chmod a+rx /usr/local/bin/yt-dlp
+  ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
 }
 
 function whatisdomain() {
@@ -265,6 +273,9 @@ function whatisdomain() {
   # shellcheck disable=SC2016
   DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' /root/tmp/admin/include/setup.php)
   DOMAIN=$(echo "$DOMAIN" | cut -d'"' -f 2)
+  URL=$(grep -P -i -m1 '\$config\['"'"'project_url'"'"']=' /root/tmp/admin/include/setup.php)
+  URL=$(echo "$URL" | cut -d'"' -f 2)
+  URL=$(echo "$URL" | sed 's~http[s]*://~~g')
   rm -rf /root/tmp
 }
 
@@ -276,16 +287,23 @@ function aptinstall_nginx() {
       echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
-      rm -rf conf.d && mkdir /etc/nginx/globals
+      rm -rf conf.d && mkdir -p /etc/nginx/globals
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
+      mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-enabled/$DOMAIN.conf
+      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/$DOMAIN.conf
+      sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/$DOMAIN.conf
+      sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/sites-enabled/$DOMAIN.conf
+      rm -rf /etc/nginx/conf.d
       service nginx restart
-      #update CF IPV4/V6
+      #update CF IPV4/V6 if CF is used
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /usr/bin/update-cloudflare-ip-list.sh
     fi
   elif [[ "$OS" == "centos" ]]; then
@@ -336,12 +354,14 @@ function aptinstall_php() {
         add-apt-repository -y ppa:ondrej/php
       fi
     fi
-    apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcache} -y
+    apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} -y
     sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2048M|' /etc/php/$PHP/fpm/php.ini
     sed -i 's|post_max_size = 8M|post_max_size = 2048M|' /etc/php/$PHP/fpm/php.ini
     sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
     sed -i 's|;max_input_vars = 1000|max_input_vars = 10000|' /etc/php/$PHP/fpm/php.ini
-    systemctl restart nginx
+    sed -i 's|;max_execution_time = 30|max_execution_time = 300|' /etc/php/$PHP/fpm/php.ini
+    sed -i 's|;max_input_time = 60|max_input_time = 360|' /etc/php/$PHP/fpm/php.ini
+    systemctl restart php$PHP
   fi
 }
 
@@ -393,13 +413,29 @@ function install_KVS() {
     mysql -u $DOMAIN -p$databasepassword $DOMAIN </var/www/$DOMAIN/_INSTALL/install_db.sql
     rm -rf /var/www/$DOMAIN/_INSTALL/
     sed -i "s|login|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-    sed -i "s|pass|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-    sed -i "s|'DB_DEVICE','base'|'DB_DEVICE','$databasepassword'|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-
+    sed -i "s|pass|$databasepassword|" /var/www/"$DOMAIN"/admin/include/setup_db.php
+    sed -i "s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" /var/www/"$DOMAIN"/admin/include/setup_db.php
   fi
 
 }
 
+function install_acme.sh() {
+  if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
+    curl https://get.acme.sh | sh -s email=$EMAIL
+    mkdir -p /var/www/_letsencrypt && chown www-data /var/www/_letsencrypt
+    sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key|trusted_certificate) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-enabled/$DOMAIN.conf
+    service nginx restart
+    /root/.acme.sh/acme.sh --issue -d $DOMAIN -d www.$DOMAIN -w /var/www/_letsencrypt --keylength ec-256
+    mkdir -p /etc/nginx/ssl /etc/nginx/ssl/$DOMAIN
+    /root/.acme.sh/acme.sh --install-cert --ecc -d $DOMAIN -d www.$DOMAIN \
+      --key-file /etc/nginx/ssl/$DOMAIN/key.pem \
+      --fullchain-file /etc/nginx/ssl/$DOMAIN/cert.pem \
+      --reloadcmd "service nginx force-reload"
+    sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-enabled/$DOMAIN.conf
+    service nginx restart
+  fi
+
+}
 
 insert_cronjob() {
   echo "* Installing cronjob.. "
@@ -447,7 +483,7 @@ function setupdone() {
   else
     echo "IPV6 : $IPV6"
   fi
-  echo "${cyan}Website: ${green}http://$DOMAIN"
+  echo "${cyan}Website: ${green}https://$URL"
   echo "${cyan}phpMyAdmin: ${green}http://$IP/phpmyadmin"
   echo "${cyan}Database: ${green}$DOMAIN"
   echo "${cyan}User: ${green}$DOMAIN"
