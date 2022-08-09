@@ -255,7 +255,7 @@ function aptupdate() {
 }
 function aptinstall() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget sudo memcached
+    DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget sudo memcached git
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
