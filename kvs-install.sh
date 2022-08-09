@@ -13,7 +13,7 @@
 #################################################################################
 #Logs
 exec 3<&1
-coproc mytee { tee kvs-install.log >&3;  }
+coproc mytee { tee /root/kvs-install.log >&3;  }
 exec >&${mytee[1]} 2>&1
 #Colors
 red=$(tput setaf 1)
@@ -315,15 +315,12 @@ function aptinstall_nginx() {
 }
 
 function aptinstall_mariadb() {
+  echo "MariaDB Installation"
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    echo "MariaDB Installation"
-    curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version="mariadb-$database_ver"
-    apt-get update && apt-get upgrade -y
-    sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys CE1A3DD5E3C94F49
-    sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys F1656F24C74CD1D8
-    apt-get install mariadb-server -y
+	apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
+    echo "deb [arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
+    apt-get update && apt-get install mariadb-server -y
     systemctl enable mariadb && systemctl start mariadb
-    rm -f /etc/apt/sources.list.d/mariadb.list.old*
   fi
 }
 
@@ -424,7 +421,9 @@ function install_KVS() {
 
 function install_acme.sh() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    curl https://get.acme.sh | sh -s email=$EMAIL
+    git clone https://github.com/acmesh-official/acme.sh.git
+    cd ./acme.sh
+    ./acme.sh --install -m $EMAIL
     mkdir -p /var/www/_letsencrypt && chown www-data /var/www/_letsencrypt
     sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key|trusted_certificate) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-enabled/$DOMAIN.conf
     service nginx restart
@@ -558,7 +557,7 @@ function updatephpMyAdmin() {
 
 initialCheck
 
-if [[ -e /var/www/html/app/ ]]; then
+if [[ -e /var/www ]]; then
   manageMenu
 else
   script
