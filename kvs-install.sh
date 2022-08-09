@@ -231,6 +231,7 @@ function installQuestions() {
     read -r EMAIL
 	echo "Upload KVS Archive File in /root"
 	echo "Ex : KVS_X.X.X_[domain.tld].zip"
+    # shellcheck disable=SC2144
     while [ ! -f /root/KVS_*.zip ]
     do
       sleep 2
@@ -273,8 +274,10 @@ function whatisdomain() {
   # shellcheck disable=SC2016
   DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' /root/tmp/admin/include/setup.php)
   DOMAIN=$(echo "$DOMAIN" | cut -d'"' -f 2)
+  # shellcheck disable=SC2016
   URL=$(grep -P -i -m1 '\$config\['"'"'project_url'"'"']=' /root/tmp/admin/include/setup.php)
   URL=$(echo "$URL" | cut -d'"' -f 2)
+  # shellcheck disable=SC2001
   URL=$(echo "$URL" | sed 's~http[s]*://~~g')
   rm -rf /root/tmp
 }
