@@ -278,7 +278,7 @@ function whatisdomain() {
   URL=$(echo "$URL" | cut -d'"' -f 2)
   # shellcheck disable=SC2001
   URL=$(echo "$URL" | sed 's~http[s]*://~~g')
-  rm -rf /root/tmp
+  rm -rf /root/tmp && cd /root || exit
 }
 
 function aptinstall_nginx() {
@@ -420,6 +420,7 @@ function install_KVS() {
 
 function install_acme.sh() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
+    cd /root || exit
     git clone https://github.com/acmesh-official/acme.sh.git
     cd ./acme.sh || exit
     ./acme.sh --install -m $EMAIL
