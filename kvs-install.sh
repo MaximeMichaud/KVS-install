@@ -131,7 +131,7 @@ function installQuestions() {
     esac
     echo "${cyan}Which Version of PHP ?"
     echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
-    echo "${yellow}    1) PHP 7.4 (recommended) ${normal}${cyan}"
+    echo "${red}    1) PHP 7.4 (recommended) ${normal}${cyan}"
     echo "${red}    2) PHP 7.3 ${normal}${cyan}"
     until [[ "$PHP_VERSION" =~ ^[1-2]$ ]]; do
       read -rp "Version [1-2]: " -e -i 1 PHP_VERSION
