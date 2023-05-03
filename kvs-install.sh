@@ -290,13 +290,10 @@ function aptinstall_nginx() {
       echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
       rm -rf conf.d && mkdir -p /etc/nginx/globals
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
+      configs=("nginx" "general" "security" "php_fastcgi" "letsencrypt" "cloudflare-ip-list" "kvs")
+      for config in "${configs[@]}"; do
+        wget "https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/${config}.conf" -O "/etc/nginx/globals/${config}.conf"
+      done
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
       mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-enabled/$DOMAIN.conf
