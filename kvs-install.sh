@@ -161,45 +161,12 @@ function installQuestions() {
       nginx_branch="stable"
       ;;
     esac
-    echo "Which type of database ?"
-    echo "   1) MariaDB"
-    echo "   2) MySQL"
-    until [[ "$DATABASE" =~ ^[1-2]$ ]]; do
-      read -rp "Version [1-2]: " -e -i 1 DATABASE
-    done
-    case $DATABASE in
-    1)
-      database="mariadb"
-      ;;
-    2)
-      database="mysql"
-      ;;
-    esac
-    if [[ "$database" =~ (mysql) ]]; then
-      echo "Which version of MySQL ?"
-      echo "${green}   1) MySQL 8.0 ${normal}"
-      echo "${red}   2) MySQL 5.7 ${normal}${cyan}"
-      until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
-        read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
-      done
-      case $DATABASE_VER in
-      1)
-        database_ver="8.0"
-        ;;
-      2)
-        database_ver="5.7"
-        ;;
-      esac
-    fi
     if [[ "$database" =~ (mariadb) ]]; then
       echo "Which version of MariaDB ? https://endoflife.date/mariadb"
       echo "${red}   1) MariaDB 10.9 (Alpha)${normal}"
       echo "${green}   2) MariaDB 10.8 (Stable)${normal}"
       echo "${green}   3) MariaDB 10.7 (Stable)${normal}"
       echo "${green}   4) MariaDB 10.6 (Stable) (LTS) (Default)${normal}"
-      echo "${yellow}   5) MariaDB 10.5 (Old Stable)${normal}"
-      echo "${yellow}   6) MariaDB 10.4 (Old Stable)${normal}"
-      echo "${yellow}   7) MariaDB 10.3 (Old Stable)${normal}${cyan}"
       until [[ "$DATABASE_VER" =~ ^[1-7]$ ]]; do
         read -rp "Version [1-4]: " -e -i 4 DATABASE_VER
       done
@@ -215,15 +182,6 @@ function installQuestions() {
         ;;
       4)
         database_ver="10.6"
-        ;;
-      5)
-        database_ver="10.5"
-        ;;
-      6)
-        database_ver="10.4"
-        ;;
-      7)
-        database_ver="10.3"
         ;;
       esac
     fi
