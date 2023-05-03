@@ -253,9 +253,27 @@ function aptupdate() {
     echo "No Support"
   fi
 }
+
 function aptinstall() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates apt-transport-https dirmngr zip unzip lsb-release gnupg openssl curl imagemagick ffmpeg wget sudo memcached git
+    packages=(
+      ca-certificates
+      apt-transport-https
+      dirmngr
+      zip
+      unzip
+      lsb-release
+      gnupg
+      openssl
+      curl
+      imagemagick
+      ffmpeg
+      wget
+      sudo
+      memcached
+      git
+    )
+    DEBIAN_FRONTEND=noninteractive apt-get -y install "${packages[@]}"
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
@@ -268,17 +286,15 @@ function install_yt-dlp() {
 }
 
 function whatisdomain() {
-  mkdir -p /root/tmp && cp KVS_* tmp
-  cd /root/tmp && unzip -o KVS_*
+  TMP_DIR="/root/tmp"
+  SETUP_FILE="$TMP_DIR/admin/include/setup.php"
+  mkdir -p $TMP_DIR && cp KVS_* $TMP_DIR
+  cd $TMP_DIR && unzip -o KVS_*
   # shellcheck disable=SC2016
-  DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' /root/tmp/admin/include/setup.php)
-  DOMAIN=$(echo "$DOMAIN" | cut -d'"' -f 2)
+  DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' $SETUP_FILE | cut -d'"' -f 2)
   # shellcheck disable=SC2016
-  URL=$(grep -P -i -m1 '\$config\['"'"'project_url'"'"']=' /root/tmp/admin/include/setup.php)
-  URL=$(echo "$URL" | cut -d'"' -f 2)
-  # shellcheck disable=SC2001
-  URL=$(echo "$URL" | sed 's~http[s]*://~~g')
-  rm -rf /root/tmp && cd /root || exit
+  URL=$(grep -P -i -m1 '\$config\['"'"'project_url'"'"']=' $SETUP_FILE | cut -d'"' -f 2 | sed 's~http[s]*://~~g')
+  rm -rf $TMP_DIR && cd /root || exit
 }
 
 function aptinstall_nginx() {
@@ -351,12 +367,12 @@ function aptinstall_php() {
       fi
     fi
     apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} -y
-    sed -i 's|upload_max_filesize = 2M|upload_max_filesize = 2048M|' /etc/php/$PHP/fpm/php.ini
-    sed -i 's|post_max_size = 8M|post_max_size = 2048M|' /etc/php/$PHP/fpm/php.ini
-    sed -i 's|memory_limit = 128M|memory_limit = 512M|' /etc/php/$PHP/fpm/php.ini
-    sed -i 's|;max_input_vars = 1000|max_input_vars = 10000|' /etc/php/$PHP/fpm/php.ini
-    sed -i 's|;max_execution_time = 30|max_execution_time = 300|' /etc/php/$PHP/fpm/php.ini
-    sed -i 's|;max_input_time = 60|max_input_time = 360|' /etc/php/$PHP/fpm/php.ini
+    sed -i "s|upload_max_filesize = 2M|upload_max_filesize = 2048M|
+            s|post_max_size = 8M|post_max_size = 2048M|
+            s|memory_limit = 128M|memory_limit = 512M|
+            s|;max_input_vars = 1000|max_input_vars = 10000|
+            s|;max_execution_time = 30|max_execution_time = 300|
+            s|;max_input_time = 60|max_input_time = 360|" /etc/php/$PHP/fpm/php.ini
     systemctl restart php$PHP
   fi
 }
@@ -388,31 +404,32 @@ function aptinstall_phpmyadmin() {
 
 function install_KVS() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    mkdir -p /var/www/"$DOMAIN"
-    mv /root/KVS_* /var/www/"$DOMAIN"
-    cd /var/www/"$DOMAIN" && unzip -o /var/www/"$DOMAIN"/KVS_*
-    rm -r /var/www/"$DOMAIN"/KVS_*
-    chown -R www-data:www-data /var/www/"$DOMAIN"
-    chmod -R 755 /var/www/"$DOMAIN"
-    sed -i '/xargs chmod 666/d' /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
-    cd _INSTALL && /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
-    sed -i "s|/PATH|/var/www/""$DOMAIN""|" /var/www/"$DOMAIN"/admin/include/setup.php
-    sed -i "s|/usr/local/bin/|/usr/bin/|" /var/www/"$DOMAIN"/admin/include/setup.php
-    sed -i "s|/usr/bin/php|/usr/bin/php$PHP|" /var/www/$DOMAIN/admin/include/setup.php
-    sed -i "s|KVS|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup.php
+    KVS_PATH="/var/www/$DOMAIN"
+    mkdir -p $KVS_PATH
+    mv /root/KVS_* $KVS_PATH
+    unzip -o $KVS_PATH/KVS_* -d $KVS_PATH
+    rm -r $KVS_PATH/KVS_*
+    chown -R www-data:www-data $KVS_PATH
+    chmod -R 755 $KVS_PATH
+    sed -i '/xargs chmod 666/d' $KVS_PATH/_INSTALL/install_permissions.sh
+    $KVS_PATH/_INSTALL/install_permissions.sh
+    sed -i "s|/PATH|$KVS_PATH|
+            s|/usr/local/bin/|/usr/bin/|
+            s|/usr/bin/php|/usr/bin/php$PHP|
+            s|KVS|$DOMAIN|" $KVS_PATH/admin/include/setup.php
     # EXPERIMENTAL HERE
     databasepassword="$(openssl rand -base64 12)"
     mysql -e "CREATE DATABASE \`$DOMAIN\`;"
     mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
     mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
     mysql -e "FLUSH PRIVILEGES;"
-    mysql -u $DOMAIN -p$databasepassword $DOMAIN </var/www/$DOMAIN/_INSTALL/install_db.sql
-    rm -rf /var/www/$DOMAIN/_INSTALL/
-    sed -i "s|login|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-    sed -i "s|pass|$databasepassword|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-    sed -i "s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-  fi
+    mysql -u $DOMAIN -p$databasepassword $DOMAIN <$KVS_PATH/_INSTALL/install_db.sql
 
+    rm -rf $KVS_PATH/_INSTALL/
+    sed -i "s|login|$DOMAIN|
+            s|pass|$databasepassword|
+            s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" $KVS_PATH/admin/include/setup_db.php
+  fi
 }
 
 function install_acme.sh() {
@@ -492,6 +509,7 @@ function setupdone() {
     echo "${green}Automatic updates enabled${normal}"
   fi
 }
+
 function manageMenu() {
   clear
   echo "Welcome to KVS-install !"
