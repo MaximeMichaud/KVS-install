@@ -336,24 +336,6 @@ function aptinstall_mariadb() {
   fi
 }
 
-function aptinstall_mysql() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    echo "MYSQL Installation"
-    if [[ "$database_ver" == "8.0" ]]; then
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/master/conf/mysql/default-auth-override.cnf -P /etc/mysql/mysql.conf.d
-    fi
-    if [[ "$VERSION_ID" =~ (10|11|20.04|22.04) ]]; then
-      echo "deb https://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >/etc/apt/sources.list.d/mysql.list
-      echo "deb-src https://repo.mysql.com/apt/$ID/ $(lsb_release -sc) mysql-$database_ver" >>/etc/apt/sources.list.d/mysql.list
-      apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
-      apt-get update && apt-get install mysql-server mysql-client -y
-      systemctl enable mysql && systemctl start mysql
-    elif [[ "$OS" == "centos" ]]; then
-      echo "No Support"
-    fi
-  fi
-}
-
 function aptinstall_php() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "PHP Installation"
