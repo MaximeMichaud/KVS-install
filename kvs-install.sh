@@ -24,14 +24,15 @@ white=$(tput setaf 7)
 normal=$(tput sgr0)
 alert=${white}${on_red}
 on_red=$(tput setab 1)
+# Variables Shell
+export DEBIAN_FRONTEND=noninteractive
 # Define installation parameters for headless install (fallback if unspecifed)
 if [[ $HEADLESS == "y" ]]; then
   # Define options
   PHP=7.4
   webserver=nginx
   nginx_branch=mainline
-  database=mariadb
-  database_ver=10.6
+  database_ver=10.11
 fi
 #################################################################################
 function isRoot() {
@@ -97,7 +98,7 @@ function script() {
   install_yt-dlp
   aptinstall_php
   aptinstall_nginx
-  aptinstall_"$database"
+  aptinstall_mariadb
   aptinstall_phpmyadmin
   install_KVS
   install_ioncube
@@ -161,30 +162,20 @@ function installQuestions() {
       nginx_branch="stable"
       ;;
     esac
-    if [[ "$database" =~ (mariadb) ]]; then
-      echo "Which version of MariaDB ? https://endoflife.date/mariadb"
-      echo "${red}   1) MariaDB 10.9 (Alpha)${normal}"
-      echo "${green}   2) MariaDB 10.8 (Stable)${normal}"
-      echo "${green}   3) MariaDB 10.7 (Stable)${normal}"
-      echo "${green}   4) MariaDB 10.6 (Stable) (LTS) (Default)${normal}"
-      until [[ "$DATABASE_VER" =~ ^[1-7]$ ]]; do
-        read -rp "Version [1-4]: " -e -i 4 DATABASE_VER
-      done
-      case $DATABASE_VER in
-      1)
-        database_ver="10.9"
-        ;;
-      2)
-        database_ver="10.8"
-        ;;
-      3)
-        database_ver="10.7"
-        ;;
-      4)
-        database_ver="10.6"
-        ;;
-      esac
-    fi
+    echo "Which version of MariaDB ? https://endoflife.date/mariadb"
+    echo "${green}   4) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
+    echo "${green}   4) MariaDB 10.6 (Stable) (LTS) (Default)${normal}"
+    until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
+      read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
+    done
+    case $DATABASE_VER in
+    1)
+      database_ver="10.11"
+      ;;
+    2)
+      database_ver="10.6"
+      ;;
+    esac
     echo "Mail for SSL"
     read -r EMAIL
     echo "Upload KVS Archive File in /root"
@@ -231,7 +222,7 @@ function aptinstall() {
       memcached
       git
     )
-    DEBIAN_FRONTEND=noninteractive apt-get -y install "${packages[@]}"
+    apt-get -y install "${packages[@]}"
   elif [[ "$OS" == "centos" ]]; then
     echo "No Support"
   fi
@@ -244,16 +235,20 @@ function install_yt-dlp() {
 }
 
 function whatisdomain() {
-  TMP_DIR="/root/tmp"
-  SETUP_FILE="$TMP_DIR/admin/include/setup.php"
-  mkdir -p $TMP_DIR && cp KVS_* $TMP_DIR
-  cd $TMP_DIR && unzip -o KVS_*
+  mkdir -p /root/tmp
+  cp KVS_* tmp
+  cd /root/tmp && unzip -o KVS_*
   # shellcheck disable=SC2016
-  DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' $SETUP_FILE | cut -d'"' -f 2)
+  DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' /root/tmp/admin/include/setup.php)
+  DOMAIN=$(echo "$DOMAIN" | cut -d'"' -f 2)
   # shellcheck disable=SC2016
-  URL=$(grep -P -i -m1 '\$config\['"'"'project_url'"'"']=' $SETUP_FILE | cut -d'"' -f 2 | sed 's~http[s]*://~~g')
-  rm -rf $TMP_DIR && cd /root || exit
+  URL=$(grep -P -i -m1 '\$config\['"'"'project_url'"'"']=' /root/tmp/admin/include/setup.php)
+  URL=$(echo "$URL" | cut -d'"' -f 2)
+  # shellcheck disable=SC2001
+  URL=$(echo "$URL" | sed 's~http[s]*://~~g')
+  rm -rf /root/tmp && cd /root || exit
 }
+
 
 function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
@@ -342,34 +337,63 @@ function aptinstall_phpmyadmin() {
   fi
 }
 
+#function install_KVS() {
+#  if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
+#    KVS_PATH="/var/www/$DOMAIN"
+#    mkdir -p $KVS_PATH
+#    mv /root/KVS_* $KVS_PATH
+#    unzip -o $KVS_PATH/KVS_* -d $KVS_PATH
+#    rm -r $KVS_PATH/KVS_*
+#    chown -R www-data:www-data $KVS_PATH
+#    chmod -R 755 $KVS_PATH
+#    sed -i '/xargs chmod 666/d' $KVS_PATH/_INSTALL/install_permissions.sh
+#    $KVS_PATH/_INSTALL/install_permissions.sh
+#    sed -i "s|/PATH|$KVS_PATH|
+#            s|/usr/local/bin/|/usr/bin/|
+#            s|/usr/bin/php|/usr/bin/php$PHP|
+#            s|KVS|$DOMAIN|" $KVS_PATH/admin/include/setup.php
+#    # EXPERIMENTAL HERE
+#    databasepassword="$(openssl rand -base64 12)"
+#    mysql -e "CREATE DATABASE \`$DOMAIN\`;"
+#    mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
+#    mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
+#    mysql -e "FLUSH PRIVILEGES;"
+#    mysql -u $DOMAIN -p$databasepassword $DOMAIN <$KVS_PATH/_INSTALL/install_db.sql
+#
+#    rm -rf $KVS_PATH/_INSTALL/
+#    sed -i "s|login|$DOMAIN|
+#            s|pass|$databasepassword|
+#            s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" $KVS_PATH/admin/include/setup_db.php
+#  fi
+#}
+
 function install_KVS() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    KVS_PATH="/var/www/$DOMAIN"
-    mkdir -p $KVS_PATH
-    mv /root/KVS_* $KVS_PATH
-    unzip -o $KVS_PATH/KVS_* -d $KVS_PATH
-    rm -r $KVS_PATH/KVS_*
-    chown -R www-data:www-data $KVS_PATH
-    chmod -R 755 $KVS_PATH
-    sed -i '/xargs chmod 666/d' $KVS_PATH/_INSTALL/install_permissions.sh
-    $KVS_PATH/_INSTALL/install_permissions.sh
-    sed -i "s|/PATH|$KVS_PATH|
-            s|/usr/local/bin/|/usr/bin/|
-            s|/usr/bin/php|/usr/bin/php$PHP|
-            s|KVS|$DOMAIN|" $KVS_PATH/admin/include/setup.php
+    mkdir -p /var/www/"$DOMAIN"
+    mv /root/KVS_* /var/www/"$DOMAIN"
+    cd /var/www/"$DOMAIN" && unzip -o /var/www/"$DOMAIN"/KVS_*
+    rm -r /var/www/"$DOMAIN"/KVS_*
+    chown -R www-data:www-data /var/www/"$DOMAIN"
+    chmod -R 755 /var/www/"$DOMAIN"
+    sed -i '/xargs chmod 666/d' /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
+    cd _INSTALL && /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
+    sed -i "s|/PATH|/var/www/""$DOMAIN""|" /var/www/"$DOMAIN"/admin/include/setup.php
+    sed -i "s|/usr/local/bin/|/usr/bin/|" /var/www/"$DOMAIN"/admin/include/setup.php
+    sed -i "s|/usr/bin/php|/usr/bin/php$PHP|" /var/www/$DOMAIN/admin/include/setup.php
+    sed -i "s|KVS|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup.php
     # EXPERIMENTAL HERE
     databasepassword="$(openssl rand -base64 12)"
     mysql -e "CREATE DATABASE \`$DOMAIN\`;"
     mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
     mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
     mysql -e "FLUSH PRIVILEGES;"
-    mysql -u $DOMAIN -p$databasepassword $DOMAIN <$KVS_PATH/_INSTALL/install_db.sql
-
-    rm -rf $KVS_PATH/_INSTALL/
-    sed -i "s|login|$DOMAIN|
-            s|pass|$databasepassword|
-            s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" $KVS_PATH/admin/include/setup_db.php
+    mysql -u $DOMAIN -p$databasepassword $DOMAIN </var/www/$DOMAIN/_INSTALL/install_db.sql
+    rm -rf /var/www/$DOMAIN/_INSTALL/
+    sed -i "s|login|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
+    sed -i "s|pass|$databasepassword|" /var/www/"$DOMAIN"/admin/include/setup_db.php
+    sed -i "s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" /var/www/"$DOMAIN"/admin/include/setup_db.php
   fi
+
 }
 
 function install_acme.sh() {
@@ -423,7 +447,7 @@ function install_ioncube() {
 
 function autoUpdate() {
   if [[ "$AUTOUPDATE" =~ (YES) ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades
+    apt-get install -y unattended-upgrades
     sed -i 's|APT::Periodic::Update-Package-Lists "0";|APT::Periodic::Update-Package-Lists "1";|' /etc/apt/apt.conf.d/20auto-upgrades
     sed -i 's|APT::Periodic::Unattended-Upgrade "0";|APT::Periodic::Unattended-Upgrade "1";|' /etc/apt/apt.conf.d/20auto-upgrades
   fi
