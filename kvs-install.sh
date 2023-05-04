@@ -164,7 +164,7 @@ function installQuestions() {
     esac
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
     echo "${green}   4) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
-    echo "${green}   4) MariaDB 10.6 (Stable) (LTS) (Default)${normal}"
+    echo "${green}   4) MariaDB 10.6 (Stable) (LTS)${normal}"
     until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
       read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
     done
@@ -303,11 +303,11 @@ function aptinstall_php() {
     fi
     apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} -y
     sed -i "s|upload_max_filesize = 2M|upload_max_filesize = 2048M|
-            s|post_max_size = 8M|post_max_size = 2048M|
-            s|memory_limit = 128M|memory_limit = 512M|
-            s|;max_input_vars = 1000|max_input_vars = 10000|
-            s|;max_execution_time = 30|max_execution_time = 300|
-            s|;max_input_time = 60|max_input_time = 360|" /etc/php/$PHP/fpm/php.ini
+                s|post_max_size = 8M|post_max_size = 2048M|
+                s|memory_limit = 128M|memory_limit = 512M|
+                s|;max_input_vars = 1000|max_input_vars = 10000|
+                s|;max_execution_time = 30|max_execution_time = 300|
+                s|;max_input_time = 30|max_input_time = 360|" /etc/php/$PHP/fpm/php.ini
     systemctl restart php$PHP
   fi
 }
