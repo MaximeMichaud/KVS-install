@@ -150,19 +150,19 @@ function installQuestions() {
     esac
     echo "Do you want to install and enable IonCube ? (Recommanded) ?"
     echo "No, only if you have a licence with the source code."
-        echo "   1) Yes"
-        echo "   2) No"
-        until [[ "$IONCUBE" =~ ^[1-2]$ ]]; do
-          read -rp "[1-2]: " -e -i 1 IONCUBE
-        done
-        case $AUTOUPDATE in
-        1)
-          IONCUBE="YES"
-          ;;
-        2)
-          IONCUBE="NO"
-          ;;
-        esac
+    echo "   1) Yes"
+    echo "   2) No"
+    until [[ "$IONCUBE" =~ ^[1-2]$ ]]; do
+      read -rp "[1-2]: " -e -i 1 IONCUBE
+    done
+    case $AUTOUPDATE in
+    1)
+      IONCUBE="YES"
+      ;;
+    2)
+      IONCUBE="NO"
+      ;;
+    esac
     echo "Which branch of NGINX ?"
     echo "   1) Mainline"
     echo "   2) Stable"
@@ -271,7 +271,6 @@ function whatisdomain() {
   rm -rf /root/tmp && cd /root || exit
 }
 
-
 function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "NGINX Installation"
@@ -337,11 +336,13 @@ function aptinstall_php() {
 function aptinstall_phpmyadmin() {
   echo "phpMyAdmin Installation"
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
-    mkdir -p /usr/share/phpmyadmin/ || exit
-    wget https://files.phpmyadmin.net/phpMyAdmin/"$PHPMYADMIN_VER"/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz
-    tar xzf /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
-    rm -f /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages
+    INSTALL_DIR="/usr/share/phpmyadmin"
+    PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
+    PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
+    wget -O phpmyadmin.tar.gz "${PHPMYADMIN_URL}"
+    mkdir -p "${INSTALL_DIR}"
+    tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${INSTALL_DIR}"
+    rm phpmyadmin.tar.gz
     # Create phpMyAdmin TempDir
     mkdir -p /usr/share/phpmyadmin/tmp || exit
     chown www-data:www-data /usr/share/phpmyadmin/tmp
@@ -456,16 +457,16 @@ insert_cronjob() {
 
 function install_ioncube() {
   if [[ "$AUTOUPDATE" =~ (YES) ]]; then
-  if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    cd /root || exit
-    wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
-    tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
-    cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
-    echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/fpm/php.ini
-    echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
-    systemctl restart php7.4-fpm
-    rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
-  fi
+    if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
+      cd /root || exit
+      wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
+      tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
+      cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
+      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/fpm/php.ini
+      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
+      systemctl restart php7.4-fpm
+      rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
+    fi
   fi
 }
 
@@ -547,11 +548,13 @@ function update() {
 function updatephpMyAdmin() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     rm -rf /usr/share/phpmyadmin/*
-    cd /usr/share/phpmyadmin/ || exit
-    PHPMYADMIN_VER=$(curl -s "https://api.github.com/repos/phpmyadmin/phpmyadmin/releases/latest" | grep -m1 '^[[:blank:]]*"name":' | cut -d \" -f 4)
-    wget https://files.phpmyadmin.net/phpMyAdmin/"$PHPMYADMIN_VER"/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz -O /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz
-    tar xzf /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz --strip-components=1 --directory /usr/share/phpmyadmin
-    rm -f /usr/share/phpmyadmin/phpMyAdmin-"$PHPMYADMIN_VER"-all-languages.tar.gz
+    INSTALL_DIR="/usr/share/phpmyadmin"
+    PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
+    PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
+    wget -O phpmyadmin.tar.gz "${PHPMYADMIN_URL}"
+    mkdir -p "${INSTALL_DIR}"
+    tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${INSTALL_DIR}"
+    rm phpmyadmin.tar.gz
     # Create TempDir
     mkdir /usr/share/phpmyadmin/tmp || exit
     chown www-data:www-data /usr/share/phpmyadmin/tmp
