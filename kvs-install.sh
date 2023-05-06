@@ -480,7 +480,7 @@ function manageMenu() {
   echo ""
   echo "What do you want to do ?"
   echo "   1) Restart the installation"
-  echo "   2) Add another KVS website"
+  echo "   2) Add another KVS website (work in progress, not working)"
   echo "   3) Update phpMyAdmin"
   echo "   4) Update the Script"
   echo "   5) Quit"
