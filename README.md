@@ -15,8 +15,7 @@ HEADLESS=y \
 PHP=7.4 \
 webserver=nginx \
 nginx_branch=mainline \
-database=mariadb \
-database_ver=10.6 \
+database_ver=10.11 \
 ./kvs-install.sh
 
 ```
@@ -35,6 +34,6 @@ This script supports the following Linux distributions:
 https://github.com/MaximeMichaud/KVS-install/projects/1
 ## Supports
 * NGINX 1.23.X
-* MySQL 5.7 - 8.0 or MariaDB 10.3 - 10.9
+* MariaDB 10.6 , 10.11
 * PHP 7.4
-* phpMyAdmin 5.2.0
+* phpMyAdmin 5.2.1
