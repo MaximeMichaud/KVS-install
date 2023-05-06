@@ -280,10 +280,13 @@ function aptinstall_nginx() {
       echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
       rm -rf conf.d && mkdir -p /etc/nginx/globals
-      configs=("nginx" "general" "security" "php_fastcgi" "letsencrypt" "cloudflare-ip-list" "kvs")
-      for config in "${configs[@]}"; do
-        wget "https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/${config}.conf" -O "/etc/nginx/globals/${config}.conf"
-      done
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
       mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-enabled/$DOMAIN.conf
@@ -360,63 +363,35 @@ function aptinstall_phpmyadmin() {
   fi
 }
 
-#function install_KVS() {
-#  if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-#    KVS_PATH="/var/www/$DOMAIN"
-#    mkdir -p $KVS_PATH
-#    mv /root/KVS_* $KVS_PATH
-#    unzip -o $KVS_PATH/KVS_* -d $KVS_PATH
-#    rm -r $KVS_PATH/KVS_*
-#    chown -R www-data:www-data $KVS_PATH
-#    chmod -R 755 $KVS_PATH
-#    sed -i '/xargs chmod 666/d' $KVS_PATH/_INSTALL/install_permissions.sh
-#    $KVS_PATH/_INSTALL/install_permissions.sh
-#    sed -i "s|/PATH|$KVS_PATH|
-#            s|/usr/local/bin/|/usr/bin/|
-#            s|/usr/bin/php|/usr/bin/php$PHP|
-#            s|KVS|$DOMAIN|" $KVS_PATH/admin/include/setup.php
-#    # EXPERIMENTAL HERE
-#    databasepassword="$(openssl rand -base64 12)"
-#    mysql -e "CREATE DATABASE \`$DOMAIN\`;"
-#    mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
-#    mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
-#    mysql -e "FLUSH PRIVILEGES;"
-#    mysql -u $DOMAIN -p$databasepassword $DOMAIN <$KVS_PATH/_INSTALL/install_db.sql
-#
-#    rm -rf $KVS_PATH/_INSTALL/
-#    sed -i "s|login|$DOMAIN|
-#            s|pass|$databasepassword|
-#            s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" $KVS_PATH/admin/include/setup_db.php
-#  fi
-#}
-
 function install_KVS() {
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
-    mkdir -p /var/www/"$DOMAIN"
-    mv /root/KVS_* /var/www/"$DOMAIN"
-    cd /var/www/"$DOMAIN" && unzip -o /var/www/"$DOMAIN"/KVS_*
-    rm -r /var/www/"$DOMAIN"/KVS_*
-    chown -R www-data:www-data /var/www/"$DOMAIN"
-    chmod -R 755 /var/www/"$DOMAIN"
-    sed -i '/xargs chmod 666/d' /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
-    cd _INSTALL && /var/www/"$DOMAIN"/_INSTALL/install_permissions.sh
-    sed -i "s|/PATH|/var/www/""$DOMAIN""|" /var/www/"$DOMAIN"/admin/include/setup.php
-    sed -i "s|/usr/local/bin/|/usr/bin/|" /var/www/"$DOMAIN"/admin/include/setup.php
-    sed -i "s|/usr/bin/php|/usr/bin/php$PHP|" /var/www/$DOMAIN/admin/include/setup.php
-    sed -i "s|KVS|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup.php
-    # EXPERIMENTAL HERE
+    KVS_PATH="/var/www/$DOMAIN"
+    mkdir -p $KVS_PATH
+    mv /root/KVS_* $KVS_PATH
+    unzip -o $KVS_PATH/KVS_* -d $KVS_PATH
+    rm -r $KVS_PATH/KVS_*
+    chown -R www-data:www-data $KVS_PATH
+    chmod -R 755 $KVS_PATH
+    sed -i '/xargs chmod 666/d' $KVS_PATH/_INSTALL/install_permissions.sh
+    $KVS_PATH/_INSTALL/install_permissions.sh
+    sed -i "s|/PATH|$KVS_PATH|
+             s|/usr/local/bin/|/usr/bin/|
+             s|/usr/bin/php|/usr/bin/php$PHP|
+             s|KVS|$DOMAIN|" $KVS_PATH/admin/include/setup.php
     databasepassword="$(openssl rand -base64 12)"
     mysql -e "CREATE DATABASE \`$DOMAIN\`;"
     mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
     mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
     mysql -e "FLUSH PRIVILEGES;"
-    mysql -u $DOMAIN -p$databasepassword $DOMAIN </var/www/$DOMAIN/_INSTALL/install_db.sql
-    rm -rf /var/www/$DOMAIN/_INSTALL/
-    sed -i "s|login|$DOMAIN|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-    sed -i "s|pass|$databasepassword|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-    sed -i "s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" /var/www/"$DOMAIN"/admin/include/setup_db.php
-  fi
+    mysql -u $DOMAIN -p$databasepassword $DOMAIN <$KVS_PATH/_INSTALL/install_db.sql
+    # Remove anonymous user
+    mysql -e "DELETE FROM mysql.user WHERE User='';"
 
+    rm -rf $KVS_PATH/_INSTALL/
+    sed -i "s|login|$DOMAIN|
+             s|pass|$databasepassword|
+             s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" $KVS_PATH/admin/include/setup_db.php
+  fi
 }
 
 function install_acme.sh() {
@@ -437,7 +412,6 @@ function install_acme.sh() {
     sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-enabled/$DOMAIN.conf
     service nginx restart
   fi
-
 }
 
 insert_cronjob() {
@@ -493,7 +467,8 @@ function setupdone() {
   echo "${cyan}Database: ${green}$DOMAIN"
   echo "${cyan}User: ${green}$DOMAIN"
   echo "${cyan}Password: ${green}$databasepassword"
-  echo "${cyan}For the moment, If you choose to use MariaDB, you will need to execute ${normal}${on_red}${white}mysql_secure_installation${normal}${cyan} for setting the root password and enforcing security."
+  echo "${cyan}You will need to execute ${normal}${on_red}${white}mysql_secure_installation${normal}${cyan} for setting the root password."
+  echo "${cyan}IPV6 is not enabled on the webserver configuration."
   if [[ "$AUTOUPDATE" =~ (YES) ]]; then
     echo "${green}Automatic updates enabled${normal}"
   fi
