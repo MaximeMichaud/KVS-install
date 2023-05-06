@@ -148,6 +148,21 @@ function installQuestions() {
       PHP="7.3"
       ;;
     esac
+    echo "Do you want to install and enable IonCube ? (Recommanded) ?"
+    echo "No, only if you have a licence with the source code."
+        echo "   1) Yes"
+        echo "   2) No"
+        until [[ "$IONCUBE" =~ ^[1-2]$ ]]; do
+          read -rp "[1-2]: " -e -i 1 IONCUBE
+        done
+        case $AUTOUPDATE in
+        1)
+          IONCUBE="YES"
+          ;;
+        2)
+          IONCUBE="NO"
+          ;;
+        esac
     echo "Which branch of NGINX ?"
     echo "   1) Mainline"
     echo "   2) Stable"
@@ -177,7 +192,14 @@ function installQuestions() {
       ;;
     esac
     echo "Mail for SSL"
-    read -r EMAIL
+    while true; do
+      read -rp "Email: " EMAIL
+      if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        break
+      else
+        echo "Please enter a valid email address."
+      fi
+    done
     echo "Upload KVS Archive File in /root"
     echo "Ex : KVS_X.X.X_[domain.tld].zip"
     # shellcheck disable=SC2144
@@ -433,6 +455,7 @@ insert_cronjob() {
 }
 
 function install_ioncube() {
+  if [[ "$AUTOUPDATE" =~ (YES) ]]; then
   if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
     cd /root || exit
     wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
@@ -442,6 +465,7 @@ function install_ioncube() {
     echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
     systemctl restart php7.4-fpm
     rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
+  fi
   fi
 }
 
