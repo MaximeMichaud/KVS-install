@@ -507,20 +507,25 @@ function manageMenu() {
   echo ""
   echo "What do you want to do ?"
   echo "   1) Restart the installation"
-  echo "   2) Update phpMyAdmin"
-  echo "   3) Update the Script"
-  echo "   4) Quit"
-  until [[ "$MENU_OPTION" =~ ^[1-4]$ ]]; do
-    read -rp "Select an option [1-4] : " MENU_OPTION
+  echo "   2) Add another KVS website"
+  echo "   3) Update phpMyAdmin"
+  echo "   4) Update the Script"
+  echo "   5) Quit"
+  until [[ "$MENU_OPTION" =~ ^[1-5]$ ]]; do
+    read -rp "Select an option [1-5] : " MENU_OPTION
   done
   case $MENU_OPTION in
   1)
     script
     ;;
   2)
-    updatephpMyAdmin
+    whatisdomain
+    install_KVS
     ;;
   3)
+    updatephpMyAdmin
+    ;;
+  4)
     update
     ;;
   5)
