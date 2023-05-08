@@ -175,8 +175,8 @@ function installQuestions() {
       ;;
     esac
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
-    echo "${green}   4) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
-    echo "${green}   4) MariaDB 10.6 (Stable) (LTS)${normal}"
+    echo "${green}   1) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
+    echo "${green}   2) MariaDB 10.6 (Stable) (LTS)${normal}"
     until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
       read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
     done
