@@ -373,8 +373,8 @@ function install_KVS() {
     $KVS_PATH/_INSTALL/install_permissions.sh
     sed -i "s|/PATH|$KVS_PATH|
              s|/usr/local/bin/|/usr/bin/|
-             s|/usr/bin/php|/usr/bin/php$PHP|
-             s|KVS|$DOMAIN|" $KVS_PATH/admin/include/setup.php
+             s|/usr/bin/php|/usr/bin/php$PHP|" $KVS_PATH/admin/include/setup.php
+    sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" $KVS_PATH/admin/include/setup.php
     databasepassword="$(openssl rand -base64 12)"
     mysql -e "CREATE DATABASE \`$DOMAIN\`;"
     mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
