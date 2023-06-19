@@ -28,12 +28,13 @@ This script supports the following Linux distributions:
 |--------                 |---    |
 | Debian 10               |✅     |
 | Debian 11               |✅     |
+| Debian 12               |❌     |
 | Ubuntu 20.04            |✅     |
 | Ubuntu 22.04            |✅     |
 ## To-Do
 https://github.com/MaximeMichaud/KVS-install/projects/1
 ## Supports
-* NGINX 1.23.X
+* NGINX 1.25.X
 * MariaDB 10.6 , 10.11
 * PHP 7.4
 * phpMyAdmin 5.2.1
