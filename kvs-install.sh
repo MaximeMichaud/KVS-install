@@ -54,11 +54,10 @@ function checkOS() {
     OS="debian"
     source /etc/os-release
 
-    if [[ "$ID" == "debian" || "$ID" == "raspbian" ]]; then
       if [[ ! $VERSION_ID =~ (10|11) ]]; then
         echo "⚠️ ${alert}Your version of Debian is not supported.${normal}"
         echo ""
-        echo "However, if you're using Debian >= 9 or unstable/testing then you can continue."
+        echo "However, if you're using Debian unstable/testing then you can continue."
         echo "Keep in mind they are not supported, though.${normal}"
         echo ""
         until [[ $CONTINUE =~ (y|n) ]]; do
@@ -67,7 +66,6 @@ function checkOS() {
         if [[ "$CONTINUE" == "n" ]]; then
           exit 1
         fi
-      fi
     elif [[ "$ID" == "ubuntu" ]]; then
       OS="ubuntu"
       if [[ ! $VERSION_ID =~ (20.04|22.04) ]]; then
