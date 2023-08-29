@@ -341,7 +341,7 @@ function aptinstall_phpmyadmin() {
     wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf
     ln -s /usr/share/phpmyadmin /var/www/phpmyadmin
     if [[ "$webserver" =~ (nginx) ]]; then
-      apt-get update && apt-get install php7.4{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
+      apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
       service nginx restart
     fi
   fi
@@ -419,10 +419,10 @@ function install_ioncube() {
       cd /root || exit
       wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
       tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
-      cd ioncube && cp ioncube_loader_lin_$PHP.so /usr/lib/php/20190902/
-      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/fpm/php.ini
-      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/$PHP/cli/php.ini
-      systemctl restart php7.4-fpm
+      cd ioncube && cp ioncube_loader_lin_"$PHP".so /usr/lib/php/20190902/
+      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_"$PHP".so" >>/etc/php/"$PHP"/fpm/php.ini
+      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/cli/php.ini
+      systemctl restart php"$PHP"-fpm
       rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
     fi
   fi
