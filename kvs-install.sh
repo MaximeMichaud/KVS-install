@@ -147,7 +147,7 @@ function installQuestions() {
     until [[ "$IONCUBE" =~ ^[1-2]$ ]]; do
       read -rp "[1-2]: " -e -i 1 IONCUBE
     done
-    case $AUTOUPDATE in
+    case $IONCUBE in
     1)
       IONCUBE="YES"
       ;;
@@ -414,7 +414,7 @@ insert_cronjob() {
 }
 
 function install_ioncube() {
-  if [[ "$AUTOUPDATE" =~ (YES) ]]; then
+  if [[ "$IONCUBE" =~ (YES) ]]; then
     if [[ "$OS" =~ (debian|ubuntu) ]]; then
       cd /root || exit
       wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
