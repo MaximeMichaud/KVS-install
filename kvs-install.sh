@@ -311,14 +311,14 @@ function aptinstall_php() {
         add-apt-repository -y ppa:ondrej/php
       fi
     fi
-    apt-get update && apt-get install php$PHP{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} -y
+    apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} -y
     sed -i "s|upload_max_filesize = 2M|upload_max_filesize = 2048M|
                 s|post_max_size = 8M|post_max_size = 2048M|
                 s|memory_limit = 128M|memory_limit = 512M|
                 s|;max_input_vars = 1000|max_input_vars = 10000|
                 s|;max_execution_time = 30|max_execution_time = 300|
-                s|;max_input_time = 30|max_input_time = 360|" /etc/php/$PHP/fpm/php.ini
-    systemctl restart php$PHP
+                s|;max_input_time = 30|max_input_time = 360|" /etc/php/"$PHP"/fpm/php.ini
+    systemctl restart php"$PHP"
   fi
 }
 
