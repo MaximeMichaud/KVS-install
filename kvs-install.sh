@@ -58,9 +58,6 @@ function checkOS() {
       if [[ ! $VERSION_ID =~ (10|11|12) ]]; then
         echo "⚠️ ${alert}Your version of Debian is not supported.${normal}"
         echo ""
-        echo "However, if you're using Debian unstable/testing then you can continue."
-        echo "Keep in mind they are not supported, though.${normal}"
-        echo ""
         until [[ $CONTINUE =~ (y|n) ]]; do
           read -rp "Continue? [y/n] : " -e CONTINUE
         done
@@ -71,9 +68,6 @@ function checkOS() {
       OS="ubuntu"
       if [[ ! $VERSION_ID =~ (20.04|22.04) ]]; then
         echo "⚠️ ${alert}Your version of Ubuntu is not supported.${normal}"
-        echo ""
-        echo "However, if you're using Ubuntu > 17 or beta, then you can continue."
-        echo "Keep in mind they are not supported, though.${normal}"
         echo ""
         until [[ $CONTINUE =~ (y|n) ]]; do
           read -rp "Continue? [y/n]: " -e CONTINUE
