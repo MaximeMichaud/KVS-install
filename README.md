@@ -14,6 +14,7 @@ chmod +x kvs-install.sh
 HEADLESS=y \
 nginx_branch=mainline \
 database_ver=10.11 \
+IONCUBE=YES \
 ./kvs-install.sh
 
 ```

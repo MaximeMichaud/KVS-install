@@ -33,6 +33,7 @@ if [[ $HEADLESS == "y" ]]; then
   webserver=nginx
   nginx_branch=mainline
   database_ver=10.11
+  IONCUBE=YES
 fi
 #################################################################################
 function isRoot() {
