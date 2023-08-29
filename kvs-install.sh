@@ -31,7 +31,7 @@ if [[ $HEADLESS == "y" ]]; then
   # Define options
   PHP=7.4
   webserver=nginx
-  nginx_branch=mainline
+  #nginx_branch=mainline
   database_ver=10.11
   IONCUBE=YES
 fi
@@ -155,20 +155,20 @@ function installQuestions() {
       IONCUBE="NO"
       ;;
     esac
-    echo "Which branch of NGINX ?"
-    echo "   1) Mainline"
-    echo "   2) Stable"
-    until [[ "$NGINX_BRANCH" =~ ^[1-2]$ ]]; do
-      read -rp "Version [1-2]: " -e -i 1 NGINX_BRANCH
-    done
-    case $NGINX_BRANCH in
-    1)
-      nginx_branch="mainline"
-      ;;
-    2)
-      nginx_branch="stable"
-      ;;
-    esac
+#    echo "Which branch of NGINX ?"
+#    echo "   1) Mainline"
+#    echo "   2) Stable"
+#    until [[ "$NGINX_BRANCH" =~ ^[1-2]$ ]]; do
+#      read -rp "Version [1-2]: " -e -i 1 NGINX_BRANCH
+#    done
+#    case $NGINX_BRANCH in
+#    1)
+#      nginx_branch="mainline"
+#      ;;
+#    2)
+#      nginx_branch="stable"
+#      ;;
+#    esac
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
     echo "${green}   1) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
     echo "${green}   2) MariaDB 10.6 (Old Stable) (LTS)${normal}"
@@ -264,8 +264,8 @@ function aptinstall_nginx() {
     echo "NGINX Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
     if [[ "$VERSION_ID" =~ (10|11|12|20.04|22.04) ]]; then
-      echo "deb https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src https://nginx.org/packages/$nginx_branch/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
+      echo "deb https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
+      echo "deb-src https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
       rm -rf conf.d && mkdir -p /etc/nginx/globals
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
@@ -420,7 +420,7 @@ function install_ioncube() {
       wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
       tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
       cd ioncube && cp ioncube_loader_lin_"$PHP".so /usr/lib/php/20190902/
-      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_"$PHP".so" >>/etc/php/"$PHP"/fpm/php.ini
+      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/fpm/php.ini
       echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/cli/php.ini
       systemctl restart php"$PHP"-fpm
       rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
