@@ -78,7 +78,7 @@ function checkOS() {
       fi
     fi
   else
-    echo "Looks like you aren't running this script on a Debian, Ubuntu or CentOS system ${normal}"
+    echo "Looks like you aren't running this script on a Debian or Ubuntu system ${normal}"
     exit 1
   fi
 }
@@ -212,8 +212,6 @@ function installQuestions() {
 function aptupdate() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     apt-get update
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
   fi
 }
 
@@ -237,8 +235,6 @@ function aptinstall() {
       git
     )
     apt-get -y install "${packages[@]}"
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
   fi
 }
 
@@ -290,8 +286,6 @@ function aptinstall_nginx() {
       #update CF IPV4/V6 if CF is used
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /usr/bin/update-cloudflare-ip-list.sh
     fi
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
   fi
 }
 
@@ -350,13 +344,11 @@ function aptinstall_phpmyadmin() {
       apt-get update && apt-get install php7.4{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
       service nginx restart
     fi
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
   fi
 }
 
 function install_KVS() {
-  if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
+  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     KVS_PATH="/var/www/$DOMAIN"
     mkdir -p $KVS_PATH
     mv /root/KVS_* $KVS_PATH
@@ -387,7 +379,7 @@ function install_KVS() {
 }
 
 function install_acme.sh() {
-  if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
+  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     cd /root || exit
     git clone https://github.com/acmesh-official/acme.sh.git
     cd ./acme.sh || exit
@@ -423,7 +415,7 @@ insert_cronjob() {
 
 function install_ioncube() {
   if [[ "$AUTOUPDATE" =~ (YES) ]]; then
-    if [[ "$OS" =~ (debian|ubuntu|centos) ]]; then
+    if [[ "$OS" =~ (debian|ubuntu) ]]; then
       cd /root || exit
       wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
       tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
@@ -528,8 +520,6 @@ function updatephpMyAdmin() {
     chmod 700 /var/www/phpmyadmin/tmp
     randomBlowfishSecret=$(openssl rand -base64 22)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
-  elif [[ "$OS" == "centos" ]]; then
-    echo "No Support"
   fi
 }
 
