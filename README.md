@@ -20,7 +20,7 @@ database_ver=10.11 \
 
 ```
 ## Compatibility
-The latest versions are more stable.
+The latest versions are more stable and we recommended using Debian 12 for the best support.
 
 This script supports the following Linux distributions:
 
