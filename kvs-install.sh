@@ -10,11 +10,11 @@
 #
 # KVS-install Copyright (c) 2020-2023 Maxime Michaud
 # Licensed under GNU General Public License v3.0
-#################################################################################
+#################################################################
 #Logs
 exec 3<&1
 coproc mytee { tee /root/kvs-install.log >&3; }
-exec >&${mytee[1]} 2>&1
+exec >&"${mytee[1]}" 2>&1
 #Colors
 red=$(tput setaf 1)
 green=$(tput setaf 2)
@@ -35,7 +35,7 @@ if [[ $HEADLESS == "y" ]]; then
   database_ver=10.11
   IONCUBE=YES
 fi
-#################################################################################
+#################################################################
 function isRoot() {
   if [ "$EUID" -ne 0 ]; then
     return 1
@@ -171,7 +171,7 @@ function installQuestions() {
     esac
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
     echo "${green}   1) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
-    echo "${green}   2) MariaDB 10.6 (Stable) (LTS)${normal}"
+    echo "${green}   2) MariaDB 10.6 (Old Stable) (LTS)${normal}"
     until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
       read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
     done
@@ -277,10 +277,10 @@ function aptinstall_nginx() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
       mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-enabled/$DOMAIN.conf
-      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/$DOMAIN.conf
-      sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/$DOMAIN.conf
-      sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/sites-enabled/$DOMAIN.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-enabled/"$DOMAIN".conf
+      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/"$DOMAIN".conf
+      sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/"$DOMAIN".conf
+      sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/sites-enabled/"$DOMAIN".conf
       rm -rf /etc/nginx/conf.d
       service nginx restart
       #update CF IPV4/V6 if CF is used
@@ -350,31 +350,31 @@ function aptinstall_phpmyadmin() {
 function install_KVS() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     KVS_PATH="/var/www/$DOMAIN"
-    mkdir -p $KVS_PATH
-    mv /root/KVS_* $KVS_PATH
-    unzip -o $KVS_PATH/KVS_* -d $KVS_PATH
-    rm -r $KVS_PATH/KVS_*
-    chown -R www-data:www-data $KVS_PATH
-    chmod -R 755 $KVS_PATH
-    sed -i '/xargs chmod 666/d' $KVS_PATH/_INSTALL/install_permissions.sh
-    $KVS_PATH/_INSTALL/install_permissions.sh
+    mkdir -p "$KVS_PATH"
+    mv /root/KVS_* "$KVS_PATH"
+    unzip -o "$KVS_PATH"/KVS_* -d "$KVS_PATH"
+    rm -r "$KVS_PATH"/KVS_*
+    chown -R www-data:www-data "$KVS_PATH"
+    chmod -R 755 "$KVS_PATH"
+    sed -i '/xargs chmod 666/d' "$KVS_PATH"/_INSTALL/install_permissions.sh
+    "$KVS_PATH"/_INSTALL/install_permissions.sh
     sed -i "s|/PATH|$KVS_PATH|
              s|/usr/local/bin/|/usr/bin/|
-             s|/usr/bin/php|/usr/bin/php$PHP|" $KVS_PATH/admin/include/setup.php
-    sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" $KVS_PATH/admin/include/setup.php
+             s|/usr/bin/php|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
+    sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH"/admin/include/setup.php
     databasepassword="$(openssl rand -base64 12)"
     mysql -e "CREATE DATABASE \`$DOMAIN\`;"
     mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
     mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
     mysql -e "FLUSH PRIVILEGES;"
-    mysql -u $DOMAIN -p$databasepassword $DOMAIN <$KVS_PATH/_INSTALL/install_db.sql
+    mysql -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
     # Remove anonymous user
     mysql -e "DELETE FROM mysql.user WHERE User='';"
 
-    rm -rf $KVS_PATH/_INSTALL/
+    rm -rf "$KVS_PATH"/_INSTALL/
     sed -i "s|login|$DOMAIN|
              s|pass|$databasepassword|
-             s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" $KVS_PATH/admin/include/setup_db.php
+             s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH"/admin/include/setup_db.php
   fi
 }
 
@@ -383,17 +383,17 @@ function install_acme.sh() {
     cd /root || exit
     git clone https://github.com/acmesh-official/acme.sh.git
     cd ./acme.sh || exit
-    ./acme.sh --install -m $EMAIL
+    ./acme.sh --install -m "$EMAIL"
     mkdir -p /var/www/_letsencrypt && chown www-data /var/www/_letsencrypt
-    sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key|trusted_certificate) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-enabled/$DOMAIN.conf
+    sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key|trusted_certificate) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-enabled/"$DOMAIN".conf
     service nginx restart
-    /root/.acme.sh/acme.sh --issue -d $DOMAIN -d www.$DOMAIN -w /var/www/_letsencrypt --keylength ec-256
-    mkdir -p /etc/nginx/ssl /etc/nginx/ssl/$DOMAIN
-    /root/.acme.sh/acme.sh --install-cert --ecc -d $DOMAIN -d www.$DOMAIN \
-      --key-file /etc/nginx/ssl/$DOMAIN/key.pem \
-      --fullchain-file /etc/nginx/ssl/$DOMAIN/cert.pem \
+    /root/.acme.sh/acme.sh --issue -d "$DOMAIN" -d www."$DOMAIN" -w /var/www/_letsencrypt --keylength ec-256
+    mkdir -p /etc/nginx/ssl /etc/nginx/ssl/"$DOMAIN"
+    /root/.acme.sh/acme.sh --install-cert --ecc -d "$DOMAIN" -d www."$DOMAIN" \
+      --key-file /etc/nginx/ssl/"$DOMAIN"/key.pem \
+      --fullchain-file /etc/nginx/ssl/"$DOMAIN"/cert.pem \
       --reloadcmd "service nginx force-reload"
-    sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-enabled/$DOMAIN.conf
+    sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-enabled/"$DOMAIN".conf
     service nginx restart
   fi
 }
@@ -452,7 +452,8 @@ function setupdone() {
   echo "${cyan}User: ${green}$DOMAIN"
   echo "${cyan}Password: ${green}$databasepassword"
   echo "${cyan}You will need to execute ${normal}${on_red}${white}mysql_secure_installation${normal}${cyan} for setting the root password."
-  echo "${cyan}IPV6 is not enabled on the webserver configuration."
+  echo "${cyan}IPV6 is not ENABLED on the webserver configuration, KVS doesn't support IPV6 at 100%"
+  echo "${cyan}If you wish to analyze the logs later, you can execute the following command : cat /root/kvs-install.log"
   if [[ "$AUTOUPDATE" =~ (YES) ]]; then
     echo "${green}Automatic updates enabled${normal}"
   fi
