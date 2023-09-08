@@ -30,8 +30,17 @@ This script supports the following Linux distributions:
 | Debian 12               |✅     |
 | Ubuntu 20.04            |✅     |
 | Ubuntu 22.04            |✅     |
+
+## Features
+- Automatic installation of KVS (dependencies, database, cronjob, webserver).
+- Secure NGINX with support for very latest improvements like HTTP2 with ALPN, 0-RTT support for TLS 1.3, TLS 1.3 support, x25519 support, etc.
+- Automatic SSL configuration with ACME.sh.
+
 ## To-Do
 https://github.com/MaximeMichaud/KVS-install/projects/1
+
+The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them.
+
 ## Supports
 * NGINX 1.25.x
 * MariaDB 10.6 , 10.11
