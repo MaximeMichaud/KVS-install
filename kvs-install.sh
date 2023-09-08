@@ -26,12 +26,12 @@ alert=${white}${on_red}
 on_red=$(tput setab 1)
 # Variables Shell
 export DEBIAN_FRONTEND=noninteractive
+# Variables Services
+PHP=7.4
+webserver=nginx
 # Define installation parameters for headless install (fallback if unspecifed)
 if [[ $HEADLESS == "y" ]]; then
   # Define options
-  PHP=7.4
-  webserver=nginx
-  #nginx_branch=mainline
   database_ver=10.11
   IONCUBE=YES
 fi
@@ -370,7 +370,6 @@ function install_KVS() {
     mysql -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
     # Remove anonymous user
     mysql -e "DELETE FROM mysql.user WHERE User='';"
-
     rm -rf "$KVS_PATH"/_INSTALL/
     sed -i "s|login|$DOMAIN|
              s|pass|$databasepassword|
@@ -515,7 +514,6 @@ function updatephpMyAdmin() {
     mkdir -p "${INSTALL_DIR}"
     tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${INSTALL_DIR}"
     rm phpmyadmin.tar.gz
-    # Create TempDir
     mkdir /usr/share/phpmyadmin/tmp || exit
     chown www-data:www-data /usr/share/phpmyadmin/tmp
     chmod 700 /var/www/phpmyadmin/tmp
