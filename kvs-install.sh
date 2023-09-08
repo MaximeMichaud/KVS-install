@@ -278,10 +278,15 @@ function aptinstall_nginx() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
       mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-enabled/"$DOMAIN".conf
-      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/"$DOMAIN".conf
-      sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/"$DOMAIN".conf
-      sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/sites-enabled/"$DOMAIN".conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-available/"$DOMAIN".conf
+      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-available/"$DOMAIN".conf
+      sed -i "s/project_url/$URL/g" /etc/nginx/sites-available/"$DOMAIN".conf
+      # wget genssl conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/genssl.conf -O /etc/nginx/sites-enabled/genssl.conf
+      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/genssl.conf
+      sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/genssl.conf
+      ##
+      sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/sites-available/"$DOMAIN".conf
       rm -rf /etc/nginx/conf.d
       service nginx restart
       #update CF IPV4/V6 if CF is used
@@ -333,7 +338,6 @@ function aptinstall_phpmyadmin() {
     mkdir -p "${INSTALL_DIR}"
     tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${INSTALL_DIR}"
     rm phpmyadmin.tar.gz
-    # Create phpMyAdmin TempDir
     mkdir -p /usr/share/phpmyadmin/tmp || exit
     chown www-data:www-data /usr/share/phpmyadmin/tmp
     chmod 700 /usr/share/phpmyadmin/tmp
@@ -385,7 +389,7 @@ function install_acme.sh() {
     cd ./acme.sh || exit
     ./acme.sh --install -m "$EMAIL"
     mkdir -p /var/www/_letsencrypt && chown www-data /var/www/_letsencrypt
-    sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key|trusted_certificate) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-enabled/"$DOMAIN".conf
+    #sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key|trusted_certificate) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-available/"$DOMAIN".conf
     service nginx restart
     /root/.acme.sh/acme.sh --issue -d "$DOMAIN" -d www."$DOMAIN" -w /var/www/_letsencrypt --keylength ec-256
     mkdir -p /etc/nginx/ssl /etc/nginx/ssl/"$DOMAIN"
@@ -393,7 +397,9 @@ function install_acme.sh() {
       --key-file /etc/nginx/ssl/"$DOMAIN"/key.pem \
       --fullchain-file /etc/nginx/ssl/"$DOMAIN"/cert.pem \
       --reloadcmd "service nginx force-reload"
-    sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-enabled/"$DOMAIN".conf
+    mv /etc/nginx/sites-enabled/genssl.conf /etc/nginx/sites-available/genssl.conf
+    mv /etc/nginx/sites-available/"$DOMAIN".conf /etc/nginx/sites-enabled/"$DOMAIN".conf
+    #sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-available/"$DOMAIN".conf
     service nginx restart
   fi
 }
