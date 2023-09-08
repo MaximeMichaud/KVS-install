@@ -34,6 +34,7 @@ if [[ $HEADLESS == "y" ]]; then
   # Define options
   database_ver=10.11
   IONCUBE=YES
+  AUTOPACKAGEUPDATE=YES
 fi
 #################################################################
 function isRoot() {
@@ -112,15 +113,15 @@ function installQuestions() {
     echo "Do you want to enable automatic updates (All Packages) (Recommanded) ?"
     echo "   1) Yes"
     echo "   2) No"
-    until [[ "$AUTOUPDATE" =~ ^[1-2]$ ]]; do
-      read -rp "[1-2]: " -e -i 1 AUTOUPDATE
+    until [[ "$AUTOPACKAGEUPDATE" =~ ^[1-2]$ ]]; do
+      read -rp "[1-2]: " -e -i 1 AUTOPACKAGEUPDATE
     done
-    case $AUTOUPDATE in
+    case $AUTOPACKAGEUPDATE in
     1)
-      AUTOUPDATE="YES"
+      AUTOPACKAGEUPDATE="YES"
       ;;
     2)
-      AUTOUPDATE="NO"
+      AUTOPACKAGEUPDATE="NO"
       ;;
     esac
 #    echo "${cyan}Which Version of PHP ?"
@@ -428,7 +429,7 @@ function install_ioncube() {
 }
 
 function autoUpdate() {
-  if [[ "$AUTOUPDATE" =~ (YES) ]]; then
+  if [[ "$AUTOPACKAGEUPDATE" =~ (YES) ]]; then
     apt-get install -y unattended-upgrades
     sed -i 's|APT::Periodic::Update-Package-Lists "0";|APT::Periodic::Update-Package-Lists "1";|' /etc/apt/apt.conf.d/20auto-upgrades
     sed -i 's|APT::Periodic::Unattended-Upgrade "0";|APT::Periodic::Unattended-Upgrade "1";|' /etc/apt/apt.conf.d/20auto-upgrades
@@ -453,7 +454,7 @@ function setupdone() {
   echo "${cyan}You will need to execute ${normal}${on_red}${white}mysql_secure_installation${normal}${cyan} for setting the root password."
   echo "${cyan}IPV6 is not ENABLED on the webserver configuration, KVS doesn't support IPV6 at 100%"
   echo "${cyan}If you wish to analyze the logs later, you can execute the following command : cat /root/kvs-install.log"
-  if [[ "$AUTOUPDATE" =~ (YES) ]]; then
+  if [[ "$AUTOPACKAGEUPDATE" =~ (YES) ]]; then
     echo "${green}Automatic updates enabled${normal}"
   fi
 }

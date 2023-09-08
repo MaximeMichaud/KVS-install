@@ -14,6 +14,7 @@ chmod +x kvs-install.sh
 HEADLESS=y \
 database_ver=10.11 \
 IONCUBE=YES \
+AUTOPACKAGEUPDATE=YES \
 ./kvs-install.sh
 
 ```
