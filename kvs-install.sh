@@ -281,10 +281,10 @@ function aptinstall_nginx() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-available/"$DOMAIN".conf
       sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-available/"$DOMAIN".conf
       sed -i "s/project_url/$URL/g" /etc/nginx/sites-available/"$DOMAIN".conf
-      # wget genssl conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/genssl.conf -O /etc/nginx/sites-enabled/genssl.conf
-      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/genssl.conf
-      sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/genssl.conf
+      # wget sslgen conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/sslgen.conf -O /etc/nginx/sites-enabled/sslgen.conf
+      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/sslgen.conf
+      sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/sslgen.conf
       ##
       sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/sites-available/"$DOMAIN".conf
       rm -rf /etc/nginx/conf.d
@@ -397,7 +397,7 @@ function install_acme.sh() {
       --key-file /etc/nginx/ssl/"$DOMAIN"/key.pem \
       --fullchain-file /etc/nginx/ssl/"$DOMAIN"/cert.pem \
       --reloadcmd "service nginx force-reload"
-    mv /etc/nginx/sites-enabled/genssl.conf /etc/nginx/sites-available/genssl.conf
+    mv /etc/nginx/sites-enabled/sslgen.conf /etc/nginx/sites-available/sslgen.conf
     mv /etc/nginx/sites-available/"$DOMAIN".conf /etc/nginx/sites-enabled/"$DOMAIN".conf
     #sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-available/"$DOMAIN".conf
     service nginx restart
