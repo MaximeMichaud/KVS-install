@@ -27,7 +27,6 @@ on_red=$(tput setab 1)
 # Variables Shell
 export DEBIAN_FRONTEND=noninteractive
 # Variables Services
-PHP=7.4
 webserver=nginx
 # Define installation parameters for headless install (fallback if unspecifed)
 if [[ $HEADLESS == "y" ]]; then
@@ -56,15 +55,15 @@ function checkOS() {
     OS="debian"
     source /etc/os-release
 
-      if [[ ! $VERSION_ID =~ (10|11|12) ]]; then
-        echo "⚠️ ${alert}Your version of Debian is not supported.${normal}"
-        echo ""
-        until [[ $CONTINUE =~ (y|n) ]]; do
-          read -rp "Continue? [y/n] : " -e CONTINUE
-        done
-        if [[ "$CONTINUE" == "n" ]]; then
-          exit 1
-        fi
+    if [[ ! $VERSION_ID =~ (10|11|12) ]]; then
+      echo "⚠️ ${alert}Your version of Debian is not supported.${normal}"
+      echo ""
+      until [[ $CONTINUE =~ (y|n) ]]; do
+        read -rp "Continue? [y/n] : " -e CONTINUE
+      done
+      if [[ "$CONTINUE" == "n" ]]; then
+        exit 1
+      fi
     elif [[ "$ID" == "ubuntu" ]]; then
       OS="ubuntu"
       if [[ ! $VERSION_ID =~ (20.04|22.04) ]]; then
@@ -124,22 +123,22 @@ function installQuestions() {
       AUTOPACKAGEUPDATE="NO"
       ;;
     esac
-#    echo "${cyan}Which Version of PHP ?"
-#    echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
-#    echo "${red}    1) PHP 7.4 (recommended for KVS) ${normal}${cyan}"
-#    echo "${red}    2) PHP 8.0 ${normal}${cyan}"
-#    echo "${red}    2) PHP 8.1 (not yet supported by KVS) ${normal}${cyan}"
-#    until [[ "$PHP_VERSION" =~ ^[1-3]$ ]]; do
-#      read -rp "Version [1-3]: " -e -i 1 PHP_VERSION
-#    done
-#    case $PHP_VERSION in
-#    1)
-#      PHP="7.4"
-#      ;;
-#    2)
-#      PHP="8.0"
-#      ;;
-#    esac
+    #    echo "${cyan}Which Version of PHP ?"
+    #    echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
+    #    echo "${red}    1) PHP 7.4 (recommended for KVS) ${normal}${cyan}"
+    #    echo "${red}    2) PHP 8.0 ${normal}${cyan}"
+    #    echo "${red}    2) PHP 8.1 (not yet supported by KVS) ${normal}${cyan}"
+    #    until [[ "$PHP_VERSION" =~ ^[1-3]$ ]]; do
+    #      read -rp "Version [1-3]: " -e -i 1 PHP_VERSION
+    #    done
+    #    case $PHP_VERSION in
+    #    1)
+    #      PHP="7.4"
+    #      ;;
+    #    2)
+    #      PHP="8.0"
+    #      ;;
+    #    esac
     echo "Do you want to install and enable IonCube ? (Recommanded) ?"
     echo "No, only if you have a licence with the source code."
     echo "If unsure, choose Yes."
@@ -156,20 +155,20 @@ function installQuestions() {
       IONCUBE="NO"
       ;;
     esac
-#    echo "Which branch of NGINX ?"
-#    echo "   1) Mainline"
-#    echo "   2) Stable"
-#    until [[ "$NGINX_BRANCH" =~ ^[1-2]$ ]]; do
-#      read -rp "Version [1-2]: " -e -i 1 NGINX_BRANCH
-#    done
-#    case $NGINX_BRANCH in
-#    1)
-#      nginx_branch="mainline"
-#      ;;
-#    2)
-#      nginx_branch="stable"
-#      ;;
-#    esac
+    #    echo "Which branch of NGINX ?"
+    #    echo "   1) Mainline"
+    #    echo "   2) Stable"
+    #    until [[ "$NGINX_BRANCH" =~ ^[1-2]$ ]]; do
+    #      read -rp "Version [1-2]: " -e -i 1 NGINX_BRANCH
+    #    done
+    #    case $NGINX_BRANCH in
+    #    1)
+    #      nginx_branch="mainline"
+    #      ;;
+    #    2)
+    #      nginx_branch="stable"
+    #      ;;
+    #    esac
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
     echo "${green}   1) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
     echo "${green}   2) MariaDB 10.6 (Old Stable) (LTS)${normal}"
@@ -201,7 +200,23 @@ function installQuestions() {
       echo "Waiting for KVS .ZIP file in /root"
       echo "Press CTRL + C for exiting"
     done
-    ls -l /root/KVS_*.zip
+    file=$(ls /root/KVS_*.zip)
+    ls -l "$file"
+    version=$(echo "$file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+')
+
+    # KVS Version comparison
+    ver_compare() {
+      [ "$1" = "$(echo -e "$1\n$2" | sort -V | head -n1)" ]
+    }
+
+    # Determining PHP version and PHP path
+    PHP="7.4"
+    php_path="/usr/lib/php/20190902"
+    if ver_compare "6.2" "$version"; then
+      PHP="8.1"
+      php_path="/usr/lib/php/20210902"
+    fi
+
     echo "We are ready to start the installation !"
     APPROVE_INSTALL=${APPROVE_INSTALL:-n}
     if [[ $APPROVE_INSTALL =~ n ]]; then
@@ -425,9 +440,9 @@ function install_ioncube() {
       cd /root || exit
       wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
       tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
-      cd ioncube && cp ioncube_loader_lin_"$PHP".so /usr/lib/php/20190902/
-      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/fpm/php.ini
-      echo "zend_extension=/usr/lib/php/20190902/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/cli/php.ini
+      cd ioncube && cp ioncube_loader_lin_"$PHP".so $php_path/
+      echo "zend_extension=$php_path/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/fpm/php.ini
+      echo "zend_extension=$php_path/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/cli/php.ini
       systemctl restart php"$PHP"-fpm
       rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
     fi
