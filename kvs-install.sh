@@ -55,7 +55,7 @@ function checkOS() {
     OS="debian"
     source /etc/os-release
 
-    if [[ ! $VERSION_ID =~ (10|11|12) ]]; then
+    if [[ ! $VERSION_ID =~ (11|12) ]]; then
       echo "⚠️ ${alert}Your version of Debian is not supported.${normal}"
       echo ""
       until [[ $CONTINUE =~ (y|n) ]]; do
@@ -279,7 +279,7 @@ function aptinstall_nginx() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "NGINX Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
-    if [[ "$VERSION_ID" =~ (10|11|12|20.04|22.04) ]]; then
+    if [[ "$VERSION_ID" =~ (11|12|20.04|22.04) ]]; then
       echo "deb https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
@@ -325,7 +325,7 @@ function aptinstall_php() {
     echo "PHP Installation"
     curl -sSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
     if [[ "$webserver" =~ (nginx) ]]; then
-      if [[ "$VERSION_ID" =~ (10|11|12) ]]; then
+      if [[ "$VERSION_ID" =~ (11|12) ]]; then
         echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
       fi
       if [[ "$VERSION_ID" =~ (20.04|22.04) ]]; then

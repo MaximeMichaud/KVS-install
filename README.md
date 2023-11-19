@@ -25,7 +25,6 @@ This script supports the following Linux distributions:
 
 |Operating System	      |Support|
 |--------                 |---    |
-| Debian 10               |✅     |
 | Debian 11               |✅     |
 | Debian 12               |✅     |
 | Ubuntu 20.04            |✅     |
