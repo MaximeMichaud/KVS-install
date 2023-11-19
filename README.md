@@ -39,9 +39,10 @@ This script supports the following Linux distributions:
 ## To-Do
 https://github.com/MaximeMichaud/KVS-install/projects/1
 
+## Supports
+
 The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them.
 
-## Supports
 * NGINX 1.25.x
 * MariaDB 10.6 , 10.11
 * PHP 7.4 , PHP 8.1 (6.2.0)
