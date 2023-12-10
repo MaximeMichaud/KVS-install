@@ -45,7 +45,7 @@ This script supports the following Linux distributions:
 
 ## To-Do
 
-https://github.com/MaximeMichaud/KVS-install/projects/1
+https://github.com/users/MaximeMichaud/projects/2
 
 ## Supports
 
