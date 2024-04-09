@@ -123,22 +123,6 @@ function installQuestions() {
       AUTOPACKAGEUPDATE="NO"
       ;;
     esac
-    #    echo "${cyan}Which Version of PHP ?"
-    #    echo "${red}Red = End of life ${yellow}| Yellow = Security fixes only ${green}| Green = Active support"
-    #    echo "${red}    1) PHP 7.4 (recommended for KVS) ${normal}${cyan}"
-    #    echo "${red}    2) PHP 8.0 ${normal}${cyan}"
-    #    echo "${red}    2) PHP 8.1 (not yet supported by KVS) ${normal}${cyan}"
-    #    until [[ "$PHP_VERSION" =~ ^[1-3]$ ]]; do
-    #      read -rp "Version [1-3]: " -e -i 1 PHP_VERSION
-    #    done
-    #    case $PHP_VERSION in
-    #    1)
-    #      PHP="7.4"
-    #      ;;
-    #    2)
-    #      PHP="8.0"
-    #      ;;
-    #    esac
     echo "Do you want to install and enable IonCube ? (Recommanded) ?"
     echo "No, only if you have a licence with the source code."
     echo "If unsure, choose Yes."
