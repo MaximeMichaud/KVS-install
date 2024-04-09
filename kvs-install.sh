@@ -247,7 +247,6 @@ function aptinstall() {
       ffmpeg
       wget
       sudo
-      memcached
       git
     )
     apt-get -y install "${packages[@]}"
@@ -396,6 +395,19 @@ function install_KVS() {
              s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH"/admin/include/setup_db.php
   fi
 }
+
+function aptinstall_memcached() {
+  if [[ "$OS" =~ (debian|ubuntu) ]]; then
+    echo "Installing Memcached..."
+    apt-get install -y memcached
+  fi
+
+  echo "Configuring Memcached to use 256 MB of RAM..."
+  sed -i 's/-m 64/-m 256/' /etc/memcached.conf
+  systemctl restart memcached
+  echo "Memcached installation and configuration complete."
+}
+
 
 function install_acme.sh() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
