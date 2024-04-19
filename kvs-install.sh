@@ -28,7 +28,7 @@ on_red=$(tput setab 1)
 export DEBIAN_FRONTEND=noninteractive
 # Variables Services
 webserver=nginx
-# Define installation parameters for headless install (fallback if unspecifed)
+# Define installation parameters for headless install (fallback if unspecified)
 if [[ $HEADLESS == "y" ]]; then
   # Define options
   database_ver=10.11
@@ -90,6 +90,7 @@ function script() {
   whatisdomain
   install_yt-dlp
   aptinstall_php
+  aptinstall_memcached
   aptinstall_nginx
   aptinstall_mariadb
   aptinstall_phpmyadmin
@@ -109,7 +110,10 @@ function installQuestions() {
     echo "I need to ask some questions before starting the configuration."
     echo "You can leave the default options and just press Enter if that's right for you."
     echo ""
-    echo "Do you want to enable automatic updates (All Packages) (Recommanded) ?"
+    echo "Note: This script should be run on a fresh installation of a tested distribution."
+    echo "Otherwise, it may not function correctly."
+    echo ""
+    echo "Do you want to enable automatic updates (All Packages) (Recommended) ?"
     echo "   1) Yes"
     echo "   2) No"
     until [[ "$AUTOPACKAGEUPDATE" =~ ^[1-2]$ ]]; do
@@ -123,9 +127,10 @@ function installQuestions() {
       AUTOPACKAGEUPDATE="NO"
       ;;
     esac
-    echo "Do you want to install and enable IonCube ? (Recommanded) ?"
-    echo "No, only if you have a licence with the source code."
+    echo "Do you want to install and enable IonCube? (Recommended)"
+    echo "No, only if you have a license with the source code."
     echo "If unsure, choose Yes."
+    echo "If some files are encoded with IonCube along with open-source code, it may result in unknown behavior (Really bad)."
     echo "   1) Yes"
     echo "   2) No"
     until [[ "$IONCUBE" =~ ^[1-2]$ ]]; do
@@ -156,6 +161,12 @@ function installQuestions() {
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
     echo "${green}   1) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
     echo "${green}   2) MariaDB 10.6 (Old Stable) (LTS)${normal}"
+    echo "Please note: We only recommend LTS versions, despite other versions being available."
+    echo "Regardless of the version, KVS has a specific way of storing MYSQL data."
+    echo "As long as the MYISAM engine is not removed from KVS, you should always choose the latest LTS version recommended by the script."
+    echo "Even if this was the case, tables can be migrated from MYISAM to InnoDB."
+    echo "Some have done so, but the end result was never studied thoroughly."
+    echo "The risk taken is probably not worth the performance difference if the case."
     until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
       read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
     done
@@ -168,6 +179,10 @@ function installQuestions() {
       ;;
     esac
     echo "Mail for SSL"
+    echo "Email address is required for notifications (e.g., certificate expiration if script doesn't renew automatically)."
+    echo "Required by acme.sh as a security measure for SSL."
+    echo "Currently, acme.sh utilizes ZeroSSL for SSL certificates."
+    echo "The certificate will be ECDSA 256-bit, valid for 3 months (standard)."
     while true; do
       read -rp "Email: " EMAIL
       if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
@@ -273,7 +288,7 @@ function aptinstall_nginx() {
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
+      #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
       mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-available/"$DOMAIN".conf
@@ -359,8 +374,10 @@ function install_KVS() {
     rm -r "$KVS_PATH"/KVS_*
     chown -R www-data:www-data "$KVS_PATH"
     chmod -R 755 "$KVS_PATH"
+    
     sed -i '/xargs chmod 666/d' "$KVS_PATH"/_INSTALL/install_permissions.sh
     "$KVS_PATH"/_INSTALL/install_permissions.sh
+    cat "$KVS_PATH"/_INSTALL/nginx_config.txt > /etc/nginx/globals/kvs.conf
     sed -i "s|/PATH|$KVS_PATH|
              s|/usr/local/bin/|/usr/bin/|
              s|/usr/bin/php|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
@@ -384,14 +401,13 @@ function aptinstall_memcached() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "Installing Memcached..."
     apt-get install -y memcached
+    echo "Configuring Memcached to use 256 MB of RAM..."
+    sed -i 's/-m 64/-m 256/' /etc/memcached.conf
+    systemctl restart memcached
   fi
 
-  echo "Configuring Memcached to use 256 MB of RAM..."
-  sed -i 's/-m 64/-m 256/' /etc/memcached.conf
-  systemctl restart memcached
   echo "Memcached installation and configuration complete."
 }
-
 
 function install_acme.sh() {
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
