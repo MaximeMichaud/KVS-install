@@ -259,8 +259,8 @@ function aptinstall() {
 }
 
 function install_yt-dlp() {
-  sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-  sudo chmod a+rx /usr/local/bin/yt-dlp
+  curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+  chmod a+rx /usr/local/bin/yt-dlp
   ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
 }
 
@@ -449,32 +449,32 @@ configure_dynamic_php_fpm() {
   average_memory_per_script=64
 
   # Calculate FPM settings
-  max_children=$(($allocated_memory_mb / $average_memory_per_script))
-  start_servers=$(($max_children / 4))
-  min_spare_servers=$(($start_servers / 2))
-  max_spare_servers=$(($start_servers * 2))
+  max_children=$((allocated_memory_mb / average_memory_per_script))
+  start_servers=$((max_children / 4))
+  min_spare_servers=$((start_servers / 2))
+  max_spare_servers=$((start_servers * 2))
 
   # Path to PHP-FPM configuration file for www pool
   php_fpm_conf="/etc/php/$PHP/fpm/pool.d/www.conf"
 
   # Backup the original configuration file
-  cp $php_fpm_conf "${php_fpm_conf}.bak"
+  cp "$php_fpm_conf" "${php_fpm_conf}.bak"
 
   # Update PHP-FPM configuration with new calculated values
-  sed -i "s/pm.max_children =.*/pm.max_children = $max_children/" $php_fpm_conf
-  sed -i "s/pm.start_servers =.*/pm.start_servers = $start_servers/" $php_fpm_conf
-  sed -i "s/pm.min_spare_servers =.*/pm.min_spare_servers = $min_spare_servers/" $php_fmd_conf
-  sed -i "s/pm.max_spare_servers =.*/pm.max_spare_servers = $max_spare_servers/" $php_fpm_conf
+  sed -i "s/pm.max_children =.*/pm.max_children = $max_children/" "$php_fpm_conf"
+  sed -i "s/pm.start_servers =.*/pm.start_servers = $start_servers/" "$php_fpm_conf"
+  sed -i "s/pm.min_spare_servers =.*/pm.min_spare_servers = $min_spare_servers/" "$php_fpm_conf"
+  sed -i "s/pm.max_spare_s_servers =.*/pm.max_spare_servers = $max_spare_servers/" "$php_fpm_conf"
 
   # Restart PHP-FPM to apply changes
   systemctl restart php"$PHP"-fpm
 
-  # Display new settings (To Display At The End)
-  #echo "PHP-FPM has been configured with the following settings:"
-  #echo "Max Children: $max_children"
-  #echo "Start Servers: $start_servers"
-  #echo "Min Spare Servers: $min_spare_servers"
-  #echo "Max Spare Servers: $max_spare_servers"
+  # Optionally, display the new settings for confirmation/debugging purposes
+  # echo "PHP-FPM has been configured with the following settings:"
+  # echo "Max Children: $max_children"
+  # echo "Start Servers: $start_servers"
+  # echo "Min Spare Servers: $min_spare_servers"
+  # echo "Max Spare Servers: $max_spare_servers"
 }
 
 insert_cronjob() {
@@ -485,9 +485,8 @@ insert_cronjob() {
     echo "#KVS"
     echo "* * * * * cd /var/www/$DOMAIN/admin/include && /usr/bin/php$PHP cron.php > /dev/null 2>&1"
     echo "#yt-dlp Automatic Update"
-    echo "0 0 * * * yt-dlp -U > /dev/null 2>&1"
-
-  } | crontab -
+    echo "0 0 * * * /bin/bash -c 'curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp' > /dev/null 2>&1"
+} | crontab -
 
   echo "* Cronjob installed!"
 }
