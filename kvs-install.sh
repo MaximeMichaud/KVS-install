@@ -99,6 +99,7 @@ function script() {
   install_ioncube
   insert_cronjob
   install_acme.sh
+  configure_dynamic_php_fpm
   autoUpdate
   setupdone
 
@@ -434,6 +435,46 @@ function install_acme.sh() {
     #sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-available/"$DOMAIN".conf
     service nginx restart
   fi
+}
+
+configure_dynamic_php_fpm() {
+  # Retrieve the total memory in KB and convert it to MB
+  total_memory_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  total_memory_mb=$((total_memory_kb / 1024))
+
+  # Use half of the total memory for PHP-FPM
+  allocated_memory_mb=$((total_memory_mb / 2))
+
+  # Average memory per PHP script (adjust as needed)
+  average_memory_per_script=64
+
+  # Calculate FPM settings
+  max_children=$(($allocated_memory_mb / $average_memory_per_script))
+  start_servers=$(($max_children / 4))
+  min_spare_servers=$(($start_servers / 2))
+  max_spare_servers=$(($start_servers * 2))
+
+  # Path to PHP-FPM configuration file for www pool
+  php_fpm_conf="/etc/php/$PHP/fpm/pool.d/www.conf"
+
+  # Backup the original configuration file
+  cp $php_fpm_conf "${php_fpm_conf}.bak"
+
+  # Update PHP-FPM configuration with new calculated values
+  sed -i "s/pm.max_children =.*/pm.max_children = $max_children/" $php_fpm_conf
+  sed -i "s/pm.start_servers =.*/pm.start_servers = $start_servers/" $php_fpm_conf
+  sed -i "s/pm.min_spare_servers =.*/pm.min_spare_servers = $min_spare_servers/" $php_fmd_conf
+  sed -i "s/pm.max_spare_servers =.*/pm.max_spare_servers = $max_spare_servers/" $php_fpm_conf
+
+  # Restart PHP-FPM to apply changes
+  systemctl restart php"$PHP"-fpm
+
+  # Display new settings (To Display At The End)
+  #echo "PHP-FPM has been configured with the following settings:"
+  #echo "Max Children: $max_children"
+  #echo "Start Servers: $start_servers"
+  #echo "Min Spare Servers: $min_spare_servers"
+  #echo "Max Spare Servers: $max_spare_servers"
 }
 
 insert_cronjob() {
