@@ -1,5 +1,4 @@
 #!/bin/bash
-#
 # [Automatic installation on Linux for Kernel Video Sharing]
 #
 # GitHub : https://github.com/MaximeMichaud/KVS-install
@@ -10,6 +9,8 @@
 #
 # KVS-install Copyright (c) 2020-2023 Maxime Michaud
 # Licensed under GNU General Public License v3.0
+#################################################################
+# shellcheck disable=SC1091
 #################################################################
 #Logs
 exec 3<&1
@@ -31,7 +32,7 @@ webserver=nginx
 # Define installation parameters for headless install (fallback if unspecified)
 if [[ $HEADLESS == "y" ]]; then
   # Define options
-  database_ver=10.11
+  database_ver=11.4
   IONCUBE=YES
   AUTOPACKAGEUPDATE=YES
 fi
@@ -159,22 +160,26 @@ function installQuestions() {
     #      ;;
     #    esac
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
-    echo "${green}   1) MariaDB 10.11 (Stable) (LTS) (Default)${normal}"
+    echo "${green}   1) MariaDB 11.4 (Stable) (LTS) (Default)${normal}"
+    echo "${green}   2) MariaDB 10.11 (Old Stable) (LTS)${normal}"
     echo "${green}   2) MariaDB 10.6 (Old Stable) (LTS)${normal}"
     echo "Please note: We only recommend LTS versions, despite other versions being available."
     echo "Regardless of the version, KVS has a specific way of storing MYSQL data."
-    echo "As long as the MYISAM engine is not removed from KVS, you should always choose the latest LTS version recommended by the script."
+    echo "As long as the MYISAM engine is not removed from MariaDB, you should always choose the latest LTS version recommended by the script."
     echo "Even if this was the case, tables can be migrated from MYISAM to InnoDB."
     echo "Some have done so, but the end result was never studied thoroughly."
     echo "The risk taken is probably not worth the performance difference if the case."
-    until [[ "$DATABASE_VER" =~ ^[1-2]$ ]]; do
-      read -rp "Version [1-2]: " -e -i 1 DATABASE_VER
+    until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
+      read -rp "Version [1-3]: " -e -i 1 DATABASE_VER
     done
     case $DATABASE_VER in
     1)
-      database_ver="10.11"
+      database_ver="11.4"
       ;;
     2)
+      database_ver="10.11"
+      ;;
+    3)
       database_ver="10.6"
       ;;
     esac
@@ -374,7 +379,7 @@ function install_KVS() {
     rm -r "$KVS_PATH"/KVS_*
     chown -R www-data:www-data "$KVS_PATH"
     chmod -R 755 "$KVS_PATH"
-    
+
     sed -i '/xargs chmod 666/d' "$KVS_PATH"/_INSTALL/install_permissions.sh
     "$KVS_PATH"/_INSTALL/install_permissions.sh
     cat "$KVS_PATH"/_INSTALL/nginx_config.txt > /etc/nginx/globals/kvs.conf
@@ -452,7 +457,7 @@ function install_ioncube() {
       cd /root || exit
       wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
       tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
-      cd ioncube && cp ioncube_loader_lin_"$PHP".so $php_path/
+      cd ioncube && cp ioncube_loader_lin_"$PHP".so "$php_path"/
       echo "zend_extension=$php_path/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/fpm/php.ini
       echo "zend_extension=$php_path/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/cli/php.ini
       systemctl restart php"$PHP"-fpm
