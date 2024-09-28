@@ -10,30 +10,38 @@ on:
 
 jobs:
   test:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [debian:11, debian:12]
+        os: ['debian:11', 'debian:12']
 
-    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.os }}
 
     steps:
-    - name: Set up ${{ matrix.os }}
-      run: |
-        docker pull ${{ matrix.os }}
-        docker run -d --name debian_test -v ${{ github.workspace }}:/workspace ${{ matrix.os }} tail -f /dev/null
+    - name: Check out repository
+      uses: actions/checkout@v2
 
-    - name: Install curl and run KVS Installation Script on ${{ matrix.os }}
+    - name: Install curl and prerequisites
       run: |
-        docker exec debian_test bash -c "apt-get update && apt-get install -y curl"
-        docker exec debian_test bash -c "export CI_MODE=y && export PHP='7.4' && bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)"
+        apt-get update
+        apt-get install -y curl systemctl
+
+    - name: Run KVS Installation Script
+      run: |
+        export CI_MODE=y
+        export PHP='7.4'
+        bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
 
     - name: Check service statuses and logs
       run: |
-        docker exec debian_test bash -c "systemctl status mariadb"
-        docker exec debian_test bash -c "systemctl status nginx"
-        docker exec debian_test bash -c "echo 'Check log file for any issues:' && cat kvs-install.log"
+        systemctl status mariadb
+        systemctl status nginx
+        echo "Check log file for any issues:"
+        cat kvs-install.log
 
     - name: Stop and remove container
+      if: always()
       run: |
         docker stop debian_test
         docker rm debian_test
