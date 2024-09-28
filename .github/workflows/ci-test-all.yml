@@ -3,10 +3,10 @@ name: Test KVS Installation on Debian 11 and 12
 on:
   push:
     branches:
-      - '*'   
+      - '*'
   pull_request:
     branches:
-      - '*'   
+      - '*'
 
 jobs:
   test:
@@ -25,7 +25,7 @@ jobs:
     - name: Install prerequisites
       run: |
         apt-get update
-        apt-get install -y curl wget mariadb-client nginx memcached php php-cli
+        apt-get install -y curl wget
       shell: bash
 
     - name: Download and execute the KVS installation script
