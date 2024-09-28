@@ -65,24 +65,13 @@ function checkOS() {
       if [[ "$CONTINUE" == "n" ]]; then
         exit 1
       fi
-    elif [[ "$ID" == "ubuntu" ]]; then
-      OS="ubuntu"
-      if [[ ! $VERSION_ID =~ (20.04|22.04) ]]; then
-        echo "⚠️ ${alert}Your version of Ubuntu is not supported.${normal}"
-        echo ""
-        until [[ $CONTINUE =~ (y|n) ]]; do
-          read -rp "Continue? [y/n]: " -e CONTINUE
-        done
-        if [[ "$CONTINUE" == "n" ]]; then
-          exit 1
-        fi
-      fi
     fi
   else
-    echo "Looks like you aren't running this script on a Debian or Ubuntu system ${normal}"
+    echo "Looks like you aren't running this script on a Debian system ${normal}"
     exit 1
   fi
 }
+
 
 function script() {
   installQuestions
@@ -231,13 +220,10 @@ function installQuestions() {
 }
 
 function aptupdate() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
-    apt-get update
-  fi
+apt-get update
 }
 
 function aptinstall() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     packages=(
       ca-certificates
       apt-transport-https
@@ -255,7 +241,6 @@ function aptinstall() {
       git
     )
     apt-get -y install "${packages[@]}"
-  fi
 }
 
 function install_yt-dlp() {
@@ -280,7 +265,6 @@ function whatisdomain() {
 }
 
 function aptinstall_nginx() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "NGINX Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
     if [[ "$VERSION_ID" =~ (11|12|20.04|22.04) ]]; then
@@ -311,21 +295,17 @@ function aptinstall_nginx() {
       #update CF IPV4/V6 if CF is used
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /usr/bin/update-cloudflare-ip-list.sh
     fi
-  fi
 }
 
 function aptinstall_mariadb() {
   echo "MariaDB Installation"
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
     echo "deb [arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
     apt-get update && apt-get install mariadb-server -y
     systemctl enable mariadb && systemctl start mariadb
-  fi
 }
 
 function aptinstall_php() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "PHP Installation"
     curl -sSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
     if [[ "$webserver" =~ (nginx) ]]; then
@@ -344,12 +324,10 @@ function aptinstall_php() {
                 s|;max_execution_time = 30|max_execution_time = 300|
                 s|;max_input_time = 30|max_input_time = 360|" /etc/php/"$PHP"/fpm/php.ini
     systemctl restart php"$PHP"
-  fi
 }
 
 function aptinstall_phpmyadmin() {
   echo "phpMyAdmin Installation"
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     INSTALL_DIR="/usr/share/phpmyadmin"
     PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
     PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
@@ -362,17 +340,16 @@ function aptinstall_phpmyadmin() {
     chmod 700 /usr/share/phpmyadmin/tmp
     randomBlowfishSecret=$(openssl rand -base64 22)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
-    wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf
+    # 404
+	#wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf
     ln -s /usr/share/phpmyadmin /var/www/phpmyadmin
     if [[ "$webserver" =~ (nginx) ]]; then
       apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
       service nginx restart
     fi
-  fi
 }
 
 function install_KVS() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     KVS_PATH="/var/www/$DOMAIN"
     mkdir -p "$KVS_PATH"
     mv /root/KVS_* "$KVS_PATH"
@@ -400,23 +377,19 @@ function install_KVS() {
     sed -i "s|login|$DOMAIN|
              s|pass|$databasepassword|
              s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH"/admin/include/setup_db.php
-  fi
 }
 
 function aptinstall_memcached() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     echo "Installing Memcached..."
     apt-get install -y memcached
     echo "Configuring Memcached to use 256 MB of RAM..."
     sed -i 's/-m 64/-m 256/' /etc/memcached.conf
     systemctl restart memcached
-  fi
 
   echo "Memcached installation and configuration complete."
 }
 
 function install_acme.sh() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     cd /root || exit
     git clone https://github.com/acmesh-official/acme.sh.git
     cd ./acme.sh || exit
@@ -434,7 +407,6 @@ function install_acme.sh() {
     mv /etc/nginx/sites-available/"$DOMAIN".conf /etc/nginx/sites-enabled/"$DOMAIN".conf
     #sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-available/"$DOMAIN".conf
     service nginx restart
-  fi
 }
 
 configure_dynamic_php_fpm() {
@@ -493,7 +465,6 @@ insert_cronjob() {
 
 function install_ioncube() {
   if [[ "$IONCUBE" =~ (YES) ]]; then
-    if [[ "$OS" =~ (debian|ubuntu) ]]; then
       cd /root || exit
       wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
       tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
@@ -502,7 +473,6 @@ function install_ioncube() {
       echo "zend_extension=$php_path/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/cli/php.ini
       systemctl restart php"$PHP"-fpm
       rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
-    fi
   fi
 }
 
@@ -584,7 +554,6 @@ function update() {
 }
 
 function updatephpMyAdmin() {
-  if [[ "$OS" =~ (debian|ubuntu) ]]; then
     rm -rf /usr/share/phpmyadmin/*
     INSTALL_DIR="/usr/share/phpmyadmin"
     PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
@@ -598,7 +567,6 @@ function updatephpMyAdmin() {
     chmod 700 /var/www/phpmyadmin/tmp
     randomBlowfishSecret=$(openssl rand -base64 22)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
-  fi
 }
 
 initialCheck
