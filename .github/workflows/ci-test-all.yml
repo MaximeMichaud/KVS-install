@@ -25,7 +25,7 @@ jobs:
     - name: Install prerequisites
       run: |
         apt-get update
-        apt-get install -y curl wget
+        apt-get install -y curl wget mariadb-client nginx memcached php php-cli
       shell: bash
 
     - name: Download and execute the KVS installation script
@@ -39,11 +39,12 @@ jobs:
         ./kvs-install.sh
       shell: bash
 
-    - name: Check service statuses and logs
+    - name: Check service versions
       run: |
-        systemctl status mariadb
-        systemctl status nginx
-        systemctl status memcached
+        mariadb --version
+        nginx -v
+        memcached --version
+        php -v
         echo "Check log file for any issues:"
         cat kvs-install.log
       shell: bash
