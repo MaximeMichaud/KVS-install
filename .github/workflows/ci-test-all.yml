@@ -33,6 +33,7 @@ jobs:
         wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
         chmod +x kvs-install.sh
         CI_MODE='y' \
+        PHP='7.4' \
         database_ver='10.11' \
         IONCUBE='YES' \
         AUTOPACKAGEUPDATE='YES' \
@@ -46,5 +47,5 @@ jobs:
         memcached --version
         php -v
         echo "Check log file for any issues:"
-        cat kvs-install.log
+        cat /root/kvs-install.log
       shell: bash
