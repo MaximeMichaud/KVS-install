@@ -45,8 +45,6 @@ This script supports the following Linux distributions:
 |-------------------|---------|
 | Debian 11         | ✅       |
 | Debian 12         | ✅       |
-| Ubuntu 20.04      | ✅       |
-| Ubuntu 22.04      | ✅       |
 
 At present, non-Debian-based distros are not a priority. We recommend using the latest stable version of Debian as it was the development platform for this script. If you wish to use another distro, please open an issue on GitHub with a valid reason for consideration. Your case will be studied, and may provide support through Docker to achieve similar results.
 
@@ -108,7 +106,7 @@ While this script is designed for a straightforward deployment on systems that d
 - **Existing LEMP Stacks**: If you already have a LEMP stack installed and are familiar with its configuration, you may opt to use the NGINX configuration provided in this repository. This allows you to leverage the optimizations without running the script.
 - **Server Configuration Understanding**: It is beneficial to review the functions within the script to understand the recommended configurations for NGINX, PHP-FPM, and Memcached. Specifically, the script adjusts NGINX to align with PHP-FPM settings and increases Memcached's default memory allocation, which is typically insufficient in default distribution installations.
 - **Web Server Compatibility**: The script is optimized for NGINX and does not support other web servers such as Apache2, LiteSpeed, or Caddy. If your environment uses these or other web servers, manual configuration adjustments will be necessary.
-- **Distro Compatibility**: This script is primarily designed for use with Debian-based distributions. Users of other Linux distributions should adjust the script or manually configure their systems according to their distro's best practices.
+- **Distro Compatibility**: This script is primarily designed for use with Debian-based distributions.
 
 These points should help you tailor the installation to your needs, providing a deeper understanding of the Kernel Video Sharing platform configuration requirements and ensuring optimal performance.
 
