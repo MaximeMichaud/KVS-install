@@ -1,4 +1,4 @@
-name: Test KVS Installation on Debian 11 and 12
+name: Test KVS Installation on Debian and Ubuntu
 
 on:
   push:
@@ -12,15 +12,32 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        os: ['debian:11', 'debian:12']
+        os-php:
+          - os: debian:11
+            php: '7.4'
+          - os: debian:11
+            php: '8.1'
+          - os: debian:12
+            php: '7.4'
+          - os: debian:12
+            php: '8.1'
+          - os: ubuntu:20.04
+            php: '7.4'
+          - os: ubuntu:20.04
+            php: '8.1'
+          - os: ubuntu:22.04
+            php: '7.4'
+          - os: ubuntu:22.04
+            php: '8.1'
 
     container:
-      image: ${{ matrix.os }}
+      image: ${{ matrix.os-php.os }}
 
     steps:
     - name: Check out repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
 
     - name: Install prerequisites
       run: |
@@ -33,7 +50,7 @@ jobs:
         wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
         chmod +x kvs-install.sh
         CI_MODE='y' \
-        PHP='7.4' \
+        PHP='${{ matrix.os-php.php }}' \
         database_ver='10.11' \
         IONCUBE='YES' \
         AUTOPACKAGEUPDATE='YES' \
@@ -46,6 +63,4 @@ jobs:
         nginx -v
         memcached --version
         php -v
-        echo "Check log file for any issues:"
-        cat /root/kvs-install.log
       shell: bash

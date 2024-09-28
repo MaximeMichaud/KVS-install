@@ -88,7 +88,6 @@ function script() {
   # If CI environment is detected, skip installQuestions and install_KVS, and define CI-specific options
   if [[ $CI_MODE == "y" ]]; then
     # Define options for CI mode
-    database_ver=11.4
     IONCUBE=YES
     AUTOPACKAGEUPDATE=YES
 
