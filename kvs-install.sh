@@ -273,19 +273,20 @@ function aptinstall_nginx() {
       apt-get update && apt-get install nginx -y
       rm -rf conf.d && mkdir -p /etc/nginx/globals
       wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/general.conf -O /etc/nginx/globals/general.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/security.conf -O /etc/nginx/globals/security.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/general.conf -O /etc/nginx/globals/general.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/security.conf -O /etc/nginx/globals/security.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
+	  # Custom KVS NGINX conf
       #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
       mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/domain.conf -O /etc/nginx/sites-available/"$DOMAIN".conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/domain.conf -O /etc/nginx/sites-available/"$DOMAIN".conf
       sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-available/"$DOMAIN".conf
       sed -i "s/project_url/$URL/g" /etc/nginx/sites-available/"$DOMAIN".conf
       # wget sslgen conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/sslgen.conf -O /etc/nginx/sites-enabled/sslgen.conf
+      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/sslgen.conf -O /etc/nginx/sites-enabled/sslgen.conf
       sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/sslgen.conf
       sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/sslgen.conf
       ##
