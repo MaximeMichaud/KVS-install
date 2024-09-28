@@ -1,0 +1,39 @@
+name: Test KVS Installation on Debian 11 and 12
+
+on:
+  push:
+    branches:
+      - '*'   
+  pull_request:
+    branches:
+      - '*'   
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [debian:11, debian:12]
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Set up ${{ matrix.os }}
+      run: |
+        docker pull ${{ matrix.os }}
+        docker run -d --name debian_test -v ${{ github.workspace }}:/workspace ${{ matrix.os }} tail -f /dev/null
+
+    - name: Install curl and run KVS Installation Script on ${{ matrix.os }}
+      run: |
+        docker exec debian_test bash -c "apt-get update && apt-get install -y curl"
+        docker exec debian_test bash -c "export CI_MODE=y && export PHP='7.4' && bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)"
+
+    - name: Check service statuses and logs
+      run: |
+        docker exec debian_test bash -c "systemctl status mariadb"
+        docker exec debian_test bash -c "systemctl status nginx"
+        docker exec debian_test bash -c "echo 'Check log file for any issues:' && cat kvs-install.log"
+
+    - name: Stop and remove container
+      run: |
+        docker stop debian_test
+        docker rm debian_test
