@@ -100,7 +100,7 @@ function script() {
     # Execute the steps without installQuestions and install_KVS
     aptupdate
     aptinstall
-    whatisdomain
+	#whatisdomain
     install_yt-dlp
     aptinstall_php
     aptinstall_memcached
@@ -109,10 +109,10 @@ function script() {
     aptinstall_phpmyadmin
     install_ioncube
     insert_cronjob
-    install_acme.sh
+    #install_acme.sh
     configure_dynamic_php_fpm
     autoUpdate
-    setupdone
+    #setupdone
   else
     # Normal execution for non-CI environment
     installQuestions
