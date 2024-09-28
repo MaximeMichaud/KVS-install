@@ -29,7 +29,7 @@ jobs:
 
     - name: Run KVS Installation Script
       run: |
-        export CI_MODE=y
+        export CI_MODE='y'
         export PHP='7.4'
         bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
 
