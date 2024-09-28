@@ -25,13 +25,15 @@ jobs:
     - name: Install curl and prerequisites
       run: |
         apt-get update
-        apt-get install -y curl systemctl
+        apt-get install -y curl
+      shell: bash
 
     - name: Run KVS Installation Script
       run: |
         export CI_MODE='y'
         export PHP='7.4'
         bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
+      shell: bash
 
     - name: Check service statuses and logs
       run: |
@@ -39,9 +41,4 @@ jobs:
         systemctl status nginx
         echo "Check log file for any issues:"
         cat kvs-install.log
-
-    - name: Stop and remove container
-      if: always()
-      run: |
-        docker stop debian_test
-        docker rm debian_test
+      shell: bash
