@@ -85,25 +85,56 @@ function checkOS() {
 }
 
 function script() {
-  installQuestions
-  aptupdate
-  aptinstall
-  whatisdomain
-  install_yt-dlp
-  aptinstall_php
-  aptinstall_memcached
-  aptinstall_nginx
-  aptinstall_mariadb
-  aptinstall_phpmyadmin
-  install_KVS
-  install_ioncube
-  insert_cronjob
-  install_acme.sh
-  configure_dynamic_php_fpm
-  autoUpdate
-  setupdone
+  # If CI environment is detected, skip installQuestions and install_KVS, and define CI-specific options
+  if [[ $CI_MODE == "y" ]]; then
+    # Define options for CI mode
+    database_ver=11.4
+    IONCUBE=YES
+    AUTOPACKAGEUPDATE=YES
 
+    echo "Running in CI mode with predefined options:"
+    echo " - MariaDB version: $database_ver"
+    echo " - IonCube installation: $IONCUBE"
+    echo " - Automatic package updates: $AUTOPACKAGEUPDATE"
+
+    # Execute the steps without installQuestions and install_KVS
+    aptupdate
+    aptinstall
+    whatisdomain
+    install_yt-dlp
+    aptinstall_php
+    aptinstall_memcached
+    aptinstall_nginx
+    aptinstall_mariadb
+    aptinstall_phpmyadmin
+    install_ioncube
+    insert_cronjob
+    install_acme.sh
+    configure_dynamic_php_fpm
+    autoUpdate
+    setupdone
+  else
+    # Normal execution for non-CI environment
+    installQuestions
+    aptupdate
+    aptinstall
+    whatisdomain
+    install_yt-dlp
+    aptinstall_php
+    aptinstall_memcached
+    aptinstall_nginx
+    aptinstall_mariadb
+    aptinstall_phpmyadmin
+    install_KVS
+    install_ioncube
+    insert_cronjob
+    install_acme.sh
+    configure_dynamic_php_fpm
+    autoUpdate
+    setupdone
+  fi
 }
+
 function installQuestions() {
   if [[ $HEADLESS != "y" ]]; then
     yes '' | sed 20q
@@ -122,12 +153,12 @@ function installQuestions() {
       read -rp "[1-2]: " -e -i 1 AUTOPACKAGEUPDATE
     done
     case $AUTOPACKAGEUPDATE in
-    1)
-      AUTOPACKAGEUPDATE="YES"
-      ;;
-    2)
-      AUTOPACKAGEUPDATE="NO"
-      ;;
+      1)
+        AUTOPACKAGEUPDATE="YES"
+        ;;
+      2)
+        AUTOPACKAGEUPDATE="NO"
+        ;;
     esac
     echo "Do you want to install and enable IonCube? (Recommended)"
     echo "No, only if you have a license with the source code."
@@ -139,12 +170,12 @@ function installQuestions() {
       read -rp "[1-2]: " -e -i 1 IONCUBE
     done
     case $IONCUBE in
-    1)
-      IONCUBE="YES"
-      ;;
-    2)
-      IONCUBE="NO"
-      ;;
+      1)
+        IONCUBE="YES"
+        ;;
+      2)
+        IONCUBE="NO"
+        ;;
     esac
     #    echo "Which branch of NGINX ?"
     #    echo "   1) Mainline"
@@ -174,15 +205,15 @@ function installQuestions() {
       read -rp "Version [1-3]: " -e -i 1 DATABASE_VER
     done
     case $DATABASE_VER in
-    1)
-      database_ver="11.4"
-      ;;
-    2)
-      database_ver="10.11"
-      ;;
-    3)
-      database_ver="10.6"
-      ;;
+      1)
+        database_ver="11.4"
+        ;;
+      2)
+        database_ver="10.11"
+        ;;
+      3)
+        database_ver="10.6"
+        ;;
     esac
     echo "Mail for SSL"
     echo "Email address is required for notifications (e.g., certificate expiration if script doesn't renew automatically)."
@@ -316,11 +347,47 @@ function aptinstall_nginx() {
 
 function aptinstall_mariadb() {
   echo "MariaDB Installation"
+  
+  # Check if the OS is either Debian or Ubuntu
   if [[ "$OS" =~ (debian|ubuntu) ]]; then
+    
+    # Fetch MariaDB signing key
     apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc'
+    
+    # Add MariaDB repository based on the OS version and ID
     echo "deb [arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
+    
+    # Update package list and install MariaDB server
     apt-get update && apt-get install mariadb-server -y
+    
+    # Enable and start MariaDB service
     systemctl enable mariadb && systemctl start mariadb
+
+    # Extract major version number from $ID (assuming $ID contains the version number)
+    ID_MAJOR_VERSION=$(echo "$ID" | cut -d'.' -f1)
+    ID_MINOR_VERSION=$(echo "$ID" | cut -d'.' -f2)
+
+    # Check if ID version is 11.4 or higher
+	# ""11.4, unlike previous version, no longer includes mysql named compatible executable symlinks inside the container.""
+	# TO BE REWORKED (More checks)
+    if (( ID_MAJOR_VERSION > 11 )) || (( ID_MAJOR_VERSION == 11 && ID_MINOR_VERSION >= 4 )); then
+      echo "OS version is 11.4 or higher, creating aliases."
+      
+      # Add alias for mysql if not already present in .bashrc
+      if ! grep -q "alias mysql=" ~/.bashrc; then
+        echo "alias mysql='/usr/bin/mariadb'" >> ~/.bashrc
+      fi
+      
+      # Add alias for mysql_secure_installation if not already present in .bashrc
+      if ! grep -q "alias mysql_secure_installation=" ~/.bashrc; then
+        echo "alias mysql_secure_installation='/usr/bin/mariadb-secure-installation'" >> ~/.bashrc
+      fi
+
+      # Reload .bashrc to apply the new aliases
+      source ~/.bashrc
+    else
+      echo "OS version is below 11.4, skipping alias creation."
+    fi
   fi
 }
 
@@ -383,7 +450,7 @@ function install_KVS() {
 
     sed -i '/xargs chmod 666/d' "$KVS_PATH"/_INSTALL/install_permissions.sh
     "$KVS_PATH"/_INSTALL/install_permissions.sh
-    cat "$KVS_PATH"/_INSTALL/nginx_config.txt > /etc/nginx/globals/kvs.conf
+    cat "$KVS_PATH"/_INSTALL/nginx_config.txt >/etc/nginx/globals/kvs.conf
     sed -i "s|/PATH|$KVS_PATH|
              s|/usr/local/bin/|/usr/bin/|
              s|/usr/bin/php|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
@@ -486,7 +553,7 @@ insert_cronjob() {
     echo "* * * * * cd /var/www/$DOMAIN/admin/include && /usr/bin/php$PHP cron.php > /dev/null 2>&1"
     echo "#yt-dlp Automatic Update"
     echo "0 0 * * * /bin/bash -c 'curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp' > /dev/null 2>&1"
-} | crontab -
+  } | crontab -
 
   echo "* Cronjob installed!"
 }
@@ -554,22 +621,22 @@ function manageMenu() {
     read -rp "Select an option [1-5] : " MENU_OPTION
   done
   case $MENU_OPTION in
-  1)
-    script
-    ;;
-  2)
-    whatisdomain
-    install_KVS
-    ;;
-  3)
-    updatephpMyAdmin
-    ;;
-  4)
-    update
-    ;;
-  5)
-    exit 0
-    ;;
+    1)
+      script
+      ;;
+    2)
+      whatisdomain
+      install_KVS
+      ;;
+    3)
+      updatephpMyAdmin
+      ;;
+    4)
+      update
+      ;;
+    5)
+      exit 0
+      ;;
   esac
 }
 
