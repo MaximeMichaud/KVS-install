@@ -22,23 +22,28 @@ jobs:
     - name: Check out repository
       uses: actions/checkout@v2
 
-    - name: Install curl and prerequisites
+    - name: Install prerequisites
       run: |
         apt-get update
-        apt-get install -y curl
+        apt-get install -y curl wget
       shell: bash
 
-    - name: Run KVS Installation Script
+    - name: Download and execute the KVS installation script
       run: |
-        export CI_MODE='y'
-        export PHP='7.4'
-        bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
+        wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
+        chmod +x kvs-install.sh
+        CI_MODE='y' \
+        database_ver='10.11' \
+        IONCUBE='YES' \
+        AUTOPACKAGEUPDATE='YES' \
+        ./kvs-install.sh
       shell: bash
 
     - name: Check service statuses and logs
       run: |
         systemctl status mariadb
         systemctl status nginx
+        systemctl status memcached
         echo "Check log file for any issues:"
         cat kvs-install.log
       shell: bash
