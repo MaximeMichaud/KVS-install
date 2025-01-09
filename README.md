@@ -29,7 +29,7 @@ This approach will help you appreciate the detailed descriptions and choices pro
 wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
 chmod +x kvs-install.sh
 HEADLESS=y \
-database_ver=10.11 \
+database_ver=11.4 \
 IONCUBE=YES \
 AUTOPACKAGEUPDATE=YES \
 ./kvs-install.sh
@@ -94,8 +94,8 @@ Your input is valuable— if you believe certain enhancements should be prioriti
 
 The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them. (For example, PHP 8.2/8.3 is not yet officially supported by KVS and thus not recommended.)
 
-* NGINX 1.25.x mainline
-* MariaDB 10.6 LTS or 10.11 LTS (Default)
+* NGINX 1.27.x mainline
+* MariaDB 10.6 LTS, 10.11 LTS or 11.4 (Default)
 * PHP 7.4 or PHP 8.1 (since 6.2.0)
 * phpMyAdmin 5.2.1 (or newer)
 
