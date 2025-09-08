@@ -370,15 +370,54 @@ function install_KVS() {
              s|/usr/local/bin/|/usr/bin/|
              s|/usr/bin/php|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
     sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH"/admin/include/setup.php
-    databasepassword="$(openssl rand -base64 12)"
-    mariadb -e "CREATE DATABASE \`$DOMAIN\`;"
-    mariadb -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
+    # Check if setup_db.php already exists and extract password
+    if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
+        # Extract existing password from setup_db.php
+        existing_password=$(grep -oP "(?<=pass=')[^']+" "$KVS_PATH/admin/include/setup_db.php" 2>/dev/null || echo "")
+        if [ -n "$existing_password" ]; then
+            databasepassword="$existing_password"
+            echo "Using existing database password from setup_db.php"
+        else
+            databasepassword="$(openssl rand -base64 12)"
+        fi
+    else
+        databasepassword="$(openssl rand -base64 12)"
+    fi
+    
+    # Check if database exists
+    if ! mariadb -e "USE \`$DOMAIN\`" 2>/dev/null; then
+        echo "Creating database $DOMAIN..."
+        mariadb -e "CREATE DATABASE \`$DOMAIN\`;"
+        db_created=true
+    else
+        echo "Database $DOMAIN already exists, skipping creation..."
+        db_created=false
+    fi
+    
+    # Check if user exists
+    if ! mariadb -e "SELECT User FROM mysql.user WHERE User='$DOMAIN' AND Host='localhost'" | grep -q "$DOMAIN"; then
+        echo "Creating user $DOMAIN..."
+        mariadb -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
+    else
+        echo "User $DOMAIN already exists, updating password..."
+        mariadb -e "ALTER USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
+    fi
+    
     mariadb -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
     mariadb -e "FLUSH PRIVILEGES;"
-    mariadb -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
+    
+    # Only import install_db.sql if database was just created
+    if [ "$db_created" = true ] && [ -f "$KVS_PATH"/_INSTALL/install_db.sql ]; then
+        echo "Importing initial database structure..."
+        mariadb -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
+    fi
+    
     # Remove anonymous user
-    mariadb -e "DELETE FROM mysql.user WHERE User='';"
-    rm -rf "$KVS_PATH"/_INSTALL/
+    mariadb -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
+    
+    # Clean up installation files if they exist
+    [ -d "$KVS_PATH"/_INSTALL/ ] && rm -rf "$KVS_PATH"/_INSTALL/
+    
     sed -i "s|login|$DOMAIN|
              s|pass|$databasepassword|
              s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH"/admin/include/setup_db.php
