@@ -271,7 +271,7 @@ function whatisdomain() {
 function aptinstall_nginx() {
     echo "NGINX Installation"
     apt-key adv --fetch-keys 'https://nginx.org/keys/nginx_signing.key'
-    if [[ "$VERSION_ID" =~ (11|12|22.04) ]]; then
+    if [[ "$VERSION_ID" =~ (11|12|22.04|24.04) ]]; then
       echo "deb https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
@@ -317,7 +317,7 @@ function aptinstall_php() {
       if [[ "$VERSION_ID" =~ (11|12) ]]; then
         echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
       fi
-      if [[ "$VERSION_ID" =~ (22.04) ]]; then
+      if [[ "$VERSION_ID" =~ (22.04|24.04) ]]; then
         add-apt-repository -y ppa:ondrej/php
       fi
     fi
