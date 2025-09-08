@@ -35,6 +35,7 @@ if [[ $HEADLESS == "y" ]]; then
   database_ver=11.8
   IONCUBE=YES
   AUTOPACKAGEUPDATE=YES
+  PHP_CHOICE=2  # Default to PHP 8.3 for headless mode (for KVS 6.4+)
 fi
 #################################################################
 function isRoot() {
@@ -210,9 +211,33 @@ function installQuestions() {
     # Determining PHP version and PHP path
     PHP="7.4"
     php_path="/usr/lib/php/20190902"
+    
+    # KVS 6.2+ supports PHP 8.1
     if ver_compare "6.2" "$version"; then
       PHP="8.1"
       php_path="/usr/lib/php/20210902"
+    fi
+    
+    # KVS 6.4+ supports PHP 8.1 and 8.3 - let user choose
+    if ver_compare "6.4" "$version"; then
+      echo ""
+      echo "KVS $version supports multiple PHP versions."
+      echo "Which PHP version do you want to install?"
+      echo "   1) PHP 8.1 (Stable, well-tested)"
+      echo "   2) PHP 8.3 (Latest, better performance)"
+      until [[ "$PHP_CHOICE" =~ ^[1-2]$ ]]; do
+        read -rp "Version [1-2]: " -e -i 2 PHP_CHOICE
+      done
+      case $PHP_CHOICE in
+      1)
+        PHP="8.1"
+        php_path="/usr/lib/php/20210902"
+        ;;
+      2)
+        PHP="8.3"
+        php_path="/usr/lib/php/20230831"
+        ;;
+      esac
     fi
 
     echo "We are ready to start the installation !"
