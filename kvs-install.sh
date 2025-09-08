@@ -395,6 +395,11 @@ function aptinstall_memcached() {
 }
 
 function install_acme.sh() {
+    # Ensure ports 80 and 443 are open for Let's Encrypt validation
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow 80/tcp >/dev/null 2>&1
+        ufw allow 443/tcp >/dev/null 2>&1
+    fi
     cd /root || exit
     git clone https://github.com/acmesh-official/acme.sh.git
     cd ./acme.sh || exit
