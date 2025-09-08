@@ -7,7 +7,7 @@
 # This script is intended for a quick and easy installation :
 # bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
 #
-# KVS-install Copyright (c) 2020-2023 Maxime Michaud
+# KVS-install Copyright (c) 2020-2025 Maxime Michaud
 # Licensed under GNU General Public License v3.0
 #################################################################
 # shellcheck disable=SC1091
