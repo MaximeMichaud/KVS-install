@@ -371,13 +371,13 @@ function install_KVS() {
              s|/usr/bin/php|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
     sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH"/admin/include/setup.php
     databasepassword="$(openssl rand -base64 12)"
-    mysql -e "CREATE DATABASE \`$DOMAIN\`;"
-    mysql -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
-    mysql -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
-    mysql -e "FLUSH PRIVILEGES;"
-    mysql -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
+    mariadb -e "CREATE DATABASE \`$DOMAIN\`;"
+    mariadb -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
+    mariadb -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
+    mariadb -e "FLUSH PRIVILEGES;"
+    mariadb -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
     # Remove anonymous user
-    mysql -e "DELETE FROM mysql.user WHERE User='';"
+    mariadb -e "DELETE FROM mysql.user WHERE User='';"
     rm -rf "$KVS_PATH"/_INSTALL/
     sed -i "s|login|$DOMAIN|
              s|pass|$databasepassword|
