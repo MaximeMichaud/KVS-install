@@ -328,7 +328,7 @@ function aptinstall_php() {
                 s|;max_input_vars = 1000|max_input_vars = 10000|
                 s|;max_execution_time = 30|max_execution_time = 300|
                 s|;max_input_time = 30|max_input_time = 360|" /etc/php/"$PHP"/fpm/php.ini
-    systemctl restart php"$PHP"
+    systemctl restart php"$PHP"-fpm
 }
 
 function aptinstall_phpmyadmin() {
