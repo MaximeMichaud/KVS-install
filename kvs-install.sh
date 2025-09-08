@@ -441,7 +441,7 @@ configure_dynamic_php_fpm() {
   sed -i "s/pm.max_children =.*/pm.max_children = $max_children/" "$php_fpm_conf"
   sed -i "s/pm.start_servers =.*/pm.start_servers = $start_servers/" "$php_fpm_conf"
   sed -i "s/pm.min_spare_servers =.*/pm.min_spare_servers = $min_spare_servers/" "$php_fpm_conf"
-  sed -i "s/pm.max_spare_s_servers =.*/pm.max_spare_servers = $max_spare_servers/" "$php_fpm_conf"
+  sed -i "s/pm.max_spare_servers =.*/pm.max_spare_servers = $max_spare_servers/" "$php_fpm_conf"
 
   # Restart PHP-FPM to apply changes
   systemctl restart php"$PHP"-fpm
