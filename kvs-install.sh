@@ -250,7 +250,8 @@ function aptinstall() {
 function install_yt-dlp() {
   curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
   chmod a+rx /usr/local/bin/yt-dlp
-  ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
+  # Create symlink only if it doesn't exist
+  [ ! -e /usr/local/bin/youtube-dl ] && ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
 }
 
 function whatisdomain() {
@@ -270,7 +271,8 @@ function whatisdomain() {
 
 function aptinstall_nginx() {
     echo "NGINX Installation"
-    curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /usr/share/keyrings/nginx.gpg
+    # Download GPG key, overwrite if exists
+    curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --yes --dearmor -o /usr/share/keyrings/nginx.gpg
     if [[ "$VERSION_ID" =~ (11|12|13|22.04|24.04) ]]; then
       echo "deb [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
@@ -304,7 +306,8 @@ function aptinstall_nginx() {
 
 function aptinstall_mariadb() {
   echo "MariaDB Installation"
-    curl -fsSL https://mariadb.org/mariadb_release_signing_key.asc | gpg --dearmor -o /usr/share/keyrings/mariadb.gpg
+    # Download GPG key, overwrite if exists
+    curl -fsSL https://mariadb.org/mariadb_release_signing_key.asc | gpg --yes --dearmor -o /usr/share/keyrings/mariadb.gpg
     echo "deb [signed-by=/usr/share/keyrings/mariadb.gpg arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
     apt-get update && apt-get install mariadb-server -y
     systemctl enable mariadb && systemctl start mariadb
@@ -312,7 +315,8 @@ function aptinstall_mariadb() {
 
 function aptinstall_php() {
     echo "PHP Installation"
-    curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/php.sury.org.gpg
+    # Download GPG key, overwrite if exists
+    curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --yes --dearmor -o /usr/share/keyrings/php.sury.org.gpg
     if [[ "$webserver" =~ (nginx) ]]; then
       if [[ "$VERSION_ID" =~ (11|12|13) ]]; then
         echo "deb [signed-by=/usr/share/keyrings/php.sury.org.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
