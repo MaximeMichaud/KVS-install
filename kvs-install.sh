@@ -152,7 +152,7 @@ function installQuestions() {
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
     echo "${green}   1) MariaDB 11.4 (Stable) (LTS) (Default)${normal}"
     echo "${green}   2) MariaDB 10.11 (Old Stable) (LTS)${normal}"
-    echo "${green}   2) MariaDB 10.6 (Old Stable) (LTS)${normal}"
+    echo "${green}   3) MariaDB 10.6 (Old Stable) (LTS)${normal}"
     echo "Please note: We only recommend LTS versions, despite other versions being available."
     echo "Regardless of the version, KVS has a specific way of storing MYSQL data."
     echo "As long as the MYISAM engine is not removed from MariaDB, you should always choose the latest LTS version recommended by the script."
