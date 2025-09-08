@@ -427,9 +427,14 @@ configure_dynamic_php_fpm() {
 
   # Calculate FPM settings
   max_children=$((allocated_memory_mb / average_memory_per_script))
+  # Ensure minimum values to prevent errors
+  [ $max_children -lt 5 ] && max_children=5
   start_servers=$((max_children / 4))
+  [ $start_servers -lt 2 ] && start_servers=2
   min_spare_servers=$((start_servers / 2))
+  [ $min_spare_servers -lt 1 ] && min_spare_servers=1
   max_spare_servers=$((start_servers * 2))
+  [ $max_spare_servers -lt $start_servers ] && max_spare_servers=$((start_servers + 1))
 
   # Path to PHP-FPM configuration file for www pool
   php_fpm_conf="/etc/php/$PHP/fpm/pool.d/www.conf"
