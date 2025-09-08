@@ -32,7 +32,7 @@ webserver=nginx
 # Define installation parameters for headless install (fallback if unspecified)
 if [[ $HEADLESS == "y" ]]; then
   # Define options
-  database_ver=11.4
+  database_ver=11.8
   IONCUBE=YES
   AUTOPACKAGEUPDATE=YES
 fi
@@ -150,26 +150,30 @@ function installQuestions() {
     #      ;;
     #    esac
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
-    echo "${green}   1) MariaDB 11.4 (Stable) (LTS) (Default)${normal}"
-    echo "${green}   2) MariaDB 10.11 (Old Stable) (LTS)${normal}"
-    echo "${green}   3) MariaDB 10.6 (Old Stable) (LTS)${normal}"
+    echo "${green}   1) MariaDB 11.8 (Stable) (LTS) (Default)${normal}"
+    echo "${green}   2) MariaDB 11.4 (Stable) (LTS)${normal}"
+    echo "${green}   3) MariaDB 10.11 (Old Stable) (LTS)${normal}"
+    echo "${green}   4) MariaDB 10.6 (Old Stable) (LTS)${normal}"
     echo "Please note: We only recommend LTS versions, despite other versions being available."
     echo "Regardless of the version, KVS has a specific way of storing MYSQL data."
     echo "As long as the MYISAM engine is not removed from MariaDB, you should always choose the latest LTS version recommended by the script."
     echo "Even if this was the case, tables can be migrated from MYISAM to InnoDB."
     echo "Some have done so, but the end result was never studied thoroughly."
     echo "The risk taken is probably not worth the performance difference if the case."
-    until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
-      read -rp "Version [1-3]: " -e -i 1 DATABASE_VER
+    until [[ "$DATABASE_VER" =~ ^[1-4]$ ]]; do
+      read -rp "Version [1-4]: " -e -i 1 DATABASE_VER
     done
     case $DATABASE_VER in
     1)
-      database_ver="11.4"
+      database_ver="11.8"
       ;;
     2)
-      database_ver="10.11"
+      database_ver="11.4"
       ;;
     3)
+      database_ver="10.11"
+      ;;
+    4)
       database_ver="10.6"
       ;;
     esac
