@@ -1,4 +1,4 @@
-# KVS-install | Tested with 5.5.1, 6.1.2 and 6.2.1
+# KVS-install | Tested with 5.5.1, 6.1.2, 6.2.1 and 6.3.2
 
 [![ShellCheck](https://github.com/MaximeMichaud/KVS-install/workflows/ShellCheck/badge.svg)](https://github.com/MaximeMichaud/KVS-install/actions?query=workflow%3AShellCheck)
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/183a53d1a8ea49619c49d6fc2514c237)](https://app.codacy.com/gh/MaximeMichaud/KVS-install/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
