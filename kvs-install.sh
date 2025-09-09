@@ -79,6 +79,7 @@ function script() {
   aptupdate
   aptinstall
   whatisdomain
+  check_dns_configuration
   install_yt-dlp
   aptinstall_php
   aptinstall_memcached
@@ -292,6 +293,109 @@ function whatisdomain() {
   # shellcheck disable=SC2001
   URL=$(echo "$URL" | sed 's~http[s]*://~~g')
   rm -rf /root/tmp && cd /root || exit
+}
+
+function check_dns_configuration() {
+  echo "Checking DNS configuration for $DOMAIN..."
+  
+  # Get server's public IP
+  SERVER_IP=$(curl -s https://api.ipify.org)
+  SERVER_IPV6=$(curl -s https://api64.ipify.org)
+  
+  # Check if we got the server IP successfully
+  if [ -z "$SERVER_IP" ]; then
+    echo "${red}Warning: Could not determine server IP address${normal}"
+    echo "Continuing anyway..."
+    return
+  fi
+  
+  # Function to check DNS for a specific domain
+  check_single_domain() {
+    local domain=$1
+    local domain_ip
+    domain_ip=$(dig +short "$domain" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+    
+    if [ -z "$domain_ip" ]; then
+      echo "  $domain: No A record found"
+      return 1
+    elif [ "$domain_ip" = "$SERVER_IP" ]; then
+      echo "  $domain: ${green}OK${normal} -> $domain_ip"
+      return 0
+    else
+      echo "  $domain: ${red}MISMATCH${normal} -> $domain_ip (expected: $SERVER_IP)"
+      return 1
+    fi
+  }
+  
+  # Check both domain and www subdomain
+  dns_ok=true
+  echo "DNS Resolution Status:"
+  if ! check_single_domain "$DOMAIN"; then
+    dns_ok=false
+  fi
+  if ! check_single_domain "www.$DOMAIN"; then
+    dns_ok=false
+  fi
+  
+  # If DNS is not properly configured
+  if [ "$dns_ok" = false ]; then
+    echo ""
+    echo "${red}DNS configuration issue detected!${normal}"
+    echo "The domain does not point to this server's IP ($SERVER_IP)"
+    echo ""
+    
+    if [[ $HEADLESS == "y" ]]; then
+      echo "Running in headless mode - continuing despite DNS issues"
+      echo "SSL certificate generation will likely fail"
+    else
+      echo "Options:"
+      echo "  1) Continue anyway (SSL certificate will likely fail)"
+      echo "  2) Wait 60 seconds and check again"
+      echo "  3) Exit to configure DNS first (recommended)"
+      
+      until [[ "$DNS_ACTION" =~ ^[1-3]$ ]]; do
+        read -rp "Select [1-3]: " DNS_ACTION
+      done
+      
+      case $DNS_ACTION in
+        1)
+          echo "Continuing installation despite DNS issues..."
+          ;;
+        2)
+          echo "Waiting 60 seconds for DNS propagation..."
+          sleep 60
+          check_dns_configuration
+          ;;
+        3)
+          echo ""
+          echo "Please configure your DNS records:"
+          echo "  - Add A record for $DOMAIN pointing to $SERVER_IP"
+          echo "  - Add A record for www.$DOMAIN pointing to $SERVER_IP"
+          echo ""
+          echo "Then run this script again."
+          exit 1
+          ;;
+      esac
+    fi
+  else
+    echo ""
+    echo "${green}DNS configuration verified successfully!${normal}"
+    
+    # Optional: Check DNS propagation across multiple nameservers
+    echo "Checking DNS propagation..."
+    for ns in 8.8.8.8 1.1.1.1 9.9.9.9; do
+      ns_result=$(dig @$ns +short "$DOMAIN" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+      if [ -n "$ns_result" ]; then
+        if [ "$ns_result" = "$SERVER_IP" ]; then
+          echo "  NS $ns: OK"
+        else
+          echo "  NS $ns: Points to $ns_result (propagating...)"
+        fi
+      fi
+    done
+  fi
+  
+  echo ""
 }
 
 function aptinstall_nginx() {
