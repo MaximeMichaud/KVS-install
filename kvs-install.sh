@@ -324,7 +324,11 @@ function check_dns_configuration() {
   check_single_domain() {
     local domain=$1
     local domain_ip
-    domain_ip=$(dig +short "$domain" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+    domain_ip=$(
+      dig +short "$domain" A \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+      | head -n1
+    )
     
     if [ -z "$domain_ip" ]; then
       echo "  $domain: No A record found"
@@ -395,7 +399,11 @@ function check_dns_configuration() {
     # Optional: Check DNS propagation across multiple nameservers
     echo "Checking DNS propagation..."
     for ns in 8.8.8.8 1.1.1.1 9.9.9.9; do
-      ns_result=$(dig @$ns +short "$DOMAIN" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+      ns_result=$(
+        dig @$ns +short "$DOMAIN" A 2>/dev/null \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+        | head -n1
+      )
       if [ -n "$ns_result" ]; then
         if [ "$ns_result" = "$SERVER_IP" ]; then
           echo "  NS $ns: OK"
