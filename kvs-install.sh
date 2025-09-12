@@ -266,7 +266,6 @@ function aptinstall() {
       curl
       imagemagick
       ffmpeg
-      curl
       sudo
       git
 	  cron
