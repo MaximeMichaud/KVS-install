@@ -269,6 +269,7 @@ function aptinstall() {
       wget
       sudo
       git
+	  cron
     )
     apt-get -y install "${packages[@]}"
 }
