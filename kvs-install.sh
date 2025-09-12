@@ -277,6 +277,8 @@ function aptinstall() {
 	  grep
 	  coreutils
 	  findutils
+	  tar
+	  gzip
     )
     apt-get -y install "${packages[@]}"
 }
