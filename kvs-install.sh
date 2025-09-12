@@ -12,9 +12,15 @@
 #################################################################
 # shellcheck disable=SC1091
 #################################################################
+# Script constants
+readonly SCRIPT_VERSION="2.0"
+readonly LOG_FILE="/root/kvs-install.log"
+readonly PHPMYADMIN_INSTALL_DIR="/usr/share/phpmyadmin"
+readonly PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
+#################################################################
 #Logs
 exec 3<&1
-coproc mytee { tee /root/kvs-install.log >&3; }
+coproc mytee { tee "${LOG_FILE}" >&3; }
 exec >&"${mytee[1]}" 2>&1
 #Colors
 red=$(tput setaf 1)
@@ -484,21 +490,19 @@ function aptinstall_php() {
 
 function aptinstall_phpmyadmin() {
   echo "phpMyAdmin Installation"
-    INSTALL_DIR="/usr/share/phpmyadmin"
-    PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
     PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
     curl -fsSL "${PHPMYADMIN_URL}" -o phpmyadmin.tar.gz
-    mkdir -p "${INSTALL_DIR}"
-    tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${INSTALL_DIR}"
+    mkdir -p "${PHPMYADMIN_INSTALL_DIR}"
+    tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${PHPMYADMIN_INSTALL_DIR}"
     rm phpmyadmin.tar.gz
-    mkdir -p /usr/share/phpmyadmin/tmp || exit
-    chown www-data:www-data /usr/share/phpmyadmin/tmp
-    chmod 700 /usr/share/phpmyadmin/tmp
+    mkdir -p "${PHPMYADMIN_INSTALL_DIR}/tmp" || exit
+    chown www-data:www-data "${PHPMYADMIN_INSTALL_DIR}/tmp"
+    chmod 700 "${PHPMYADMIN_INSTALL_DIR}/tmp"
     randomBlowfishSecret=$(openssl rand -base64 22)
-    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
+    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "${PHPMYADMIN_INSTALL_DIR}/config.sample.inc.php" >"${PHPMYADMIN_INSTALL_DIR}/config.inc.php"
     # 404
 	#curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf -o phpmyadmin.conf
-    ln -s /usr/share/phpmyadmin /var/www/phpmyadmin
+    ln -s "${PHPMYADMIN_INSTALL_DIR}" /var/www/phpmyadmin
     if [[ "$webserver" =~ (nginx) ]]; then
       apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
       service nginx restart
@@ -759,19 +763,17 @@ function update() {
 }
 
 function updatephpMyAdmin() {
-    rm -rf /usr/share/phpmyadmin/*
-    INSTALL_DIR="/usr/share/phpmyadmin"
-    PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
+    rm -rf "${PHPMYADMIN_INSTALL_DIR}"/*
     PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
     curl -fsSL "${PHPMYADMIN_URL}" -o phpmyadmin.tar.gz
-    mkdir -p "${INSTALL_DIR}"
-    tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${INSTALL_DIR}"
+    mkdir -p "${PHPMYADMIN_INSTALL_DIR}"
+    tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${PHPMYADMIN_INSTALL_DIR}"
     rm phpmyadmin.tar.gz
     mkdir /usr/share/phpmyadmin/tmp || exit
-    chown www-data:www-data /usr/share/phpmyadmin/tmp
-    chmod 700 /var/www/phpmyadmin/tmp
+    chown www-data:www-data "${PHPMYADMIN_INSTALL_DIR}/tmp"
+    chmod 700 "${PHPMYADMIN_INSTALL_DIR}/tmp"
     randomBlowfishSecret=$(openssl rand -base64 22)
-    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
+    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "${PHPMYADMIN_INSTALL_DIR}/config.sample.inc.php" >"${PHPMYADMIN_INSTALL_DIR}/config.inc.php"
 }
 
 initialCheck
