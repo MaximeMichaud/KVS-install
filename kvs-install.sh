@@ -279,6 +279,7 @@ function aptinstall() {
 	  findutils
 	  tar
 	  gzip
+	  ncurses-bin
     )
     apt-get -y install "${packages[@]}"
 }
