@@ -266,7 +266,7 @@ function aptinstall() {
       curl
       imagemagick
       ffmpeg
-      wget
+      curl
       sudo
       git
 	  cron
@@ -426,21 +426,21 @@ function aptinstall_nginx() {
       echo "deb-src [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
       rm -rf conf.d && mkdir -p /etc/nginx/globals
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -O /etc/nginx/nginx.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/general.conf -O /etc/nginx/globals/general.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/security.conf -O /etc/nginx/globals/security.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/php_fastcgi.conf -O /etc/nginx/globals/php_fastcgi.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/letsencrypt.conf -O /etc/nginx/globals/letsencrypt.conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/cloudflare-ip-list.conf -O /etc/nginx/globals/cloudflare-ip-list.conf
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -o /etc/nginx/nginx.conf
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/general.conf -o /etc/nginx/globals/general.conf
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/security.conf -o /etc/nginx/globals/security.conf
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/php_fastcgi.conf -o /etc/nginx/globals/php_fastcgi.conf
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/letsencrypt.conf -o /etc/nginx/globals/letsencrypt.conf
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/cloudflare-ip-list.conf -o /etc/nginx/globals/cloudflare-ip-list.conf
 	  # Custom KVS NGINX conf
-      #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -O /etc/nginx/globals/kvs.conf
+      #curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -o /etc/nginx/globals/kvs.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
       mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/domain.conf -O /etc/nginx/sites-available/"$DOMAIN".conf
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/domain.conf -o /etc/nginx/sites-available/"$DOMAIN".conf
       sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-available/"$DOMAIN".conf
       sed -i "s/project_url/$URL/g" /etc/nginx/sites-available/"$DOMAIN".conf
-      # wget sslgen conf
-      wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/sslgen.conf -O /etc/nginx/sites-enabled/sslgen.conf
+      # curl sslgen conf
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/sslgen.conf -o /etc/nginx/sites-enabled/sslgen.conf
       sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/sslgen.conf
       sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/sslgen.conf
       ##
@@ -448,7 +448,7 @@ function aptinstall_nginx() {
       rm -rf /etc/nginx/conf.d
       service nginx restart
       #update CF IPV4/V6 if CF is used
-      #wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -O /usr/bin/update-cloudflare-ip-list.sh
+      #curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -o /usr/bin/update-cloudflare-ip-list.sh
     fi
 }
 
@@ -488,7 +488,7 @@ function aptinstall_phpmyadmin() {
     INSTALL_DIR="/usr/share/phpmyadmin"
     PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
     PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
-    wget -O phpmyadmin.tar.gz "${PHPMYADMIN_URL}"
+    curl -fsSL "${PHPMYADMIN_URL}" -o phpmyadmin.tar.gz
     mkdir -p "${INSTALL_DIR}"
     tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${INSTALL_DIR}"
     rm phpmyadmin.tar.gz
@@ -498,7 +498,7 @@ function aptinstall_phpmyadmin() {
     randomBlowfishSecret=$(openssl rand -base64 22)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" /usr/share/phpmyadmin/config.sample.inc.php >/usr/share/phpmyadmin/config.inc.php
     # 404
-	#wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf
+	#curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf -o phpmyadmin.conf
     ln -s /usr/share/phpmyadmin /var/www/phpmyadmin
     if [[ "$webserver" =~ (nginx) ]]; then
       apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
@@ -672,7 +672,7 @@ insert_cronjob() {
 function install_ioncube() {
   if [[ "$IONCUBE" =~ (YES) ]]; then
       cd /root || exit
-      wget 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz'
+      curl -fsSL 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz' -o ioncube_loaders_lin_x86-64.tar.gz
       tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
       cd ioncube && cp ioncube_loader_lin_"$PHP".so "$php_path"/
       echo "zend_extension=$php_path/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/fpm/php.ini
@@ -750,7 +750,7 @@ function manageMenu() {
 }
 
 function update() {
-  wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh -O kvs-install.sh
+  curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh -o kvs-install.sh
   chmod +x kvs-install.sh
   echo ""
   echo "Update Done."
@@ -764,7 +764,7 @@ function updatephpMyAdmin() {
     INSTALL_DIR="/usr/share/phpmyadmin"
     PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
     PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
-    wget -O phpmyadmin.tar.gz "${PHPMYADMIN_URL}"
+    curl -fsSL "${PHPMYADMIN_URL}" -o phpmyadmin.tar.gz
     mkdir -p "${INSTALL_DIR}"
     tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${INSTALL_DIR}"
     rm phpmyadmin.tar.gz
