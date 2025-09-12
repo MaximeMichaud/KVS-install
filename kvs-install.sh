@@ -270,6 +270,7 @@ function aptinstall() {
       sudo
       git
 	  cron
+	  dnsutils
     )
     apt-get -y install "${packages[@]}"
 }
