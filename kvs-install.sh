@@ -271,6 +271,12 @@ function aptinstall() {
       git
 	  cron
 	  dnsutils
+	  procps
+	  sed
+	  mawk
+	  grep
+	  coreutils
+	  findutils
     )
     apt-get -y install "${packages[@]}"
 }
