@@ -45,7 +45,7 @@ if [[ $HEADLESS == "y" ]]; then
 fi
 #################################################################
 function isRoot() {
-  if [ "$EUID" -ne 0 ]; then
+  if [[ "$EUID" -ne 0 ]]; then
     return 1
   fi
 }
@@ -201,7 +201,7 @@ function installQuestions() {
     echo "Upload KVS Archive File in /root"
     echo "Ex : KVS_X.X.X_[domain.tld].zip"
     # shellcheck disable=SC2144
-    while [ ! -f /root/KVS_*.zip ]; do
+    while [[ ! -f /root/KVS_*.zip ]]; do
       sleep 2
       echo "Waiting for KVS .ZIP file in /root"
       echo "Press CTRL + C for exiting"
@@ -212,7 +212,7 @@ function installQuestions() {
 
     # KVS Version comparison
     ver_compare() {
-      [ "$1" = "$(echo -e "$1\n$2" | sort -V | head -n1)" ]
+      [[ "$1" = "$(echo -e "$1\n$2" | sort -V | head -n1)" ]]
     }
 
     # Determining PHP version and PHP path
@@ -293,25 +293,50 @@ function install_yt-dlp() {
   curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
   chmod a+rx /usr/local/bin/yt-dlp
   # Create symlink only if it doesn't exist
-  [ ! -e /usr/local/bin/youtube-dl ] && ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
+  [[ ! -e /usr/local/bin/youtube-dl ]] && ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
 }
 
 function whatisdomain() {
   mkdir -p /root/tmp
-  cp KVS_* tmp
+  cp KVS_* /root/tmp/
   cd /root/tmp && unzip -o KVS_*
-  # shellcheck disable=SC2016
-  DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']="[a-zA-Z]+\.[a-zA-Z]+"' /root/tmp/admin/include/setup.php)
-  DOMAIN=$(echo "$DOMAIN" | cut -d'"' -f 2)
+  
+  # Try to extract domain from setup.php if it exists
+  if [[ -f /root/tmp/admin/include/setup.php ]]; then
+    # shellcheck disable=SC2016
+    DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']=' /root/tmp/admin/include/setup.php | head -1)
+    DOMAIN=$(echo "$DOMAIN" | sed 's/.*="\([^"]*\)".*/\1/')
+  fi
+  
+  # Fallback: extract domain from filename if not found in setup.php
+  if [[ -z "$DOMAIN" ]]; then
+    # Extract domain from filename pattern like KVS_6.3.2_[domain.com].zip
+    local kvs_file
+    kvs_file=$(ls KVS_*.zip 2>/dev/null | head -1)
+    if [[ -n "$kvs_file" ]]; then
+      DOMAIN=$(echo "$kvs_file" | sed -n 's/.*\[\([^]]*\)\].*/\1/p')
+    fi
+  fi
+  
+  # Validate domain format
+  if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    echo "Error: Invalid or empty domain extracted: '$DOMAIN'"
+    exit 1
+  fi
   # shellcheck disable=SC2016
   URL=$(grep -P -i -m1 '\$config\['"'"'project_url'"'"']=' /root/tmp/admin/include/setup.php)
   URL=$(echo "$URL" | cut -d'"' -f 2)
   # shellcheck disable=SC2001
   URL=$(echo "$URL" | sed 's~http[s]*://~~g')
   rm -rf /root/tmp && cd /root || exit
+  echo "Domain extracted: $DOMAIN"
 }
 
 function check_dns_configuration() {
+  if [[ -z "$DOMAIN" ]]; then
+    echo "Error: DOMAIN variable is empty. Cannot check DNS configuration."
+    return 1
+  fi
   echo "Checking DNS configuration for $DOMAIN..."
   
   # Get server's public IP
@@ -319,7 +344,7 @@ function check_dns_configuration() {
   SERVER_IPV6=$(curl -s https://api64.ipify.org)
   
   # Check if we got the server IP successfully
-  if [ -z "$SERVER_IP" ]; then
+  if [[ -z "$SERVER_IP" ]]; then
     echo "${red}Warning: Could not determine server IP address${normal}"
     echo "Continuing anyway..."
     return
@@ -335,10 +360,10 @@ function check_dns_configuration() {
       | head -n1
     )
     
-    if [ -z "$domain_ip" ]; then
+    if [[ -z "$domain_ip" ]]; then
       echo "  $domain: No A record found"
       return 1
-    elif [ "$domain_ip" = "$SERVER_IP" ]; then
+    elif [[ "$domain_ip" = "$SERVER_IP" ]]; then
       echo "  $domain: ${green}OK${normal} -> $domain_ip"
       return 0
     else
@@ -358,7 +383,7 @@ function check_dns_configuration() {
   fi
   
   # If DNS is not properly configured
-  if [ "$dns_ok" = false ]; then
+  if [[ "$dns_ok" = false ]]; then
     echo ""
     echo "${red}DNS configuration issue detected!${normal}"
     echo "The domain does not point to this server's IP ($SERVER_IP)"
@@ -409,8 +434,8 @@ function check_dns_configuration() {
         | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
         | head -n1
       )
-      if [ -n "$ns_result" ]; then
-        if [ "$ns_result" = "$SERVER_IP" ]; then
+      if [[ -n "$ns_result" ]]; then
+        if [[ "$ns_result" = "$SERVER_IP" ]]; then
           echo "  NS $ns: OK"
         else
           echo "  NS $ns: Points to $ns_result (propagating...)"
@@ -526,10 +551,10 @@ function install_KVS() {
              s|/usr/bin/php|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
     sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH"/admin/include/setup.php
     # Check if setup_db.php already exists and extract password
-    if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
+    if [[ -f "$KVS_PATH/admin/include/setup_db.php" ]]; then
         # Extract existing password from setup_db.php
         existing_password=$(grep -oP "(?<=pass=')[^']+" "$KVS_PATH/admin/include/setup_db.php" 2>/dev/null || echo "")
-        if [ -n "$existing_password" ]; then
+        if [[ -n "$existing_password" ]]; then
             databasepassword="$existing_password"
             echo "Using existing database password from setup_db.php"
         else
@@ -562,7 +587,7 @@ function install_KVS() {
     mariadb -e "FLUSH PRIVILEGES;"
     
     # Only import install_db.sql if database was just created
-    if [ "$db_created" = true ] && [ -f "$KVS_PATH"/_INSTALL/install_db.sql ]; then
+    if [[ "$db_created" = true ]] && [[ -f "$KVS_PATH"/_INSTALL/install_db.sql ]]; then
         echo "Importing initial database structure..."
         mariadb -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
     fi
