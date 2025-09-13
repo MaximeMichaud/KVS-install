@@ -201,7 +201,7 @@ function installQuestions() {
     echo "Upload KVS Archive File in /root"
     echo "Ex : KVS_X.X.X_[domain.tld].zip"
     # shellcheck disable=SC2144
-    while [[ ! -f /root/KVS_*.zip ]]; do
+    while [ ! -f /root/KVS_*.zip ]; do
       sleep 2
       echo "Waiting for KVS .ZIP file in /root"
       echo "Press CTRL + C for exiting"
@@ -314,7 +314,7 @@ function whatisdomain() {
   if [[ -z "$DOMAIN" ]]; then
     # Extract domain from filename pattern like KVS_6.3.2_[domain.com].zip
     local kvs_file
-    kvs_file=$(find . -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
+    kvs_file=$(find /root -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
     kvs_file=${kvs_file##*/}
     if [[ -n "$kvs_file" ]]; then
       # Extract domain from brackets
