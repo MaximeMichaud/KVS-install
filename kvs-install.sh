@@ -763,7 +763,7 @@ function update() {
 }
 
 function updatephpMyAdmin() {
-    rm -rf "${PHPMYADMIN_INSTALL_DIR}"/*
+    rm -rf "${PHPMYADMIN_INSTALL_DIR:?}"/*
     PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
     curl -fsSL "${PHPMYADMIN_URL}" -o phpmyadmin.tar.gz
     mkdir -p "${PHPMYADMIN_INSTALL_DIR}"
