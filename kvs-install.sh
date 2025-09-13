@@ -305,16 +305,21 @@ function whatisdomain() {
   if [[ -f /root/tmp/admin/include/setup.php ]]; then
     # shellcheck disable=SC2016
     DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']=' /root/tmp/admin/include/setup.php | head -1)
-    DOMAIN=$(echo "$DOMAIN" | sed 's/.*="\([^"]*\)".*/\1/')
+    # Extract value between quotes
+    DOMAIN=${DOMAIN#*=\"}
+    DOMAIN=${DOMAIN%\"*}
   fi
   
   # Fallback: extract domain from filename if not found in setup.php
   if [[ -z "$DOMAIN" ]]; then
     # Extract domain from filename pattern like KVS_6.3.2_[domain.com].zip
     local kvs_file
-    kvs_file=$(ls KVS_*.zip 2>/dev/null | head -1)
+    kvs_file=$(find . -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
+    kvs_file=${kvs_file##*/}
     if [[ -n "$kvs_file" ]]; then
-      DOMAIN=$(echo "$kvs_file" | sed -n 's/.*\[\([^]]*\)\].*/\1/p')
+      # Extract domain from brackets
+      DOMAIN=${kvs_file#*[}
+      DOMAIN=${DOMAIN%]*}
     fi
   fi
   
