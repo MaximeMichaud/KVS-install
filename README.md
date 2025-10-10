@@ -26,7 +26,7 @@ This approach will help you appreciate the detailed descriptions and choices pro
 
 
 ```bash
-wget https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh
+curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh -o kvs-install.sh
 chmod +x kvs-install.sh
 HEADLESS=y \
 database_ver=11.8 \
