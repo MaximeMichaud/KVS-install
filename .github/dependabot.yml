@@ -4,7 +4,9 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-    assignees:
-      - "maximemichaud"
-    reviewers:
-      - "maximemichaud"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
