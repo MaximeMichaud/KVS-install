@@ -93,7 +93,7 @@ Your input is valuable— if you believe certain enhancements should be prioriti
 
 ## Supports
 
-The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them. (For example, PHP 8.2/8.3 is not yet officially supported by KVS and thus not recommended.)
+The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them. (For example, PHP 8.3/8.4 is not yet officially supported by KVS and thus not recommended.)
 
 * NGINX 1.29.x mainline
 * MariaDB 10.6 LTS, 10.11 LTS, 11.4 LTS or 11.8 LTS (Default)
