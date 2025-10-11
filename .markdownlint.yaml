@@ -1,0 +1,17 @@
+# markdownlint configuration
+# See: https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+
+# Line length - disabled for README (badges, URLs, etc.)
+MD013: false
+
+# Allow multiple consecutive blank lines for visual separation
+MD012: false
+
+# Unordered list style - enforce dash
+MD004:
+  style: dash
+
+# Trailing spaces - strict mode (no trailing spaces allowed)
+MD009:
+  br_spaces: 2
+  strict: true
