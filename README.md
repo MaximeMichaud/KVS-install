@@ -20,7 +20,7 @@ bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/
 
 Using the script in headless mode is ideal for saving time during mass installations. This mode can facilitate the setup of multiple KVS sites per machine if desired by the user. However, some interactions may still be required to fine-tune specific configurations.
 
-We are actively working to improve mass installation capabilities to allow the script to handle multiple site installations on a single machine seamlessly. To fully understand the available options and their implications, we recommend running the script in its standard mode initially. 
+We are actively working to improve mass installation capabilities to allow the script to handle multiple site installations on a single machine seamlessly. To fully understand the available options and their implications, we recommend running the script in its standard mode initially.
 
 This approach will help you appreciate the detailed descriptions and choices provided during the setup process.
 
@@ -52,9 +52,9 @@ At present, non-Debian-based distros are not a priority. We recommend using the 
 
 ### Hardware Recommendations
 
-This script does not have specific minimum requirements, but we recommend using an SSD for KVS and an HDD for mass storage. 
+This script does not have specific minimum requirements, but we recommend using an SSD for KVS and an HDD for mass storage.
 
-Additionally, certain configurations may need to be modified based on your site's needs, such as the number of PHP workers. 
+Additionally, certain configurations may need to be modified based on your site's needs, such as the number of PHP workers.
 
 However, in general, you should be fine even with a site experiencing a high amount of traffic, unless you have specific usage patterns or inefficient code. This is why SSDs are important, or other measures may need to be implemented to improve performance if it becomes problematic.
 
@@ -85,7 +85,7 @@ In a test on Debian 11, a standard installation left 6.3GB free out of 10GB. Wat
 
 Features are continuously being developed to enhance the script, ensuring it remains comprehensive and up-to-date. For a detailed view of ongoing and planned improvements, visit the [project page](https://github.com/users/MaximeMichaud/projects/2).
 
-If you have suggestions or questions, please feel free to open an issue on GitHub with the 'enhancement' or 'question' label. 
+If you have suggestions or questions, please feel free to open an issue on GitHub with the 'enhancement' or 'question' label.
 
 Current priorities include increasing SSL flexibility to support configurations such as Cloudflare, improving NGINX configurations (e.g., handling `CF-Connecting-IP`), and integrating Cloudflare settings via API. We are also focused on enhancing testing protocols to identify bugs more efficiently and verifying that the installation is functional and optimized across all script components after completion.
 
@@ -95,10 +95,10 @@ Your input is valuable— if you believe certain enhancements should be prioriti
 
 The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them. (For example, PHP 8.3/8.4 is not yet officially supported by KVS and thus not recommended.)
 
-* NGINX 1.29.x mainline
-* MariaDB 10.6 LTS, 10.11 LTS, 11.4 LTS or 11.8 LTS (Default)
-* PHP 7.4 or PHP 8.1 (since 6.2.0)
-* phpMyAdmin 5.2.3 (or newer)
+- NGINX 1.29.x mainline
+- MariaDB 10.6 LTS, 10.11 LTS, 11.4 LTS or 11.8 LTS (Default)
+- PHP 7.4 or PHP 8.1 (since 6.2.0)
+- phpMyAdmin 5.2.3 (or newer)
 
 ## Customization and Limitations
 
