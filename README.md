@@ -37,7 +37,7 @@ AUTOPACKAGEUPDATE=YES \
 
 ## Compatibility
 
-The latest versions are more stable and we recommended using Debian 12 for the best support.
+The latest versions are more stable and we recommended using Debian 13 for the best support.
 
 This script supports the following Linux distributions:
 
