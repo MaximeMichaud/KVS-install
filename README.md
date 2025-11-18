@@ -41,11 +41,11 @@ The latest versions are more stable and we recommended using Debian 13 for the b
 
 This script supports the following Linux distributions:
 
-| Operating System       | Support |
-|-------------------|---------|
-| Debian 11         | ✅       |
-| Debian 12         | ✅       |
-| Debian 13         | ✅       |
+| Operating System | Support |
+| ---------------- | ------- |
+| Debian 11        | ✅       |
+| Debian 12        | ✅       |
+| Debian 13        | ✅       |
 
 At present, non-Debian-based distros are not a priority. We recommend using the latest stable version of Debian as it was the development platform for this script. If you wish to use another distro, please open an issue on GitHub with a valid reason for consideration. Your case will be studied, and may provide support through Docker to achieve similar results.
 
