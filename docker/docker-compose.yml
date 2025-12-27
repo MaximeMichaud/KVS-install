@@ -167,8 +167,9 @@ services:
     command: |
       sh -c '
         if [ ! -f /usr/share/phpmyadmin/index.php ]; then
-          apk add --no-cache curl tar
-          PMA_URL=$$(curl -s https://www.phpmyadmin.net/downloads/ | grep -oP "https://files.phpmyadmin.net/phpMyAdmin/[^\"]+all-languages.tar.gz" | head -1)
+          apk add --no-cache curl tar grep
+          PMA_URL=$$(curl -s https://www.phpmyadmin.net/downloads/ | grep -oE "https://files.phpmyadmin.net/phpMyAdmin/[^\"]+all-languages.tar.gz" | head -1)
+          echo "Downloading phpMyAdmin from: $$PMA_URL"
           curl -fsSL "$$PMA_URL" | tar xz --strip-components=1 -C /usr/share/phpmyadmin
           mkdir -p /usr/share/phpmyadmin/tmp
           chmod 700 /usr/share/phpmyadmin/tmp
