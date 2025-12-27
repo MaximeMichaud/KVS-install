@@ -1,0 +1,26 @@
+# Copy this file to docker-compose.override.yml to use bind mounts
+# This allows direct file access from the host for manual edits
+#
+# Before using:
+# 1. sudo mkdir -p /var/www/${DOMAIN}
+# 2. sudo chown 1000:1000 /var/www/${DOMAIN}
+# 3. Copy this file: cp docker-compose.override.yml.example docker-compose.override.yml
+# 4. Run: docker compose --profile setup up kvs-init
+# 5. Then: docker compose up -d
+
+services:
+  nginx:
+    volumes:
+      - /var/www/${DOMAIN}:/var/www/kvs
+
+  php-fpm:
+    volumes:
+      - /var/www/${DOMAIN}:/var/www/kvs
+
+  cron:
+    volumes:
+      - /var/www/${DOMAIN}:/var/www/kvs
+
+  kvs-init:
+    volumes:
+      - /var/www/${DOMAIN}:/var/www/kvs

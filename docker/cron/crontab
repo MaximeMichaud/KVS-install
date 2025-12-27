@@ -1,0 +1,10 @@
+# Set PATH for cron
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# KVS Cron Job - runs every minute
+* * * * * cd /var/www/kvs/admin/include && /usr/local/bin/php cron.php >> /var/log/cron.log 2>&1
+
+# yt-dlp automatic update - daily at midnight
+0 0 * * * curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp >> /var/log/cron.log 2>&1
+
+# Empty line required
