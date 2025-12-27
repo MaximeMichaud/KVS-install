@@ -94,14 +94,14 @@ select_mariadb_version() {
     echo ""
 
     # Parse and display LTS versions with status
-    # LTS versions: 11.4, 10.11, 10.6, 10.5 (and 11.8 when released)
+    # LTS versions: 11.8, 11.4, 10.11, 10.6
     TODAY=$(date +%Y-%m-%d)
 
     i=1
     declare -a VERSIONS
 
     # Check each LTS version
-    for version in "11.4" "10.11" "10.6"; do
+    for version in "11.8" "11.4" "10.11" "10.6"; do
         # Get EOL and support dates for this version
         EOL=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"eol":"[^"]*"' | cut -d'"' -f4)
         SUPPORT=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"support":"[^"]*"' | cut -d'"' -f4)
@@ -218,7 +218,7 @@ select_ioncube() {
 }
 
 # Run version selections if using defaults
-if [ "$MARIADB_VERSION" = "11.4" ]; then
+if [ "$MARIADB_VERSION" = "11.8" ]; then
     select_mariadb_version
 fi
 

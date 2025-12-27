@@ -54,7 +54,7 @@ services:
       - kvs-network
 
   mariadb:
-    image: mariadb:${MARIADB_VERSION:-11.4}
+    image: mariadb:${MARIADB_VERSION:-11.8}
     container_name: kvs-mariadb
     restart: unless-stopped
     ports:
