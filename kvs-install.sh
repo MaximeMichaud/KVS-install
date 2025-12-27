@@ -45,7 +45,7 @@ if [[ $HEADLESS == "y" ]]; then
 fi
 #################################################################
 # Redirect stdin to /dev/tty for interactive input when piped (curl | bash)
-if [[ ! -t 0 ]]; then
+if [[ ! -t 0 ]] && [[ -e /dev/tty ]]; then
   exec < /dev/tty
 fi
 #################################################################
