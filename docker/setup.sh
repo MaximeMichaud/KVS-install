@@ -51,6 +51,61 @@ fi
 # Reload .env
 source .env
 
+# DNS Check Function
+check_dns() {
+    echo ""
+    echo -e "${CYAN}Checking DNS configuration...${NC}"
+    SERVER_IP=$(curl -s https://api.ipify.org)
+    DOMAIN_IP=$(dig +short "$DOMAIN" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+    WWW_IP=$(dig +short "www.$DOMAIN" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+
+    dns_ok=true
+    echo "Server IP: $SERVER_IP"
+    if [ "$DOMAIN_IP" = "$SERVER_IP" ]; then
+        echo -e "  $DOMAIN: ${GREEN}OK${NC} -> $DOMAIN_IP"
+    else
+        echo -e "  $DOMAIN: ${RED}MISMATCH${NC} -> $DOMAIN_IP (expected: $SERVER_IP)"
+        dns_ok=false
+    fi
+    if [ "$WWW_IP" = "$SERVER_IP" ]; then
+        echo -e "  www.$DOMAIN: ${GREEN}OK${NC} -> $WWW_IP"
+    else
+        echo -e "  www.$DOMAIN: ${RED}MISMATCH${NC} -> $WWW_IP (expected: $SERVER_IP)"
+        dns_ok=false
+    fi
+
+    if [ "$dns_ok" = false ]; then
+        return 1
+    fi
+    return 0
+}
+
+# DNS Check with retry loop
+while true; do
+    if check_dns; then
+        echo -e "${GREEN}DNS configuration OK${NC}"
+        break
+    else
+        echo ""
+        echo -e "${RED}DNS not configured correctly!${NC}"
+        echo "Please configure your DNS records:"
+        echo "  - A record for $DOMAIN -> $SERVER_IP"
+        echo "  - A record for www.$DOMAIN -> $SERVER_IP"
+        echo ""
+        echo "Options:"
+        echo "  1) Retry DNS check"
+        echo "  2) Continue anyway (SSL will fail)"
+        echo "  3) Exit"
+        read -rp "Select [1-3]: " DNS_CHOICE
+        case $DNS_CHOICE in
+            1) continue ;;
+            2) echo "Continuing without valid DNS..."; break ;;
+            3) exit 1 ;;
+            *) continue ;;
+        esac
+    fi
+done
+
 # Check for KVS archive
 echo ""
 echo "Checking for KVS archive..."
@@ -86,41 +141,6 @@ fi
 
 # Create SSL directory structure (certificates will be generated later)
 mkdir -p "nginx/ssl/${DOMAIN}"
-
-# DNS Check
-echo ""
-echo -e "${CYAN}Checking DNS configuration...${NC}"
-SERVER_IP=$(curl -s https://api.ipify.org)
-DOMAIN_IP=$(dig +short "$DOMAIN" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
-WWW_IP=$(dig +short "www.$DOMAIN" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
-
-dns_ok=true
-echo "Server IP: $SERVER_IP"
-if [ "$DOMAIN_IP" = "$SERVER_IP" ]; then
-    echo -e "  $DOMAIN: ${GREEN}OK${NC} -> $DOMAIN_IP"
-else
-    echo -e "  $DOMAIN: ${RED}MISMATCH${NC} -> $DOMAIN_IP (expected: $SERVER_IP)"
-    dns_ok=false
-fi
-if [ "$WWW_IP" = "$SERVER_IP" ]; then
-    echo -e "  www.$DOMAIN: ${GREEN}OK${NC} -> $WWW_IP"
-else
-    echo -e "  www.$DOMAIN: ${RED}MISMATCH${NC} -> $WWW_IP (expected: $SERVER_IP)"
-    dns_ok=false
-fi
-
-if [ "$dns_ok" = false ]; then
-    echo ""
-    echo -e "${RED}DNS not configured correctly!${NC}"
-    echo "SSL certificate will fail. Please configure DNS first:"
-    echo "  - A record for $DOMAIN -> $SERVER_IP"
-    echo "  - A record for www.$DOMAIN -> $SERVER_IP"
-    echo ""
-    read -rp "Continue anyway? [y/N]: " DNS_CONTINUE
-    if [[ ! "$DNS_CONTINUE" =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
 
 # Step 1: Build images
 echo ""
