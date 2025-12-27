@@ -843,15 +843,23 @@ function dockerInstall() {
 
   # Clone or update KVS-install repo
   INSTALL_DIR="/opt/kvs-docker"
-  if [[ -d "$INSTALL_DIR" ]]; then
+  if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "Updating existing installation..."
-    cd "$INSTALL_DIR" && git pull
+    if cd "$INSTALL_DIR" && git pull; then
+      echo "${green}Updated successfully${normal}"
+    else
+      echo "${red}Git pull failed, re-cloning...${normal}"
+      cd /opt && rm -rf "$INSTALL_DIR"
+      git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
+    fi
   else
+    # Directory doesn't exist or is not a git repo
+    rm -rf "$INSTALL_DIR" 2>/dev/null
     echo "Cloning KVS-install..."
     git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
   fi
 
-  cd "$INSTALL_DIR/docker" || exit 1
+  cd "$INSTALL_DIR/docker" || { echo "${red}Failed to enter docker directory${normal}"; exit 1; }
 
   # Check for KVS archive in /root or current docker directory
   echo ""
