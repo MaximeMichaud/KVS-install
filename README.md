@@ -13,8 +13,39 @@ We strongly recommend all users to thoroughly read this README.md to fully under
 ## Usage
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
+curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh | bash
 ```
+
+The script will prompt you to choose between:
+
+1. **Docker (recommended)** - Containerized installation with Docker Compose
+2. **Standalone** - Traditional installation directly on the server
+
+### Docker Installation
+
+Docker installation is the recommended method. It provides:
+
+- Isolated environment with all dependencies
+- Easy updates and rollbacks
+- Consistent configuration across environments
+- Dragonfly cache (faster than Memcached)
+
+Requirements:
+
+- Docker and Docker Compose (installed automatically if missing)
+- KVS archive file (`KVS_X.X.X_[domain.tld].zip`) in `/root`
+
+The script will:
+
+1. Install Docker if not present
+2. Clone the repository to `/opt/kvs-docker`
+3. Configure environment variables automatically
+4. Generate secure database passwords
+5. Start all services via Docker Compose
+
+### Standalone Installation
+
+For traditional bare-metal installation on Debian systems.
 
 ### Headless Usage
 
@@ -68,6 +99,7 @@ In a test on Debian 11, a standard installation left 6.3GB free out of 10GB. Wat
 
 ## Features
 
+- **Docker Support (Recommended)**: Full Docker Compose setup with NGINX, PHP-FPM, MariaDB, Dragonfly cache, and automatic SSL via ACME. Includes bind mount option for direct file access with kvs-cli.
 - **Automated KVS Setup**: Installs all necessary dependencies, sets up the database, configures cron jobs, and prepares the webserver. Tailored to meet the [KVS requirements](https://www.kernel-video-sharing.com/en/requirements/).
 - **Optimized Web Server Configuration**: Configures NGINX with the latest performance and security enhancements including HTTP/2 with ALPN, 0-RTT support for TLS 1.3, and x25519 support. Configurations are aligned with [Qualys SSL Labs](https://www.ssllabs.com/ssltest/) and Mozilla Foundation security standards, ensuring broad compatibility without compromising on security.
 - **SSL Configuration via ACME.sh**: Automatically handles SSL certificate issuance and renewal using ACME.sh with ECDSA support for enhanced security.
