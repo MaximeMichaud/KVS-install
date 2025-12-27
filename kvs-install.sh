@@ -907,37 +907,7 @@ function dockerInstall() {
     echo "Domain set to: ${green}$archive_domain${normal}"
   fi
 
-  # Prompt for email if still default
-  source .env
-  if [[ "$EMAIL" == "admin@example.com" ]]; then
-    echo ""
-    echo "Email for SSL certificates (required by acme.sh/ZeroSSL):"
-    while true; do
-      read -rp "Email: " EMAIL
-      if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-        sed -i "s/^EMAIL=.*/EMAIL=$EMAIL/" .env
-        break
-      else
-        echo "Please enter a valid email address."
-      fi
-    done
-  fi
-
-  # Generate secure passwords if still defaults
-  source .env
-  if [[ "$MARIADB_ROOT_PASSWORD" == "CHANGE_ME_ROOT_PASSWORD" ]] || [[ "$MARIADB_ROOT_PASSWORD" == "testrootpass123" ]]; then
-    # Generate password without special chars that break sed
-    MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
-    sed -i "s|^MARIADB_ROOT_PASSWORD=.*|MARIADB_ROOT_PASSWORD=$MARIADB_ROOT_PASSWORD|" .env
-    echo "${green}Generated MariaDB root password${normal}"
-  fi
-
-  if [[ "$MARIADB_PASSWORD" == "CHANGE_ME_KVS_PASSWORD" ]] || [[ "$MARIADB_PASSWORD" == "testkvpass123" ]]; then
-    # Generate password without special chars that break sed
-    MARIADB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
-    sed -i "s|^MARIADB_PASSWORD=.*|MARIADB_PASSWORD=$MARIADB_PASSWORD|" .env
-    echo "${green}Generated MariaDB KVS password${normal}"
-  fi
+  # Email, SSL provider, and password prompts are handled by setup.sh
 
   # Run Docker setup
   chmod +x setup.sh
