@@ -105,6 +105,20 @@ if [ -d "$KVS_PATH/_INSTALL" ]; then
     echo "Installation files cleaned up"
 fi
 
+# Clear stale cron locks (prevents "Duplicate cron operation" errors after container recreation)
+# This is safe during init since cron container hasn't started yet
+echo "Clearing cron locks..."
+find "$KVS_PATH/admin/data" -name "*.lock" -type f -delete 2>/dev/null || true
+
+# Clear CRON_UID from database so new container can register
+# Table name may be ktvs_options or sys_options depending on KVS version
+if mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+    -e "SELECT 1 FROM ktvs_options LIMIT 1;" >/dev/null 2>&1; then
+    mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+        -e "DELETE FROM ktvs_options WHERE variable IN ('CRON_UID', 'CRON_TIME');" 2>/dev/null || true
+    echo "Cleared cron registration from ktvs_options"
+fi
+
 # Final permissions
 chown -R 1000:1000 "$KVS_PATH"
 

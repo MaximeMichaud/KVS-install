@@ -81,8 +81,13 @@ RUN mkdir -p /var/log/php && chown www-data:www-data /var/log/php
 # Set proper permissions
 RUN usermod -u 1000 www-data && groupmod -g 1000 www-data
 
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 WORKDIR /var/www/kvs
 
 EXPOSE 9000
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["php-fpm"]

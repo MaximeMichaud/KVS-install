@@ -71,6 +71,8 @@ services:
       MARIADB_DATABASE: ${DOMAIN:?error}
       MARIADB_USER: ${DOMAIN}
       MARIADB_PASSWORD: ${MARIADB_PASSWORD:?error}
+      # Create mysql@localhost user for healthcheck (doesn't need password)
+      MARIADB_MYSQL_LOCALHOST_USER: 1
     volumes:
       - mariadb-data:/var/lib/mysql
       - ./mariadb/init:/docker-entrypoint-initdb.d:ro

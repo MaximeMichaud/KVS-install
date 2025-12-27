@@ -308,6 +308,74 @@ if [ "$MODE" = "single" ]; then
     select_mode
 fi
 
+# Check for existing MariaDB volume
+# Based on MariaDB Docker best practices: env vars are IGNORED if data exists
+# See: https://mariadb.com/kb/en/docker-official-image-frequently-asked-questions/
+check_existing_volume() {
+    echo ""
+    echo -e "${CYAN}Checking for existing MariaDB data...${NC}"
+
+    # Check if volume exists
+    VOLUME_NAME="docker_mariadb-data"
+    if docker volume ls -q | grep -q "^${VOLUME_NAME}$"; then
+        echo -e "${YELLOW}Existing MariaDB volume found: ${VOLUME_NAME}${NC}"
+        echo -e "${YELLOW}Note: MariaDB ignores password env vars when data exists${NC}"
+
+        # Check if .env has non-default passwords (meaning we generated them before)
+        source .env
+        if [ "$MARIADB_ROOT_PASSWORD" != "CHANGE_ME_ROOT_PASSWORD" ] && [ -n "$MARIADB_ROOT_PASSWORD" ]; then
+            echo "Saved credentials found in .env"
+
+            # Try to verify connection by starting container briefly
+            echo "Verifying database connection..."
+            docker compose up -d mariadb >/dev/null 2>&1
+            sleep 5
+
+            if docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; then
+                echo -e "${GREEN}Connection verified - using existing database${NC}"
+                docker compose down >/dev/null 2>&1
+                return 0
+            else
+                echo -e "${RED}Connection failed - password mismatch${NC}"
+                docker compose down >/dev/null 2>&1
+            fi
+        fi
+
+        # Volume exists but credentials don't work or don't exist
+        echo ""
+        echo -e "${RED}WARNING: Cannot connect with saved credentials${NC}"
+        echo "The volume contains data created with different credentials."
+        echo ""
+        echo "Options:"
+        echo "  1) Delete volume and start fresh (DATA WILL BE LOST)"
+        echo "  2) Exit - manually backup or reset password first"
+        echo ""
+        echo "To reset password manually:"
+        echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql mariadb:${MARIADB_VERSION:-11.8} \\"
+        echo "    --skip-grant-tables --user=mysql &"
+        echo "  # Then connect and reset: ALTER USER 'root'@'localhost' IDENTIFIED BY 'newpass';"
+        echo ""
+        read -rp "Select [1-2]: " VOLUME_CHOICE
+
+        case $VOLUME_CHOICE in
+            1)
+                echo -e "${YELLOW}Stopping containers and removing volume...${NC}"
+                docker compose down 2>/dev/null || true
+                docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                echo -e "${GREEN}Volume removed. Will create fresh database.${NC}"
+                ;;
+            *)
+                echo "Exiting. Please backup your data or fix credentials."
+                exit 1
+                ;;
+        esac
+    else
+        echo "No existing MariaDB volume - will create fresh database."
+    fi
+}
+
+check_existing_volume
+
 # Generate passwords if still defaults
 source .env
 if [ "$MARIADB_ROOT_PASSWORD" = "CHANGE_ME_ROOT_PASSWORD" ]; then
