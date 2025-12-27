@@ -63,10 +63,36 @@ if [ "$DOMAIN" = "example.com" ]; then
     done
 fi
 
-# Prompt for email
-if [ "$EMAIL" = "admin@example.com" ]; then
+# SSL provider selection FIRST (before email)
+echo ""
+echo -e "${CYAN}SSL Certificate Provider${NC}"
+echo "  1) Let's Encrypt (recommended, default)"
+echo "  2) ZeroSSL"
+echo "  3) Self-signed (for testing only)"
+read -rp "Select SSL provider [1-3] (default: 1): " SSL_CHOICE
+
+case $SSL_CHOICE in
+    2)
+        SSL_PROVIDER="zerossl"
+        sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=zerossl/" .env
+        echo -e "${GREEN}Selected ZeroSSL${NC}"
+        ;;
+    3)
+        SSL_PROVIDER="selfsigned"
+        sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=selfsigned/" .env
+        echo -e "${YELLOW}Selected self-signed certificate${NC}"
+        ;;
+    *)
+        SSL_PROVIDER="letsencrypt"
+        sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=letsencrypt/" .env
+        echo -e "${GREEN}Selected Let's Encrypt${NC}"
+        ;;
+esac
+
+# Prompt for email only if using letsencrypt or zerossl
+if [ "$SSL_PROVIDER" != "selfsigned" ] && [ "$EMAIL" = "admin@example.com" ]; then
     while true; do
-        read -rp "Enter your email (for SSL certificates): " EMAIL
+        read -rp "Enter your email (required for $SSL_PROVIDER): " EMAIL
         if validate_email "$EMAIL"; then
             sed -i "s/EMAIL=admin@example.com/EMAIL=$EMAIL/" .env
             break
@@ -217,31 +243,6 @@ select_ioncube() {
     esac
 }
 
-# SSL provider selection
-select_ssl_provider() {
-    echo ""
-    echo -e "${CYAN}SSL Certificate Provider${NC}"
-    echo "  1) Let's Encrypt (recommended, default)"
-    echo "  2) ZeroSSL"
-    echo "  3) Self-signed (for testing only)"
-    read -rp "Select SSL provider [1-3] (default: 1): " SSL_CHOICE
-
-    case $SSL_CHOICE in
-        2)
-            sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=zerossl/" .env
-            echo -e "${GREEN}Selected ZeroSSL${NC}"
-            ;;
-        3)
-            sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=selfsigned/" .env
-            echo -e "${YELLOW}Selected self-signed certificate${NC}"
-            ;;
-        *)
-            sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=letsencrypt/" .env
-            echo -e "${GREEN}Selected Let's Encrypt${NC}"
-            ;;
-    esac
-}
-
 # Run version selections if using defaults
 if [ "$MARIADB_VERSION" = "11.8" ]; then
     select_mariadb_version
@@ -273,9 +274,38 @@ if [ "$IONCUBE" = "YES" ]; then
     select_ioncube
 fi
 
-# SSL provider selection
-if [ "$SSL_PROVIDER" = "letsencrypt" ]; then
-    select_ssl_provider
+# Mode selection (single/multi)
+select_mode() {
+    echo ""
+    echo -e "${CYAN}Installation Mode${NC}"
+    echo "  1) Single site (default) - nginx direct, lowest latency"
+    echo "  2) Multi site - Traefik reverse proxy, add more sites later"
+    read -rp "Select mode [1-2] (default: 1): " MODE_CHOICE
+
+    case $MODE_CHOICE in
+        2)
+            sed -i "s/MODE=.*/MODE=multi/" .env
+            # Add multi to COMPOSE_PROFILES
+            CURRENT_PROFILES=$(grep "^COMPOSE_PROFILES=" .env | cut -d= -f2)
+            sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=${CURRENT_PROFILES},multi/" .env
+            # Create override to remove nginx ports
+            cat > docker-compose.override.yml << 'OVERRIDE'
+services:
+  nginx:
+    ports: []
+OVERRIDE
+            echo -e "${GREEN}Multi-site mode enabled with Traefik${NC}"
+            ;;
+        *)
+            sed -i "s/MODE=.*/MODE=single/" .env
+            rm -f docker-compose.override.yml
+            echo -e "${GREEN}Single site mode (direct nginx)${NC}"
+            ;;
+    esac
+}
+
+if [ "$MODE" = "single" ]; then
+    select_mode
 fi
 
 # Generate passwords if still defaults
@@ -306,13 +336,23 @@ fi
 # Check if ports are available
 echo ""
 echo -e "${CYAN}Checking if ports 80 and 443 are available...${NC}"
-if ss -tuln | grep -qE ':80\s'; then
-    echo -e "${RED}WARNING: Port 80 is already in use${NC}"
-    ss -tuln | grep -E ':80\s'
-fi
-if ss -tuln | grep -qE ':443\s'; then
-    echo -e "${RED}WARNING: Port 443 is already in use${NC}"
-    ss -tuln | grep -E ':443\s'
+if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
+    # Check if it's a KVS docker container
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "kvs-"; then
+        echo -e "${YELLOW}Existing KVS containers detected${NC}"
+        docker ps --filter "name=kvs-" --format "table {{.Names}}\t{{.Status}}"
+        echo ""
+        read -rp "Stop existing KVS containers? [Y/n]: " STOP_EXISTING
+        if [ "$STOP_EXISTING" != "n" ] && [ "$STOP_EXISTING" != "N" ]; then
+            echo "Stopping existing containers..."
+            docker compose down 2>/dev/null || true
+            docker ps -q --filter "name=kvs-" | xargs -r docker stop 2>/dev/null || true
+            echo -e "${GREEN}Existing containers stopped${NC}"
+        fi
+    else
+        echo -e "${RED}WARNING: Ports 80/443 in use by non-KVS process${NC}"
+        ss -tuln | grep -E ':(80|443)\s'
+    fi
 fi
 
 # DNS Check Function
@@ -320,8 +360,9 @@ check_dns() {
     echo ""
     echo -e "${CYAN}Checking DNS configuration...${NC}"
     SERVER_IP=$(curl -s https://api.ipify.org)
-    DOMAIN_IP=$(dig +short "$DOMAIN" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
-    WWW_IP=$(dig +short "www.$DOMAIN" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+    # Use getent instead of dig (more portable)
+    DOMAIN_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
+    WWW_IP=$(getent hosts "www.$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
 
     dns_ok=true
     echo "Server IP: $SERVER_IP"
@@ -430,13 +471,13 @@ if [ "$SSL_PROVIDER" = "selfsigned" ]; then
 else
     echo "Issuing SSL certificate for $DOMAIN..."
 
-    # Build command based on provider
-    ACME_CMD="acme.sh --issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --keylength ec-256 --accountemail $EMAIL"
+    # Build acme.sh command
+    ACME_ARGS="--issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --keylength ec-256 --accountemail $EMAIL"
     if [ "$SSL_PROVIDER" = "letsencrypt" ]; then
-        ACME_CMD="$ACME_CMD --server letsencrypt"
+        ACME_ARGS="$ACME_ARGS --server letsencrypt"
     fi
 
-    if docker compose exec acme sh -c "$ACME_CMD"; then
+    if docker compose exec acme sh -c "acme.sh $ACME_ARGS"; then
         # Install certificate only if issue succeeded
         docker compose exec acme acme.sh --install-cert \
             -d "$DOMAIN" \
@@ -449,7 +490,7 @@ else
     else
         echo -e "${RED}SSL certificate issue failed${NC}"
         echo "Site will use self-signed certificate until you run:"
-        echo "  docker compose exec acme sh -c '$ACME_CMD --force'"
+        echo "  docker compose exec acme acme.sh --issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --force"
     fi
 fi
 

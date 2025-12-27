@@ -41,7 +41,6 @@ fi
 if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     echo "Configuring setup.php..."
     sed -i "s|/PATH|$KVS_PATH|g" "$KVS_PATH/admin/include/setup.php"
-    sed -i "s|/usr/local/bin/|/usr/local/bin/|g" "$KVS_PATH/admin/include/setup.php"
 
     # Update project title with domain
     if [ -n "$DOMAIN" ]; then

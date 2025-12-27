@@ -24,6 +24,12 @@ services:
     depends_on:
       - php-fpm
       - acme
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${DOMAIN:-kvs}.rule=Host(`${DOMAIN}`) || Host(`www.${DOMAIN}`)"
+      - "traefik.http.routers.${DOMAIN:-kvs}.entrypoints=websecure"
+      - "traefik.http.routers.${DOMAIN:-kvs}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.${DOMAIN:-kvs}.loadbalancer.server.port=80"
     networks:
       kvs-network:
         aliases:
@@ -78,7 +84,7 @@ services:
 
   memcached:
     image: memcached:alpine
-    container_name: kvs-cache
+    container_name: kvs-memcached
     hostname: cache
     restart: unless-stopped
     command: memcached -m ${CACHE_MEMORY:-256}
@@ -94,7 +100,7 @@ services:
 
   dragonfly:
     image: docker.dragonflydb.io/dragonflydb/dragonfly
-    container_name: kvs-cache
+    container_name: kvs-dragonfly
     hostname: cache
     restart: unless-stopped
     command: dragonfly --memcached_port=11211 --maxmemory=${CACHE_MEMORY:-256}mb --proactor_threads=2 --logtostderr
@@ -186,6 +192,33 @@ services:
     profiles:
       - setup
 
+  # Traefik reverse proxy - only in multi-site mode
+  traefik:
+    image: traefik:v3.6
+    container_name: kvs-traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=kvs-network"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.email=${EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certs:/letsencrypt
+    networks:
+      - kvs-network
+    profiles:
+      - multi
+
 networks:
   kvs-network:
     driver: bridge
@@ -212,3 +245,4 @@ volumes:
   letsencrypt-webroot:
   phpmyadmin-data:
   nginx-logs:
+  traefik-certs:
