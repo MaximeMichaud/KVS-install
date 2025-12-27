@@ -65,10 +65,10 @@ fi
 # Configure database connection
 if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
     echo "Configuring database connection..."
-    sed -i "s|'DB_HOST','localhost'|'DB_HOST','kvs-mariadb'|" "$KVS_PATH/admin/include/setup_db.php"
-    sed -i "s|login|$DOMAIN|g" "$KVS_PATH/admin/include/setup_db.php"
-    sed -i "s|pass|$MARIADB_PASSWORD|g" "$KVS_PATH/admin/include/setup_db.php"
-    sed -i "s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
+    sed -i "s|'DB_HOST','[^']*'|'DB_HOST','kvs-mariadb'|" "$KVS_PATH/admin/include/setup_db.php"
+    sed -i "s|'DB_LOGIN','[^']*'|'DB_LOGIN','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
+    sed -i "s|'DB_PASS','[^']*'|'DB_PASS','$MARIADB_PASSWORD'|" "$KVS_PATH/admin/include/setup_db.php"
+    sed -i "s|'DB_DEVICE','[^']*'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
 fi
 
 # Import database if first run
