@@ -13,7 +13,7 @@ if [ ! -f "${SSL_DIR}/cert.pem" ]; then
         -keyout "${SSL_DIR}/key.pem" \
         -out "${SSL_DIR}/cert.pem" \
         -subj "/CN=${DOMAIN}" \
-        -addext "subjectAltName=DNS:${DOMAIN},DNS:www.${DOMAIN},DNS:pma.${DOMAIN}" \
+        -addext "subjectAltName=DNS:${DOMAIN},DNS:www.${DOMAIN}" \
         2>/dev/null
     echo "Self-signed certificate generated for ${DOMAIN}"
 fi
