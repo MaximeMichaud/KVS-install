@@ -44,6 +44,11 @@ if [[ $HEADLESS == "y" ]]; then
   PHP_CHOICE=${PHP_CHOICE:-2}  # Default to PHP 8.3 for headless mode (for KVS 6.4+) if not set
 fi
 #################################################################
+# Redirect stdin to /dev/tty for interactive input when piped (curl | bash)
+if [[ ! -t 0 ]]; then
+  exec < /dev/tty
+fi
+#################################################################
 function isRoot() {
   if [[ "$EUID" -ne 0 ]]; then
     return 1
