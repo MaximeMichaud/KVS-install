@@ -13,7 +13,7 @@ We strongly recommend all users to thoroughly read this README.md to fully under
 ## Usage
 
 ```bash
-curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh | bash
+curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh | sudo bash
 ```
 
 The script will prompt you to choose between:
