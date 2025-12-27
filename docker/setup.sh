@@ -185,36 +185,43 @@ echo ""
 echo -e "${CYAN}Initializing phpMyAdmin and KVS...${NC}"
 docker compose --profile setup up phpmyadmin-init kvs-init
 
-# Step 4: Start acme.sh and get certificate
+# Step 4: Start nginx and get certificate
 echo ""
-echo -e "${CYAN}Starting ACME for SSL certificates...${NC}"
 docker compose up -d nginx acme
 
 # Wait a moment for nginx to start
 sleep 5
 
-# Issue SSL certificate
-echo "Issuing SSL certificate for $DOMAIN..."
-if docker compose exec acme acme.sh --issue \
-    -d "$DOMAIN" \
-    -d "www.$DOMAIN" \
-    --webroot /var/www/_letsencrypt \
-    --keylength ec-256 \
-    --accountemail "$EMAIL"; then
+# SSL Certificate based on SSL_PROVIDER
+SSL_PROVIDER="${SSL_PROVIDER:-letsencrypt}"
+echo -e "${CYAN}SSL Provider: ${SSL_PROVIDER}${NC}"
 
-    # Install certificate only if issue succeeded
-    docker compose exec acme acme.sh --install-cert \
-        -d "$DOMAIN" \
-        --ecc \
-        --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
-        --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
-        --reloadcmd "true"
-
-    echo -e "${GREEN}SSL certificate installed${NC}"
+if [ "$SSL_PROVIDER" = "selfsigned" ]; then
+    echo -e "${GREEN}Using self-signed certificate (already generated)${NC}"
 else
-    echo -e "${RED}SSL certificate issue failed${NC}"
-    echo "Site will use self-signed certificate until you run:"
-    echo "  docker compose exec acme acme.sh --issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --keylength ec-256 --force"
+    echo "Issuing SSL certificate for $DOMAIN..."
+
+    # Build command based on provider
+    ACME_CMD="acme.sh --issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --keylength ec-256 --accountemail $EMAIL"
+    if [ "$SSL_PROVIDER" = "letsencrypt" ]; then
+        ACME_CMD="$ACME_CMD --server letsencrypt"
+    fi
+
+    if docker compose exec acme sh -c "$ACME_CMD"; then
+        # Install certificate only if issue succeeded
+        docker compose exec acme acme.sh --install-cert \
+            -d "$DOMAIN" \
+            --ecc \
+            --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
+            --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
+            --reloadcmd "true"
+
+        echo -e "${GREEN}SSL certificate installed${NC}"
+    else
+        echo -e "${RED}SSL certificate issue failed${NC}"
+        echo "Site will use self-signed certificate until you run:"
+        echo "  docker compose exec acme sh -c '$ACME_CMD --force'"
+    fi
 fi
 
 # Step 5: Start all services
