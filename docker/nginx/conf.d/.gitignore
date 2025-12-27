@@ -1,0 +1,3 @@
+# Generated configs - do not commit
+*.conf
+!.gitignore

@@ -1,0 +1,214 @@
+services:
+  nginx:
+    build:
+      context: ./nginx
+    container_name: kvs-nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+      - USE_WWW=${USE_WWW:-false}
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../conf/nginx/templates:/etc/nginx/templates:ro
+      - ../conf/nginx/globals:/etc/nginx/globals:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
+      - kvs-data:/var/www/kvs
+      - phpmyadmin-data:/usr/share/phpmyadmin:ro
+      - acme-certs:/etc/nginx/ssl
+      - letsencrypt-webroot:/var/www/_letsencrypt
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      - php-fpm
+      - acme
+    networks:
+      kvs-network:
+        aliases:
+          - ${DOMAIN}
+          - www.${DOMAIN}
+
+  php-fpm:
+    build:
+      context: ./php
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+        IONCUBE: ${IONCUBE:-YES}
+    container_name: kvs-php
+    restart: unless-stopped
+    volumes:
+      - kvs-data:/var/www/kvs
+      - phpmyadmin-data:/usr/share/phpmyadmin
+      - ./php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
+    environment:
+      - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-512M}
+      - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
+      - PHP_POST_MAX_SIZE=${PHP_POST_MAX_SIZE:-2048M}
+      - PHP_MAX_EXECUTION_TIME=${PHP_MAX_EXECUTION_TIME:-300}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - kvs-network
+
+  mariadb:
+    image: mariadb:${MARIADB_VERSION:-11.4}
+    container_name: kvs-mariadb
+    restart: unless-stopped
+    ports:
+      # Localhost only - safe for kvs-cli access
+      - "127.0.0.1:3306:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?error}
+      MARIADB_DATABASE: ${DOMAIN:?error}
+      MARIADB_USER: ${DOMAIN}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?error}
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - ./mariadb/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kvs-network
+
+  memcached:
+    image: memcached:alpine
+    container_name: kvs-cache
+    hostname: cache
+    restart: unless-stopped
+    command: memcached -m ${CACHE_MEMORY:-256}
+    ports:
+      # Localhost only - for kvs-cli access
+      - "127.0.0.1:11211:11211"
+    networks:
+      kvs-network:
+        aliases:
+          - cache
+    profiles:
+      - memcached
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly
+    container_name: kvs-cache
+    hostname: cache
+    restart: unless-stopped
+    command: dragonfly --memcached_port=11211 --maxmemory=${CACHE_MEMORY:-256}mb --proactor_threads=2 --logtostderr
+    ports:
+      # Localhost only - for kvs-cli access
+      - "127.0.0.1:11211:11211"
+    ulimits:
+      memlock: -1
+    networks:
+      kvs-network:
+        aliases:
+          - cache
+    profiles:
+      - dragonfly
+
+  acme:
+    image: neilpang/acme.sh
+    container_name: kvs-acme
+    restart: unless-stopped
+    command: daemon
+    environment:
+      - DEPLOY_DOCKER_CONTAINER_LABEL=sh.acme.autoload.domain=${DOMAIN}
+    volumes:
+      - acme-data:/acme.sh
+      - acme-certs:/etc/nginx/ssl
+      - letsencrypt-webroot:/var/www/_letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - kvs-network
+
+  cron:
+    build:
+      context: ./cron
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+        IONCUBE: ${IONCUBE:-YES}
+    container_name: kvs-cron
+    restart: unless-stopped
+    volumes:
+      - kvs-data:/var/www/kvs
+    depends_on:
+      - php-fpm
+      - mariadb
+    networks:
+      - kvs-network
+
+  # Init container - runs once to setup KVS
+  kvs-init:
+    build:
+      context: ./init
+    container_name: kvs-init
+    volumes:
+      - kvs-data:/var/www/kvs
+      - ./kvs-archive:/kvs-archive:ro
+    environment:
+      - DOMAIN=${DOMAIN}
+      - MARIADB_PASSWORD=${MARIADB_PASSWORD}
+      - USE_WWW=${USE_WWW:-false}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - kvs-network
+    profiles:
+      - setup
+
+  phpmyadmin-init:
+    image: alpine:latest
+    container_name: kvs-phpmyadmin-init
+    command: |
+      sh -c '
+        if [ ! -f /usr/share/phpmyadmin/index.php ]; then
+          apk add --no-cache curl tar
+          PMA_URL=$$(curl -s https://www.phpmyadmin.net/downloads/ | grep -oP "https://files.phpmyadmin.net/phpMyAdmin/[^\"]+all-languages.tar.gz" | head -1)
+          curl -fsSL "$$PMA_URL" | tar xz --strip-components=1 -C /usr/share/phpmyadmin
+          mkdir -p /usr/share/phpmyadmin/tmp
+          chmod 700 /usr/share/phpmyadmin/tmp
+          BLOWFISH=$$(head -c 32 /dev/urandom | base64 | tr -d "=+/" | head -c 32)
+          sed "s/cfg\[.blowfish_secret.\] = .*/cfg[\"blowfish_secret\"] = \"$$BLOWFISH\";/" \
+            /usr/share/phpmyadmin/config.sample.inc.php > /usr/share/phpmyadmin/config.inc.php
+          echo "phpMyAdmin installed"
+        else
+          echo "phpMyAdmin already installed"
+        fi
+      '
+    volumes:
+      - phpmyadmin-data:/usr/share/phpmyadmin
+    profiles:
+      - setup
+
+networks:
+  kvs-network:
+    driver: bridge
+
+# Volumes: Docker managed (default)
+# For bind mounts (direct file access), create docker-compose.override.yml:
+#   services:
+#     nginx:
+#       volumes:
+#         - /var/www/${DOMAIN}:/var/www/kvs
+#     php-fpm:
+#       volumes:
+#         - /var/www/${DOMAIN}:/var/www/kvs
+#     cron:
+#       volumes:
+#         - /var/www/${DOMAIN}:/var/www/kvs
+#     kvs-init:
+#       volumes:
+#         - /var/www/${DOMAIN}:/var/www/kvs
+volumes:
+  kvs-data:
+  mariadb-data:
+  acme-data:
+  acme-certs:
+  letsencrypt-webroot:
+  phpmyadmin-data:
+  nginx-logs:

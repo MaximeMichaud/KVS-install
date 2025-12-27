@@ -1,0 +1,12 @@
+# Sensitive files
+.env
+kvs-archive/
+
+# Generated files
+nginx/dhparam.pem
+nginx/ssl/
+nginx/conf.d/*.conf
+
+# Docker volumes (if using bind mounts)
+data/
+docker-compose.override.yml
