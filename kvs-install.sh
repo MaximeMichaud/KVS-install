@@ -60,23 +60,26 @@ function initialCheck() {
 }
 
 function checkOS() {
+  IS_DEBIAN=false
   if [[ -e /etc/debian_version ]]; then
     OS="debian"
+    IS_DEBIAN=true
     source /etc/os-release
 
     if [[ ! $VERSION_ID =~ (11|12|13) ]]; then
-      echo "⚠️ ${alert}Your version of Debian is not supported.${normal}"
+      echo "⚠️ ${alert}Your version of Debian is not supported for standalone installation.${normal}"
       echo ""
-      until [[ $CONTINUE =~ (y|n) ]]; do
-        read -rp "Continue? [y/n] : " -e CONTINUE
-      done
-      if [[ "$CONTINUE" == "n" ]]; then
-        exit 1
-      fi
     fi
   else
-    echo "Looks like you aren't running this script on a Debian system ${normal}"
-    exit 1
+    # Non-Debian: Docker only
+    if [[ -e /etc/os-release ]]; then
+      source /etc/os-release
+      OS="$ID"
+    else
+      OS="unknown"
+    fi
+    echo "${cyan}Detected: $OS${normal}"
+    echo "Standalone installation requires Debian. Docker installation is available."
   fi
 }
 
@@ -785,6 +788,16 @@ function setupdone() {
 
 function chooseInstallationType() {
   echo ""
+
+  # Non-Debian: Docker only
+  if [[ "$IS_DEBIAN" == false ]]; then
+    echo "Docker installation will be used (standalone requires Debian)."
+    echo ""
+    dockerInstall
+    return
+  fi
+
+  # Debian: offer choice
   echo "Choose installation type:"
   echo "   1) Docker (recommended)"
   echo "   2) Standalone (install directly on server)"
