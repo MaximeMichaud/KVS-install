@@ -926,14 +926,16 @@ function dockerInstall() {
   # Generate secure passwords if still defaults
   source .env
   if [[ "$MARIADB_ROOT_PASSWORD" == "CHANGE_ME_ROOT_PASSWORD" ]] || [[ "$MARIADB_ROOT_PASSWORD" == "testrootpass123" ]]; then
-    MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24)
-    sed -i "s/^MARIADB_ROOT_PASSWORD=.*/MARIADB_ROOT_PASSWORD=$MARIADB_ROOT_PASSWORD/" .env
+    # Generate password without special chars that break sed
+    MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
+    sed -i "s|^MARIADB_ROOT_PASSWORD=.*|MARIADB_ROOT_PASSWORD=$MARIADB_ROOT_PASSWORD|" .env
     echo "${green}Generated MariaDB root password${normal}"
   fi
 
   if [[ "$MARIADB_PASSWORD" == "CHANGE_ME_KVS_PASSWORD" ]] || [[ "$MARIADB_PASSWORD" == "testkvpass123" ]]; then
-    MARIADB_PASSWORD=$(openssl rand -base64 24)
-    sed -i "s/^MARIADB_PASSWORD=.*/MARIADB_PASSWORD=$MARIADB_PASSWORD/" .env
+    # Generate password without special chars that break sed
+    MARIADB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
+    sed -i "s|^MARIADB_PASSWORD=.*|MARIADB_PASSWORD=$MARIADB_PASSWORD|" .env
     echo "${green}Generated MariaDB KVS password${normal}"
   fi
 
