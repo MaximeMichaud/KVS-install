@@ -13,7 +13,7 @@
 # shellcheck disable=SC1091
 #################################################################
 # Script constants
-readonly SCRIPT_VERSION="2.0"
+readonly SCRIPT_VERSION="3.0.0"
 readonly LOG_FILE="/root/kvs-install.log"
 readonly PHPMYADMIN_INSTALL_DIR="/usr/share/phpmyadmin"
 readonly PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
@@ -51,6 +51,7 @@ function isRoot() {
 }
 
 function initialCheck() {
+  echo "${cyan}KVS-install v${SCRIPT_VERSION}${normal}"
   if ! isRoot; then
     echo "Sorry, you need to run this as root"
     exit 1
@@ -357,7 +358,7 @@ function check_dns_configuration() {
     return
   fi
   
-  # Function to check DNS for a specific domain
+  # Function to check DNS IPv4 for a specific domain
   check_single_domain() {
     local domain=$1
     local domain_ip
@@ -366,27 +367,61 @@ function check_dns_configuration() {
       | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
       | head -n1
     )
-    
+
     if [[ -z "$domain_ip" ]]; then
-      echo "  $domain: No A record found"
+      echo "  $domain (A): No record found"
       return 1
     elif [[ "$domain_ip" = "$SERVER_IP" ]]; then
-      echo "  $domain: ${green}OK${normal} -> $domain_ip"
+      echo "  $domain (A): ${green}OK${normal} -> $domain_ip"
       return 0
     else
-      echo "  $domain: ${red}MISMATCH${normal} -> $domain_ip (expected: $SERVER_IP)"
+      echo "  $domain (A): ${red}MISMATCH${normal} -> $domain_ip (expected: $SERVER_IP)"
+      return 1
+    fi
+  }
+
+  # Function to check DNS IPv6 for a specific domain
+  check_single_domain_ipv6() {
+    local domain=$1
+    local domain_ipv6
+    domain_ipv6=$(
+      dig +short "$domain" AAAA \
+      | grep -E '^[0-9a-fA-F:]+$' \
+      | head -n1
+    )
+
+    if [[ -z "$domain_ipv6" ]]; then
+      echo "  $domain (AAAA): No record found (optional)"
+      return 0  # IPv6 is optional, don't fail
+    elif [[ "$domain_ipv6" = "$SERVER_IPV6" ]]; then
+      echo "  $domain (AAAA): ${green}OK${normal} -> $domain_ipv6"
+      return 0
+    else
+      echo "  $domain (AAAA): ${red}MISMATCH${normal} -> $domain_ipv6 (expected: $SERVER_IPV6)"
       return 1
     fi
   }
   
   # Check both domain and www subdomain
   dns_ok=true
-  echo "DNS Resolution Status:"
+  echo "DNS Resolution Status (IPv4):"
   if ! check_single_domain "$DOMAIN"; then
     dns_ok=false
   fi
   if ! check_single_domain "www.$DOMAIN"; then
     dns_ok=false
+  fi
+
+  # Check IPv6 if server has IPv6 connectivity
+  if [[ -n "$SERVER_IPV6" ]]; then
+    echo ""
+    echo "DNS Resolution Status (IPv6):"
+    if ! check_single_domain_ipv6 "$DOMAIN"; then
+      dns_ok=false
+    fi
+    if ! check_single_domain_ipv6 "www.$DOMAIN"; then
+      dns_ok=false
+    fi
   fi
   
   # If DNS is not properly configured
@@ -748,6 +783,139 @@ function setupdone() {
   fi
 }
 
+function chooseInstallationType() {
+  echo ""
+  echo "Choose installation type:"
+  echo "   1) Docker (recommended)"
+  echo "   2) Standalone (install directly on server)"
+  until [[ "$INSTALL_TYPE" =~ ^[1-2]$ ]]; do
+    read -rp "Select an option [1-2] : " -e -i 1 INSTALL_TYPE
+  done
+  case $INSTALL_TYPE in
+  1)
+    dockerInstall
+    ;;
+  2)
+    script
+    ;;
+  esac
+}
+
+function dockerInstall() {
+  echo ""
+  echo "${cyan}=== Docker Installation ===${normal}"
+
+  # Check if Docker is installed
+  if ! command -v docker &> /dev/null; then
+    echo "Docker is not installed. Installing Docker..."
+    curl -fsSL https://get.docker.com | sh
+    systemctl enable docker
+    systemctl start docker
+    echo "${green}Docker installed successfully${normal}"
+  else
+    echo "${green}Docker is already installed${normal}"
+  fi
+
+  # Check if Docker Compose is available
+  if ! docker compose version &> /dev/null; then
+    echo "${red}Docker Compose plugin not found. Please install it.${normal}"
+    exit 1
+  fi
+  echo "${green}Docker Compose is available${normal}"
+
+  # Clone or update KVS-install repo
+  INSTALL_DIR="/opt/kvs-docker"
+  if [[ -d "$INSTALL_DIR" ]]; then
+    echo "Updating existing installation..."
+    cd "$INSTALL_DIR" && git pull
+  else
+    echo "Cloning KVS-install..."
+    git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
+  fi
+
+  cd "$INSTALL_DIR/docker" || exit 1
+
+  # Check for KVS archive in /root or current docker directory
+  echo ""
+  echo "Checking for KVS archive..."
+  mkdir -p kvs-archive
+
+  # First check if archive already exists in kvs-archive
+  if ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
+    echo "${green}KVS archive found in kvs-archive/${normal}"
+  # Then check /root
+  elif ls /root/KVS_*.zip 1>/dev/null 2>&1; then
+    echo "Found KVS archive in /root, copying to kvs-archive/..."
+    cp /root/KVS_*.zip kvs-archive/
+    echo "${green}KVS archive copied${normal}"
+  else
+    echo "${red}No KVS archive found${normal}"
+    echo "Please upload your KVS_X.X.X_[domain.tld].zip file to /root"
+    # shellcheck disable=SC2144
+    while [ ! -f /root/KVS_*.zip ]; do
+      sleep 2
+      echo "Waiting for KVS .ZIP file in /root..."
+      echo "Press CTRL + C to exit"
+    done
+    cp /root/KVS_*.zip kvs-archive/
+    echo "${green}KVS archive copied${normal}"
+  fi
+
+  # Extract domain from KVS archive filename
+  local kvs_file
+  kvs_file=$(find kvs-archive -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
+  kvs_file=${kvs_file##*/}
+  local archive_domain
+  archive_domain=${kvs_file#*[}
+  archive_domain=${archive_domain%]*}
+
+  # Setup .env file
+  if [ ! -f .env ]; then
+    cp .env.example .env
+    echo "${green}Created .env from .env.example${normal}"
+  fi
+
+  # Update .env with domain from archive
+  if [[ -n "$archive_domain" ]] && [[ "$archive_domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    sed -i "s/^DOMAIN=.*/DOMAIN=$archive_domain/" .env
+    echo "Domain set to: ${green}$archive_domain${normal}"
+  fi
+
+  # Prompt for email if still default
+  source .env
+  if [[ "$EMAIL" == "admin@example.com" ]]; then
+    echo ""
+    echo "Email for SSL certificates (required by acme.sh/ZeroSSL):"
+    while true; do
+      read -rp "Email: " EMAIL
+      if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        sed -i "s/^EMAIL=.*/EMAIL=$EMAIL/" .env
+        break
+      else
+        echo "Please enter a valid email address."
+      fi
+    done
+  fi
+
+  # Generate secure passwords if still defaults
+  source .env
+  if [[ "$MARIADB_ROOT_PASSWORD" == "CHANGE_ME_ROOT_PASSWORD" ]] || [[ "$MARIADB_ROOT_PASSWORD" == "testrootpass123" ]]; then
+    MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24)
+    sed -i "s/^MARIADB_ROOT_PASSWORD=.*/MARIADB_ROOT_PASSWORD=$MARIADB_ROOT_PASSWORD/" .env
+    echo "${green}Generated MariaDB root password${normal}"
+  fi
+
+  if [[ "$MARIADB_PASSWORD" == "CHANGE_ME_KVS_PASSWORD" ]] || [[ "$MARIADB_PASSWORD" == "testkvpass123" ]]; then
+    MARIADB_PASSWORD=$(openssl rand -base64 24)
+    sed -i "s/^MARIADB_PASSWORD=.*/MARIADB_PASSWORD=$MARIADB_PASSWORD/" .env
+    echo "${green}Generated MariaDB KVS password${normal}"
+  fi
+
+  # Run Docker setup
+  chmod +x setup.sh
+  ./setup.sh
+}
+
 function manageMenu() {
   clear
   echo "Welcome to KVS-install !"
@@ -766,7 +934,7 @@ function manageMenu() {
   done
   case $MENU_OPTION in
   1)
-    script
+    chooseInstallationType
     ;;
   2)
     whatisdomain
@@ -813,5 +981,5 @@ initialCheck
 if [[ -e /var/www ]]; then
   manageMenu
 else
-  script
+  chooseInstallationType
 fi
