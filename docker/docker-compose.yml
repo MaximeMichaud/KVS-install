@@ -34,7 +34,7 @@ services:
     build:
       context: ./php
       args:
-        PHP_VERSION: ${PHP_VERSION:-8.3}
+        PHP_VERSION: ${PHP_VERSION:-8.1}
         IONCUBE: ${IONCUBE:-YES}
     container_name: kvs-php
     restart: unless-stopped
@@ -129,7 +129,7 @@ services:
     build:
       context: ./cron
       args:
-        PHP_VERSION: ${PHP_VERSION:-8.3}
+        PHP_VERSION: ${PHP_VERSION:-8.1}
         IONCUBE: ${IONCUBE:-YES}
     container_name: kvs-cron
     restart: unless-stopped
