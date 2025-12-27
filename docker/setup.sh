@@ -52,6 +52,26 @@ fi
 # Reload .env
 source .env
 
+# Open firewall ports if ufw is active
+if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    echo -e "${CYAN}Opening firewall ports 80 and 443...${NC}"
+    ufw allow 80/tcp >/dev/null 2>&1
+    ufw allow 443/tcp >/dev/null 2>&1
+    echo -e "${GREEN}Firewall ports opened${NC}"
+fi
+
+# Check if ports are available
+echo ""
+echo -e "${CYAN}Checking if ports 80 and 443 are available...${NC}"
+if ss -tuln | grep -qE ':80\s'; then
+    echo -e "${RED}WARNING: Port 80 is already in use${NC}"
+    ss -tuln | grep -E ':80\s'
+fi
+if ss -tuln | grep -qE ':443\s'; then
+    echo -e "${RED}WARNING: Port 443 is already in use${NC}"
+    ss -tuln | grep -E ':443\s'
+fi
+
 # DNS Check Function
 check_dns() {
     echo ""
@@ -175,23 +195,27 @@ sleep 5
 
 # Issue SSL certificate
 echo "Issuing SSL certificate for $DOMAIN..."
-docker compose exec acme --issue \
+if docker compose exec acme acme.sh --issue \
     -d "$DOMAIN" \
     -d "www.$DOMAIN" \
-    -w /var/www/_letsencrypt \
+    --webroot /var/www/_letsencrypt \
     --keylength ec-256 \
-    --accountemail "$EMAIL" || true
+    --accountemail "$EMAIL"; then
 
-# Install certificate
-docker compose exec acme --install-cert \
-    -d "$DOMAIN" \
-    --ecc \
-    --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
-    --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
-    --reloadcmd "true" || {
-    echo -e "${RED}SSL certificate installation failed${NC}"
-    echo "You may need to configure DNS first and run this script again"
-}
+    # Install certificate only if issue succeeded
+    docker compose exec acme acme.sh --install-cert \
+        -d "$DOMAIN" \
+        --ecc \
+        --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
+        --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
+        --reloadcmd "true"
+
+    echo -e "${GREEN}SSL certificate installed${NC}"
+else
+    echo -e "${RED}SSL certificate issue failed${NC}"
+    echo "Site will use self-signed certificate until you run:"
+    echo "  docker compose exec acme acme.sh --issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --keylength ec-256 --force"
+fi
 
 # Step 5: Start all services
 echo ""
