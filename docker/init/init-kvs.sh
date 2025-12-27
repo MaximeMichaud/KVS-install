@@ -71,18 +71,33 @@ if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
     sed -i "s|'DB_DEVICE','[^']*'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
 fi
 
-# Import database if first run
-if [ -f "$KVS_PATH/_INSTALL/install_db.sql" ]; then
-    echo "Importing initial database..."
+# Wait for MariaDB
+until mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1; do
+    echo "Waiting for MariaDB..."
+    sleep 2
+done
 
-    # Wait for MariaDB
-    until mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1; do
-        echo "Waiting for MariaDB..."
-        sleep 2
-    done
+# Check if database has tables
+TABLE_COUNT=$(mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DOMAIN'" 2>/dev/null || echo "0")
 
-    mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" < "$KVS_PATH/_INSTALL/install_db.sql"
-    echo "Database imported successfully"
+if [ "$TABLE_COUNT" -eq 0 ]; then
+    echo "Database is empty, need to import..."
+
+    # If install_db.sql doesn't exist, re-extract from archive
+    if [ ! -f "$KVS_PATH/_INSTALL/install_db.sql" ]; then
+        KVS_ARCHIVE=$(find /kvs-archive -name "KVS_*.zip" -type f 2>/dev/null | head -1)
+        if [ -n "$KVS_ARCHIVE" ]; then
+            echo "Re-extracting _INSTALL from archive..."
+            unzip -o "$KVS_ARCHIVE" "_INSTALL/*" -d "$KVS_PATH"
+        fi
+    fi
+
+    if [ -f "$KVS_PATH/_INSTALL/install_db.sql" ]; then
+        mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" < "$KVS_PATH/_INSTALL/install_db.sql"
+        echo "Database imported successfully"
+    else
+        echo "ERROR: install_db.sql not found"
+    fi
 fi
 
 # Clean up installation files
