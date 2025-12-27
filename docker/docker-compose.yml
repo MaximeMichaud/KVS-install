@@ -16,7 +16,7 @@ services:
       - ../conf/nginx/globals:/etc/nginx/globals:ro
       - ./nginx/conf.d:/etc/nginx/conf.d
       - ./nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
-      - kvs-data:/var/www/kvs
+      - /var/www/${DOMAIN}:/var/www/kvs
       - phpmyadmin-data:/usr/share/phpmyadmin:ro
       - acme-certs:/etc/nginx/ssl
       - letsencrypt-webroot:/var/www/_letsencrypt
@@ -39,7 +39,7 @@ services:
     container_name: kvs-php
     restart: unless-stopped
     volumes:
-      - kvs-data:/var/www/kvs
+      - /var/www/${DOMAIN}:/var/www/kvs
       - phpmyadmin-data:/usr/share/phpmyadmin
       - ./php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
     environment:
@@ -134,7 +134,7 @@ services:
     container_name: kvs-cron
     restart: unless-stopped
     volumes:
-      - kvs-data:/var/www/kvs
+      - /var/www/${DOMAIN}:/var/www/kvs
     depends_on:
       - php-fpm
       - mariadb
@@ -147,7 +147,7 @@ services:
       context: ./init
     container_name: kvs-init
     volumes:
-      - kvs-data:/var/www/kvs
+      - /var/www/${DOMAIN}:/var/www/kvs
       - ./kvs-archive:/kvs-archive:ro
     environment:
       - DOMAIN=${DOMAIN}
@@ -206,7 +206,6 @@ networks:
 #       volumes:
 #         - /var/www/${DOMAIN}:/var/www/kvs
 volumes:
-  kvs-data:
   mariadb-data:
   acme-data:
   acme-certs:

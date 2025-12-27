@@ -217,6 +217,31 @@ select_ioncube() {
     esac
 }
 
+# SSL provider selection
+select_ssl_provider() {
+    echo ""
+    echo -e "${CYAN}SSL Certificate Provider${NC}"
+    echo "  1) Let's Encrypt (recommended, default)"
+    echo "  2) ZeroSSL"
+    echo "  3) Self-signed (for testing only)"
+    read -rp "Select SSL provider [1-3] (default: 1): " SSL_CHOICE
+
+    case $SSL_CHOICE in
+        2)
+            sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=zerossl/" .env
+            echo -e "${GREEN}Selected ZeroSSL${NC}"
+            ;;
+        3)
+            sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=selfsigned/" .env
+            echo -e "${YELLOW}Selected self-signed certificate${NC}"
+            ;;
+        *)
+            sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=letsencrypt/" .env
+            echo -e "${GREEN}Selected Let's Encrypt${NC}"
+            ;;
+    esac
+}
+
 # Run version selections if using defaults
 if [ "$MARIADB_VERSION" = "11.8" ]; then
     select_mariadb_version
@@ -246,6 +271,11 @@ select_php_version
 # IonCube selection
 if [ "$IONCUBE" = "YES" ]; then
     select_ioncube
+fi
+
+# SSL provider selection
+if [ "$SSL_PROVIDER" = "letsencrypt" ]; then
+    select_ssl_provider
 fi
 
 # Generate passwords if still defaults
@@ -362,6 +392,10 @@ mkdir -p "nginx/ssl/${DOMAIN}"
 echo ""
 echo -e "${CYAN}Building Docker images...${NC}"
 docker compose build
+
+# Create bind mount directory
+mkdir -p /var/www/"$DOMAIN"
+chown 1000:1000 /var/www/"$DOMAIN"
 
 # Step 2: Start infrastructure services
 echo ""
