@@ -34,6 +34,9 @@ RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o 
     && chmod a+rx /usr/local/bin/yt-dlp \
     && ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
 
+# Symlink PHP to /usr/bin (KVS scripts expect it there)
+RUN ln -sf /usr/local/bin/php /usr/bin/php
+
 # Setup crontab
 COPY crontab /etc/cron.d/kvs-cron
 RUN chmod 0644 /etc/cron.d/kvs-cron \

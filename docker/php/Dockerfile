@@ -78,6 +78,9 @@ RUN sed -i \
 # Create log directory
 RUN mkdir -p /var/log/php && chown www-data:www-data /var/log/php
 
+# Symlink PHP to /usr/bin (KVS scripts expect it there)
+RUN ln -sf /usr/local/bin/php /usr/bin/php
+
 # Set proper permissions
 RUN usermod -u 1000 www-data && groupmod -g 1000 www-data
 
