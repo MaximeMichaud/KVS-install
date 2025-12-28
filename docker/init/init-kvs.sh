@@ -70,9 +70,17 @@ if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
     sed -i "s|'DB_DEVICE','[^']*'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
 fi
 
-# Wait for MariaDB
+# Wait for MariaDB (max 1 minute - should already be healthy)
+TRIES=0
+MAX_TRIES=30
 until mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1; do
-    echo "Waiting for MariaDB..."
+    TRIES=$((TRIES + 1))
+    if [ $TRIES -ge $MAX_TRIES ]; then
+        echo "ERROR: Cannot connect to MariaDB after 1 minute"
+        echo "Check credentials: DOMAIN=$DOMAIN"
+        exit 1
+    fi
+    echo "Waiting for MariaDB... ($TRIES/$MAX_TRIES)"
     sleep 2
 done
 

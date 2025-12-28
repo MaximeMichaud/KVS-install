@@ -108,7 +108,7 @@ select_mariadb_version() {
     echo -e "${CYAN}Fetching MariaDB LTS versions from endoflife.date...${NC}"
 
     # Fetch data from API
-    MARIADB_DATA=$(curl -s "https://endoflife.date/api/mariadb.json" 2>/dev/null)
+    MARIADB_DATA=$(curl -s --connect-timeout 5 "https://endoflife.date/api/mariadb.json" 2>/dev/null)
 
     if [ -z "$MARIADB_DATA" ]; then
         echo -e "${YELLOW}Could not fetch version data. Using defaults.${NC}"
@@ -227,8 +227,8 @@ select_ioncube() {
     echo ""
     echo -e "${CYAN}IonCube Loader${NC}"
     echo "KVS requires IonCube for encoded files."
-    echo "  1) Yes - Install IonCube (default)"
-    echo "  2) No - Skip IonCube"
+    echo "  1) Yes - Install IonCube (required for KVS) (default)"
+    echo "  2) No - Skip (only if you have unencoded KVS)"
     read -rp "Install IonCube? [1-2] (default: 1): " IONCUBE_CHOICE
 
     case $IONCUBE_CHOICE in
@@ -274,12 +274,34 @@ if [ "$IONCUBE" = "YES" ]; then
     select_ioncube
 fi
 
+# Cache selection (dragonfly/memcached)
+select_cache() {
+    echo ""
+    echo -e "${CYAN}Cache Server${NC}"
+    echo "  1) Dragonfly (faster, modern) (default)"
+    echo "  2) Memcached (legacy, same as standalone)"
+    read -rp "Select cache [1-2] (default: 1): " CACHE_CHOICE
+
+    case $CACHE_CHOICE in
+        2)
+            sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=memcached/" .env
+            echo -e "${GREEN}Selected Memcached${NC}"
+            ;;
+        *)
+            sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=dragonfly/" .env
+            echo -e "${GREEN}Selected Dragonfly${NC}"
+            ;;
+    esac
+}
+
+select_cache
+
 # Mode selection (single/multi)
 select_mode() {
     echo ""
     echo -e "${CYAN}Installation Mode${NC}"
-    echo "  1) Single site (default) - nginx direct, lowest latency"
-    echo "  2) Multi site - Traefik reverse proxy, add more sites later"
+    echo "  1) Single site (default) - direct nginx, best performance"
+    echo "  2) Multi site - Traefik proxy, run multiple KVS on same server"
     read -rp "Select mode [1-2] (default: 1): " MODE_CHOICE
 
     case $MODE_CHOICE in
@@ -316,7 +338,9 @@ check_existing_volume() {
     echo -e "${CYAN}Checking for existing MariaDB data...${NC}"
 
     # Check if volume exists
-    VOLUME_NAME="docker_mariadb-data"
+    # Volume name = <directory>_mariadb-data (Docker Compose default)
+    PROJECT_NAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
+    VOLUME_NAME="${PROJECT_NAME}_mariadb-data"
     if docker volume ls -q | grep -q "^${VOLUME_NAME}$"; then
         echo -e "${YELLOW}Existing MariaDB volume found: ${VOLUME_NAME}${NC}"
         echo -e "${YELLOW}Note: MariaDB ignores password env vars when data exists${NC}"
@@ -427,7 +451,7 @@ fi
 check_dns() {
     echo ""
     echo -e "${CYAN}Checking DNS configuration...${NC}"
-    SERVER_IP=$(curl -s https://api.ipify.org)
+    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org)
     # Use getent instead of dig (more portable)
     DOMAIN_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
     WWW_IP=$(getent hosts "www.$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
@@ -500,7 +524,13 @@ mkdir -p "nginx/ssl/${DOMAIN}"
 # Step 1: Build images
 echo ""
 echo -e "${CYAN}Building Docker images...${NC}"
-docker compose build
+if ! docker compose build; then
+    echo -e "${RED}Docker build failed${NC}"
+    echo -e "${YELLOW}If error mentions 'parent snapshot does not exist', run:${NC}"
+    echo "  docker builder prune -af"
+    echo "Then re-run this script."
+    exit 1
+fi
 
 # Create bind mount directory
 mkdir -p /var/www/"$DOMAIN"
@@ -511,9 +541,17 @@ echo ""
 echo -e "${CYAN}Starting infrastructure services...${NC}"
 docker compose up -d mariadb
 
-# Wait for MariaDB
+# Wait for MariaDB (max 3 minutes)
 echo "Waiting for MariaDB to be ready..."
+TRIES=0
+MAX_TRIES=90
 until docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" > /dev/null 2>&1; do
+    TRIES=$((TRIES + 1))
+    if [ $TRIES -ge $MAX_TRIES ]; then
+        echo -e "${RED}ERROR: MariaDB not ready after 3 minutes${NC}"
+        echo "Check logs: docker compose logs mariadb"
+        exit 1
+    fi
     sleep 2
 done
 echo -e "${GREEN}MariaDB is ready${NC}"
