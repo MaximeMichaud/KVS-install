@@ -583,18 +583,29 @@ else
         ACME_ARGS="$ACME_ARGS --server letsencrypt"
     fi
 
-    if docker compose exec acme sh -c "acme.sh $ACME_ARGS"; then
-        # Install certificate only if issue succeeded
+    ACME_OUTPUT=$(docker compose exec acme sh -c "acme.sh $ACME_ARGS" 2>&1) || true
+
+    if echo "$ACME_OUTPUT" | grep -q "Cert success"; then
+        # New certificate issued - install it
         docker compose exec acme acme.sh --install-cert \
             -d "$DOMAIN" \
             --ecc \
             --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
             --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
             --reloadcmd "true"
-
         echo -e "${GREEN}SSL certificate installed${NC}"
+    elif echo "$ACME_OUTPUT" | grep -q "Skipping"; then
+        # Certificate still valid - just reinstall to ensure files are in place
+        docker compose exec acme acme.sh --install-cert \
+            -d "$DOMAIN" \
+            --ecc \
+            --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
+            --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
+            --reloadcmd "true" 2>/dev/null || true
+        echo -e "${GREEN}SSL certificate still valid, using existing${NC}"
     else
         echo -e "${RED}SSL certificate issue failed${NC}"
+        echo "$ACME_OUTPUT"
         echo "Site will use self-signed certificate until you run:"
         echo "  docker compose exec acme acme.sh --issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --force"
     fi
