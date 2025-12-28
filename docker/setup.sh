@@ -352,7 +352,7 @@ check_existing_volume() {
 
             # Try to verify connection by starting container briefly
             echo "Verifying database connection..."
-            docker compose up -d mariadb >/dev/null 2>&1
+            docker compose up -d --force-recreate mariadb >/dev/null 2>&1
             sleep 5
 
             if docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; then
@@ -539,7 +539,7 @@ chown 1000:1000 /var/www/"$DOMAIN"
 # Step 2: Start infrastructure services
 echo ""
 echo -e "${CYAN}Starting infrastructure services...${NC}"
-docker compose up -d mariadb
+docker compose up -d --force-recreate mariadb
 
 # Wait for MariaDB (max 3 minutes)
 echo "Waiting for MariaDB to be ready..."
@@ -559,11 +559,11 @@ echo -e "${GREEN}MariaDB is ready${NC}"
 # Step 3: Initialize phpMyAdmin and KVS
 echo ""
 echo -e "${CYAN}Initializing phpMyAdmin and KVS...${NC}"
-docker compose --profile setup up phpmyadmin-init kvs-init
+docker compose --profile setup up --force-recreate phpmyadmin-init kvs-init
 
 # Step 4: Start nginx and get certificate
 echo ""
-docker compose up -d nginx acme
+docker compose up -d --force-recreate nginx acme
 
 # Wait a moment for nginx to start
 sleep 5
@@ -603,7 +603,7 @@ fi
 # Step 5: Start all services
 echo ""
 echo -e "${CYAN}Starting all services...${NC}"
-docker compose up -d
+docker compose up -d --force-recreate
 
 # Reload nginx to pick up SSL
 docker compose exec nginx nginx -s reload || true
