@@ -28,10 +28,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     fonts-dejavu-core \
     fonts-liberation \
+    mariadb-client \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/bin/ffmpeg /usr/local/bin/ffmpeg \
+    && ln -s /usr/bin/ffprobe /usr/local/bin/ffprobe \
     && ln -s /usr/bin/convert /usr/local/bin/convert \
-    && ln -s /usr/bin/wget /usr/local/bin/wget
+    && ln -s /usr/bin/wget /usr/local/bin/wget \
+    && ln -s /usr/bin/mariadb-dump /usr/local/bin/mysqldump
 
 # Optional: For MaxMind GeoIP (not needed if using Cloudflare)
 # Add to apt-get above: libmaxminddb0 libmaxminddb-dev
