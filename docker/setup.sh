@@ -68,7 +68,7 @@ echo ""
 echo -e "${CYAN}SSL Certificate Provider${NC}"
 echo "  1) Let's Encrypt (recommended, default)"
 echo "  2) ZeroSSL"
-echo "  3) Self-signed (for testing only)"
+echo "  3) Self-signed (dev/testing or behind reverse proxy)"
 read -rp "Select SSL provider [1-3] (default: 1): " SSL_CHOICE
 
 case $SSL_CHOICE in
@@ -81,6 +81,7 @@ case $SSL_CHOICE in
         SSL_PROVIDER="selfsigned"
         sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=selfsigned/" .env
         echo -e "${YELLOW}Selected self-signed certificate${NC}"
+        echo -e "${YELLOW}  → Use for: local development, or with a reverse proxy (Cloudflare, HAProxy, nginx, etc.)${NC}"
         ;;
     *)
         SSL_PROVIDER="letsencrypt"
