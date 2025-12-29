@@ -18,6 +18,16 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Detect existing installation and warn
+EXISTING_CONTAINERS=$(docker ps -a --filter "name=kvs-" --format "{{.Names}}" 2>/dev/null | wc -l)
+EXISTING_VOLUMES=$(docker volume ls --filter "name=docker_" -q 2>/dev/null | wc -l)
+
+if [ "$EXISTING_CONTAINERS" -gt 0 ] || [ "$EXISTING_VOLUMES" -gt 0 ]; then
+    echo -e "${YELLOW}WARNING: Re-running on existing installation (${EXISTING_CONTAINERS} container(s), ${EXISTING_VOLUMES} volume(s))${NC}"
+    echo -e "${YELLOW}Persisted data from a previous run may cause issues if it was misconfigured.${NC}"
+    echo ""
+fi
+
 # Check if .env exists
 if [ ! -f .env ]; then
     if [ -f .env.example ]; then

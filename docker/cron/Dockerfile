@@ -9,15 +9,22 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cron \
-    default-mysql-client \
+    mariadb-client \
     libmemcached-dev \
     libz-dev \
     curl \
+    wget \
     ca-certificates \
+    ffmpeg \
+    imagemagick \
+    imagemagick-7-common \
+    libmagickwand-dev \
     && docker-php-ext-install mysqli pdo_mysql \
-    && pecl install memcached \
-    && docker-php-ext-enable memcached \
-    && rm -rf /var/lib/apt/lists/*
+    && pecl install memcached imagick \
+    && docker-php-ext-enable memcached imagick \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/convert /usr/local/bin/convert \
+    && ln -sf /usr/bin/mariadb-dump /usr/bin/mysqldump
 
 # Install IonCube Loader if enabled
 RUN if [ "$IONCUBE" = "YES" ]; then \
