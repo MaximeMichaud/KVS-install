@@ -805,7 +805,7 @@ function chooseInstallationType() {
   # Debian: offer choice
   echo "Choose installation type:"
   echo "   1) Docker (recommended)"
-  echo "   2) Standalone (install directly on server)"
+  echo "   2) Standalone (legacy - will be deprecated)"
   until [[ "$INSTALL_TYPE" =~ ^[1-2]$ ]]; do
     read -rp "Select an option [1-2] : " -e -i 1 INSTALL_TYPE
   done

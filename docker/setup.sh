@@ -302,7 +302,7 @@ select_mode() {
     echo ""
     echo -e "${CYAN}Installation Mode${NC}"
     echo "  1) Single site (default) - direct nginx, best performance"
-    echo "  2) Multi site - Traefik proxy, run multiple KVS on same server"
+    echo "  2) Multi site - Traefik proxy, multiple KVS on same server (in development)"
     read -rp "Select mode [1-2] (default: 1): " MODE_CHOICE
 
     case $MODE_CHOICE in
