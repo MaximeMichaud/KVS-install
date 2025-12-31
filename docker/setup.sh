@@ -271,27 +271,11 @@ select_php_version() {
     elif [ "$KVS_MAJOR" -eq 6 ] && [ "$KVS_MINOR" -lt 2 ]; then
         echo "KVS 6.0-6.1 requires PHP 8.0"
         sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.0/" .env
-    elif [ "$KVS_MAJOR" -eq 6 ] && [ "$KVS_MINOR" -lt 4 ]; then
-        echo "KVS 6.2-6.3 requires PHP 8.1"
-        sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.1/" .env
     else
-        # KVS 6.4+ supports PHP 8.1 and 8.3
-        echo ""
-        echo "KVS $KVS_VERSION supports PHP 8.1 and 8.3"
-        echo "  1) PHP 8.1 (Stable, recommended)"
-        echo "  2) PHP 8.3 (Latest)"
-        read -rp "Select PHP version [1-2] (default: 1): " PHP_CHOICE
-
-        case $PHP_CHOICE in
-            2)
-                sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.3/" .env
-                echo -e "${GREEN}Selected PHP 8.3${NC}"
-                ;;
-            *)
-                sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.1/" .env
-                echo -e "${GREEN}Selected PHP 8.1${NC}"
-                ;;
-        esac
+        # KVS 6.2+ requires PHP 8.1
+        echo "KVS $KVS_VERSION requires PHP 8.1"
+        sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.1/" .env
+        echo -e "${GREEN}Set PHP 8.1${NC}"
     fi
 }
 
