@@ -353,11 +353,13 @@ function whatisdomain() {
     echo "Error: Invalid or empty domain extracted: '$DOMAIN'"
     exit 1
   fi
-  # Set URL based on USE_WWW
+  # Set URL and redirect server_name based on USE_WWW
   if [[ "$USE_WWW" == "true" ]]; then
     URL="www.$DOMAIN"
+    REDIRECT_SERVER_NAME=".$DOMAIN"
   else
     URL="$DOMAIN"
+    REDIRECT_SERVER_NAME="*.$DOMAIN"
   fi
   rm -rf /root/tmp && cd /root || exit
   echo "Domain extracted: $DOMAIN"
@@ -535,6 +537,7 @@ function aptinstall_nginx() {
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/domain.conf -o /etc/nginx/conf.d/"$DOMAIN".conf.disabled
       sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
       sed -i "s/project_url/$URL/g" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
+      sed -i "s/redirect_server_name/$REDIRECT_SERVER_NAME/g" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
       sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
       # Download sslgen config for ACME challenge
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/sslgen.conf -o /etc/nginx/conf.d/sslgen.conf
