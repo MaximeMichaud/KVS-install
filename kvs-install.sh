@@ -41,7 +41,8 @@ if [[ $HEADLESS == "y" ]]; then
   database_ver=${DATABASE_VER:-11.8}
   IONCUBE=${IONCUBE:-YES}
   AUTOPACKAGEUPDATE=${AUTOPACKAGEUPDATE:-YES}
-  PHP_CHOICE=${PHP_CHOICE:-2}  # Default to PHP 8.3 for headless mode (for KVS 6.4+) if not set
+  SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}  # letsencrypt, zerossl, or selfsigned
+  USE_WWW=${USE_WWW:-false}  # true or false
 fi
 #################################################################
 # Redirect stdin to /dev/tty for interactive input when piped (curl | bash)
@@ -194,19 +195,56 @@ function installQuestions() {
       database_ver="10.6"
       ;;
     esac
-    echo "Mail for SSL"
-    echo "Email address is required for notifications (e.g., certificate expiration if script doesn't renew automatically)."
-    echo "Required by acme.sh as a security measure for SSL."
-    echo "Currently, acme.sh utilizes ZeroSSL for SSL certificates."
-    echo "The certificate will be ECDSA 256-bit, valid for 3 months (standard)."
-    while true; do
-      read -rp "Email: " EMAIL
-      if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-        break
-      else
-        echo "Please enter a valid email address."
-      fi
+
+    echo ""
+    echo "SSL Certificate Provider"
+    echo "   1) Let's Encrypt (recommended)"
+    echo "   2) ZeroSSL"
+    echo "   3) Self-signed (dev/testing or behind reverse proxy)"
+    until [[ "$SSL_CHOICE" =~ ^[1-3]$ ]]; do
+      read -rp "Select [1-3]: " -e -i 1 SSL_CHOICE
     done
+    case $SSL_CHOICE in
+    1)
+      SSL_PROVIDER="letsencrypt"
+      ;;
+    2)
+      SSL_PROVIDER="zerossl"
+      ;;
+    3)
+      SSL_PROVIDER="selfsigned"
+      ;;
+    esac
+
+    if [[ "$SSL_PROVIDER" != "selfsigned" ]]; then
+      echo ""
+      echo "Email for SSL ($SSL_PROVIDER)"
+      echo "Required for certificate notifications."
+      while true; do
+        read -rp "Email: " EMAIL
+        if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+          break
+        else
+          echo "Please enter a valid email address."
+        fi
+      done
+    fi
+
+    echo ""
+    echo "Use www prefix?"
+    echo "   1) No - https://domain.com (recommended)"
+    echo "   2) Yes - https://www.domain.com"
+    until [[ "$WWW_CHOICE" =~ ^[1-2]$ ]]; do
+      read -rp "Select [1-2]: " -e -i 1 WWW_CHOICE
+    done
+    case $WWW_CHOICE in
+    1)
+      USE_WWW="false"
+      ;;
+    2)
+      USE_WWW="true"
+      ;;
+    esac
     echo "Upload KVS Archive File in /root"
     echo "Ex : KVS_X.X.X_[domain.tld].zip"
     # shellcheck disable=SC2144
@@ -232,30 +270,6 @@ function installQuestions() {
     if ver_compare "6.2" "$version"; then
       PHP="8.1"
       php_path="/usr/lib/php/20210902"
-    fi
-    
-    # KVS 6.4+ supports PHP 8.1 and 8.3 - let user choose
-    if ver_compare "6.4" "$version"; then
-      if [[ $HEADLESS != "y" ]]; then
-        echo ""
-        echo "KVS $version supports multiple PHP versions."
-        echo "Which PHP version do you want to install?"
-        echo "   1) PHP 8.1 (Stable, well-tested)"
-        echo "   2) PHP 8.3 (Latest, better performance)"
-        until [[ "$PHP_CHOICE" =~ ^[1-2]$ ]]; do
-          read -rp "Version [1-2]: " -e -i 2 PHP_CHOICE
-        done
-      fi
-      case $PHP_CHOICE in
-      1)
-        PHP="8.1"
-        php_path="/usr/lib/php/20210902"
-        ;;
-      2)
-        PHP="8.3"
-        php_path="/usr/lib/php/20230831"
-        ;;
-      esac
     fi
 
     echo "We are ready to start the installation !"
@@ -339,13 +353,15 @@ function whatisdomain() {
     echo "Error: Invalid or empty domain extracted: '$DOMAIN'"
     exit 1
   fi
-  # shellcheck disable=SC2016
-  URL=$(grep -P -i -m1 '\$config\['"'"'project_url'"'"']=' /root/tmp/admin/include/setup.php)
-  URL=$(echo "$URL" | cut -d'"' -f 2)
-  # shellcheck disable=SC2001
-  URL=$(echo "$URL" | sed 's~http[s]*://~~g')
+  # Set URL based on USE_WWW
+  if [[ "$USE_WWW" == "true" ]]; then
+    URL="www.$DOMAIN"
+  else
+    URL="$DOMAIN"
+  fi
   rm -rf /root/tmp && cd /root || exit
   echo "Domain extracted: $DOMAIN"
+  echo "Project URL: $URL"
 }
 
 function check_dns_configuration() {
@@ -663,28 +679,60 @@ function aptinstall_memcached() {
   echo "Memcached installation and configuration complete."
 }
 
+function generate_selfsigned_cert() {
+    mkdir -p /etc/nginx/ssl/"$DOMAIN"
+    openssl req -x509 -nodes -days 365 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout /etc/nginx/ssl/"$DOMAIN"/key.pem \
+        -out /etc/nginx/ssl/"$DOMAIN"/cert.pem \
+        -subj "/CN=$DOMAIN"
+    echo "Self-signed certificate generated for $DOMAIN"
+}
+
 function install_acme.sh() {
-    # Ensure ports 80 and 443 are open for Let's Encrypt validation
+    mkdir -p /etc/nginx/ssl/"$DOMAIN"
+
+    # Self-signed: skip acme.sh entirely
+    if [[ "$SSL_PROVIDER" == "selfsigned" ]]; then
+        generate_selfsigned_cert
+        mv /etc/nginx/sites-enabled/sslgen.conf /etc/nginx/sites-available/sslgen.conf
+        mv /etc/nginx/sites-available/"$DOMAIN".conf /etc/nginx/sites-enabled/"$DOMAIN".conf
+        service nginx restart
+        return
+    fi
+
+    # Ensure ports 80 and 443 are open for validation
     if command -v ufw >/dev/null 2>&1; then
         ufw allow 80/tcp >/dev/null 2>&1
         ufw allow 443/tcp >/dev/null 2>&1
     fi
+
     cd /root || exit
     git clone https://github.com/acmesh-official/acme.sh.git
     cd ./acme.sh || exit
     ./acme.sh --install -m "$EMAIL"
     mkdir -p /var/www/_letsencrypt && chown www-data /var/www/_letsencrypt
-    #sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key|trusted_certificate) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-available/"$DOMAIN".conf
     service nginx restart
-    /root/.acme.sh/acme.sh --issue -d "$DOMAIN" -d www."$DOMAIN" -w /var/www/_letsencrypt --keylength ec-256
-    mkdir -p /etc/nginx/ssl /etc/nginx/ssl/"$DOMAIN"
-    /root/.acme.sh/acme.sh --install-cert --ecc -d "$DOMAIN" -d www."$DOMAIN" \
-      --key-file /etc/nginx/ssl/"$DOMAIN"/key.pem \
-      --fullchain-file /etc/nginx/ssl/"$DOMAIN"/cert.pem \
-      --reloadcmd "service nginx force-reload"
+
+    # Build acme.sh command based on provider
+    ACME_ARGS="--issue -d $DOMAIN -d www.$DOMAIN -w /var/www/_letsencrypt --keylength ec-256"
+    if [[ "$SSL_PROVIDER" == "letsencrypt" ]]; then
+        ACME_ARGS="$ACME_ARGS --server letsencrypt"
+    fi
+
+    # Try to issue certificate
+    if /root/.acme.sh/acme.sh $ACME_ARGS; then
+        echo "SSL certificate issued successfully"
+        /root/.acme.sh/acme.sh --install-cert --ecc -d "$DOMAIN" -d www."$DOMAIN" \
+          --key-file /etc/nginx/ssl/"$DOMAIN"/key.pem \
+          --fullchain-file /etc/nginx/ssl/"$DOMAIN"/cert.pem \
+          --reloadcmd "service nginx force-reload"
+    else
+        echo "SSL certificate issue failed, generating self-signed certificate..."
+        generate_selfsigned_cert
+    fi
+
     mv /etc/nginx/sites-enabled/sslgen.conf /etc/nginx/sites-available/sslgen.conf
     mv /etc/nginx/sites-available/"$DOMAIN".conf /etc/nginx/sites-enabled/"$DOMAIN".conf
-    #sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-available/"$DOMAIN".conf
     service nginx restart
 }
 
