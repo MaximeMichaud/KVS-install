@@ -42,7 +42,8 @@ run_step() {
 
     if command -v gum &>/dev/null; then
         # With gum: show spinner, log output to file
-        # shellcheck disable=SC2016 -- $@ and $0 must be expanded by sh -c, not the parent shell
+        # Note: $@ and $0 must be expanded by sh -c, not the parent shell
+        # shellcheck disable=SC2016
         if gum spin --spinner dot --title "$title" -- sh -c '"$@" >"$0" 2>&1' "$logfile" "$@"; then
             echo -e "  ${GREEN}✓${NC} $title"
             rm -f "$logfile"
