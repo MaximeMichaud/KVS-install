@@ -616,6 +616,8 @@ function install_KVS() {
              s|/usr/local/bin/|/usr/bin/|
              s|/usr/bin/php|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
     sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH"/admin/include/setup.php
+    # Set project_url based on USE_WWW setting (format: https://domain or https://www.domain)
+    sed -i "/^\\\$config\['project_url'\]=/s|\"https://[^\"]*\"|\"https://$URL\"|" "$KVS_PATH"/admin/include/setup.php
     # Check if setup_db.php already exists and extract password
     if [[ -f "$KVS_PATH/admin/include/setup_db.php" ]]; then
         # Extract existing password from setup_db.php
