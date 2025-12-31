@@ -9,6 +9,68 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Install gum for better UX (if not present)
+install_gum() {
+    if command -v gum &>/dev/null; then
+        return 0
+    fi
+
+    GUM_VERSION=$(curl -fsSL https://api.github.com/repos/charmbracelet/gum/releases/latest 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
+
+    if [ -z "$GUM_VERSION" ]; then
+        return 1
+    fi
+
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64) ARCH="x86_64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *) return 1 ;;
+    esac
+
+    curl -fsSL "https://github.com/charmbracelet/gum/releases/download/${GUM_VERSION}/gum_${GUM_VERSION#v}_Linux_${ARCH}.tar.gz" \
+        | tar -xzf - --strip-components=1 -C /usr/local/bin --wildcards '*/gum' 2>/dev/null
+
+    chmod +x /usr/local/bin/gum 2>/dev/null
+}
+
+# Run a command with spinner, showing title and result
+run_step() {
+    local title="$1"
+    shift
+    local logfile="/tmp/run_step_$$.log"
+
+    if command -v gum &>/dev/null; then
+        # With gum: show spinner, log output to file
+        if gum spin --spinner dot --title "$title" -- sh -c '"$@" >"$0" 2>&1' "$logfile" "$@"; then
+            echo -e "  ${GREEN}✓${NC} $title"
+            rm -f "$logfile"
+            return 0
+        else
+            echo -e "  ${RED}✗${NC} $title"
+            [ -s "$logfile" ] && echo "    Error:" && head -10 "$logfile" | sed 's/^/    /'
+            rm -f "$logfile"
+            return 1
+        fi
+    else
+        # Fallback without gum
+        echo -n "  $title..."
+        if "$@" >"$logfile" 2>&1; then
+            echo -e " ${GREEN}✓${NC}"
+            rm -f "$logfile"
+            return 0
+        else
+            echo -e " ${RED}✗${NC}"
+            [ -s "$logfile" ] && head -10 "$logfile" | sed 's/^/    /'
+            rm -f "$logfile"
+            return 1
+        fi
+    fi
+}
+
+# Install gum silently at startup
+install_gum
+
 echo -e "${CYAN}=== KVS Docker Setup ===${NC}"
 echo ""
 
@@ -516,8 +578,7 @@ done
 
 # Generate dhparam if not exists
 if [ ! -f nginx/dhparam.pem ]; then
-    echo "Generating DH parameters (this may take a while)..."
-    openssl dhparam -out nginx/dhparam.pem 2048
+    run_step "Generating DH parameters" openssl dhparam -out nginx/dhparam.pem 2048
 fi
 
 # Create bind mount directory if override file exists
@@ -535,13 +596,15 @@ mkdir -p "nginx/ssl/${DOMAIN}"
 # Step 1: Build images
 echo ""
 echo -e "${CYAN}Building Docker images...${NC}"
-if ! docker compose build; then
+if ! run_step "Building PHP-FPM container" docker compose build php-fpm; then
     echo -e "${RED}Docker build failed${NC}"
     echo -e "${YELLOW}If error mentions 'parent snapshot does not exist', run:${NC}"
     echo "  docker builder prune -af"
     echo "Then re-run this script."
     exit 1
 fi
+run_step "Building Cron container" docker compose build cron
+run_step "Building Nginx container" docker compose build nginx
 
 # Create bind mount directory
 mkdir -p /var/www/"$DOMAIN"
@@ -550,34 +613,38 @@ chown 1000:1000 /var/www/"$DOMAIN"
 # Step 2: Start infrastructure services
 echo ""
 echo -e "${CYAN}Starting infrastructure services...${NC}"
-docker compose up -d --force-recreate mariadb
+run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
 
 # Wait for MariaDB (max 3 minutes)
-echo "Waiting for MariaDB to be ready..."
+echo -n "  Waiting for MariaDB..."
 TRIES=0
 MAX_TRIES=90
-until docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" > /dev/null 2>&1; do
+while ! docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" > /dev/null 2>&1; do
     TRIES=$((TRIES + 1))
     if [ $TRIES -ge $MAX_TRIES ]; then
+        echo -e " ${RED}✗${NC}"
         echo -e "${RED}ERROR: MariaDB not ready after 3 minutes${NC}"
         echo "Check logs: docker compose logs mariadb"
         exit 1
     fi
     sleep 2
 done
-echo -e "${GREEN}MariaDB is ready${NC}"
+echo -e " ${GREEN}✓${NC}"
 
 # Step 3: Initialize phpMyAdmin and KVS
 echo ""
-echo -e "${CYAN}Initializing phpMyAdmin and KVS...${NC}"
-docker compose --profile setup up --force-recreate phpmyadmin-init kvs-init
+echo -e "${CYAN}Initializing services...${NC}"
+run_step "Initializing phpMyAdmin" docker compose --profile setup up --force-recreate phpmyadmin-init
+run_step "Initializing KVS" docker compose --profile setup up --force-recreate kvs-init
 
 # Step 4: Start nginx and get certificate
 echo ""
-docker compose up -d --force-recreate nginx acme
+echo -e "${CYAN}Starting web services...${NC}"
+run_step "Starting Nginx" docker compose up -d --force-recreate nginx
+run_step "Starting ACME" docker compose up -d --force-recreate acme
 
 # Wait a moment for nginx to start
-sleep 5
+sleep 3
 
 # SSL Certificate based on SSL_PROVIDER
 SSL_PROVIDER="${SSL_PROVIDER:-letsencrypt}"
@@ -624,11 +691,9 @@ fi
 
 # Step 5: Start all services
 echo ""
-echo -e "${CYAN}Starting all services...${NC}"
-docker compose up -d --force-recreate
-
-# Reload nginx to pick up SSL
-docker compose exec nginx nginx -s reload || true
+echo -e "${CYAN}Finalizing...${NC}"
+run_step "Starting all services" docker compose up -d --force-recreate
+run_step "Reloading Nginx" docker compose exec nginx nginx -s reload
 
 # Done
 echo ""
