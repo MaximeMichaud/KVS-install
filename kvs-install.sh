@@ -515,7 +515,24 @@ function check_dns_configuration() {
   echo ""
 }
 
+function check_ports() {
+    echo "Checking if ports 80 and 443 are available..."
+    if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
+        echo "${red}WARNING: Ports 80/443 are already in use${normal}"
+        ss -tuln | grep -E ':(80|443)\s'
+        echo ""
+        read -rp "Continue anyway? [y/N]: " CONTINUE
+        if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
+            echo "Aborting installation."
+            exit 1
+        fi
+    else
+        echo "Ports 80 and 443 are available."
+    fi
+}
+
 function aptinstall_nginx() {
+    check_ports
     echo "NGINX Installation"
     # Download GPG key, overwrite if exists
     curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --yes --dearmor -o /usr/share/keyrings/nginx.gpg
