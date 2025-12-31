@@ -641,18 +641,15 @@ run_step "Initializing KVS" docker compose --profile setup up --force-recreate k
 echo ""
 echo -e "${CYAN}Starting web services...${NC}"
 run_step "Starting Nginx" docker compose up -d --force-recreate nginx
-run_step "Starting ACME" docker compose up -d --force-recreate acme
-
-# Wait a moment for nginx to start
-sleep 3
 
 # SSL Certificate based on SSL_PROVIDER
 SSL_PROVIDER="${SSL_PROVIDER:-letsencrypt}"
-echo -e "${CYAN}SSL Provider: ${SSL_PROVIDER}${NC}"
 
 if [ "$SSL_PROVIDER" = "selfsigned" ]; then
-    echo -e "${GREEN}Using self-signed certificate (already generated)${NC}"
+    echo -e "  ${GREEN}✓${NC} Using self-signed certificate"
 else
+    run_step "Starting ACME" docker compose up -d --force-recreate acme
+    sleep 3
     echo "Issuing SSL certificate for $DOMAIN..."
 
     # Build acme.sh command
