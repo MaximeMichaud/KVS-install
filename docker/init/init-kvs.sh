@@ -31,9 +31,10 @@ else
     chmod -R 755 "$KVS_PATH"
 
     # Run KVS permission script (without the problematic chmod 666)
+    # Must run from _INSTALL directory since script does "cd .."
     if [ -f "$KVS_PATH/_INSTALL/install_permissions.sh" ]; then
         sed -i '/xargs chmod 666/d' "$KVS_PATH/_INSTALL/install_permissions.sh"
-        bash "$KVS_PATH/_INSTALL/install_permissions.sh" || true
+        (cd "$KVS_PATH/_INSTALL" && bash install_permissions.sh) || true
     fi
 fi
 
