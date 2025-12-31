@@ -531,17 +531,15 @@ function aptinstall_nginx() {
 	  # Custom KVS NGINX conf
       #curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -o /etc/nginx/globals/kvs.conf
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
-      mkdir /etc/nginx/sites-available /etc/nginx/sites-enabled
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/domain.conf -o /etc/nginx/sites-available/"$DOMAIN".conf
-      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-available/"$DOMAIN".conf
-      sed -i "s/project_url/$URL/g" /etc/nginx/sites-available/"$DOMAIN".conf
-      # curl sslgen conf
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/sslgen.conf -o /etc/nginx/sites-enabled/sslgen.conf
-      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/sites-enabled/sslgen.conf
-      sed -i "s/project_url/$URL/g" /etc/nginx/sites-enabled/sslgen.conf
-      ##
-      sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/sites-available/"$DOMAIN".conf
-      rm -rf /etc/nginx/conf.d
+      # Download domain config (disabled during SSL setup, enabled after)
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/domain.conf -o /etc/nginx/conf.d/"$DOMAIN".conf.disabled
+      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
+      sed -i "s/project_url/$URL/g" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
+      sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
+      # Download sslgen config for ACME challenge
+      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/sslgen.conf -o /etc/nginx/conf.d/sslgen.conf
+      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/conf.d/sslgen.conf
+      sed -i "s/project_url/$URL/g" /etc/nginx/conf.d/sslgen.conf
       service nginx restart
       #update CF IPV4/V6 if CF is used
       #curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -o /usr/bin/update-cloudflare-ip-list.sh
@@ -696,8 +694,8 @@ function install_acme.sh() {
     # Self-signed: skip acme.sh entirely
     if [[ "$SSL_PROVIDER" == "selfsigned" ]]; then
         generate_selfsigned_cert
-        mv /etc/nginx/sites-enabled/sslgen.conf /etc/nginx/sites-available/sslgen.conf
-        mv /etc/nginx/sites-available/"$DOMAIN".conf /etc/nginx/sites-enabled/"$DOMAIN".conf
+        rm -f /etc/nginx/conf.d/sslgen.conf
+        mv /etc/nginx/conf.d/"$DOMAIN".conf.disabled /etc/nginx/conf.d/"$DOMAIN".conf
         service nginx restart
         return
     fi
@@ -733,8 +731,8 @@ function install_acme.sh() {
         generate_selfsigned_cert
     fi
 
-    mv /etc/nginx/sites-enabled/sslgen.conf /etc/nginx/sites-available/sslgen.conf
-    mv /etc/nginx/sites-available/"$DOMAIN".conf /etc/nginx/sites-enabled/"$DOMAIN".conf
+    rm -f /etc/nginx/conf.d/sslgen.conf
+    mv /etc/nginx/conf.d/"$DOMAIN".conf.disabled /etc/nginx/conf.d/"$DOMAIN".conf
     service nginx restart
 }
 
