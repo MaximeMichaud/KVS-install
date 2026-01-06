@@ -19,6 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick \
     imagemagick-7-common \
     libmagickwand-dev \
+    libheif1 \
+    libheif-plugin-aomenc \
+    libheif-plugin-aomdec \
+    libavif-dev \
+    libaom-dev \
     && docker-php-ext-install mysqli pdo_mysql \
     && pecl install memcached imagick \
     && docker-php-ext-enable memcached imagick \

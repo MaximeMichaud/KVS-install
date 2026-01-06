@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick-7-common \
     libheif1 \
     libheif-plugin-aomenc \
+    libheif-plugin-aomdec \
     libavif-dev \
     libaom-dev \
     ffmpeg \
