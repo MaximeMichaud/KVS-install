@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     aria2 \
     procps \
+    mariadb-client \
     unzip \
     curl \
     wget \
@@ -34,7 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/bin/ffmpeg /usr/local/bin/ffmpeg \
     && ln -s /usr/bin/convert /usr/local/bin/convert \
-    && ln -s /usr/bin/wget /usr/local/bin/wget
+    && ln -s /usr/bin/wget /usr/local/bin/wget \
+    && ln -sf /usr/bin/mariadb-dump /usr/bin/mysqldump
 
 # Optional: For MaxMind GeoIP (not needed if using Cloudflare)
 # Add to apt-get above: libmaxminddb0 libmaxminddb-dev
