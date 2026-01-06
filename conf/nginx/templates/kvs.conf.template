@@ -73,10 +73,18 @@ server {
     }
 
     # phpMyAdmin
-    location /phpmyadmin {
-        alias /usr/share/phpmyadmin;
+    location /phpmyadmin/ {
+        alias /usr/share/phpmyadmin/;
         index index.php;
 
+        # Static files
+        location ~* ^/phpmyadmin/(.+\.(css|js|ico|gif|png|jpg|jpeg|svg|woff|woff2|ttf|eot))$ {
+            alias /usr/share/phpmyadmin/$1;
+            expires 7d;
+            access_log off;
+        }
+
+        # PHP files
         location ~ ^/phpmyadmin/(.+\.php)$ {
             alias /usr/share/phpmyadmin/$1;
             ${RESOLVER_LINE}
