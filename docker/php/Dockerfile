@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavif-dev \
     libaom-dev \
     ffmpeg \
+    aria2 \
     unzip \
     curl \
     wget \
