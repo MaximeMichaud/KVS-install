@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libaom-dev \
     ffmpeg \
     aria2 \
+    procps \
     unzip \
     curl \
     wget \

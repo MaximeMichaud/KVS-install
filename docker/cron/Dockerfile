@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
     aria2 \
+    procps \
     imagemagick \
     imagemagick-7-common \
     libmagickwand-dev \
