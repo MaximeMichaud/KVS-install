@@ -41,7 +41,11 @@ fi
 # Update setup.php paths
 if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     echo "Configuring setup.php..."
+    # Replace /PATH placeholder (fresh archives)
     sed -i "s|/PATH|$KVS_PATH|g" "$KVS_PATH/admin/include/setup.php"
+    # Also fix project_path if it was already configured for a different path (e.g., from standalone install)
+    sed -i "s|\$config\['project_path'\]=\"[^\"]*\"|\$config['project_path']=\"$KVS_PATH\"|" "$KVS_PATH/admin/include/setup.php"
+    echo "Project path set to: $KVS_PATH"
 
     # Update project title with domain
     if [ -n "$DOMAIN" ]; then
