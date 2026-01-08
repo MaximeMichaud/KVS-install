@@ -15,6 +15,8 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=*, usb=()";
 
     # index.php
     index                   index.php;
@@ -31,16 +33,16 @@ server {
     access_log /var/log/nginx/${DOMAIN}.access.log;
     error_log /var/log/nginx/${DOMAIN}.error.log warn;
 
-    # Assets, media
+    # Assets, media (180d cache like standalone)
     location ~* \.(?:css(\.map)?|js(\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv)$ {
-        expires 7d;
+        expires 180d;
         access_log off;
     }
 
     # SVG, fonts
     location ~* \.(?:svgz?|ttf|ttc|otf|eot|woff2?)$ {
         add_header Access-Control-Allow-Origin "*";
-        expires 7d;
+        expires 180d;
         access_log off;
     }
 
@@ -83,7 +85,7 @@ server {
         # Static files
         location ~* ^/phpmyadmin/(.+\.(css|js|ico|gif|png|jpg|jpeg|svg|woff|woff2|ttf|eot))$ {
             alias /usr/share/phpmyadmin/$1;
-            expires 7d;
+            expires 180d;
             access_log off;
         }
 

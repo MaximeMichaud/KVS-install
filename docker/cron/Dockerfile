@@ -30,7 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pecl install memcached imagick \
     && docker-php-ext-enable memcached imagick \
     && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/ffmpeg /usr/local/bin/ffmpeg \
     && ln -s /usr/bin/convert /usr/local/bin/convert \
+    && ln -s /usr/bin/wget /usr/local/bin/wget \
     && ln -sf /usr/bin/mariadb-dump /usr/bin/mysqldump
 
 # Install IonCube Loader if enabled
