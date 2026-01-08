@@ -112,6 +112,19 @@ if [ "$TABLE_COUNT" -eq 0 ]; then
     fi
 fi
 
+# Copy nginx rewrites from KVS archive (same as standalone install)
+if [ -f "$KVS_PATH/_INSTALL/nginx_config.txt" ]; then
+    cp "$KVS_PATH/_INSTALL/nginx_config.txt" /nginx-includes/kvs-rewrites.conf
+    echo "Nginx rewrites copied from archive"
+elif [ ! -f /nginx-includes/kvs-rewrites.conf ]; then
+    # Re-extract just nginx_config.txt if _INSTALL was already deleted
+    KVS_ARCHIVE=$(find /kvs-archive -name "KVS_*.zip" -type f 2>/dev/null | head -1)
+    if [ -n "$KVS_ARCHIVE" ]; then
+        unzip -p "$KVS_ARCHIVE" "_INSTALL/nginx_config.txt" > /nginx-includes/kvs-rewrites.conf 2>/dev/null || true
+        echo "Nginx rewrites extracted from archive"
+    fi
+fi
+
 # Clean up installation files
 if [ -d "$KVS_PATH/_INSTALL" ]; then
     rm -rf "$KVS_PATH/_INSTALL"
@@ -131,6 +144,14 @@ if mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
         -e "DELETE FROM ktvs_options WHERE variable IN ('CRON_UID', 'CRON_TIME');" 2>/dev/null || true
     echo "Cleared cron registration from ktvs_options"
 fi
+
+# Replace %PROJECT_PATH% placeholder in server paths
+# This is normally done by post_install.php but may fail if project_path was wrong on first admin access
+mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+    -e "UPDATE ktvs_admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$KVS_PATH') WHERE path LIKE '%PROJECT_PATH%';" 2>/dev/null || true
+mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+    -e "UPDATE ktvs_admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$KVS_PATH') WHERE path LIKE '%PROJECT_PATH%';" 2>/dev/null || true
+echo "Server paths configured to: $KVS_PATH"
 
 # Final permissions
 chown -R 1000:1000 "$KVS_PATH"

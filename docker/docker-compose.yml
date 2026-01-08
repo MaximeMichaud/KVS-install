@@ -21,6 +21,7 @@ services:
       - acme-certs:/etc/nginx/ssl
       - letsencrypt-webroot:/var/www/_letsencrypt
       - nginx-logs:/var/log/nginx
+      - nginx-includes:/etc/nginx/includes:ro
     depends_on:
       - php-fpm
       - acme
@@ -157,6 +158,7 @@ services:
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - ./kvs-archive:/kvs-archive:ro
+      - nginx-includes:/nginx-includes
     environment:
       - DOMAIN=${DOMAIN}
       - MARIADB_PASSWORD=${MARIADB_PASSWORD}
@@ -247,4 +249,5 @@ volumes:
   letsencrypt-webroot:
   phpmyadmin-data:
   nginx-logs:
+  nginx-includes:
   traefik-certs:

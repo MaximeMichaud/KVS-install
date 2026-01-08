@@ -19,7 +19,10 @@ server {
     # index.php
     index                   index.php;
 
-    # index.php fallback
+    # KVS URL rewrites (from KVS archive _INSTALL/nginx_config.txt)
+    include /etc/nginx/includes/kvs-rewrites.conf;
+
+    # Fallback to index.php
     location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
