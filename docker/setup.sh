@@ -83,7 +83,8 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Detect existing installation and warn
-EXISTING_CONTAINERS=$(docker ps -a --filter "name=kvs-" --format "{{.Names}}" 2>/dev/null | wc -l)
+# Look for KVS-related containers (any prefix ending with -php, -mariadb, etc.)
+EXISTING_CONTAINERS=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep -E '-(php|mariadb|nginx|dragonfly|memcached|cron)$' | wc -l)
 EXISTING_VOLUMES=$(docker volume ls --filter "name=docker_" -q 2>/dev/null | wc -l)
 
 if [ "$EXISTING_CONTAINERS" -gt 0 ] || [ "$EXISTING_VOLUMES" -gt 0 ]; then
@@ -135,6 +136,58 @@ if [ "$DOMAIN" = "example.com" ]; then
             echo -e "${RED}Invalid domain format. Please try again.${NC}"
         fi
     done
+fi
+
+# Site prefix for container naming (multi-site support)
+select_site_prefix() {
+    echo ""
+    echo -e "${CYAN}Container Prefix (for multi-site support)${NC}"
+
+    # Generate default from domain (remove TLD)
+    # e.g., maximemichaud.ca -> maximemichaud, example.com -> example
+    DEFAULT_PREFIX="${DOMAIN%.*}"
+    # Sanitize: lowercase, replace dots/underscores with hyphens
+    DEFAULT_PREFIX=$(echo "$DEFAULT_PREFIX" | tr '[:upper:]' '[:lower:]' | tr '._' '-')
+
+    echo "Container names will be: {prefix}-php, {prefix}-mariadb, etc."
+    echo "  Default: kvs-${DEFAULT_PREFIX} (e.g., kvs-${DEFAULT_PREFIX}-php)"
+    echo ""
+    echo "Options:"
+    echo "  1) Use default: kvs-${DEFAULT_PREFIX}"
+    echo "  2) Use legacy: kvs (single-site, containers: kvs-php, kvs-mariadb)"
+    echo "  3) Custom prefix"
+    read -rp "Select [1-3] (default: 1): " PREFIX_CHOICE
+
+    case $PREFIX_CHOICE in
+        2)
+            SITE_PREFIX="kvs"
+            echo -e "${GREEN}Using legacy prefix: kvs${NC}"
+            ;;
+        3)
+            while true; do
+                read -rp "Enter custom prefix (e.g., kvs-mysite): " SITE_PREFIX
+                # Validate: lowercase, alphanumeric and hyphens only
+                if [[ "$SITE_PREFIX" =~ ^[a-z][a-z0-9-]*$ ]]; then
+                    break
+                else
+                    echo -e "${RED}Invalid prefix. Use lowercase letters, numbers, and hyphens only.${NC}"
+                fi
+            done
+            echo -e "${GREEN}Using custom prefix: ${SITE_PREFIX}${NC}"
+            ;;
+        *)
+            SITE_PREFIX="kvs-${DEFAULT_PREFIX}"
+            echo -e "${GREEN}Using prefix: ${SITE_PREFIX}${NC}"
+            ;;
+    esac
+
+    sed -i "s/^SITE_PREFIX=.*/SITE_PREFIX=$SITE_PREFIX/" .env
+}
+
+# Only ask about prefix if using default
+source .env
+if [ "$SITE_PREFIX" = "kvs" ]; then
+    select_site_prefix
 fi
 
 # SSL provider selection FIRST (before email)
@@ -406,7 +459,7 @@ check_existing_volume() {
 
         # Check if .env has non-default passwords (meaning we generated them before)
         source .env
-        if [ "$MARIADB_ROOT_PASSWORD" != "CHANGE_ME_ROOT_PASSWORD" ] && [ -n "$MARIADB_ROOT_PASSWORD" ]; then
+        if [ "$MARIADB_ROOT_PASSWORD" != "CHANGE_ME_ROOT_PASSWORD" ] && [ -n "$MARIADB_ROOT_PASSWORD" ]; then  # pragma: allowlist secret
             echo "Saved credentials found in .env"
 
             # Try to verify connection by starting container briefly
@@ -461,13 +514,13 @@ check_existing_volume
 
 # Generate passwords if still defaults
 source .env
-if [ "$MARIADB_ROOT_PASSWORD" = "CHANGE_ME_ROOT_PASSWORD" ]; then
+if [ "$MARIADB_ROOT_PASSWORD" = "CHANGE_ME_ROOT_PASSWORD" ]; then  # pragma: allowlist secret
     MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
     sed -i "s|MARIADB_ROOT_PASSWORD=CHANGE_ME_ROOT_PASSWORD|MARIADB_ROOT_PASSWORD=$MARIADB_ROOT_PASSWORD|" .env
     echo -e "${GREEN}Generated MariaDB root password${NC}"
 fi
 
-if [ "$MARIADB_PASSWORD" = "CHANGE_ME_KVS_PASSWORD" ]; then
+if [ "$MARIADB_PASSWORD" = "CHANGE_ME_KVS_PASSWORD" ]; then  # pragma: allowlist secret
     MARIADB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
     sed -i "s|MARIADB_PASSWORD=CHANGE_ME_KVS_PASSWORD|MARIADB_PASSWORD=$MARIADB_PASSWORD|" .env
     echo -e "${GREEN}Generated MariaDB KVS password${NC}"
@@ -488,16 +541,18 @@ fi
 echo ""
 echo -e "${CYAN}Checking if ports 80 and 443 are available...${NC}"
 if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
-    # Check if it's a KVS docker container
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "kvs-"; then
+    # Check if it's a KVS docker container (use SITE_PREFIX or detect by service suffix)
+    KVS_CONTAINERS=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E "^${SITE_PREFIX}-|-(php|mariadb|nginx)$" || true)
+    if [ -n "$KVS_CONTAINERS" ]; then
         echo -e "${YELLOW}Existing KVS containers detected${NC}"
-        docker ps --filter "name=kvs-" --format "table {{.Names}}\t{{.Status}}"
+        docker ps --filter "name=${SITE_PREFIX}-" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null || \
+            docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "-(php|mariadb|nginx)"
         echo ""
         read -rp "Stop existing KVS containers? [Y/n]: " STOP_EXISTING
         if [ "$STOP_EXISTING" != "n" ] && [ "$STOP_EXISTING" != "N" ]; then
             echo "Stopping existing containers..."
             docker compose down 2>/dev/null || true
-            docker ps -q --filter "name=kvs-" | xargs -r docker stop 2>/dev/null || true
+            docker ps -q --filter "name=${SITE_PREFIX}-" 2>/dev/null | xargs -r docker stop 2>/dev/null || true
             echo -e "${GREEN}Existing containers stopped${NC}"
         fi
     else

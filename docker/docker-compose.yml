@@ -2,7 +2,7 @@ services:
   nginx:
     build:
       context: ./nginx
-    container_name: kvs-nginx
+    container_name: ${SITE_PREFIX:-kvs}-nginx
     restart: unless-stopped
     ports:
       - "${HTTP_PORT:-80}:80"
@@ -42,7 +42,7 @@ services:
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
         IONCUBE: ${IONCUBE:-YES}
-    container_name: kvs-php
+    container_name: ${SITE_PREFIX:-kvs}-php
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
@@ -61,7 +61,7 @@ services:
 
   mariadb:
     image: mariadb:${MARIADB_VERSION:-11.8}
-    container_name: kvs-mariadb
+    container_name: ${SITE_PREFIX:-kvs}-mariadb
     restart: unless-stopped
     ports:
       # Localhost only - safe for kvs-cli access
@@ -86,7 +86,7 @@ services:
 
   memcached:
     image: memcached:alpine
-    container_name: kvs-memcached
+    container_name: ${SITE_PREFIX:-kvs}-memcached
     hostname: cache
     restart: unless-stopped
     command: memcached -m ${CACHE_MEMORY:-256}
@@ -102,7 +102,7 @@ services:
 
   dragonfly:
     image: docker.dragonflydb.io/dragonflydb/dragonfly
-    container_name: kvs-dragonfly
+    container_name: ${SITE_PREFIX:-kvs}-dragonfly
     hostname: cache
     restart: unless-stopped
     command: dragonfly --memcached_port=11211 --maxmemory=${CACHE_MEMORY:-256}mb --proactor_threads=2 --logtostderr
@@ -120,7 +120,7 @@ services:
 
   acme:
     image: neilpang/acme.sh
-    container_name: kvs-acme
+    container_name: ${SITE_PREFIX:-kvs}-acme
     restart: unless-stopped
     command: daemon
     environment:
@@ -139,7 +139,7 @@ services:
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
         IONCUBE: ${IONCUBE:-YES}
-    container_name: kvs-cron
+    container_name: ${SITE_PREFIX:-kvs}-cron
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
@@ -153,7 +153,7 @@ services:
   kvs-init:
     build:
       context: ./init
-    container_name: kvs-init
+    container_name: ${SITE_PREFIX:-kvs}-init
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - ./kvs-archive:/kvs-archive:ro
@@ -171,7 +171,7 @@ services:
 
   phpmyadmin-init:
     image: alpine:latest
-    container_name: kvs-phpmyadmin-init
+    container_name: ${SITE_PREFIX:-kvs}-phpmyadmin-init
     command: |
       sh -c '
         if [ ! -f /usr/share/phpmyadmin/index.php ]; then
@@ -197,7 +197,7 @@ services:
   # Traefik reverse proxy - only in multi-site mode
   traefik:
     image: traefik:v3.6
-    container_name: kvs-traefik
+    container_name: ${SITE_PREFIX:-kvs}-traefik
     restart: unless-stopped
     command:
       - "--api.dashboard=false"
