@@ -337,7 +337,7 @@ function whatisdomain() {
   
   # Fallback: extract domain from filename if not found in setup.php
   if [[ -z "$DOMAIN" ]]; then
-    # Extract domain from filename pattern like KVS_6.3.2_[domain.com].zip
+    # Extract domain from filename pattern like KVS_X.X.X_[domain.com].zip
     local kvs_file
     kvs_file=$(find /root -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
     kvs_file=${kvs_file##*/}
