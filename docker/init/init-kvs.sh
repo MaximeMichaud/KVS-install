@@ -153,6 +153,24 @@ mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
     -e "UPDATE ktvs_admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$KVS_PATH') WHERE path LIKE '%PROJECT_PATH%';" 2>/dev/null || true
 echo "Server paths configured to: $KVS_PATH"
 
+# Configure server URLs based on USE_WWW
+if [ "$USE_WWW" = "true" ]; then
+    SERVER_URL="https://www.${DOMAIN}"
+else
+    SERVER_URL="https://${DOMAIN}"
+fi
+mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+    -e "UPDATE ktvs_admin_servers SET url = CONCAT('${SERVER_URL}', SUBSTRING(url, LOCATE('/contents', url))) WHERE url LIKE '%/contents%';" 2>/dev/null || true
+echo "Server URLs configured to: $SERVER_URL"
+
+# Skip SSL verification for self-signed certificates
+# This prevents cron jobs and internal API calls from failing due to untrusted certificate
+if [ "$SSL_PROVIDER" = "selfsigned" ]; then
+    mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+        -e "UPDATE ktvs_admin_servers SET streaming_skip_ssl_check = 1;" 2>/dev/null || true
+    echo "SSL verification disabled for self-signed certificate"
+fi
+
 # Final permissions
 chown -R 1000:1000 "$KVS_PATH"
 

@@ -163,6 +163,7 @@ services:
       - DOMAIN=${DOMAIN}
       - MARIADB_PASSWORD=${MARIADB_PASSWORD}
       - USE_WWW=${USE_WWW:-false}
+      - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
     depends_on:
       mariadb:
         condition: service_healthy
