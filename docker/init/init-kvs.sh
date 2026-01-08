@@ -69,7 +69,7 @@ fi
 # Configure database connection
 if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
     echo "Configuring database connection..."
-    sed -i "s|'DB_HOST','[^']*'|'DB_HOST','kvs-mariadb'|" "$KVS_PATH/admin/include/setup_db.php"
+    sed -i "s|'DB_HOST','[^']*'|'DB_HOST','mariadb'|" "$KVS_PATH/admin/include/setup_db.php"
     sed -i "s|'DB_LOGIN','[^']*'|'DB_LOGIN','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
     sed -i "s|'DB_PASS','[^']*'|'DB_PASS','$MARIADB_PASSWORD'|" "$KVS_PATH/admin/include/setup_db.php"
     sed -i "s|'DB_DEVICE','[^']*'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
@@ -78,7 +78,7 @@ fi
 # Wait for MariaDB (max 1 minute - should already be healthy)
 TRIES=0
 MAX_TRIES=30
-until mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1; do
+until mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1; do
     TRIES=$((TRIES + 1))
     if [ $TRIES -ge $MAX_TRIES ]; then
         echo "ERROR: Cannot connect to MariaDB after 1 minute"
@@ -90,7 +90,7 @@ until mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -e "SELECT 1" "$
 done
 
 # Check if database has tables
-TABLE_COUNT=$(mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DOMAIN'" 2>/dev/null || echo "0")
+TABLE_COUNT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DOMAIN'" 2>/dev/null || echo "0")
 
 if [ "$TABLE_COUNT" -eq 0 ]; then
     echo "Database is empty, need to import..."
@@ -105,7 +105,7 @@ if [ "$TABLE_COUNT" -eq 0 ]; then
     fi
 
     if [ -f "$KVS_PATH/_INSTALL/install_db.sql" ]; then
-        mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" < "$KVS_PATH/_INSTALL/install_db.sql"
+        mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" < "$KVS_PATH/_INSTALL/install_db.sql"
         echo "Database imported successfully"
     else
         echo "ERROR: install_db.sql not found"
@@ -125,9 +125,9 @@ find "$KVS_PATH/admin/data" -name "*.lock" -type f -delete 2>/dev/null || true
 
 # Clear CRON_UID from database so new container can register
 # Table name may be ktvs_options or sys_options depending on KVS version
-if mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+if mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
     -e "SELECT 1 FROM ktvs_options LIMIT 1;" >/dev/null 2>&1; then
-    mariadb -h kvs-mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+    mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
         -e "DELETE FROM ktvs_options WHERE variable IN ('CRON_UID', 'CRON_TIME');" 2>/dev/null || true
     echo "Cleared cron registration from ktvs_options"
 fi
