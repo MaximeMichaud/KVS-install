@@ -1,0 +1,74 @@
+# Pre-commit hooks configuration for KVS-install
+# See https://pre-commit.com for more information
+
+# Define the minimum version
+minimum_pre_commit_version: '3.5.0'
+
+# Don't run on tags
+fail_fast: false
+
+# Default settings
+default_language_version:
+  python: python3.13
+
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+repos:
+  # ShellCheck - Static analysis tool for shell scripts
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
+    hooks:
+      - id: shellcheck
+        name: "ShellCheck - Static analysis for shell scripts"
+        args: ["--severity=warning"]  # Show errors and warnings
+        types: [shell]
+        files: \.(sh|bash|ksh|zsh)$
+
+  # Bashate - Code style checker for bash scripts
+  - repo: https://github.com/openstack/bashate
+    rev: 2.1.1
+    hooks:
+      - id: bashate
+        name: "Bashate - Bash code style enforcement"
+        args: ["-i", "E001,E002,E003,E005,E006,E020"]  # Ignore: trailing whitespace (other hook), tabs, indent style, line length, function format
+        files: \.(sh|bash)$
+
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        name: "Check for large files"
+        args: ['--maxkb=1000']
+      - id: check-executables-have-shebangs
+        name: "Check executable shebangs"
+      - id: check-merge-conflict
+        name: "Check for merge conflicts"
+      - id: check-symlinks
+        name: "Check symlinks"
+      - id: end-of-file-fixer
+        name: "Fix end of file"
+      - id: trailing-whitespace
+        name: "Remove trailing whitespace"
+
+  # Security checks
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        name: "Detect potential secrets"
+        args: ['--baseline', '.secrets.baseline']
+        exclude: .*\.lock$
+
+  # Commitizen - Conventional commits
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.9.1
+    hooks:
+      - id: commitizen
+        name: "Check commit message format"
+        stages: [commit-msg]
+      - id: commitizen-branch
+        name: "Check branch commits"
+        stages: [pre-push]
