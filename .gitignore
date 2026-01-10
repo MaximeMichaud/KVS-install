@@ -1,2 +1,6 @@
 
 .idea/
+
+# KVS archives (proprietary, never commit)
+KVS_*.zip
+**/KVS_*.zip
