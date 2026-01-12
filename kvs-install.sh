@@ -265,7 +265,7 @@ function installQuestions() {
     # Determining PHP version and PHP path
     PHP="7.4"
     php_path="/usr/lib/php/20190902"
-    
+
     # KVS 6.2+ supports PHP 8.1
     if ver_compare "6.2" "$version"; then
       PHP="8.1"
@@ -325,7 +325,7 @@ function whatisdomain() {
   mkdir -p /root/tmp
   cp KVS_* /root/tmp/
   cd /root/tmp && unzip -o KVS_*
-  
+
   # Try to extract domain from setup.php if it exists
   if [[ -f /root/tmp/admin/include/setup.php ]]; then
     # shellcheck disable=SC2016
@@ -334,7 +334,7 @@ function whatisdomain() {
     DOMAIN=${DOMAIN#*=\"}
     DOMAIN=${DOMAIN%\"*}
   fi
-  
+
   # Fallback: extract domain from filename if not found in setup.php
   if [[ -z "$DOMAIN" ]]; then
     # Extract domain from filename pattern like KVS_X.X.X_[domain.com].zip
@@ -347,7 +347,7 @@ function whatisdomain() {
       DOMAIN=${DOMAIN%]*}
     fi
   fi
-  
+
   # Validate domain format
   if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
     echo "Error: Invalid or empty domain extracted: '$DOMAIN'"
@@ -372,18 +372,18 @@ function check_dns_configuration() {
     return 1
   fi
   echo "Checking DNS configuration for $DOMAIN..."
-  
+
   # Get server's public IP
   SERVER_IP=$(curl -s https://api.ipify.org)
   SERVER_IPV6=$(curl -s https://api64.ipify.org)
-  
+
   # Check if we got the server IP successfully
   if [[ -z "$SERVER_IP" ]]; then
     echo "${red}Warning: Could not determine server IP address${normal}"
     echo "Continuing anyway..."
     return
   fi
-  
+
   # Function to check DNS IPv4 for a specific domain
   check_single_domain() {
     local domain=$1
@@ -427,7 +427,7 @@ function check_dns_configuration() {
       return 1
     fi
   }
-  
+
   # Check both domain and www subdomain
   dns_ok=true
   echo "DNS Resolution Status (IPv4):"
@@ -449,14 +449,14 @@ function check_dns_configuration() {
       dns_ok=false
     fi
   fi
-  
+
   # If DNS is not properly configured
   if [[ "$dns_ok" = false ]]; then
     echo ""
     echo "${red}DNS configuration issue detected!${normal}"
     echo "The domain does not point to this server's IP ($SERVER_IP)"
     echo ""
-    
+
     if [[ $HEADLESS == "y" ]]; then
       echo "Running in headless mode - continuing despite DNS issues"
       echo "SSL certificate generation will likely fail"
@@ -465,11 +465,11 @@ function check_dns_configuration() {
       echo "  1) Continue anyway (SSL certificate will likely fail)"
       echo "  2) Wait 60 seconds and check again"
       echo "  3) Exit to configure DNS first (recommended)"
-      
+
       until [[ "$DNS_ACTION" =~ ^[1-3]$ ]]; do
         read -rp "Select [1-3]: " DNS_ACTION
       done
-      
+
       case $DNS_ACTION in
         1)
           echo "Continuing installation despite DNS issues..."
@@ -493,7 +493,7 @@ function check_dns_configuration() {
   else
     echo ""
     echo "${green}DNS configuration verified successfully!${normal}"
-    
+
     # Optional: Check DNS propagation across multiple nameservers
     echo "Checking DNS propagation..."
     for ns in 8.8.8.8 1.1.1.1 9.9.9.9; do
@@ -511,7 +511,7 @@ function check_dns_configuration() {
       fi
     done
   fi
-  
+
   echo ""
 }
 
@@ -649,7 +649,7 @@ function install_KVS() {
     else
         databasepassword="$(openssl rand -base64 12)"
     fi
-    
+
     # Check if database exists
     if ! mariadb -e "USE \`$DOMAIN\`" 2>/dev/null; then
         echo "Creating database $DOMAIN..."
@@ -659,7 +659,7 @@ function install_KVS() {
         echo "Database $DOMAIN already exists, skipping creation..."
         db_created=false
     fi
-    
+
     # Check if user exists
     if ! mariadb -e "SELECT User FROM mysql.user WHERE User='$DOMAIN' AND Host='localhost'" | grep -q "$DOMAIN"; then
         echo "Creating user $DOMAIN..."
@@ -668,22 +668,22 @@ function install_KVS() {
         echo "User $DOMAIN already exists, updating password..."
         mariadb -e "ALTER USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
     fi
-    
+
     mariadb -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
     mariadb -e "FLUSH PRIVILEGES;"
-    
+
     # Only import install_db.sql if database was just created
     if [[ "$db_created" = true ]] && [[ -f "$KVS_PATH"/_INSTALL/install_db.sql ]]; then
         echo "Importing initial database structure..."
         mariadb -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
     fi
-    
+
     # Remove anonymous user
     mariadb -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
-    
+
     # Clean up installation files if they exist
     [ -d "$KVS_PATH"/_INSTALL/ ] && rm -rf "$KVS_PATH"/_INSTALL/
-    
+
     sed -i "s|login|$DOMAIN|
              s|pass|$databasepassword|
              s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH"/admin/include/setup_db.php
@@ -910,7 +910,7 @@ function dockerInstall() {
   echo "${green}Docker Compose is available${normal}"
 
   # Clone or update KVS-install repo
-  INSTALL_DIR="/opt/kvs-docker"
+  INSTALL_DIR="/opt/kvs"
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "Updating existing installation..."
     if cd "$INSTALL_DIR" && git pull; then

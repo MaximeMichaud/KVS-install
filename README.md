@@ -38,7 +38,7 @@ Requirements:
 The script will:
 
 1. Install Docker if not present
-2. Clone the repository to `/opt/kvs-docker`
+2. Clone the repository to `/opt/kvs`
 3. Configure environment variables automatically
 4. Generate secure database passwords
 5. Start all services via Docker Compose
