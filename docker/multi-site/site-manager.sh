@@ -128,9 +128,17 @@ EOF
     log_success "Created docker-compose.yml"
 
     # Generate Caddy site config
+    # Detect if subdomain (more than 2 parts = subdomain, no www needed)
+    local domain_parts
+    domain_parts=$(echo "$domain" | tr '.' '\n' | wc -l)
+    local server_names="$domain"
+    if [ "$domain_parts" -le 2 ]; then
+        server_names="${domain}, www.${domain}"
+    fi
+
     cat > "${CADDY_SITES_DIR}/${domain}.caddy" << EOF
 # KVS Site: ${domain}
-${domain}, www.${domain} {
+${server_names} {
     reverse_proxy ${site_prefix}-nginx:80 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
