@@ -91,6 +91,12 @@ add_site() {
     mkdir -p "${site_dir}"
     log_success "Created site directory: ${site_dir}"
 
+    # Create webroot directory
+    local webroot="/var/www/${domain}"
+    mkdir -p "${webroot}"
+    chown 1000:1000 "${webroot}"
+    log_success "Created webroot: ${webroot}"
+
     # Generate .env file
     cat > "${site_dir}/.env" << EOF
 # Site configuration for ${domain}
@@ -228,6 +234,7 @@ remove_site() {
     local domain="$1"
     local site_dir="${SITES_DIR}/${domain}"
     local caddy_config="${CADDY_SITES_DIR}/${domain}.caddy"
+    local webroot="/var/www/${domain}"
 
     if [ ! -d "$site_dir" ]; then
         log_error "Site ${domain} does not exist"
@@ -235,6 +242,10 @@ remove_site() {
     fi
 
     echo -e "${YELLOW}WARNING: This will remove all data for ${domain}!${NC}"
+    echo "  - Docker containers and volumes"
+    echo "  - Site configuration"
+    [ -d "$webroot" ] && echo "  - Webroot: ${webroot}"
+    echo ""
     read -rp "Are you sure? (type 'yes' to confirm): " confirm
     if [ "$confirm" != "yes" ]; then
         log_info "Aborted"
@@ -254,6 +265,17 @@ remove_site() {
     # Remove site directory
     rm -rf "$site_dir"
     log_success "Removed site directory"
+
+    # Remove webroot (ask first)
+    if [ -d "$webroot" ]; then
+        read -rp "Also remove webroot ${webroot}? [y/N]: " remove_webroot
+        if [ "$remove_webroot" = "y" ] || [ "$remove_webroot" = "Y" ]; then
+            rm -rf "$webroot"
+            log_success "Removed webroot: ${webroot}"
+        else
+            log_info "Webroot preserved at: ${webroot}"
+        fi
+    fi
 
     # Reload Caddy
     if docker ps --format '{{.Names}}' | grep -q "kvs-caddy"; then
