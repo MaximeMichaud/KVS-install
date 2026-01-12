@@ -1,0 +1,32 @@
+# =============================================================================
+# KVS Multi-Site - Main Caddyfile
+# =============================================================================
+#
+# This file imports all site configurations from /etc/caddy/sites/
+# Each site has its own .caddy file that defines the domain and upstream.
+#
+# To add a new site:
+#   1. Create sites/domain.com.caddy
+#   2. Run: docker exec kvs-caddy caddy reload --config /etc/caddy/Caddyfile
+#
+# =============================================================================
+
+# Global options
+{
+    # Email for Let's Encrypt
+    email {$ACME_EMAIL:admin@example.com}
+
+    # Use Let's Encrypt production (comment for staging/testing)
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+
+    # Enable HTTP/3
+    servers {
+        protocols h1 h2 h3
+    }
+
+    # Admin API (for health checks)
+    admin 0.0.0.0:2019
+}
+
+# Import all site configurations
+import /etc/caddy/sites/*.caddy

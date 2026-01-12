@@ -3,20 +3,29 @@ set -e
 
 DOMAIN="${DOMAIN:-example.com}"
 USE_WWW="${USE_WWW:-false}"
+SSL_PROVIDER="${SSL_PROVIDER:-selfsigned}"
 
 # Generate self-signed cert if not exists (fallback until ACME runs)
-SSL_DIR="/etc/nginx/ssl/${DOMAIN}"
-if [ ! -f "${SSL_DIR}/cert.pem" ]; then
-    echo "SSL certificate not found, generating self-signed certificate..."
-    mkdir -p "${SSL_DIR}"
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout "${SSL_DIR}/key.pem" \
-        -out "${SSL_DIR}/cert.pem" \
-        -subj "/CN=${DOMAIN}" \
-        -addext "subjectAltName=DNS:${DOMAIN},DNS:www.${DOMAIN}" \
-        2>/dev/null
-    echo "Self-signed certificate generated for ${DOMAIN}"
+# Skip if SSL_PROVIDER=none (behind reverse proxy like Caddy)
+if [ "$SSL_PROVIDER" != "none" ]; then
+    SSL_DIR="/etc/nginx/ssl/${DOMAIN}"
+    if [ ! -f "${SSL_DIR}/cert.pem" ]; then
+        echo "SSL certificate not found, generating self-signed certificate..."
+        mkdir -p "${SSL_DIR}"
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout "${SSL_DIR}/key.pem" \
+            -out "${SSL_DIR}/cert.pem" \
+            -subj "/CN=${DOMAIN}" \
+            -addext "subjectAltName=DNS:${DOMAIN},DNS:www.${DOMAIN}" \
+            2>/dev/null
+        echo "Self-signed certificate generated for ${DOMAIN}"
+    fi
+else
+    echo "SSL_PROVIDER=none: Skipping SSL certificate generation (behind reverse proxy)"
 fi
+
+# Remove default nginx config (conflicts with our server blocks)
+rm -f /etc/nginx/conf.d/default.conf
 
 # Docker-specific settings
 export KVS_ROOT="/var/www/kvs"

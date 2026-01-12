@@ -1,0 +1,110 @@
+# KVS Multi-Site nginx config (behind Caddy reverse proxy)
+# No SSL - Caddy handles SSL termination
+
+server {
+    listen 80;
+    server_name ${DOMAIN} www.${DOMAIN};
+    set $base ${KVS_ROOT};
+    root $base;
+
+    # Health check for Caddy
+    location /health {
+        access_log off;
+        return 200 'OK';
+        add_header Content-Type text/plain;
+    }
+
+    # Security headers (some handled by Caddy)
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    # index.php
+    index index.php;
+
+    # KVS URL rewrites (from KVS archive _INSTALL/nginx_config.txt)
+    include /etc/nginx/includes/kvs-rewrites.conf;
+
+    # Fallback to index.php
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    # Logging
+    access_log /var/log/nginx/${DOMAIN}.access.log;
+    error_log /var/log/nginx/${DOMAIN}.error.log warn;
+
+    # Assets, media
+    location ~* \.(?:css(\.map)?|js(\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv)$ {
+        expires 180d;
+        access_log off;
+    }
+
+    # SVG, fonts
+    location ~* \.(?:svgz?|ttf|ttc|otf|eot|woff2?)$ {
+        add_header Access-Control-Allow-Origin "*";
+        expires 180d;
+        access_log off;
+    }
+
+    # Handle PHP
+    location ~ \.php$ {
+        ${RESOLVER_LINE}
+        fastcgi_pass ${PHP_FPM_UPSTREAM};
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
+
+        # Timeouts
+        fastcgi_connect_timeout 60;
+        fastcgi_send_timeout 300;
+        fastcgi_read_timeout 300;
+        fastcgi_buffer_size 64k;
+        fastcgi_buffers 4 64k;
+    }
+
+    # KVS internal locations
+    location ~* /blocks/.*\.php$ { internal; }
+    location ~* /langs/.*\.php$ { internal; }
+    location ~* /template/.*\.php$ { internal; }
+    location ~* /tmp/.*\.php$ { internal; }
+
+    # Protect videos from direct access
+    location ^~ /contents/videos/ {
+        internal;
+        aio threads=default;
+        mp4;
+        mp4_buffer_size     1M;
+        mp4_max_buffer_size 3M;
+    }
+
+    # phpMyAdmin
+    location /phpmyadmin/ {
+        alias /usr/share/phpmyadmin/;
+        index index.php;
+
+        # Static files
+        location ~* ^/phpmyadmin/(.+\.(css|js|ico|gif|png|jpg|jpeg|svg|woff|woff2|ttf|eot))$ {
+            alias /usr/share/phpmyadmin/$1;
+            expires 180d;
+            access_log off;
+        }
+
+        # PHP files
+        location ~ ^/phpmyadmin/(.+\.php)$ {
+            alias /usr/share/phpmyadmin/$1;
+            ${RESOLVER_LINE}
+            fastcgi_pass ${PHP_FPM_UPSTREAM};
+            fastcgi_param SCRIPT_FILENAME $request_filename;
+            include fastcgi_params;
+        }
+    }
+
+    # Deny access to sensitive files
+    location ~ /\. {
+        deny all;
+    }
+
+    location ~ ^/(admin/include|tmp)/ {
+        deny all;
+    }
+}

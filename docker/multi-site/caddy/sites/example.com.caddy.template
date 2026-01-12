@@ -1,0 +1,40 @@
+# =============================================================================
+# Site Configuration Template
+# =============================================================================
+# Copy this file and rename to your-domain.com.caddy
+# Replace DOMAIN with your actual domain
+# =============================================================================
+
+DOMAIN, www.DOMAIN {
+    # Reverse proxy to site's nginx container
+    reverse_proxy kvs-DOMAIN_SAFE-nginx:80 {
+        # Health check
+        health_uri /health
+        health_interval 30s
+
+        # Headers
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Logging
+    log {
+        output file /data/logs/DOMAIN.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+    }
+
+    # Security headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    # Gzip compression
+    encode gzip zstd
+}

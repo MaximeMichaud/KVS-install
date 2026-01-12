@@ -1,0 +1,49 @@
+# =============================================================================
+# KVS Multi-Site - Caddy Reverse Proxy
+# =============================================================================
+#
+# This is the central reverse proxy that handles:
+# - SSL certificates (automatic Let's Encrypt)
+# - Routing to individual KVS sites
+# - HTTP to HTTPS redirect
+#
+# USAGE:
+#   docker compose -f docker-compose.caddy.yml up -d
+#
+# Each KVS site connects to the 'kvs-proxy' network and Caddy routes
+# traffic based on the domain name.
+#
+# =============================================================================
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: kvs-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3 QUIC
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/sites:/etc/caddy/sites:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - kvs-proxy
+    environment:
+      - CADDY_ADMIN=0.0.0.0:2019
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  kvs-proxy:
+    name: kvs-proxy
+    driver: bridge
+
+volumes:
+  caddy-data:
+  caddy-config:

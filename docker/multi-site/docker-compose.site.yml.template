@@ -1,0 +1,198 @@
+# =============================================================================
+# KVS Multi-Site - Site Template
+# =============================================================================
+#
+# Individual KVS site running behind Caddy reverse proxy.
+# This file is copied to sites/<domain>/docker-compose.yml
+#
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # Nginx - Web Server
+  # ===========================================================================
+  nginx:
+    build:
+      context: ../../../nginx
+      args:
+        - DOMAIN=${DOMAIN}
+    container_name: ${SITE_PREFIX}-nginx
+    restart: unless-stopped
+    volumes:
+      - ../../../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../../nginx/kvs-caddy.conf.template:/etc/nginx/templates/kvs.conf.template:ro
+      - ../../../../conf/nginx/globals:/etc/nginx/globals:ro
+      - kvs-webroot:/var/www/kvs
+      - phpmyadmin-data:/usr/share/phpmyadmin:ro
+      - nginx-includes:/etc/nginx/includes:ro
+    environment:
+      - DOMAIN=${DOMAIN}
+      - USE_WWW=${USE_WWW:-false}
+      - SSL_PROVIDER=none
+    depends_on:
+      php-fpm:
+        condition: service_started
+    networks:
+      kvs-proxy:
+        aliases:
+          - ${SITE_PREFIX}-nginx
+      site-internal:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ===========================================================================
+  # PHP-FPM
+  # ===========================================================================
+  php-fpm:
+    build:
+      context: ../../../php
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.1}
+        IONCUBE: ${IONCUBE:-YES}
+    container_name: ${SITE_PREFIX}-php
+    restart: unless-stopped
+    volumes:
+      - kvs-webroot:/var/www/kvs
+      - phpmyadmin-data:/usr/share/phpmyadmin
+      - ../../../php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
+    environment:
+      - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-512M}
+      - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
+      - PHP_POST_MAX_SIZE=${PHP_POST_MAX_SIZE:-2048M}
+      - PHP_MAX_EXECUTION_TIME=${PHP_MAX_EXECUTION_TIME:-300}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - site-internal
+
+  # ===========================================================================
+  # MariaDB
+  # ===========================================================================
+  mariadb:
+    image: mariadb:${MARIADB_VERSION:-11.8}
+    container_name: ${SITE_PREFIX}-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?error}
+      MARIADB_DATABASE: ${DOMAIN}
+      MARIADB_USER: ${DOMAIN}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?error}
+      MARIADB_MYSQL_LOCALHOST_USER: 1
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - ../../../mariadb/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - site-internal
+
+  # ===========================================================================
+  # Cache - Dragonfly (default)
+  # ===========================================================================
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: ${SITE_PREFIX}-cache
+    restart: unless-stopped
+    ulimits:
+      memlock: -1
+    command: ["--maxmemory", "${CACHE_MEMORY:-512}mb", "--proactor_threads", "2"]
+    networks:
+      - site-internal
+    profiles:
+      - dragonfly
+
+  # ===========================================================================
+  # Cache - Memcached (alternative)
+  # ===========================================================================
+  memcached:
+    image: memcached:alpine
+    container_name: ${SITE_PREFIX}-memcached
+    restart: unless-stopped
+    command: ["-m", "${CACHE_MEMORY:-512}"]
+    networks:
+      - site-internal
+    profiles:
+      - memcached
+
+  # ===========================================================================
+  # Cron
+  # ===========================================================================
+  cron:
+    build:
+      context: ../../../cron
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.1}
+    container_name: ${SITE_PREFIX}-cron
+    restart: unless-stopped
+    volumes:
+      - kvs-webroot:/var/www/kvs
+    depends_on:
+      - php-fpm
+    networks:
+      - site-internal
+
+  # ===========================================================================
+  # KVS Init (one-time setup)
+  # ===========================================================================
+  kvs-init:
+    build:
+      context: ../../../init
+    container_name: ${SITE_PREFIX}-init
+    volumes:
+      - kvs-webroot:/var/www/kvs
+      - ../../../kvs-archive:/kvs-archive:ro
+      - nginx-includes:/nginx-includes
+    environment:
+      - DOMAIN=${DOMAIN}
+      - USE_WWW=${USE_WWW:-false}
+      - MARIADB_HOST=mariadb
+      - MARIADB_USER=${DOMAIN}
+      - MARIADB_PASSWORD=${MARIADB_PASSWORD}
+      - MARIADB_DATABASE=${DOMAIN}
+      - SSL_PROVIDER=selfsigned
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - site-internal
+    profiles:
+      - setup
+
+  # ===========================================================================
+  # phpMyAdmin Init
+  # ===========================================================================
+  phpmyadmin-init:
+    image: phpmyadmin:fpm-alpine
+    container_name: ${SITE_PREFIX}-phpmyadmin-init
+    entrypoint: ["/bin/sh", "-c", "cp -r /var/www/html/* /usr/share/phpmyadmin/ && echo 'phpMyAdmin copied'"]
+    volumes:
+      - phpmyadmin-data:/usr/share/phpmyadmin
+    profiles:
+      - setup
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  kvs-proxy:
+    external: true
+  site-internal:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  kvs-webroot:
+  mariadb-data:
+  phpmyadmin-data:
+  nginx-includes:
