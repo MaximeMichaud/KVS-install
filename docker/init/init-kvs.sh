@@ -173,4 +173,76 @@ if [ -d "$KVS_PATH/_INSTALL" ]; then
     echo "Installation files cleaned up"
 fi
 
+# =============================================================================
+# PERMISSION VERIFICATION (failsafe - mirrors install_permissions.sh from KVS)
+# This ensures correct permissions even if install_permissions.sh was not run
+# =============================================================================
+echo "Verifying critical permissions..."
+PERM_FIXED=0
+
+# Helper: verify/fix directory permission, optionally create if missing
+fix_dir() {
+    local dir="$1" perm="$2" create="${3:-false}"
+    local actual
+    if [ ! -d "$dir" ]; then
+        [ "$create" = "true" ] && mkdir -p "$dir" && chmod "$perm" "$dir" && chown 1000:1000 "$dir" && echo "  CREATED: $dir"
+        return
+    fi
+    actual=$(stat -c "%a" "$dir" 2>/dev/null)
+    if [ "$actual" != "$perm" ]; then
+        chmod "$perm" "$dir"
+        PERM_FIXED=$((PERM_FIXED + 1))
+    fi
+}
+
+# Helper: verify/fix file permission
+fix_file() {
+    local file="$1" perm="$2"
+    local actual
+    [ ! -f "$file" ] && return
+    actual=$(stat -c "%a" "$file" 2>/dev/null)
+    if [ "$actual" != "$perm" ]; then
+        chmod "$perm" "$file"
+        PERM_FIXED=$((PERM_FIXED + 1))
+    fi
+}
+
+# --- Directories that must be 777 ---
+fix_dir "$KVS_PATH/tmp" "777" "true"
+fix_dir "$KVS_PATH/admin/smarty/cache" "777"
+fix_dir "$KVS_PATH/admin/smarty/template-c" "777"
+fix_dir "$KVS_PATH/admin/smarty/template-c-site" "777"
+fix_dir "$KVS_PATH/langs" "777"
+
+# --- Directories that must be 755 (root only, subdirs are 777) ---
+fix_dir "$KVS_PATH/contents" "755"
+fix_dir "$KVS_PATH/admin/data" "755"
+
+# --- All subdirs in these paths must be 777 ---
+find "$KVS_PATH/admin/logs" -type d -exec chmod 777 {} \; 2>/dev/null || true
+find "$KVS_PATH/admin/data" -mindepth 1 -type d -exec chmod 777 {} \; 2>/dev/null || true
+find "$KVS_PATH/contents" -mindepth 1 -type d -exec chmod 777 {} \; 2>/dev/null || true
+find "$KVS_PATH/template" -type d -exec chmod 777 {} \; 2>/dev/null || true
+find "$KVS_PATH/static" -type d -exec chmod 777 {} \; 2>/dev/null || true
+
+# --- Files that must be 666 ---
+find "$KVS_PATH/admin/logs" -type f ! -iname ".htaccess" -exec chmod 666 {} \; 2>/dev/null || true
+find "$KVS_PATH/admin/data" -type f \( -iname "*.dat" -o -iname "*.pem" -o -iname "*.tpl" \) -exec chmod 666 {} \; 2>/dev/null || true
+find "$KVS_PATH/contents" -type f ! -iname ".htaccess" -exec chmod 666 {} \; 2>/dev/null || true
+find "$KVS_PATH/template" -type f ! -iname ".htaccess" -exec chmod 666 {} \; 2>/dev/null || true
+find "$KVS_PATH/langs" -type f -iname "*.lang" -exec chmod 666 {} \; 2>/dev/null || true
+find "$KVS_PATH/static" -type f -exec chmod 666 {} \; 2>/dev/null || true
+fix_file "$KVS_PATH/robots.txt" "666"
+fix_file "$KVS_PATH/favicon.ico" "666"
+
+# --- Critical directories for theme installation (ensure they exist) ---
+fix_dir "$KVS_PATH/admin/data/tmp" "777" "true"
+fix_dir "$KVS_PATH/admin/data/engine" "777" "true"
+
+if [ "$PERM_FIXED" -eq 0 ]; then
+    echo "  All permissions OK"
+else
+    echo "  Fixed $PERM_FIXED permission issues"
+fi
+
 echo "=== KVS Initialization Complete ==="
