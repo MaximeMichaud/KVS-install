@@ -38,6 +38,8 @@ webserver=nginx
 # Define installation parameters for headless install (fallback if unspecified)
 if [[ $HEADLESS == "y" ]]; then
   # Define options
+  INSTALL_TYPE=${INSTALL_TYPE:-1}  # 1=Docker (default), 2=Standalone
+  MENU_OPTION=${MENU_OPTION:-1}    # 1=Restart install, 2=Add site, 3=Update PMA, 4=Update script, 5=Quit
   database_ver=${DATABASE_VER:-11.8}
   IONCUBE=${IONCUBE:-YES}
   AUTOPACKAGEUPDATE=${AUTOPACKAGEUPDATE:-YES}
@@ -870,13 +872,15 @@ function chooseInstallationType() {
     return
   fi
 
-  # Debian: offer choice
-  echo "Choose installation type:"
-  echo "   1) Docker (recommended)"
-  echo "   2) Standalone (legacy - will be deprecated)"
-  until [[ "$INSTALL_TYPE" =~ ^[1-2]$ ]]; do
-    read -rp "Select an option [1-2] : " -e -i 1 INSTALL_TYPE
-  done
+  # Debian: offer choice (skip prompt if already set via headless mode)
+  if [[ ! "$INSTALL_TYPE" =~ ^[1-2]$ ]]; then
+    echo "Choose installation type:"
+    echo "   1) Docker (recommended)"
+    echo "   2) Standalone (legacy - will be deprecated)"
+    until [[ "$INSTALL_TYPE" =~ ^[1-2]$ ]]; do
+      read -rp "Select an option [1-2] : " -e -i 1 INSTALL_TYPE
+    done
+  fi
   case $INSTALL_TYPE in
   1)
     dockerInstall
@@ -983,21 +987,24 @@ function dockerInstall() {
 }
 
 function manageMenu() {
-  clear
-  echo "Welcome to KVS-install !"
-  echo "https://github.com/MaximeMichaud/KVS-install"
-  echo ""
-  echo "It seems that the Script has already been used in the past."
-  echo ""
-  echo "What do you want to do ?"
-  echo "   1) Restart the installation"
-  echo "   2) Add another KVS website (work in progress, not working)"
-  echo "   3) Update phpMyAdmin"
-  echo "   4) Update the Script"
-  echo "   5) Quit"
-  until [[ "$MENU_OPTION" =~ ^[1-5]$ ]]; do
-    read -rp "Select an option [1-5] : " MENU_OPTION
-  done
+  # Skip menu display if already set via headless mode
+  if [[ ! "$MENU_OPTION" =~ ^[1-5]$ ]]; then
+    clear
+    echo "Welcome to KVS-install !"
+    echo "https://github.com/MaximeMichaud/KVS-install"
+    echo ""
+    echo "It seems that the Script has already been used in the past."
+    echo ""
+    echo "What do you want to do ?"
+    echo "   1) Restart the installation"
+    echo "   2) Add another KVS website (work in progress, not working)"
+    echo "   3) Update phpMyAdmin"
+    echo "   4) Update the Script"
+    echo "   5) Quit"
+    until [[ "$MENU_OPTION" =~ ^[1-5]$ ]]; do
+      read -rp "Select an option [1-5] : " MENU_OPTION
+    done
+  fi
   case $MENU_OPTION in
   1)
     chooseInstallationType

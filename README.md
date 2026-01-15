@@ -49,17 +49,53 @@ For traditional bare-metal installation on Debian systems.
 
 ### Headless Usage
 
-Using the script in headless mode is ideal for saving time during mass installations. This mode can facilitate the setup of multiple KVS sites per machine if desired by the user. However, some interactions may still be required to fine-tune specific configurations.
+Headless mode enables fully automated installations without interactive prompts. Ideal for scripted deployments, CI/CD pipelines, and mass installations.
 
-We are actively working to improve mass installation capabilities to allow the script to handle multiple site installations on a single machine seamlessly. To fully understand the available options and their implications, we recommend running the script in its standard mode initially.
-
-This approach will help you appreciate the detailed descriptions and choices provided during the setup process.
-
+#### Docker Headless (Recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh -o kvs-install.sh
 chmod +x kvs-install.sh
+
+# Minimal (uses smart defaults)
 HEADLESS=y \
+KVS_EMAIL=admin@yourdomain.com \
+./kvs-install.sh
+
+# Full control
+HEADLESS=y \
+INSTALL_TYPE=1 \
+MENU_OPTION=1 \
+KVS_EMAIL=admin@yourdomain.com \
+PREFIX_CHOICE=1 \
+SSL_CHOICE=1 \
+DB_CHOICE=1 \
+IONCUBE_CHOICE=1 \
+CACHE_CHOICE=1 \
+MODE_CHOICE=1 \
+./kvs-install.sh
+```
+
+| Variable | Values | Default | Description |
+|----------|--------|---------|-------------|
+| `HEADLESS` | `y` | - | Enable headless mode (required) |
+| `INSTALL_TYPE` | `1`/`2` | `1` | 1=Docker, 2=Standalone |
+| `MENU_OPTION` | `1-5` | `1` | 1=Install, 2=Add site, 3=Update PMA, 4=Update script, 5=Quit |
+| `KVS_EMAIL` | email | - | Email for SSL certificates (required for Let's Encrypt/ZeroSSL) |
+| `PREFIX_CHOICE` | `1-3` | `1` | 1=Auto (kvs-domain), 2=Legacy (kvs), 3=Custom |
+| `SSL_CHOICE` | `1-3` | `1` | 1=Let's Encrypt, 2=ZeroSSL, 3=Self-signed |
+| `DB_CHOICE` | `1-4` | `1` | MariaDB version (1=11.8, 2=11.4, 3=10.11, 4=10.6) |
+| `IONCUBE_CHOICE` | `1`/`2` | `1` | 1=Yes, 2=No |
+| `CACHE_CHOICE` | `1`/`2` | `1` | 1=Dragonfly, 2=Memcached |
+| `MODE_CHOICE` | `1`/`2` | `1` | 1=Single site, 2=Multi site |
+| `STOP_EXISTING` | `Y`/`n` | `Y` | Stop existing KVS containers |
+| `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry, 2=Continue anyway, 3=Exit |
+
+#### Standalone Headless (Legacy)
+
+```bash
+HEADLESS=y \
+INSTALL_TYPE=2 \
 database_ver=11.8 \
 IONCUBE=YES \
 AUTOPACKAGEUPDATE=YES \

@@ -2,6 +2,20 @@
 # shellcheck disable=SC1091
 set -e
 
+# Headless mode defaults (inherit from parent kvs-install.sh)
+if [[ "$HEADLESS" == "y" ]]; then
+    PREFIX_CHOICE=${PREFIX_CHOICE:-1}       # 1=default (kvs-domain), 2=legacy (kvs), 3=custom
+    SSL_CHOICE=${SSL_CHOICE:-1}             # 1=letsencrypt, 2=zerossl, 3=selfsigned
+    DB_CHOICE=${DB_CHOICE:-1}               # 1=latest LTS (11.8)
+    IONCUBE_CHOICE=${IONCUBE_CHOICE:-1}     # 1=yes, 2=no
+    CACHE_CHOICE=${CACHE_CHOICE:-1}         # 1=dragonfly, 2=memcached
+    MODE_CHOICE=${MODE_CHOICE:-1}           # 1=performance, 2=compatibility
+    VOLUME_CHOICE=${VOLUME_CHOICE:-2}       # For credential mismatch: 1=delete volume, 2=exit (safe default)
+    STOP_EXISTING=${STOP_EXISTING:-Y}       # Y=stop existing containers
+    DNS_CHOICE=${DNS_CHOICE:-2}             # 1=retry, 2=continue anyway, 3=exit
+    SKIP_PRESS_ENTER=1                      # Skip "press enter" prompts
+fi
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -84,7 +98,7 @@ fi
 
 # Detect existing installation and warn
 # Look for KVS-related containers (any prefix ending with -php, -mariadb, etc.)
-EXISTING_CONTAINERS=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep -E '-(php|mariadb|nginx|dragonfly|memcached|cron)$' | wc -l)
+EXISTING_CONTAINERS=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep -cE -- '-(php|mariadb|nginx|dragonfly|memcached|cron)$' || echo 0)
 EXISTING_VOLUMES=$(docker volume ls --filter "name=docker_" -q 2>/dev/null | wc -l)
 
 if [ "$EXISTING_CONTAINERS" -gt 0 ] || [ "$EXISTING_VOLUMES" -gt 0 ]; then
@@ -151,12 +165,16 @@ select_site_prefix() {
 
     echo "Container names will be: {prefix}-php, {prefix}-mariadb, etc."
     echo "  Default: kvs-${DEFAULT_PREFIX} (e.g., kvs-${DEFAULT_PREFIX}-php)"
-    echo ""
-    echo "Options:"
-    echo "  1) Use default: kvs-${DEFAULT_PREFIX}"
-    echo "  2) Use legacy: kvs (single-site, containers: kvs-php, kvs-mariadb)"
-    echo "  3) Custom prefix"
-    read -rp "Select [1-3] (default: 1): " PREFIX_CHOICE
+
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$PREFIX_CHOICE" ]]; then
+        echo ""
+        echo "Options:"
+        echo "  1) Use default: kvs-${DEFAULT_PREFIX}"
+        echo "  2) Use legacy: kvs (single-site, containers: kvs-php, kvs-mariadb)"
+        echo "  3) Custom prefix"
+        read -rp "Select [1-3] (default: 1): " PREFIX_CHOICE
+    fi
 
     case $PREFIX_CHOICE in
         2)
@@ -193,10 +211,13 @@ fi
 # SSL provider selection FIRST (before email)
 echo ""
 echo -e "${CYAN}SSL Certificate Provider${NC}"
-echo "  1) Let's Encrypt (recommended, default)"
-echo "  2) ZeroSSL"
-echo "  3) Self-signed (dev/testing or behind reverse proxy)"
-read -rp "Select SSL provider [1-3] (default: 1): " SSL_CHOICE
+# Skip prompt if already set (headless mode)
+if [[ -z "$SSL_CHOICE" ]]; then
+    echo "  1) Let's Encrypt (recommended, default)"
+    echo "  2) ZeroSSL"
+    echo "  3) Self-signed (dev/testing or behind reverse proxy)"
+    read -rp "Select SSL provider [1-3] (default: 1): " SSL_CHOICE
+fi
 
 case $SSL_CHOICE in
     2)
@@ -220,15 +241,21 @@ esac
 
 # Prompt for email only if using letsencrypt or zerossl
 if [ "$SSL_PROVIDER" != "selfsigned" ] && [ "$EMAIL" = "admin@example.com" ]; then
-    while true; do
-        read -rp "Enter your email (required for $SSL_PROVIDER): " EMAIL
-        if validate_email "$EMAIL"; then
-            sed -i "s/EMAIL=admin@example.com/EMAIL=$EMAIL/" .env
-            break
-        else
-            echo -e "${RED}Invalid email format. Please try again.${NC}"
-        fi
-    done
+    # Use EMAIL from environment if set (headless mode)
+    if [[ -n "$KVS_EMAIL" ]]; then
+        EMAIL="$KVS_EMAIL"
+        sed -i "s/EMAIL=admin@example.com/EMAIL=$EMAIL/" .env
+    else
+        while true; do
+            read -rp "Enter your email (required for $SSL_PROVIDER): " EMAIL
+            if validate_email "$EMAIL"; then
+                sed -i "s/EMAIL=admin@example.com/EMAIL=$EMAIL/" .env
+                break
+            else
+                echo -e "${RED}Invalid email format. Please try again.${NC}"
+            fi
+        done
+    fi
 fi
 
 # MariaDB version selection with endoflife.date API
@@ -279,8 +306,11 @@ select_mariadb_version() {
         ((i++))
     done
 
-    echo ""
-    read -rp "Select MariaDB version [1-${#VERSIONS[@]}] (default: 1): " DB_CHOICE
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$DB_CHOICE" ]]; then
+        echo ""
+        read -rp "Select MariaDB version [1-${#VERSIONS[@]}] (default: 1): " DB_CHOICE
+    fi
 
     if [ -z "$DB_CHOICE" ]; then
         DB_CHOICE=1
@@ -340,9 +370,12 @@ select_ioncube() {
     echo ""
     echo -e "${CYAN}IonCube Loader${NC}"
     echo "KVS requires IonCube for encoded files."
-    echo "  1) Yes - Install IonCube (required for KVS) (default)"
-    echo "  2) No - Skip (only if you have unencoded KVS)"
-    read -rp "Install IonCube? [1-2] (default: 1): " IONCUBE_CHOICE
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$IONCUBE_CHOICE" ]]; then
+        echo "  1) Yes - Install IonCube (required for KVS) (default)"
+        echo "  2) No - Skip (only if you have unencoded KVS)"
+        read -rp "Install IonCube? [1-2] (default: 1): " IONCUBE_CHOICE
+    fi
 
     case $IONCUBE_CHOICE in
         2)
@@ -369,7 +402,10 @@ mkdir -p kvs-archive
 if ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
     echo -e "${RED}No KVS archive found in ./kvs-archive/${NC}"
     echo "Please copy your KVS_X.X.X_[domain.tld].zip file to ./kvs-archive/"
-    read -rp "Press Enter when ready..."
+    # Skip prompt in headless mode
+    if [[ -z "$SKIP_PRESS_ENTER" ]]; then
+        read -rp "Press Enter when ready..."
+    fi
 
     if ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
         echo -e "${RED}ERROR: Still no KVS archive found. Exiting.${NC}"
@@ -391,9 +427,12 @@ fi
 select_cache() {
     echo ""
     echo -e "${CYAN}Cache Server${NC}"
-    echo "  1) Dragonfly (faster, modern) (default)"
-    echo "  2) Memcached (legacy, same as standalone)"
-    read -rp "Select cache [1-2] (default: 1): " CACHE_CHOICE
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$CACHE_CHOICE" ]]; then
+        echo "  1) Dragonfly (faster, modern) (default)"
+        echo "  2) Memcached (legacy, same as standalone)"
+        read -rp "Select cache [1-2] (default: 1): " CACHE_CHOICE
+    fi
 
     case $CACHE_CHOICE in
         2)
@@ -413,9 +452,12 @@ select_cache
 select_mode() {
     echo ""
     echo -e "${CYAN}Installation Mode${NC}"
-    echo "  1) Single site (default) - direct nginx, best performance"
-    echo "  2) Multi site - Traefik proxy, multiple KVS on same server (in development)"
-    read -rp "Select mode [1-2] (default: 1): " MODE_CHOICE
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$MODE_CHOICE" ]]; then
+        echo "  1) Single site (default) - direct nginx, best performance"
+        echo "  2) Multi site - Traefik proxy, multiple KVS on same server (in development)"
+        read -rp "Select mode [1-2] (default: 1): " MODE_CHOICE
+    fi
 
     case $MODE_CHOICE in
         2)
@@ -492,7 +534,10 @@ check_existing_volume() {
         echo "    --skip-grant-tables --user=mysql &"
         echo "  # Then connect and reset: ALTER USER 'root'@'localhost' IDENTIFIED BY 'newpass';"
         echo ""
-        read -rp "Select [1-2]: " VOLUME_CHOICE
+        # Skip prompt if already set (headless mode)
+        if [[ -z "$VOLUME_CHOICE" ]]; then
+            read -rp "Select [1-2]: " VOLUME_CHOICE
+        fi
 
         case $VOLUME_CHOICE in
             1)
@@ -543,13 +588,16 @@ echo ""
 echo -e "${CYAN}Checking if ports 80 and 443 are available...${NC}"
 if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
     # Check if it's a KVS docker container (use SITE_PREFIX or detect by service suffix)
-    KVS_CONTAINERS=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E "^${SITE_PREFIX}-|-(php|mariadb|nginx)$" || true)
+    KVS_CONTAINERS=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E -- "^${SITE_PREFIX}-|-(php|mariadb|nginx)$" || true)
     if [ -n "$KVS_CONTAINERS" ]; then
         echo -e "${YELLOW}Existing KVS containers detected${NC}"
         docker ps --filter "name=${SITE_PREFIX}-" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null || \
-            docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "-(php|mariadb|nginx)"
+            docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E -- "-(php|mariadb|nginx)"
         echo ""
-        read -rp "Stop existing KVS containers? [Y/n]: " STOP_EXISTING
+        # Skip prompt if already set (headless mode)
+        if [[ -z "$STOP_EXISTING" ]]; then
+            read -rp "Stop existing KVS containers? [Y/n]: " STOP_EXISTING
+        fi
         if [ "$STOP_EXISTING" != "n" ] && [ "$STOP_EXISTING" != "N" ]; then
             echo "Stopping existing containers..."
             docker compose down 2>/dev/null || true
@@ -608,7 +656,10 @@ while true; do
         echo "  1) Retry DNS check"
         echo "  2) Continue anyway (SSL will fail)"
         echo "  3) Exit"
-        read -rp "Select [1-3]: " DNS_CHOICE
+        # Skip prompt if already set (headless mode)
+        if [[ -z "$DNS_CHOICE" ]]; then
+            read -rp "Select [1-3]: " DNS_CHOICE
+        fi
         case $DNS_CHOICE in
             1) continue ;;
             2) echo "Continuing without valid DNS..."; break ;;

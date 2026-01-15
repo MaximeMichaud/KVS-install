@@ -60,10 +60,10 @@ fi
 export DOMAIN MAIN_SERVER_NAME REDIRECT_HOST WWW_REDIRECT_BLOCK
 
 # Generate site config from template (before official entrypoint runs)
-if [ -f /etc/nginx/templates/kvs.conf.template ]; then
+if [ -f /etc/nginx/templates/kvs.conf.tpl ]; then
     # shellcheck disable=SC2016
     envsubst '${DOMAIN} ${MAIN_SERVER_NAME} ${REDIRECT_HOST} ${WWW_REDIRECT_BLOCK} ${KVS_ROOT} ${PHP_FPM_UPSTREAM} ${RESOLVER_LINE}' \
-        < /etc/nginx/templates/kvs.conf.template \
+        < /etc/nginx/templates/kvs.conf.tpl \
         > /etc/nginx/conf.d/kvs.conf
     echo "Generated kvs.conf for domain: ${DOMAIN} (USE_WWW=${USE_WWW})"
 fi
