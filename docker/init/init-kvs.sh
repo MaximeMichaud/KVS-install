@@ -30,10 +30,9 @@ else
     chown -R 1000:1000 "$KVS_PATH"
     chmod -R 755 "$KVS_PATH"
 
-    # Run KVS permission script (without the problematic chmod 666)
+    # Run KVS permission script (safe in Docker - isolated environment)
     # Must run from _INSTALL directory since script does "cd .."
     if [ -f "$KVS_PATH/_INSTALL/install_permissions.sh" ]; then
-        sed -i '/xargs chmod 666/d' "$KVS_PATH/_INSTALL/install_permissions.sh"
         (cd "$KVS_PATH/_INSTALL" && bash install_permissions.sh) || true
     fi
 fi
@@ -130,12 +129,6 @@ elif [ ! -f /nginx-includes/kvs-rewrites.conf ]; then
     fi
 fi
 
-# Clean up installation files
-if [ -d "$KVS_PATH/_INSTALL" ]; then
-    rm -rf "$KVS_PATH/_INSTALL"
-    echo "Installation files cleaned up"
-fi
-
 # Clear stale cron locks (prevents "Duplicate cron operation" errors after container recreation)
 # This is safe during init since cron container hasn't started yet
 echo "Clearing cron locks..."
@@ -168,5 +161,16 @@ fi
 
 # Final permissions
 chown -R 1000:1000 "$KVS_PATH"
+
+# Re-run KVS permission script to ensure correct permissions after all modifications
+if [ -f "$KVS_PATH/_INSTALL/install_permissions.sh" ]; then
+    (cd "$KVS_PATH/_INSTALL" && bash install_permissions.sh) || true
+fi
+
+# Clean up installation files (done last, after permission script)
+if [ -d "$KVS_PATH/_INSTALL" ]; then
+    rm -rf "$KVS_PATH/_INSTALL"
+    echo "Installation files cleaned up"
+fi
 
 echo "=== KVS Initialization Complete ==="
