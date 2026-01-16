@@ -361,7 +361,8 @@ validate_email() {
 # Prompt for domain
 if [ "$DOMAIN" = "example.com" ]; then
     while true; do
-        read -rp "Enter your domain (e.g., mysite.com): " DOMAIN
+        echo -n "Enter your domain (e.g., mysite.com): "
+        read -r DOMAIN
         if validate_domain "$DOMAIN"; then
             sed -i "s/DOMAIN=example.com/DOMAIN=$DOMAIN/" .env
             break
@@ -392,7 +393,8 @@ select_site_prefix() {
         echo "  1) Use default: kvs-${DEFAULT_PREFIX}"
         echo "  2) Use legacy: kvs (single-site, containers: kvs-php, kvs-mariadb)"
         echo "  3) Custom prefix"
-        read -rp "Select [1-3] (default: 1): " PREFIX_CHOICE
+        echo -n "Select [1-3] (default: 1): "
+        read -r PREFIX_CHOICE
     fi
 
     case $PREFIX_CHOICE in
@@ -402,7 +404,8 @@ select_site_prefix() {
             ;;
         3)
             while true; do
-                read -rp "Enter custom prefix (e.g., kvs-mysite): " SITE_PREFIX
+                echo -n "Enter custom prefix (e.g., kvs-mysite): "
+        read -r SITE_PREFIX
                 # Validate: lowercase, alphanumeric and hyphens only
                 if [[ "$SITE_PREFIX" =~ ^[a-z][a-z0-9-]*$ ]]; then
                     break
@@ -451,7 +454,8 @@ if [[ -z "$SSL_CHOICE" ]]; then
     echo "  1) Let's Encrypt (recommended, default)"
     echo "  2) ZeroSSL"
     echo "  3) Self-signed (dev/testing or behind reverse proxy)"
-    read -rp "Select SSL provider [1-3] (default: 1): " SSL_CHOICE
+    echo -n "Select SSL provider [1-3] (default: 1): "
+        read -r SSL_CHOICE
 fi
 
 case $SSL_CHOICE in
@@ -482,7 +486,8 @@ if [ "$SSL_PROVIDER" != "selfsigned" ] && [ "$EMAIL" = "admin@example.com" ]; th
         sed -i "s/EMAIL=admin@example.com/EMAIL=$EMAIL/" .env
     else
         while true; do
-            read -rp "Enter your email (required for $SSL_PROVIDER): " EMAIL
+            echo -n "Enter your email (required for $SSL_PROVIDER): "
+        read -r EMAIL
             if validate_email "$EMAIL"; then
                 sed -i "s/EMAIL=admin@example.com/EMAIL=$EMAIL/" .env
                 break
@@ -610,7 +615,8 @@ select_ioncube() {
     if [[ -z "$IONCUBE_CHOICE" ]]; then
         echo "  1) Yes - Install IonCube (required for KVS) (default)"
         echo "  2) No - Skip (only if you have unencoded KVS)"
-        read -rp "Install IonCube? [1-2] (default: 1): " IONCUBE_CHOICE
+        echo -n "Install IonCube? [1-2] (default: 1): "
+        read -r IONCUBE_CHOICE
     fi
 
     case $IONCUBE_CHOICE in
@@ -640,7 +646,8 @@ if ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
     echo "Please copy your KVS_X.X.X_[domain.tld].zip file to ./kvs-archive/"
     # Skip prompt in headless mode
     if [[ -z "$SKIP_PRESS_ENTER" ]]; then
-        read -rp "Press Enter when ready..."
+        echo -n "Press Enter when ready..."
+        read -r
     fi
 
     if ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
@@ -667,7 +674,8 @@ select_cache() {
     if [[ -z "$CACHE_CHOICE" ]]; then
         echo "  1) Dragonfly (faster, modern) (default)"
         echo "  2) Memcached (legacy, same as standalone)"
-        read -rp "Select cache [1-2] (default: 1): " CACHE_CHOICE
+        echo -n "Select cache [1-2] (default: 1): "
+        read -r CACHE_CHOICE
     fi
 
     case $CACHE_CHOICE in
@@ -698,7 +706,8 @@ select_mode() {
     if [[ -z "$MODE_CHOICE" ]]; then
         echo "  1) Single site (default) - direct nginx, best performance"
         echo "  2) Multi site - Caddy proxy (see multi-site/site-manager.sh)"
-        read -rp "Select mode [1-2] (default: 1): " MODE_CHOICE
+        echo -n "Select mode [1-2] (default: 1): "
+        read -r MODE_CHOICE
     fi
 
     case $MODE_CHOICE in
@@ -785,7 +794,8 @@ check_existing_volume() {
         echo ""
         # Skip prompt if already set (headless mode)
         if [[ -z "$VOLUME_CHOICE" ]]; then
-            read -rp "Select [1-2]: " VOLUME_CHOICE
+            echo -n "Select [1-2]: "
+        read -r VOLUME_CHOICE
         fi
 
         case $VOLUME_CHOICE in
@@ -845,7 +855,8 @@ if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
         echo ""
         # Skip prompt if already set (headless mode)
         if [[ -z "$STOP_EXISTING" ]]; then
-            read -rp "Stop existing KVS containers? [Y/n]: " STOP_EXISTING
+            echo -n "Stop existing KVS containers? [Y/n]: "
+        read -r STOP_EXISTING
         fi
         if [ "$STOP_EXISTING" != "n" ] && [ "$STOP_EXISTING" != "N" ]; then
             echo "Stopping existing containers..."
@@ -907,7 +918,8 @@ while true; do
         echo "  3) Exit"
         # Skip prompt if already set (headless mode)
         if [[ -z "$DNS_CHOICE" ]]; then
-            read -rp "Select [1-3]: " DNS_CHOICE
+            echo -n "Select [1-3]: "
+        read -r DNS_CHOICE
         fi
         case $DNS_CHOICE in
             1) continue ;;
@@ -978,7 +990,8 @@ if [ ! -f geoip/GeoLite2-Country.mmdb ] && [ ! -f geoip/GeoLite2-City.mmdb ]; th
         echo "  1) Download GeoLite2-Country (recommended)"
         echo "  2) Skip (you can add manually later to docker/geoip/)"
         echo ""
-        read -rp "Choice [1]: " GEOIP_DOWNLOAD
+        echo -n "Choice [1]: "
+        read -r GEOIP_DOWNLOAD
         GEOIP_DOWNLOAD=${GEOIP_DOWNLOAD:-1}
     fi
 
