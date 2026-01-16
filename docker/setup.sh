@@ -782,6 +782,12 @@ select_manticore() {
     echo "Enables full-text search and better related videos performance in KVS."
     echo "Manticore is a modern fork of Sphinx Search with improved performance."
     echo ""
+    echo -e "${YELLOW}⚠ EXPERIMENTAL FEATURE${NC}"
+    echo "  • Automatically configured but may need PHP adjustments for your use case"
+    echo "  • Tested primarily with English-language video content"
+    echo "  • Should work correctly for videos, albums, and searches"
+    echo "  • Advanced users: review/modify PHP scripts in /var/www/\${DOMAIN}/ if needed"
+    echo ""
 
     # Skip prompt if already set (headless mode)
     if [[ -z "$MANTICORE_CHOICE" ]]; then

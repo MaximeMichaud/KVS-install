@@ -4,6 +4,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     curl \
+    php-cli \
     default-mysql-client \
     ca-certificates \
     jq \
