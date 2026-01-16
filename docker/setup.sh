@@ -84,6 +84,69 @@ run_step() {
     fi
 }
 
+#################################################################
+# Progress Tracking
+#################################################################
+PROGRESS_TOTAL=10
+PROGRESS_CURRENT=0
+
+progress_bar() {
+    local title="$1"
+    local pct filled empty bar i
+    PROGRESS_CURRENT=$((PROGRESS_CURRENT + 1))
+    pct=$((PROGRESS_CURRENT * 100 / PROGRESS_TOTAL))
+    filled=$((pct / 5))
+    empty=$((20 - filled))
+    bar=""
+    for ((i=0; i<filled; i++)); do
+        bar+="█"
+    done
+    for ((i=0; i<empty; i++)); do
+        bar+="░"
+    done
+
+    echo ""
+    if command -v gum &>/dev/null; then
+        gum style --foreground 212 --border-foreground 99 --border rounded --width 50 --padding "0 1" \
+            "[$bar] $pct% ($PROGRESS_CURRENT/$PROGRESS_TOTAL)" "→ $title"
+    else
+        echo -e "${CYAN}[$bar] $pct% ($PROGRESS_CURRENT/$PROGRESS_TOTAL)${NC}"
+        echo -e "${CYAN}→ $title${NC}"
+    fi
+}
+
+progress_header() {
+    local title="$1"
+    local subtitle="${2:-}"
+    echo ""
+    if command -v gum &>/dev/null; then
+        if [[ -n "$subtitle" ]]; then
+            gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title" "$subtitle"
+        else
+            gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title"
+        fi
+    else
+        echo "========================================"
+        echo "  $title"
+        [[ -n "$subtitle" ]] && echo "  $subtitle"
+        echo "========================================"
+    fi
+}
+
+progress_success() {
+    local msg="${1:-Setup Complete!}"
+    echo ""
+    if command -v gum &>/dev/null; then
+        gum style --foreground 82 --border-foreground 82 --border double --align center --width 50 --padding "1 2" \
+            "✓ $msg" "All $PROGRESS_TOTAL steps finished"
+    else
+        echo -e "${GREEN}========================================"
+        echo "  ✓ $msg"
+        echo "  All $PROGRESS_TOTAL steps finished"
+        echo -e "========================================${NC}"
+    fi
+}
+
 # Install gum silently at startup
 install_gum
 
@@ -669,9 +732,15 @@ while true; do
     fi
 done
 
+# Show progress header
+progress_header "KVS Docker Setup" "Building and deploying containers"
+
 # Generate dhparam if not exists
+progress_bar "Generating DH parameters"
 if [ ! -f nginx/dhparam.pem ]; then
-    run_step "Generating DH parameters" openssl dhparam -out nginx/dhparam.pem 2048
+    run_step "Generating DH parameters (this may take a while)" openssl dhparam -out nginx/dhparam.pem 2048
+else
+    echo -e "  ${GREEN}✓${NC} DH parameters already exist"
 fi
 
 # Create bind mount directory if override file exists
@@ -687,8 +756,7 @@ fi
 mkdir -p "nginx/ssl/${DOMAIN}"
 
 # Step 1: Build images
-echo ""
-echo -e "${CYAN}Building Docker images...${NC}"
+progress_bar "Building PHP-FPM container"
 if ! run_step "Building PHP-FPM container" docker compose build php-fpm; then
     echo -e "${RED}Docker build failed${NC}"
     echo -e "${YELLOW}If error mentions 'parent snapshot does not exist', run:${NC}"
@@ -696,7 +764,11 @@ if ! run_step "Building PHP-FPM container" docker compose build php-fpm; then
     echo "Then re-run this script."
     exit 1
 fi
+
+progress_bar "Building Cron container"
 run_step "Building Cron container" docker compose build cron
+
+progress_bar "Building Nginx container"
 run_step "Building Nginx container" docker compose build nginx
 
 # Create bind mount directory
@@ -704,8 +776,7 @@ mkdir -p /var/www/"$DOMAIN"
 chown 1000:1000 /var/www/"$DOMAIN"
 
 # Step 2: Start infrastructure services
-echo ""
-echo -e "${CYAN}Starting infrastructure services...${NC}"
+progress_bar "Starting MariaDB"
 run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
 
 # Wait for MariaDB (max 3 minutes)
@@ -725,14 +796,14 @@ done
 echo -e " ${GREEN}✓${NC}"
 
 # Step 3: Initialize phpMyAdmin and KVS
-echo ""
-echo -e "${CYAN}Initializing services...${NC}"
+progress_bar "Initializing phpMyAdmin"
 run_step "Initializing phpMyAdmin" docker compose --profile setup up --force-recreate phpmyadmin-init
+
+progress_bar "Initializing KVS"
 run_step "Initializing KVS" docker compose --profile setup up --force-recreate kvs-init
 
 # Step 4: Start nginx and get certificate
-echo ""
-echo -e "${CYAN}Starting web services...${NC}"
+progress_bar "Starting Nginx"
 run_step "Starting Nginx" docker compose up -d --force-recreate nginx
 
 # SSL Certificate based on SSL_PROVIDER
@@ -780,14 +851,14 @@ else
 fi
 
 # Step 5: Start all services
-echo ""
-echo -e "${CYAN}Finalizing...${NC}"
+progress_bar "Starting all services"
 run_step "Starting all services" docker compose up -d --force-recreate
+
+progress_bar "Reloading Nginx"
 run_step "Reloading Nginx" docker compose exec nginx nginx -s reload
 
 # Done
-echo ""
-echo -e "${GREEN}=== Setup Complete ===${NC}"
+progress_success "KVS Docker Setup Complete!"
 echo ""
 if [ "$USE_WWW" = "true" ]; then
     echo -e "${CYAN}Website:${NC}     https://www.$DOMAIN"

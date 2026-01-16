@@ -31,6 +31,94 @@ white=$(tput setaf 7)
 normal=$(tput sgr0)
 alert=${white}${on_red}
 on_red=$(tput setab 1)
+#################################################################
+# Progress Tracking (gum-based with fallback)
+#################################################################
+PROGRESS_TOTAL_STEPS=17
+PROGRESS_CURRENT_STEP=0
+PROGRESS_GUM_AVAILABLE=false
+
+install_gum() {
+  if command -v gum &> /dev/null; then
+    PROGRESS_GUM_AVAILABLE=true
+    return 0
+  fi
+  if command -v apt-get &> /dev/null; then
+    echo "Installing gum for progress display..."
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://repo.charm.sh/apt/gpg.key | gpg --dearmor -o /etc/apt/keyrings/charm.gpg 2>/dev/null
+    echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | tee /etc/apt/sources.list.d/charm.list > /dev/null
+    apt-get update -qq && apt-get install -y -qq gum
+    PROGRESS_GUM_AVAILABLE=true
+  fi
+}
+
+progress_step() {
+  local title="$1"
+  local pct filled empty bar i
+  PROGRESS_CURRENT_STEP=$((PROGRESS_CURRENT_STEP + 1))
+  pct=$((PROGRESS_CURRENT_STEP * 100 / PROGRESS_TOTAL_STEPS))
+  filled=$((pct / 5))
+  empty=$((20 - filled))
+  bar=""
+  for ((i=0; i<filled; i++)); do
+    bar+="█"
+  done
+  for ((i=0; i<empty; i++)); do
+    bar+="░"
+  done
+
+  echo ""
+  if [[ "$PROGRESS_GUM_AVAILABLE" == "true" ]]; then
+    gum style --foreground 212 --border-foreground 99 --border rounded --width 50 --padding "0 1" \
+      "[$bar] $pct% ($PROGRESS_CURRENT_STEP/$PROGRESS_TOTAL_STEPS)" "→ $title"
+  else
+    echo "${cyan}[$bar] $pct% ($PROGRESS_CURRENT_STEP/$PROGRESS_TOTAL_STEPS)${normal}"
+    echo "${cyan}→ $title${normal}"
+  fi
+}
+
+progress_done() {
+  local title="$1"
+  if [[ "$PROGRESS_GUM_AVAILABLE" == "true" ]]; then
+    gum log --level info "✓ $title"
+  else
+    echo "${green}✓ $title${normal}"
+  fi
+}
+
+progress_header() {
+  local title="$1"
+  local subtitle="${2:-}"
+  echo ""
+  if [[ "$PROGRESS_GUM_AVAILABLE" == "true" ]]; then
+    if [[ -n "$subtitle" ]]; then
+      gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title" "$subtitle"
+    else
+      gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title"
+    fi
+  else
+    echo "========================================"
+    echo "  $title"
+    [[ -n "$subtitle" ]] && echo "  $subtitle"
+    echo "========================================"
+  fi
+}
+
+progress_success() {
+  local msg="${1:-Installation Complete!}"
+  echo ""
+  if [[ "$PROGRESS_GUM_AVAILABLE" == "true" ]]; then
+    gum style --foreground 82 --border-foreground 82 --border double --align center --width 50 --padding "1 2" \
+      "✓ $msg" "All $PROGRESS_TOTAL_STEPS steps finished"
+  else
+    echo "${green}========================================"
+    echo "  ✓ $msg"
+    echo "  All $PROGRESS_TOTAL_STEPS steps finished"
+    echo "========================================${normal}"
+  fi
+}
+#################################################################
 # Variables Shell
 export DEBIAN_FRONTEND=noninteractive
 # Variables Services
@@ -93,25 +181,81 @@ function checkOS() {
 
 
 function script() {
-  installQuestions
-  aptupdate
-  aptinstall
-  whatisdomain
-  check_dns_configuration
-  install_yt-dlp
-  aptinstall_php
-  aptinstall_memcached
-  aptinstall_nginx
-  aptinstall_mariadb
-  aptinstall_phpmyadmin
-  install_KVS
-  install_ioncube
-  insert_cronjob
-  install_acme.sh
-  configure_dynamic_php_fpm
-  autoUpdate
-  setupdone
+  # Install gum for progress display (optional, has fallback)
+  install_gum
 
+  # Configuration questions (not counted in progress)
+  installQuestions
+
+  # Show installation header
+  progress_header "KVS-install v${SCRIPT_VERSION}" "Standalone Installation"
+
+  progress_step "Updating package lists"
+  aptupdate
+  progress_done "Package lists updated"
+
+  progress_step "Installing base packages"
+  aptinstall
+  progress_done "Base packages installed"
+
+  progress_step "Configuring domain"
+  whatisdomain
+  progress_done "Domain configured"
+
+  progress_step "Checking DNS configuration"
+  check_dns_configuration
+  progress_done "DNS configuration verified"
+
+  progress_step "Installing yt-dlp"
+  install_yt-dlp
+  progress_done "yt-dlp installed"
+
+  progress_step "Installing PHP"
+  aptinstall_php
+  progress_done "PHP installed"
+
+  progress_step "Installing Memcached"
+  aptinstall_memcached
+  progress_done "Memcached installed"
+
+  progress_step "Installing NGINX"
+  aptinstall_nginx
+  progress_done "NGINX installed"
+
+  progress_step "Installing MariaDB"
+  aptinstall_mariadb
+  progress_done "MariaDB installed"
+
+  progress_step "Installing phpMyAdmin"
+  aptinstall_phpmyadmin
+  progress_done "phpMyAdmin installed"
+
+  progress_step "Installing KVS"
+  install_KVS
+  progress_done "KVS installed"
+
+  progress_step "Installing IonCube"
+  install_ioncube
+  progress_done "IonCube configured"
+
+  progress_step "Setting up cron jobs"
+  insert_cronjob
+  progress_done "Cron jobs configured"
+
+  progress_step "Installing acme.sh"
+  install_acme.sh
+  progress_done "SSL certificates configured"
+
+  progress_step "Configuring PHP-FPM"
+  configure_dynamic_php_fpm
+  progress_done "PHP-FPM optimized"
+
+  progress_step "Configuring auto-updates"
+  autoUpdate
+  progress_done "Auto-updates configured"
+
+  progress_success "KVS Installation Complete!"
+  setupdone
 }
 function installQuestions() {
   if [[ $HEADLESS != "y" ]]; then
