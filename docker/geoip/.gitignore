@@ -1,0 +1,4 @@
+# Ignore GeoIP database files (large binary files, updated frequently)
+*.mmdb
+*.mmdb.gz
+*.tar.gz

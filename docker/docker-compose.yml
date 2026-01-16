@@ -43,6 +43,7 @@ services:
       - /var/www/${DOMAIN}:/var/www/kvs
       - phpmyadmin-data:/usr/share/phpmyadmin
       - ./php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
+      - ./geoip:/usr/share/geoip:ro
     environment:
       - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-512M}
       - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
@@ -138,6 +139,7 @@ services:
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
+      - ./geoip:/usr/share/geoip:ro
     depends_on:
       - php-fpm
       - mariadb

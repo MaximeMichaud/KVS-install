@@ -159,6 +159,39 @@ if [ "$SSL_PROVIDER" = "selfsigned" ]; then
     echo "SSL verification disabled for self-signed certificate"
 fi
 
+# Configure GeoIP database if available
+# Check for GeoLite2 databases in /usr/share/geoip (mounted from docker/geoip directory)
+GEOIP_DB=""
+if [ -f "/usr/share/geoip/GeoLite2-City.mmdb" ]; then
+    GEOIP_DB="/usr/share/geoip/GeoLite2-City.mmdb"
+    echo "Found GeoIP City database: $GEOIP_DB"
+elif [ -f "/usr/share/geoip/GeoLite2-Country.mmdb" ]; then
+    GEOIP_DB="/usr/share/geoip/GeoLite2-Country.mmdb"
+    echo "Found GeoIP Country database: $GEOIP_DB"
+fi
+
+if [ -n "$GEOIP_DB" ]; then
+    # Check if GEOIP_DATABASE setting exists
+    GEOIP_EXISTS=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+        -N -e "SELECT COUNT(*) FROM ktvs_options WHERE variable='GEOIP_DATABASE'" 2>/dev/null || echo "0")
+
+    if [ "$GEOIP_EXISTS" -eq 0 ]; then
+        # Insert new setting
+        mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+            -e "INSERT INTO ktvs_options (variable, value) VALUES ('GEOIP_DATABASE', '$GEOIP_DB');" 2>/dev/null || true
+        echo "GeoIP database configured: $GEOIP_DB"
+    else
+        # Update existing setting
+        mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
+            -e "UPDATE ktvs_options SET value='$GEOIP_DB' WHERE variable='GEOIP_DATABASE';" 2>/dev/null || true
+        echo "GeoIP database updated: $GEOIP_DB"
+    fi
+else
+    echo "No GeoIP database found in /usr/share/geoip/"
+    echo "To enable GeoIP: copy GeoLite2-Country.mmdb or GeoLite2-City.mmdb to docker/geoip/"
+    echo "Download from: https://www.maxmind.com/en/accounts/current/geoip/downloads"
+fi
+
 # Final permissions
 chown -R 1000:1000 "$KVS_PATH"
 

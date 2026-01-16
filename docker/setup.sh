@@ -2,6 +2,30 @@
 # shellcheck disable=SC1091
 set -e
 
+#################################################################
+# Debug Logging Setup
+#################################################################
+readonly DEBUG_LOG="/opt/kvs/logs/setup-debug.log"
+readonly TRACE_LOG="/opt/kvs/logs/setup-trace.log"
+
+# Create logs directory
+mkdir -p /opt/kvs/logs 2>/dev/null || true
+
+# Initialize logs
+{
+    echo "========================================"
+    echo "KVS Docker Setup - $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "========================================"
+    echo ""
+} >> "$DEBUG_LOG" 2>/dev/null || true
+
+# Enable command tracing (set -x) to a separate log
+export PS4='+ $(date "+%H:%M:%S") ${BASH_SOURCE##*/}:${LINENO}: '
+exec 19>>"$TRACE_LOG" 2>/dev/null || exec 19>/dev/null
+BASH_XTRACEFD=19
+set -x
+
+#################################################################
 # Headless mode defaults (inherit from parent kvs-install.sh)
 if [[ "$HEADLESS" == "y" ]]; then
     PREFIX_CHOICE=${PREFIX_CHOICE:-1}       # 1=default (kvs-domain), 2=legacy (kvs), 3=custom
@@ -13,6 +37,7 @@ if [[ "$HEADLESS" == "y" ]]; then
     VOLUME_CHOICE=${VOLUME_CHOICE:-2}       # For credential mismatch: 1=delete volume, 2=exit (safe default)
     STOP_EXISTING=${STOP_EXISTING:-Y}       # Y=stop existing containers
     DNS_CHOICE=${DNS_CHOICE:-2}             # 1=retry, 2=continue anyway, 3=exit
+    GEOIP_CHOICE=${GEOIP_CHOICE:-1}         # 1=download GeoLite2-Country, 2=skip
     SKIP_PRESS_ENTER=1                      # Skip "press enter" prompts
 fi
 
@@ -48,11 +73,38 @@ install_gum() {
     chmod +x /usr/local/bin/gum 2>/dev/null
 }
 
+# Log a command's output without showing it to the user
+# Usage: log_command <command> [args...]
+log_command() {
+    local logfile="/tmp/log_cmd_$$.log"
+    local result=0
+
+    {
+        echo ">>> [$(date '+%Y-%m-%d %H:%M:%S')] EXECUTING: $*"
+    } >> "$DEBUG_LOG" 2>/dev/null || true
+
+    if "$@" >"$logfile" 2>&1; then
+        result=0
+    else
+        result=$?
+    fi
+
+    {
+        cat "$logfile" 2>/dev/null || echo "(no output)"
+        echo "<<< EXIT CODE: $result"
+        echo ""
+    } >> "$DEBUG_LOG" 2>/dev/null || true
+
+    rm -f "$logfile"
+    return $result
+}
+
 # Run a command with spinner, showing title and result
 run_step() {
     local title="$1"
     shift
     local logfile="/tmp/run_step_$$.log"
+    local result=0
 
     if command -v gum &>/dev/null; then
         # With gum: show spinner, log output to file
@@ -60,28 +112,34 @@ run_step() {
         # shellcheck disable=SC2016
         if gum spin --spinner dot --title "$title" -- sh -c '"$@" >"$0" 2>&1' "$logfile" "$@"; then
             echo -e "  ${GREEN}✓${NC} $title"
-            rm -f "$logfile"
-            return 0
+            result=0
         else
             echo -e "  ${RED}✗${NC} $title"
             [ -s "$logfile" ] && echo "    Error:" && head -10 "$logfile" | sed 's/^/    /'
-            rm -f "$logfile"
-            return 1
+            result=1
         fi
     else
         # Fallback without gum
         echo -n "  $title..."
         if "$@" >"$logfile" 2>&1; then
             echo -e " ${GREEN}✓${NC}"
-            rm -f "$logfile"
-            return 0
+            result=0
         else
             echo -e " ${RED}✗${NC}"
             [ -s "$logfile" ] && head -10 "$logfile" | sed 's/^/    /'
-            rm -f "$logfile"
-            return 1
+            result=1
         fi
     fi
+
+    # Append step output to debug log with timestamp and title
+    {
+        echo "--- [$(date '+%Y-%m-%d %H:%M:%S')] $title $([ $result -eq 0 ] && echo '[SUCCESS]' || echo '[FAILED]') ---"
+        cat "$logfile" 2>/dev/null || echo "(no output)"
+        echo ""
+    } >> "$DEBUG_LOG" 2>/dev/null || true
+
+    rm -f "$logfile"
+    return $result
 }
 
 #################################################################
@@ -690,23 +748,23 @@ check_existing_volume() {
 
             # Try to verify connection by starting container briefly
             echo "Verifying database connection..."
-            docker compose up -d --force-recreate mariadb >/dev/null 2>&1
+            log_command docker compose up -d --force-recreate mariadb
 
             # Wait for healthcheck (up to 60 seconds)
             for i in {1..12}; do
-                if docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; then
+                if log_command docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1"; then
                     break
                 fi
                 sleep 5
             done
 
-            if docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; then
+            if log_command docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1"; then
                 echo -e "${GREEN}Connection verified - using existing database${NC}"
-                docker compose down >/dev/null 2>&1
+                log_command docker compose down
                 return 0
             else
                 echo -e "${RED}Connection failed - credentials may not match volume${NC}"
-                docker compose down >/dev/null 2>&1
+                log_command docker compose down
             fi
         fi
 
@@ -902,6 +960,45 @@ run_step "Building Nginx container" docker compose build nginx
 mkdir -p /var/www/"$DOMAIN"
 chown 1000:1000 /var/www/"$DOMAIN"
 
+#################################################################
+# Optional: Download GeoIP database
+#################################################################
+if [ ! -f geoip/GeoLite2-Country.mmdb ] && [ ! -f geoip/GeoLite2-City.mmdb ]; then
+    echo ""
+    echo -e "${CYAN}GeoIP Database${NC}"
+    echo "GeoIP enables country/state detection for visitors."
+    echo ""
+
+    if [ "$HEADLESS" = "y" ]; then
+        # In headless mode, use GEOIP_CHOICE variable (default: download)
+        GEOIP_DOWNLOAD=${GEOIP_CHOICE:-1}
+    else
+        echo "Options:"
+        echo "  1) Download GeoLite2-Country (recommended)"
+        echo "  2) Skip (you can add manually later to docker/geoip/)"
+        echo ""
+        read -rp "Choice [1]: " GEOIP_DOWNLOAD
+        GEOIP_DOWNLOAD=${GEOIP_DOWNLOAD:-1}
+    fi
+
+    if [ "$GEOIP_DOWNLOAD" = "1" ]; then
+        echo -e "${GREEN}Downloading GeoLite2-Country.mmdb...${NC}"
+        mkdir -p geoip
+        GEOIP_URL="https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb"
+
+        if curl -fsSL "$GEOIP_URL" -o geoip/GeoLite2-Country.mmdb; then
+            echo -e "${GREEN}✓ GeoIP database downloaded${NC}"
+            echo "  Path: $PWD/geoip/GeoLite2-Country.mmdb"
+        else
+            echo -e "${YELLOW}⚠ Download failed - continuing without GeoIP${NC}"
+            echo "  You can manually add it later to: $PWD/geoip/"
+        fi
+    else
+        echo -e "${YELLOW}Skipped GeoIP download${NC}"
+        echo "To add later: copy GeoLite2-Country.mmdb to docker/geoip/"
+    fi
+fi
+
 # Step 2: Start infrastructure services
 progress_bar "Starting MariaDB"
 run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
@@ -989,12 +1086,13 @@ fi
 progress_bar "Starting all services"
 # Don't use gum spin for docker compose up - it can timeout on slow operations
 echo -n "  Starting all services..."
-docker compose pull --quiet 2>/dev/null || true
-if docker compose up -d --force-recreate >/dev/null 2>&1; then
+log_command docker compose pull --quiet || true
+if log_command docker compose up -d --force-recreate; then
     echo -e " ${GREEN}✓${NC}"
 else
     echo -e " ${RED}✗${NC}"
     echo "    Check: docker compose logs"
+    echo "    Debug: tail -50 $DEBUG_LOG"
 fi
 
 progress_bar "Reloading Nginx"
@@ -1024,9 +1122,20 @@ echo "To view logs: docker compose logs -f"
 echo "To stop: docker compose down"
 echo "To restart: docker compose up -d"
 echo ""
+echo -e "${CYAN}Debug logs:${NC}"
+echo "  Setup:  $DEBUG_LOG"
+echo "  Trace:  $TRACE_LOG"
+echo ""
 echo -e "${RED}=== SECURITY WARNING ===${NC}"
 echo -e "${YELLOW}Default admin credentials:${NC}"
 echo "  Login:    admin"
 echo "  Password: 123"
 echo ""
 echo -e "${RED}Change this immediately after first login${NC}"
+
+# Mark end of installation in logs
+{
+    echo "========================================"
+    echo "KVS Docker Setup Completed - $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "========================================"
+} >> "$DEBUG_LOG" 2>/dev/null || true
