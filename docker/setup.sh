@@ -544,7 +544,8 @@ select_mariadb_version() {
     # Skip prompt if already set (headless mode)
     if [[ -z "$DB_CHOICE" ]]; then
         echo ""
-        read -rp "Select MariaDB version [1-${#VERSIONS[@]}] (default: 1): " DB_CHOICE
+        echo -n "Select MariaDB version [1-${#VERSIONS[@]}] (default: 1): "
+        read -r DB_CHOICE
     fi
 
     if [ -z "$DB_CHOICE" ]; then
