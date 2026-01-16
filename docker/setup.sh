@@ -615,10 +615,16 @@ select_cache() {
         2)
             sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=memcached/" .env
             echo -e "${GREEN}Selected Memcached${NC}"
+            # Remove orphan dragonfly container if exists (port conflict)
+            docker stop "${SITE_PREFIX}-dragonfly" 2>/dev/null || true
+            docker rm "${SITE_PREFIX}-dragonfly" 2>/dev/null || true
             ;;
         *)
             sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=dragonfly/" .env
             echo -e "${GREEN}Selected Dragonfly${NC}"
+            # Remove orphan memcached container if exists (port conflict)
+            docker stop "${SITE_PREFIX}-memcached" 2>/dev/null || true
+            docker rm "${SITE_PREFIX}-memcached" 2>/dev/null || true
             ;;
     esac
 }
