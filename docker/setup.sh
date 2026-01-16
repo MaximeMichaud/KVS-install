@@ -979,8 +979,10 @@ else
     fi
 fi
 
-# Step 6: Start all services
+# Step 6: Pull images and start all services
 progress_bar "Starting all services"
+# Pull images separately (can take time, don't let gum timeout)
+docker compose pull --quiet 2>/dev/null || true
 run_step "Starting all services" docker compose up -d --force-recreate
 
 progress_bar "Reloading Nginx"
