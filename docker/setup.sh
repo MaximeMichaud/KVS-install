@@ -981,9 +981,15 @@ fi
 
 # Step 6: Pull images and start all services
 progress_bar "Starting all services"
-# Pull images separately (can take time, don't let gum timeout)
+# Don't use gum spin for docker compose up - it can timeout on slow operations
+echo -n "  Starting all services..."
 docker compose pull --quiet 2>/dev/null || true
-run_step "Starting all services" docker compose up -d --force-recreate
+if docker compose up -d --force-recreate >/dev/null 2>&1; then
+    echo -e " ${GREEN}✓${NC}"
+else
+    echo -e " ${RED}✗${NC}"
+    echo "    Check: docker compose logs"
+fi
 
 progress_bar "Reloading Nginx"
 run_step "Reloading Nginx" docker compose exec nginx nginx -s reload
