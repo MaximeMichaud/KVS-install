@@ -775,6 +775,50 @@ select_geoip() {
 
 select_geoip
 
+# Manticore Search selection
+select_manticore() {
+    echo ""
+    echo -e "${CYAN}Manticore Search${NC}"
+    echo "Enables full-text search and better related videos performance in KVS."
+    echo "Manticore is a modern fork of Sphinx Search with improved performance."
+    echo ""
+
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$MANTICORE_CHOICE" ]]; then
+        echo "Options:"
+        echo "  1) Enable Manticore Search (recommended for large video libraries)"
+        echo "  2) Skip (use default KVS search)"
+        echo ""
+        echo -n "Choice [2]: "
+        read -r MANTICORE_CHOICE
+        MANTICORE_CHOICE=${MANTICORE_CHOICE:-2}
+    fi
+
+    if [ "$MANTICORE_CHOICE" = "1" ]; then
+        echo "ENABLE_MANTICORE=true" >> .env
+        # Add manticore to COMPOSE_PROFILES (supports multiple profiles)
+        CURRENT_PROFILES=$(grep "^COMPOSE_PROFILES=" .env | cut -d'=' -f2)
+        if [[ "$CURRENT_PROFILES" != *"manticore"* ]]; then
+            if [ -n "$CURRENT_PROFILES" ]; then
+                sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=${CURRENT_PROFILES},manticore/" .env
+            else
+                sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=manticore/" .env
+            fi
+        fi
+        echo -e "${GREEN}✓ Manticore Search enabled${NC}"
+        echo ""
+        echo -e "${YELLOW}After installation, configure in KVS Admin:${NC}"
+        echo "  → Settings → Satellite servers → Sphinx/Manticore"
+        echo "  → Host: searchd"
+        echo "  → Port: 9306"
+    else
+        echo "ENABLE_MANTICORE=false" >> .env
+        echo -e "${YELLOW}Manticore Search disabled${NC}"
+    fi
+}
+
+select_manticore
+
 # Check for existing MariaDB volume
 # Based on MariaDB Docker best practices: env vars are IGNORED if data exists
 # See: https://mariadb.com/kb/en/docker-official-image-frequently-asked-questions/

@@ -30,6 +30,7 @@ services:
         aliases:
           - ${DOMAIN}
           - www.${DOMAIN}
+          - manticore-api
 
   php-fpm:
     build:
@@ -114,6 +115,37 @@ services:
     profiles:
       - dragonfly
 
+  manticore:
+    build:
+      context: ./manticore
+    container_name: ${SITE_PREFIX:-kvs}-manticore
+    hostname: searchd
+    restart: unless-stopped
+    ports:
+      # Localhost only - for kvs-cli access
+      - "127.0.0.1:9306:9306"  # MySQL protocol
+      - "127.0.0.1:9308:9308"  # HTTP protocol
+    environment:
+      - DOMAIN=${DOMAIN}
+      - MARIADB_PASSWORD=${MARIADB_PASSWORD}
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock: -1
+    volumes:
+      - manticore-data:/var/lib/manticore
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      kvs-network:
+        aliases:
+          - searchd
+    profiles:
+      - manticore
+
   acme:
     image: neilpang/acme.sh
     container_name: ${SITE_PREFIX:-kvs}-acme
@@ -161,6 +193,7 @@ services:
       - MARIADB_PASSWORD=${MARIADB_PASSWORD}
       - USE_WWW=${USE_WWW:-false}
       - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+      - ENABLE_MANTICORE=${ENABLE_MANTICORE:-false}
     depends_on:
       mariadb:
         condition: service_healthy
@@ -221,3 +254,4 @@ volumes:
   phpmyadmin-data:
   nginx-logs:
   nginx-includes:
+  manticore-data:

@@ -191,6 +191,27 @@ else
     echo "To enable GeoIP: copy GeoLite2-Country.mmdb to docker/geoip/"
 fi
 
+# Optimize system settings for nginx and Docker environment
+echo "Configuring system settings..."
+if mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" <<-EOSQL 2>/dev/null
+	UPDATE ktvs_settings
+	SET value = JSON_SET(
+		value,
+		'$.server_type', 'nginx',
+		'$.memory_limit_default', 256,
+		'$.file_upload_max_size', 2048
+	)
+	WHERE section = 'system';
+EOSQL
+then
+    echo "✓ System settings optimized:"
+    echo "  - Server type: nginx (optimized file serving)"
+    echo "  - Memory limit: 256 MB (increased from default 128 MB)"
+    echo "  - Upload limit: 2048 MB (matches PHP/Nginx configuration)"
+else
+    echo "⚠ Failed to update system settings"
+fi
+
 # Final permissions
 chown -R 1000:1000 "$KVS_PATH"
 
@@ -275,6 +296,32 @@ if [ "$PERM_FIXED" -eq 0 ]; then
     echo "  All permissions OK"
 else
     echo "  Fixed $PERM_FIXED permission issues"
+fi
+
+# Manticore Search information (if enabled)
+if [ "${ENABLE_MANTICORE:-false}" = "true" ]; then
+    DOMAIN_SAFE="${DOMAIN//[.-]/_}"
+    echo ""
+    echo "=== Manticore Search Configuration ==="
+    echo "Manticore indexes built with prefix: ${DOMAIN_SAFE}"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Download PHP files:"
+    echo "     curl -fsSL https://kernel-scripts.com/files/manticore.zip -o manticore.zip"
+    echo "     unzip manticore.zip"
+    echo ""
+    echo "  2. Update index names in each PHP file:"
+    echo "     \$manticore_host = 'searchd';"
+    echo "     \$manticore_index = '${DOMAIN_SAFE}_videos';  # or _albums, _searches"
+    echo ""
+    echo "  3. Copy PHP files to: /var/www/${DOMAIN}/"
+    echo ""
+    echo "  4. Configure in KVS Admin → Plugins → External search:"
+    echo "     API call: https://${DOMAIN}/kvs_manticore_search_videos.php?query=%QUERY%&limit=%LIMIT%&from=%FROM%"
+    echo "     Outgoing URL: https://${DOMAIN}"
+    echo ""
+    echo "Indexes are updated hourly via cron."
+    echo ""
 fi
 
 echo "=== KVS Initialization Complete ==="

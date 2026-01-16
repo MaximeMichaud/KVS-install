@@ -1,0 +1,171 @@
+# ================================================================
+# GLOBAL SETTINGS FOR MANTICORE
+# ================================================================
+
+searchd {
+    listen = 9312
+    listen = 0.0.0.0:9306:mysql
+    listen = 9308:http
+    log = /var/log/manticore/searchd.log
+    query_log = /var/log/manticore/query.log
+    pid_file = /var/run/manticore/searchd.pid
+}
+
+indexer
+{
+    mem_limit = 1024M
+}
+
+# ================================================================
+# INDEXES SPECIFIC TO KVS: videos, albums and searches
+# NOTE: Database credentials are replaced during container init
+# ================================================================
+
+source ${DOMAIN_SAFE}_videos
+{
+    type = mysql
+    sql_host = mariadb
+    sql_user = ${DOMAIN}
+    sql_pass = ${MARIADB_PASSWORD}
+    sql_db = ${DOMAIN}
+    sql_port = 3306
+
+    sql_query_pre = SET NAMES utf8
+    sql_query_pre = SET CHARACTER SET utf8
+
+    sql_query =  SELECT video_id, video_id AS video_id_, title, description, duration, comments_count, favourites_count, video_viewed, rating/rating_amount as rating, resolution_type, format_video_group_id, UNIX_TIMESTAMP(post_date) as post_date, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_tags.tag)) FROM ktvs_tags \
+                    JOIN ktvs_tags_videos ON (ktvs_tags_videos.tag_id = ktvs_tags.tag_id) \
+                    WHERE ktvs_tags_videos.tag_id = ktvs_tags.tag_id AND ktvs_tags_videos.video_id=ktvs_videos.video_id) AS `tags`, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_categories.title,ktvs_categories.synonyms)) FROM ktvs_categories \
+                    JOIN ktvs_categories_videos ON (ktvs_categories_videos.category_id = ktvs_categories.category_id) \
+                    WHERE ktvs_categories_videos.category_id = ktvs_categories.category_id AND ktvs_categories_videos.video_id=ktvs_videos.video_id) AS `categories`, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_models.title)) FROM ktvs_models \
+                    JOIN ktvs_models_videos ON (ktvs_models_videos.model_id = ktvs_models.model_id) \
+                    WHERE ktvs_models_videos.model_id = ktvs_models.model_id AND ktvs_models_videos.video_id=ktvs_videos.video_id) AS `models`, \
+                    (SELECT CONCAT_WS(',',title) FROM ktvs_content_sources WHERE content_source_id=ktvs_videos.content_source_id) AS content_source_title, \
+                    (SELECT CONCAT_WS(',',title) FROM ktvs_dvds WHERE dvd_id=ktvs_videos.dvd_id) AS dvd_title \
+                FROM ktvs_videos \
+                WHERE status_id=1 AND relative_post_date<10000 AND post_date<=now() AND video_id BETWEEN $start AND $end
+
+    sql_attr_timestamp = post_date
+    sql_attr_bigint = duration
+    sql_attr_bigint = comments_count
+    sql_attr_bigint = favourites_count
+    sql_attr_bigint = video_viewed
+    sql_attr_float = rating
+    sql_attr_uint = resolution_type
+    sql_attr_bigint = format_video_group_id
+    sql_attr_bigint = video_id_
+
+    sql_attr_multi = uint category_id_general FROM query; \
+                     SELECT video_id, category_id \
+                     FROM ktvs_categories_videos
+
+    sql_query_range = SELECT MIN(video_id),MAX(video_id) FROM ktvs_videos
+    sql_range_step = 50000
+}
+
+index ${DOMAIN_SAFE}_videos
+{
+    source = ${DOMAIN_SAFE}_videos
+    morphology = stem_en
+    min_word_len = 2
+    min_infix_len = 2
+    index_exact_words = 1
+
+    path = /var/lib/manticore/${DOMAIN_SAFE}_videos
+
+    charset_table = 0..9, A..Z->a..z, _, a..z, U+410..U+42F->U+430..U+44F, U+430..U+44F
+}
+
+source ${DOMAIN_SAFE}_albums
+{
+    type = mysql
+    sql_host = mariadb
+    sql_user = ${DOMAIN}
+    sql_pass = ${MARIADB_PASSWORD}
+    sql_db = ${DOMAIN}
+    sql_port = 3306
+
+    sql_query_pre = SET NAMES utf8
+    sql_query_pre = SET CHARACTER SET utf8
+
+    sql_query = SELECT album_id, album_id AS album_id_, title, description, photos_amount, comments_count, favourites_count, album_viewed, rating/rating_amount as rating, UNIX_TIMESTAMP(post_date) as post_date, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_tags.tag)) FROM ktvs_tags \
+                    JOIN ktvs_tags_albums ON (ktvs_tags_albums.tag_id = ktvs_tags.tag_id) \
+                    WHERE ktvs_tags_albums.tag_id = ktvs_tags.tag_id AND ktvs_tags_albums.album_id=ktvs_albums.album_id) AS `tags`, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_categories.title,ktvs_categories.synonyms)) FROM ktvs_categories \
+                    JOIN ktvs_categories_albums ON (ktvs_categories_albums.category_id = ktvs_categories.category_id) \
+                    WHERE ktvs_categories_albums.category_id = ktvs_categories.category_id AND ktvs_categories_albums.album_id=ktvs_albums.album_id) AS `categories`, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_models.title)) FROM ktvs_models \
+                    JOIN ktvs_models_albums ON (ktvs_models_albums.model_id = ktvs_models.model_id) \
+                    WHERE ktvs_models_albums.model_id = ktvs_models.model_id AND ktvs_models_albums.album_id=ktvs_albums.album_id) AS `models`, \
+                    (SELECT CONCAT_WS(',',title) FROM ktvs_content_sources WHERE content_source_id=ktvs_albums.content_source_id) AS content_source_title \
+                FROM ktvs_albums \
+                WHERE status_id=1 AND relative_post_date<10000 AND post_date<=now() AND album_id BETWEEN $start AND $end
+
+    sql_attr_timestamp = post_date
+    sql_attr_bigint = photos_amount
+    sql_attr_bigint = comments_count
+    sql_attr_bigint = favourites_count
+    sql_attr_bigint = album_viewed
+    sql_attr_float = rating
+    sql_attr_bigint = album_id_
+
+    sql_attr_multi = uint category_id_general FROM query; \
+                     SELECT album_id, category_id \
+                     FROM ktvs_categories_albums
+
+    sql_query_range = SELECT MIN(album_id),MAX(album_id) FROM ktvs_albums
+    sql_range_step = 50000
+}
+
+index ${DOMAIN_SAFE}_albums
+{
+    source = ${DOMAIN_SAFE}_albums
+    morphology = stem_en
+    min_word_len = 2
+    min_infix_len = 2
+    index_exact_words = 1
+
+    path = /var/lib/manticore/${DOMAIN_SAFE}_albums
+
+    charset_table = 0..9, A..Z->a..z, _, a..z, U+410..U+42F->U+430..U+44F, U+430..U+44F
+}
+
+source ${DOMAIN_SAFE}_searches
+{
+    type = mysql
+    sql_host = mariadb
+    sql_user = ${DOMAIN}
+    sql_pass = ${MARIADB_PASSWORD}
+    sql_db = ${DOMAIN}
+    sql_port = 3306
+
+    sql_query_pre = SET NAMES utf8
+    sql_query_pre = SET CHARACTER SET utf8
+
+    sql_query = SELECT search_id, query, query_length, query_results_videos, query_results_albums, query_results_total, amount, added_date \
+                FROM ktvs_stats_search where status_id=1
+
+    sql_attr_timestamp = added_date
+    sql_attr_bigint = query_length
+    sql_attr_bigint = query_results_videos
+    sql_attr_bigint = query_results_albums
+    sql_attr_bigint = query_results_total
+    sql_attr_bigint = amount
+}
+
+index ${DOMAIN_SAFE}_searches
+{
+    source = ${DOMAIN_SAFE}_searches
+    morphology = stem_en
+    min_word_len = 2
+    min_infix_len = 2
+    index_exact_words = 1
+
+    path = /var/lib/manticore/${DOMAIN_SAFE}_searches
+
+    charset_table = 0..9, A..Z->a..z, _, a..z, U+410..U+42F->U+430..U+44F, U+430..U+44F
+}
