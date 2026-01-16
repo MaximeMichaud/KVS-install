@@ -358,12 +358,28 @@ select_site_prefix() {
     esac
 
     sed -i "s/^SITE_PREFIX=.*/SITE_PREFIX=$SITE_PREFIX/" .env
+    # Set COMPOSE_PROJECT_NAME to match SITE_PREFIX for consistent volume naming
+    if grep -q "^COMPOSE_PROJECT_NAME=" .env; then
+        sed -i "s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=$SITE_PREFIX/" .env
+    else
+        echo "COMPOSE_PROJECT_NAME=$SITE_PREFIX" >> .env
+    fi
 }
 
 # Only ask about prefix if using default
 source .env
 if [ "$SITE_PREFIX" = "kvs" ]; then
     select_site_prefix
+fi
+
+# Ensure COMPOSE_PROJECT_NAME matches SITE_PREFIX (for existing .env files)
+if [ "$COMPOSE_PROJECT_NAME" != "$SITE_PREFIX" ] 2>/dev/null; then
+    if grep -q "^COMPOSE_PROJECT_NAME=" .env; then
+        sed -i "s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=$SITE_PREFIX/" .env
+    else
+        echo "COMPOSE_PROJECT_NAME=$SITE_PREFIX" >> .env
+    fi
+    export COMPOSE_PROJECT_NAME="$SITE_PREFIX"
 fi
 
 # SSL provider selection FIRST (before email)
