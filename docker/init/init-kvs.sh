@@ -171,33 +171,25 @@ elif [ -f "/usr/share/geoip/GeoLite2-Country.mmdb" ]; then
 fi
 
 if [ -n "$GEOIP_DB" ]; then
-    # Update KVS system.dat file (where KVS reads GeoIP configuration)
-    SYSTEM_DAT="${KVS_PATH}/admin/data/system/system.dat"
+    echo "Configuring GeoIP database path in settings..."
 
-    if [ -f "$SYSTEM_DAT" ]; then
-        # Backup system.dat before modification
-        cp "$SYSTEM_DAT" "${SYSTEM_DAT}.bak" 2>/dev/null || true
+    # Update geoip_database in ktvs_settings JSON (system section)
+    # KVS stores settings as JSON in the 'value' column
+    mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" <<-EOSQL 2>/dev/null
+		UPDATE ktvs_settings
+		SET value = JSON_SET(value, '$.geoip_database', '$GEOIP_DB')
+		WHERE section = 'system';
+	EOSQL
 
-        # Update geoip_database field in JSON using jq
-        TMP_FILE=$(mktemp)
-        if jq --arg geoip "$GEOIP_DB" '.geoip_database = $geoip' "$SYSTEM_DAT" > "$TMP_FILE" 2>/dev/null; then
-            mv "$TMP_FILE" "$SYSTEM_DAT"
-            chown 1000:1000 "$SYSTEM_DAT"
-            echo "GeoIP database configured in system.dat: $GEOIP_DB"
-        else
-            # Fallback to sed if jq fails
-            echo "Warning: jq failed, using sed fallback"
-            sed -i "s|\"geoip_database\":\"[^\"]*\"|\"geoip_database\":\"$GEOIP_DB\"|g" "$SYSTEM_DAT"
-            echo "GeoIP database configured: $GEOIP_DB"
-        fi
-        rm -f "$TMP_FILE" 2>/dev/null || true
+    if [ $? -eq 0 ]; then
+        echo "✓ GeoIP database configured: $GEOIP_DB"
+        echo "  Note: system.dat will be auto-generated on first admin access"
     else
-        echo "Warning: system.dat not found at $SYSTEM_DAT"
+        echo "⚠ Failed to configure GeoIP in database"
     fi
 else
     echo "No GeoIP database found in /usr/share/geoip/"
-    echo "To enable GeoIP: copy GeoLite2-Country.mmdb or GeoLite2-City.mmdb to docker/geoip/"
-    echo "Download from: https://www.maxmind.com/en/accounts/current/geoip/downloads"
+    echo "To enable GeoIP: copy GeoLite2-Country.mmdb to docker/geoip/"
 fi
 
 # Final permissions
