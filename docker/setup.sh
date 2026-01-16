@@ -795,6 +795,10 @@ run_step "Initializing phpMyAdmin" docker compose --profile setup up --force-rec
 progress_bar "Initializing KVS"
 run_step "Initializing KVS" docker compose --profile setup up --force-recreate kvs-init
 
+# Show permission verification result from kvs-init logs
+echo -e "  ${CYAN}Permission verification:${NC}"
+docker compose logs kvs-init 2>/dev/null | grep -E "(permissions|Permission|CREATED|FIXED|OK)" | tail -5 | sed 's/^/    /'
+
 # Step 4: Start nginx and get certificate
 progress_bar "Starting Nginx"
 run_step "Starting Nginx" docker compose up -d --force-recreate nginx
