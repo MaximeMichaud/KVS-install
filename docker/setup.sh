@@ -213,12 +213,13 @@ configure_disk_space_limit() {
 
     if [ -n "$OPTIONS_TABLE" ]; then
         # Update the disk space limit setting (|| true to prevent set -e crash)
+        # KVS uses 'variable' column, not 'name'
         docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -e \
-            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE name='MAIN_SERVER_MIN_FREE_SPACE_MB';" 2>/dev/null || true
+            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE variable='MAIN_SERVER_MIN_FREE_SPACE_MB';" 2>/dev/null || true
 
         # Also update storage server group limit
         docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -e \
-            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE name='SERVER_GROUP_MIN_FREE_SPACE_MB';" 2>/dev/null || true
+            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE variable='SERVER_GROUP_MIN_FREE_SPACE_MB';" 2>/dev/null || true
 
         echo -e "${GREEN}✓ KVS disk space limit configured${NC}"
     else
