@@ -22,7 +22,7 @@ repos:
     hooks:
       - id: shellcheck
         name: "ShellCheck - Static analysis for shell scripts"
-        args: ["--severity=warning"]  # Show errors and warnings
+        # No args = default behavior = show all severity levels (style, info, warning, error)
         types: [shell]
         files: \.(sh|bash|ksh|zsh)$
 
