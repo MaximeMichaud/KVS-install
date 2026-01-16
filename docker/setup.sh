@@ -685,14 +685,21 @@ check_existing_volume() {
             # Try to verify connection by starting container briefly
             echo "Verifying database connection..."
             docker compose up -d --force-recreate mariadb >/dev/null 2>&1
-            sleep 5
+
+            # Wait for healthcheck (up to 60 seconds)
+            for i in {1..12}; do
+                if docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 5
+            done
 
             if docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; then
                 echo -e "${GREEN}Connection verified - using existing database${NC}"
                 docker compose down >/dev/null 2>&1
                 return 0
             else
-                echo -e "${RED}Connection failed - password mismatch${NC}"
+                echo -e "${RED}Connection failed - credentials may not match volume${NC}"
                 docker compose down >/dev/null 2>&1
             fi
         fi

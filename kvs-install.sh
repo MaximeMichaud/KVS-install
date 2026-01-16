@@ -1059,20 +1059,46 @@ function dockerInstall() {
 
   # Clone or update KVS-install repo
   INSTALL_DIR="/opt/kvs"
+  BACKUP_DIR="/tmp/kvs-backup-$$"
+
+  # Backup user data before any potential rm -rf
+  backup_user_data() {
+    if [[ -f "$INSTALL_DIR/docker/.env" ]] || [[ -d "$INSTALL_DIR/docker/kvs-archive" ]]; then
+      mkdir -p "$BACKUP_DIR"
+      [[ -f "$INSTALL_DIR/docker/.env" ]] && cp "$INSTALL_DIR/docker/.env" "$BACKUP_DIR/"
+      [[ -d "$INSTALL_DIR/docker/kvs-archive" ]] && cp -r "$INSTALL_DIR/docker/kvs-archive" "$BACKUP_DIR/"
+      echo "${cyan}Backed up .env and kvs-archive${normal}"
+    fi
+  }
+
+  # Restore user data after clone
+  restore_user_data() {
+    if [[ -d "$BACKUP_DIR" ]]; then
+      [[ -f "$BACKUP_DIR/.env" ]] && cp "$BACKUP_DIR/.env" "$INSTALL_DIR/docker/"
+      [[ -d "$BACKUP_DIR/kvs-archive" ]] && cp -r "$BACKUP_DIR/kvs-archive" "$INSTALL_DIR/docker/"
+      rm -rf "$BACKUP_DIR"
+      echo "${green}Restored .env and kvs-archive${normal}"
+    fi
+  }
+
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "Updating existing installation..."
     if cd "$INSTALL_DIR" && git pull; then
       echo "${green}Updated successfully${normal}"
     else
       echo "${red}Git pull failed, re-cloning...${normal}"
+      backup_user_data
       cd /opt && rm -rf "$INSTALL_DIR"
       git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
+      restore_user_data
     fi
   else
     # Directory doesn't exist or is not a git repo
+    backup_user_data
     rm -rf "$INSTALL_DIR" 2>/dev/null
     echo "Cloning KVS-install..."
     git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
+    restore_user_data
   fi
 
   cd "$INSTALL_DIR/docker" || { echo "${red}Failed to enter docker directory${normal}"; exit 1; }
