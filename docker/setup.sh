@@ -653,10 +653,8 @@ echo -e "${GREEN}KVS archive found${NC}"
 # Now select PHP version based on KVS
 select_php_version
 
-# IonCube selection
-if [ "$IONCUBE" = "YES" ]; then
-    select_ioncube
-fi
+# IonCube selection (always ask in interactive mode)
+select_ioncube
 
 # Cache selection (dragonfly/memcached)
 select_cache() {
@@ -715,9 +713,8 @@ select_mode() {
     esac
 }
 
-if [ "$MODE" = "single" ]; then
-    select_mode
-fi
+# Always ask in interactive mode
+select_mode
 
 # Check for existing MariaDB volume
 # Based on MariaDB Docker best practices: env vars are IGNORED if data exists
