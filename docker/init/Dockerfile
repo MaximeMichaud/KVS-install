@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     default-mysql-client \
     ca-certificates \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 COPY init-kvs.sh /init-kvs.sh

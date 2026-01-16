@@ -729,6 +729,52 @@ if [ "$MODE" = "single" ]; then
     select_mode
 fi
 
+# GeoIP database selection
+select_geoip() {
+    echo ""
+    echo -e "${CYAN}GeoIP Database${NC}"
+
+    # Check if file already exists
+    if [ -f geoip/GeoLite2-Country.mmdb ] || [ -f geoip/GeoLite2-City.mmdb ]; then
+        echo -e "${GREEN}✓ GeoIP database already configured${NC}"
+        return 0
+    fi
+
+    echo "Enables visitor geolocation (country/state detection) in KVS admin."
+    echo ""
+    echo -e "${YELLOW}Note: If using Cloudflare CDN (orange cloud), skip this.${NC}"
+    echo -e "${YELLOW}Cloudflare provides GeoIP automatically via CF-IPCountry header.${NC}"
+    echo ""
+
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$GEOIP_CHOICE" ]]; then
+        echo "Options:"
+        echo "  1) Download GeoLite2-Country database (default)"
+        echo "  2) Skip (not needed if using Cloudflare, or add manually later)"
+        echo ""
+        echo -n "Choice [1]: "
+        read -r GEOIP_CHOICE
+        GEOIP_CHOICE=${GEOIP_CHOICE:-1}
+    fi
+
+    if [ "$GEOIP_CHOICE" = "1" ]; then
+        echo -e "${GREEN}Downloading GeoLite2-Country.mmdb...${NC}"
+        mkdir -p geoip
+        GEOIP_URL="https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb"
+
+        if curl -fsSL "$GEOIP_URL" -o geoip/GeoLite2-Country.mmdb; then
+            echo -e "${GREEN}✓ GeoIP database downloaded${NC}"
+        else
+            echo -e "${YELLOW}⚠ Download failed - continuing without GeoIP${NC}"
+            echo "  You can manually add it later to: $PWD/geoip/"
+        fi
+    else
+        echo -e "${YELLOW}Skipped GeoIP download${NC}"
+    fi
+}
+
+select_geoip
+
 # Check for existing MariaDB volume
 # Based on MariaDB Docker best practices: env vars are IGNORED if data exists
 # See: https://mariadb.com/kb/en/docker-official-image-frequently-asked-questions/
@@ -972,46 +1018,6 @@ run_step "Building Nginx container" docker compose build nginx
 # Create bind mount directory
 mkdir -p /var/www/"$DOMAIN"
 chown 1000:1000 /var/www/"$DOMAIN"
-
-#################################################################
-# Optional: Download GeoIP database
-#################################################################
-if [ ! -f geoip/GeoLite2-Country.mmdb ] && [ ! -f geoip/GeoLite2-City.mmdb ]; then
-    echo ""
-    echo -e "${CYAN}GeoIP Database${NC}"
-    echo "GeoIP enables country/state detection for visitors."
-    echo ""
-
-    if [ "$HEADLESS" = "y" ]; then
-        # In headless mode, use GEOIP_CHOICE variable (default: download)
-        GEOIP_DOWNLOAD=${GEOIP_CHOICE:-1}
-    else
-        echo "Options:"
-        echo "  1) Download GeoLite2-Country (recommended)"
-        echo "  2) Skip (you can add manually later to docker/geoip/)"
-        echo ""
-        echo -n "Choice [1]: "
-        read -r GEOIP_DOWNLOAD
-        GEOIP_DOWNLOAD=${GEOIP_DOWNLOAD:-1}
-    fi
-
-    if [ "$GEOIP_DOWNLOAD" = "1" ]; then
-        echo -e "${GREEN}Downloading GeoLite2-Country.mmdb...${NC}"
-        mkdir -p geoip
-        GEOIP_URL="https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb"
-
-        if curl -fsSL "$GEOIP_URL" -o geoip/GeoLite2-Country.mmdb; then
-            echo -e "${GREEN}✓ GeoIP database downloaded${NC}"
-            echo "  Path: $PWD/geoip/GeoLite2-Country.mmdb"
-        else
-            echo -e "${YELLOW}⚠ Download failed - continuing without GeoIP${NC}"
-            echo "  You can manually add it later to: $PWD/geoip/"
-        fi
-    else
-        echo -e "${YELLOW}Skipped GeoIP download${NC}"
-        echo "To add later: copy GeoLite2-Country.mmdb to docker/geoip/"
-    fi
-fi
 
 # Step 2: Start infrastructure services
 progress_bar "Starting MariaDB"

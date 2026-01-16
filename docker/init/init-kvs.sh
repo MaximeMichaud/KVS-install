@@ -171,20 +171,28 @@ elif [ -f "/usr/share/geoip/GeoLite2-Country.mmdb" ]; then
 fi
 
 if [ -n "$GEOIP_DB" ]; then
-    # Check if GEOIP_DATABASE setting exists
-    GEOIP_EXISTS=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
-        -N -e "SELECT COUNT(*) FROM ktvs_options WHERE variable='GEOIP_DATABASE'" 2>/dev/null || echo "0")
+    # Update KVS system.dat file (where KVS reads GeoIP configuration)
+    SYSTEM_DAT="${KVS_PATH}/admin/data/system/system.dat"
 
-    if [ "$GEOIP_EXISTS" -eq 0 ]; then
-        # Insert new setting
-        mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
-            -e "INSERT INTO ktvs_options (variable, value) VALUES ('GEOIP_DATABASE', '$GEOIP_DB');" 2>/dev/null || true
-        echo "GeoIP database configured: $GEOIP_DB"
+    if [ -f "$SYSTEM_DAT" ]; then
+        # Backup system.dat before modification
+        cp "$SYSTEM_DAT" "${SYSTEM_DAT}.bak" 2>/dev/null || true
+
+        # Update geoip_database field in JSON using jq
+        TMP_FILE=$(mktemp)
+        if jq --arg geoip "$GEOIP_DB" '.geoip_database = $geoip' "$SYSTEM_DAT" > "$TMP_FILE" 2>/dev/null; then
+            mv "$TMP_FILE" "$SYSTEM_DAT"
+            chown 1000:1000 "$SYSTEM_DAT"
+            echo "GeoIP database configured in system.dat: $GEOIP_DB"
+        else
+            # Fallback to sed if jq fails
+            echo "Warning: jq failed, using sed fallback"
+            sed -i "s|\"geoip_database\":\"[^\"]*\"|\"geoip_database\":\"$GEOIP_DB\"|g" "$SYSTEM_DAT"
+            echo "GeoIP database configured: $GEOIP_DB"
+        fi
+        rm -f "$TMP_FILE" 2>/dev/null || true
     else
-        # Update existing setting
-        mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" \
-            -e "UPDATE ktvs_options SET value='$GEOIP_DB' WHERE variable='GEOIP_DATABASE';" 2>/dev/null || true
-        echo "GeoIP database updated: $GEOIP_DB"
+        echo "Warning: system.dat not found at $SYSTEM_DAT"
     fi
 else
     echo "No GeoIP database found in /usr/share/geoip/"

@@ -154,6 +154,7 @@ services:
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - ./kvs-archive:/kvs-archive:ro
+      - ./geoip:/usr/share/geoip:ro
       - nginx-includes:/nginx-includes
     environment:
       - DOMAIN=${DOMAIN}
