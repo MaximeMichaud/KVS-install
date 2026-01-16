@@ -87,7 +87,7 @@ run_step() {
 #################################################################
 # Progress Tracking
 #################################################################
-PROGRESS_TOTAL=10
+PROGRESS_TOTAL=11
 PROGRESS_CURRENT=0
 
 progress_bar() {
@@ -145,6 +145,94 @@ progress_success() {
         echo "  All $PROGRESS_TOTAL steps finished"
         echo -e "========================================${NC}"
     fi
+}
+
+# Calculate and configure dynamic disk space limit for KVS
+# Formula: MIN_FREE = MAX(2048, MIN(32768, TOTAL_DISK_MB × 5%))
+configure_disk_space_limit() {
+    echo ""
+    echo -e "${CYAN}Configuring KVS disk space limit...${NC}"
+
+    # Get total disk space in MB for the KVS directory
+    TOTAL_DISK_MB=$(df -m /var/www/"$DOMAIN" 2>/dev/null | awk 'NR==2 {print $2}')
+    TOTAL_DISK_GB=$((TOTAL_DISK_MB / 1024))
+
+    if [ -z "$TOTAL_DISK_MB" ] || [ "$TOTAL_DISK_MB" -eq 0 ]; then
+        echo -e "${YELLOW}Could not detect disk size. Using KVS default (30 GB).${NC}"
+        return
+    fi
+
+    # Formula: min_free = MAX(2048, MIN(32768, total_disk_mb × 5%))
+    # Using binary units: 2 GB = 2048 MB, 32 GB = 32768 MB
+    CALCULATED=$((TOTAL_DISK_MB * 5 / 100))
+    MIN_FLOOR=2048    # 2 GB minimum
+    MAX_CEIL=32768    # 32 GB maximum
+
+    # Apply floor
+    if [ "$CALCULATED" -lt "$MIN_FLOOR" ]; then
+        MIN_FREE_SPACE=$MIN_FLOOR
+    # Apply ceiling
+    elif [ "$CALCULATED" -gt "$MAX_CEIL" ]; then
+        MIN_FREE_SPACE=$MAX_CEIL
+    else
+        MIN_FREE_SPACE=$CALCULATED
+    fi
+
+    MIN_FREE_SPACE_GB=$((MIN_FREE_SPACE / 1024))
+    PERCENT_OF_DISK=$((MIN_FREE_SPACE * 100 / TOTAL_DISK_MB))
+
+    # Warning for small disks (< 20 GB)
+    if [ "$TOTAL_DISK_GB" -lt 20 ]; then
+        echo ""
+        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
+        echo -e "${YELLOW}⚠️  WARNING: Limited disk space detected (${TOTAL_DISK_GB} GB)${NC}"
+        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
+        echo -e "${YELLOW}This configuration is suitable for development/testing only.${NC}"
+        echo -e "${YELLOW}For production use, we recommend increasing your disk space${NC}"
+        echo -e "${YELLOW}as KVS requires storage for:${NC}"
+        echo -e "${YELLOW}  • Video thumbnails and screenshots${NC}"
+        echo -e "${YELLOW}  • Temporary video processing files${NC}"
+        echo -e "${YELLOW}  • Database and log files${NC}"
+        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
+        echo ""
+    fi
+
+    # Find the KVS options table and update the setting
+    # KVS uses different table prefixes, so we detect it dynamically
+    OPTIONS_TABLE=$(docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -N -e \
+        "SHOW TABLES LIKE '%options%';" 2>/dev/null | grep -E 'options$' | head -1)
+
+    if [ -n "$OPTIONS_TABLE" ]; then
+        # Update the disk space limit setting
+        docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -e \
+            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE name='MAIN_SERVER_MIN_FREE_SPACE_MB';" 2>/dev/null
+
+        # Also update storage server group limit
+        docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -e \
+            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE name='SERVER_GROUP_MIN_FREE_SPACE_MB';" 2>/dev/null
+
+        echo -e "${GREEN}✓ KVS disk space limit configured${NC}"
+    else
+        echo -e "${YELLOW}Could not find KVS options table. You can configure this manually in:${NC}"
+        echo -e "${YELLOW}  Admin Panel → Settings → System → Minimum free disc space${NC}"
+    fi
+
+    # Display information message
+    echo ""
+    echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│             KVS Disk Space Configuration                         │${NC}"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "${CYAN}│${NC} KVS default alert threshold: ${RED}30000 MB${NC} (30 GB)                    ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC} Adjusted to: ${GREEN}${MIN_FREE_SPACE} MB${NC} (~${MIN_FREE_SPACE_GB} GB) based on your server         ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC}                                                                  ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC} Your disk: ${GREEN}${TOTAL_DISK_MB} MB${NC} (~${TOTAL_DISK_GB} GB)                                 ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC} Reserved:  ${GREEN}${PERCENT_OF_DISK}%${NC} of total disk                                  ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC}                                                                  ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC} Formula: MAX(2048, MIN(32768, total_disk × 5%))                  ${CYAN}│${NC}"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "${CYAN}│${NC} ${YELLOW}ℹ${NC}  KVS needs disk space for thumbnails, screenshots, and        ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC}    temporary files. Upgrade disk if hosting many videos.        ${CYAN}│${NC}"
+    echo -e "${CYAN}└──────────────────────────────────────────────────────────────────┘${NC}"
 }
 
 # Install gum silently at startup
@@ -799,7 +887,11 @@ run_step "Initializing KVS" docker compose --profile setup up --force-recreate k
 echo -e "  ${CYAN}Permission verification:${NC}"
 docker compose logs kvs-init 2>/dev/null | grep -E "(permissions|Permission|CREATED|FIXED|OK)" | tail -5 | sed 's/^/    /'
 
-# Step 4: Start nginx and get certificate
+# Step 4: Configure KVS disk space limit
+progress_bar "Configuring disk space limit"
+configure_disk_space_limit
+
+# Step 5: Start nginx and get certificate
 progress_bar "Starting Nginx"
 run_step "Starting Nginx" docker compose up -d --force-recreate nginx
 
@@ -847,7 +939,7 @@ else
     fi
 fi
 
-# Step 5: Start all services
+# Step 6: Start all services
 progress_bar "Starting all services"
 run_step "Starting all services" docker compose up -d --force-recreate
 

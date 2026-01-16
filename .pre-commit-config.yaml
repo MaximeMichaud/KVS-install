@@ -35,6 +35,13 @@ repos:
         args: ["-i", "E001,E002,E003,E005,E006,E020"]  # Ignore: trailing whitespace (other hook), tabs, indent style, line length, function format
         files: \.(sh|bash)$
 
+  # Markdown linting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.47.0
+    hooks:
+      - id: markdownlint
+        name: "Markdownlint - Markdown style checker"
+
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

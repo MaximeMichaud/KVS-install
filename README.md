@@ -77,7 +77,7 @@ MODE_CHOICE=1 \
 ```
 
 | Variable | Values | Default | Description |
-|----------|--------|---------|-------------|
+| -------- | ------ | ------- | ----------- |
 | `HEADLESS` | `y` | - | Enable headless mode (required) |
 | `INSTALL_TYPE` | `1`/`2` | `1` | 1=Docker, 2=Standalone |
 | `MENU_OPTION` | `1-5` | `1` | 1=Install, 2=Add site, 3=Update PMA, 4=Update script, 5=Quit |
