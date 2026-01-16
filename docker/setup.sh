@@ -162,12 +162,13 @@ configure_disk_space_limit() {
     fi
 
     # Validate we got a number before doing arithmetic
-    if [ -z "$TOTAL_DISK_MB" ] || ! [[ "$TOTAL_DISK_MB" =~ ^[0-9]+$ ]] || [ "$TOTAL_DISK_MB" -eq 0 ]; then
+    # Use positive check to avoid issues with ! and set -e
+    if [[ "$TOTAL_DISK_MB" =~ ^[0-9]+$ ]] && [ "$TOTAL_DISK_MB" -gt 0 ]; then
+        TOTAL_DISK_GB=$((TOTAL_DISK_MB / 1024))
+    else
         echo -e "${YELLOW}Could not detect disk size. Using KVS default (30 GB).${NC}"
         return
     fi
-
-    TOTAL_DISK_GB=$((TOTAL_DISK_MB / 1024))
 
     # Formula: min_free = MAX(2048, MIN(32768, total_disk_mb × 5%))
     # Using binary units: 2 GB = 2048 MB, 32 GB = 32768 MB
@@ -206,17 +207,18 @@ configure_disk_space_limit() {
 
     # Find the KVS options table and update the setting
     # KVS uses different table prefixes, so we detect it dynamically
+    # Use || true to prevent set -e from crashing if DB query fails
     OPTIONS_TABLE=$(docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -N -e \
-        "SHOW TABLES LIKE '%options%';" 2>/dev/null | grep -E 'options$' | head -1)
+        "SHOW TABLES LIKE '%options%';" 2>/dev/null | grep -E 'options$' | head -1) || OPTIONS_TABLE=""
 
     if [ -n "$OPTIONS_TABLE" ]; then
-        # Update the disk space limit setting
+        # Update the disk space limit setting (|| true to prevent set -e crash)
         docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -e \
-            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE name='MAIN_SERVER_MIN_FREE_SPACE_MB';" 2>/dev/null
+            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE name='MAIN_SERVER_MIN_FREE_SPACE_MB';" 2>/dev/null || true
 
         # Also update storage server group limit
         docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -e \
-            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE name='SERVER_GROUP_MIN_FREE_SPACE_MB';" 2>/dev/null
+            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE name='SERVER_GROUP_MIN_FREE_SPACE_MB';" 2>/dev/null || true
 
         echo -e "${GREEN}✓ KVS disk space limit configured${NC}"
     else
@@ -256,7 +258,7 @@ fi
 
 # Detect existing installation and warn
 # Look for KVS-related containers (any prefix ending with -php, -mariadb, etc.)
-EXISTING_CONTAINERS=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep -cE -- '-(php|mariadb|nginx|dragonfly|memcached|cron)$' || echo 0)
+EXISTING_CONTAINERS=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep -cE -- '-(php|mariadb|nginx|dragonfly|memcached|cron)$') || EXISTING_CONTAINERS=0
 EXISTING_VOLUMES=$(docker volume ls --filter "name=docker_" -q 2>/dev/null | wc -l)
 
 if [ "$EXISTING_CONTAINERS" -gt 0 ] || [ "$EXISTING_VOLUMES" -gt 0 ]; then
