@@ -636,10 +636,17 @@ check_existing_volume() {
     echo ""
     echo -e "${CYAN}Checking for existing MariaDB data...${NC}"
 
-    # Check if volume exists
-    # Volume name = <directory>_mariadb-data (Docker Compose default)
-    PROJECT_NAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
-    VOLUME_NAME="${PROJECT_NAME}_mariadb-data"
+    # Get the actual volume name from docker compose (most reliable method)
+    # This respects COMPOSE_PROJECT_NAME and any compose config
+    VOLUME_NAME=$(docker compose config 2>/dev/null | grep -A1 'mariadb-data:' | grep 'name:' | awk '{print $2}')
+
+    # Fallback: compute from docker compose project name
+    if [ -z "$VOLUME_NAME" ]; then
+        # Docker Compose uses directory name, lowercased, non-alphanumeric removed
+        PROJECT_NAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
+        VOLUME_NAME="${PROJECT_NAME}_mariadb-data"
+    fi
+
     if docker volume ls -q | grep -q "^${VOLUME_NAME}$"; then
         echo -e "${YELLOW}Existing MariaDB volume found: ${VOLUME_NAME}${NC}"
         echo -e "${YELLOW}Note: MariaDB ignores password env vars when data exists${NC}"
