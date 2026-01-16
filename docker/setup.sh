@@ -154,13 +154,20 @@ configure_disk_space_limit() {
     echo -e "${CYAN}Configuring KVS disk space limit...${NC}"
 
     # Get total disk space in MB for the KVS directory
-    TOTAL_DISK_MB=$(df -m /var/www/"$DOMAIN" 2>/dev/null | awk 'NR==2 {print $2}')
-    TOTAL_DISK_GB=$((TOTAL_DISK_MB / 1024))
+    # Use root partition as fallback if /var/www/$DOMAIN doesn't exist yet
+    if [ -d "/var/www/$DOMAIN" ]; then
+        TOTAL_DISK_MB=$(df -m "/var/www/$DOMAIN" 2>/dev/null | awk 'NR==2 {print $2}')
+    else
+        TOTAL_DISK_MB=$(df -m / 2>/dev/null | awk 'NR==2 {print $2}')
+    fi
 
-    if [ -z "$TOTAL_DISK_MB" ] || [ "$TOTAL_DISK_MB" -eq 0 ]; then
+    # Validate we got a number before doing arithmetic
+    if [ -z "$TOTAL_DISK_MB" ] || ! [[ "$TOTAL_DISK_MB" =~ ^[0-9]+$ ]] || [ "$TOTAL_DISK_MB" -eq 0 ]; then
         echo -e "${YELLOW}Could not detect disk size. Using KVS default (30 GB).${NC}"
         return
     fi
+
+    TOTAL_DISK_GB=$((TOTAL_DISK_MB / 1024))
 
     # Formula: min_free = MAX(2048, MIN(32768, total_disk_mb × 5%))
     # Using binary units: 2 GB = 2048 MB, 32 GB = 32768 MB
