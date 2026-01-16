@@ -518,23 +518,16 @@ select_mode() {
     # Skip prompt if already set (headless mode)
     if [[ -z "$MODE_CHOICE" ]]; then
         echo "  1) Single site (default) - direct nginx, best performance"
-        echo "  2) Multi site - Traefik proxy, multiple KVS on same server (in development)"
+        echo "  2) Multi site - Caddy proxy (see multi-site/site-manager.sh)"
         read -rp "Select mode [1-2] (default: 1): " MODE_CHOICE
     fi
 
     case $MODE_CHOICE in
         2)
-            sed -i "s/MODE=.*/MODE=multi/" .env
-            # Add multi to COMPOSE_PROFILES
-            CURRENT_PROFILES=$(grep "^COMPOSE_PROFILES=" .env | cut -d= -f2)
-            sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=${CURRENT_PROFILES},multi/" .env
-            # Create override to remove nginx ports
-            cat > docker-compose.override.yml << 'OVERRIDE'
-services:
-  nginx:
-    ports: []
-OVERRIDE
-            echo -e "${GREEN}Multi-site mode enabled with Traefik${NC}"
+            echo -e "${YELLOW}Multi-site mode uses Caddy reverse proxy${NC}"
+            echo "After setup, use: ./multi-site/site-manager.sh add <domain>"
+            sed -i "s/MODE=.*/MODE=single/" .env
+            echo -e "${GREEN}Single site mode configured (add more sites via site-manager.sh)${NC}"
             ;;
         *)
             sed -i "s/MODE=.*/MODE=single/" .env
