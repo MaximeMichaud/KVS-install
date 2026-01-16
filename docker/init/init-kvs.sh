@@ -175,13 +175,12 @@ if [ -n "$GEOIP_DB" ]; then
 
     # Update geoip_database in ktvs_settings JSON (system section)
     # KVS stores settings as JSON in the 'value' column
-    mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" <<-EOSQL 2>/dev/null
+    if mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" <<-EOSQL 2>/dev/null
 		UPDATE ktvs_settings
 		SET value = JSON_SET(value, '$.geoip_database', '$GEOIP_DB')
 		WHERE section = 'system';
 	EOSQL
-
-    if [ $? -eq 0 ]; then
+    then
         echo "✓ GeoIP database configured: $GEOIP_DB"
         echo "  Note: system.dat will be auto-generated on first admin access"
     else
