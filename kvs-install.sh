@@ -426,11 +426,24 @@ function installQuestions() {
     }
 
     # Determining PHP version and PHP path
+    # Official KVS requirements:
+    # 6.4, 6.3, 6.2.1+ → PHP 8.1
+    # 6.2.0, 6.1, 6.0, 5.5 → PHP 7.4
     PHP="7.4"
     php_path="/usr/lib/php/20190902"
 
-    # KVS 6.2+ supports PHP 8.1
-    if ver_compare "6.2" "$version"; then
+    # Extract major.minor.patch for 6.2.0 vs 6.2.1+ distinction
+    version_major=$(echo "$version" | cut -d. -f1)
+    version_minor=$(echo "$version" | cut -d. -f2)
+    version_patch=$(echo "$version" | cut -d. -f3)
+
+    # KVS 6.2.1+ supports PHP 8.1 (but NOT 6.2.0)
+    if [ "$version_major" -eq 6 ] && [ "$version_minor" -eq 2 ] && [ "$version_patch" -eq 0 ]; then
+      # 6.2.0 specifically → PHP 7.4
+      PHP="7.4"
+      php_path="/usr/lib/php/20190902"
+    elif ver_compare "6.2.1" "$version"; then
+      # 6.2.1+ → PHP 8.1
       PHP="8.1"
       php_path="/usr/lib/php/20210902"
     fi

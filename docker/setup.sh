@@ -640,6 +640,7 @@ select_mariadb_version() {
 }
 
 # PHP version selection based on KVS version
+# Official requirements from kvs-cli CheckCommand.php
 select_php_version() {
     echo ""
     echo -e "${CYAN}Checking KVS version for PHP compatibility...${NC}"
@@ -661,20 +662,37 @@ select_php_version() {
 
     echo "Detected KVS version: $KVS_VERSION"
 
-    # Version comparison
+    # Version comparison (major.minor.patch)
     KVS_MAJOR=$(echo "$KVS_VERSION" | cut -d. -f1)
     KVS_MINOR=$(echo "$KVS_VERSION" | cut -d. -f2)
+    KVS_PATCH=$(echo "$KVS_VERSION" | cut -d. -f3)
+
+    # Official KVS PHP requirements:
+    # 6.4, 6.3, 6.2.1+ → PHP 8.1
+    # 6.2.0            → PHP 7.1-7.4
+    # 6.1, 6.0         → PHP 7.1-7.4
+    # 5.5              → PHP 7.2-7.4
 
     if [ "$KVS_MAJOR" -lt 6 ]; then
-        echo -e "${RED}KVS $KVS_VERSION requires PHP 7.4-8.0${NC}"
+        # KVS 5.x → PHP 7.4
+        echo -e "${YELLOW}KVS $KVS_VERSION requires PHP 7.2-7.4${NC}"
         echo -e "${YELLOW}Warning: PHP 7.x is EOL. Consider upgrading KVS.${NC}"
-        sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.0/" .env
-        echo "Set PHP version to 8.0"
+        sed -i "s/PHP_VERSION=.*/PHP_VERSION=7.4/" .env
+        echo "Set PHP version to 7.4"
     elif [ "$KVS_MAJOR" -eq 6 ] && [ "$KVS_MINOR" -lt 2 ]; then
-        echo "KVS 6.0-6.1 requires PHP 8.0"
-        sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.0/" .env
+        # KVS 6.0-6.1 → PHP 7.4
+        echo -e "${YELLOW}KVS $KVS_VERSION requires PHP 7.1-7.4${NC}"
+        echo -e "${YELLOW}Warning: PHP 7.x is EOL. Consider upgrading KVS.${NC}"
+        sed -i "s/PHP_VERSION=.*/PHP_VERSION=7.4/" .env
+        echo "Set PHP version to 7.4"
+    elif [ "$KVS_MAJOR" -eq 6 ] && [ "$KVS_MINOR" -eq 2 ] && [ "$KVS_PATCH" -eq 0 ]; then
+        # KVS 6.2.0 → PHP 7.4
+        echo -e "${YELLOW}KVS 6.2.0 requires PHP 7.1-7.4${NC}"
+        echo -e "${YELLOW}Warning: Upgrade to KVS 6.2.1+ for PHP 8.1 support.${NC}"
+        sed -i "s/PHP_VERSION=.*/PHP_VERSION=7.4/" .env
+        echo "Set PHP version to 7.4"
     else
-        # KVS 6.2+ requires PHP 8.1
+        # KVS 6.2.1+, 6.3.x, 6.4.x → PHP 8.1
         echo "KVS $KVS_VERSION requires PHP 8.1"
         sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.1/" .env
         echo -e "${GREEN}Set PHP 8.1${NC}"
