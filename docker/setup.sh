@@ -812,11 +812,7 @@ select_manticore() {
             fi
         fi
         echo -e "${GREEN}✓ Manticore Search enabled${NC}"
-        echo ""
-        echo -e "${YELLOW}After installation, configure in KVS Admin:${NC}"
-        echo "  → Settings → Satellite servers → Sphinx/Manticore"
-        echo "  → Host: searchd"
-        echo "  → Port: 9306"
+        echo "  External Search plugin will be auto-configured during installation"
     else
         echo "ENABLE_MANTICORE=false" >> .env
         echo -e "${YELLOW}Manticore Search disabled${NC}"
