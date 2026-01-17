@@ -21,7 +21,7 @@ fi
 # Optimize system settings for nginx and Docker environment
 log_info "Configuring system settings..."
 
-if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 2>&1 <<EOSQL
+if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 2>&1 <<-EOSQL
 	INSERT INTO ktvs_settings (section, satellite_prefix, value, added_date, version_control)
 	VALUES (
 		'system',
@@ -52,13 +52,13 @@ if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 
 	ON DUPLICATE KEY UPDATE
 		value = JSON_SET(
 			value,
-			'\$.server_type', 'nginx',
-			'\$.memory_limit_default', 256,
-			'\$.file_upload_max_size', 2048,
-			'\$.geoip_database', '$GEOIP_DB'
+			'$.server_type', 'nginx',
+			'$.memory_limit_default', 256,
+			'$.file_upload_max_size', 2048,
+			'$.geoip_database', '$GEOIP_DB'
 		),
 		version_control = version_control + 1;
-EOSQL
+	EOSQL
 ); then
     log_info "System settings optimized:"
     log_info "  - Server type: nginx"
