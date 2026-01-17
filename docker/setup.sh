@@ -255,13 +255,21 @@ preflight_checks() {
     fi
 
     # 4. RAM check (informational only)
-    local total_ram free_ram
-    total_ram=$(free -m | awk 'NR==2 {print int($2/1024)}')
-    free_ram=$(free -m | awk 'NR==2 {print int($7/1024)}')
-    if (( total_ram >= 2 )); then
-        echo -e "${GREEN}✓${NC} RAM: ${total_ram} GB total, ${free_ram} GB available"
+    local total_ram_mb free_ram_mb
+    total_ram_mb=$(free -m | awk 'NR==2 {print $2}')
+    free_ram_mb=$(free -m | awk 'NR==2 {print $7}')
+
+    # Display in GB if >= 1024MB, otherwise in MB
+    if (( total_ram_mb >= 1024 )); then
+        local total_ram_gb=$((total_ram_mb / 1024))
+        local free_ram_gb=$((free_ram_mb / 1024))
+        if (( total_ram_mb >= 2048 )); then
+            echo -e "${GREEN}✓${NC} RAM: ${total_ram_gb} GB total, ${free_ram_gb} GB available"
+        else
+            echo -e "${YELLOW}⚠${NC} RAM: ${total_ram_gb} GB total (recommended 2 GB minimum)"
+        fi
     else
-        echo -e "${YELLOW}⚠${NC} RAM: ${total_ram} GB total (recommended 2 GB minimum)"
+        echo -e "${YELLOW}⚠${NC} RAM: ${total_ram_mb} MB total (recommended 2 GB minimum)"
     fi
 
     # 5. Internet connectivity (can be bypassed)
@@ -306,11 +314,16 @@ preflight_checks() {
             echo -e "${YELLOW}⚠ Warnings detected, but DEV_MODE enabled - continuing anyway${NC}"
             echo ""
         else
-            echo -e "${YELLOW}⚠ Some checks have warnings or failed.${NC}"
+            echo -e "${YELLOW}⚠ Some checks have warnings.${NC}"
+            echo ""
+            echo "Note: KVS needs disk space for thumbnails, screenshots, and user uploads"
+            echo "that cannot be delegated to external storage. Low disk space is acceptable"
+            echo "for development/testing or sites with minimal content, but may become"
+            echo "problematic for production sites with many videos and high traffic."
             echo ""
             # Skip prompt if headless mode
             if [[ -z "$PREFLIGHT_BYPASS" ]]; then
-                echo -n "Continue anyway? This may cause issues. [y/N]: "
+                echo -n "Continue anyway? [y/N]: "
                 read -r PREFLIGHT_BYPASS
             fi
 
@@ -318,7 +331,7 @@ preflight_checks() {
                 echo -e "${YELLOW}Continuing with warnings...${NC}"
                 echo ""
             else
-                echo -e "${RED}Installation cancelled. Please fix the issues above.${NC}"
+                echo -e "${RED}Installation cancelled.${NC}"
                 exit 1
             fi
         fi
