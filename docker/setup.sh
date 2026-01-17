@@ -1298,6 +1298,27 @@ ask_existing_volume() {
 
     # Check if volume exists
     if docker volume ls -q | grep -q "^${VOLUME_NAME}$"; then
+        # Detect MariaDB version in volume by reading mysql_upgrade_info
+        VOLUME_VERSION=$(docker run --rm -v "$VOLUME_NAME:/data:ro" alpine cat /data/mysql_upgrade_info 2>/dev/null || echo "")
+        VOLUME_MAJOR_MINOR=""
+        if [ -n "$VOLUME_VERSION" ]; then
+            # Extract major.minor (e.g., "10.6.24-MariaDB" → "10.6")
+            VOLUME_MAJOR_MINOR=$(echo "$VOLUME_VERSION" | grep -oP '^\d+\.\d+')
+        fi
+
+        # Compare versions (major.minor only)
+        SELECTED_MAJOR_MINOR=$(echo "$MARIADB_VERSION" | grep -oP '^\d+\.\d+')
+        VERSION_MISMATCH=false
+        IS_DOWNGRADE=false
+
+        if [ -n "$VOLUME_MAJOR_MINOR" ] && [ "$VOLUME_MAJOR_MINOR" != "$SELECTED_MAJOR_MINOR" ]; then
+            VERSION_MISMATCH=true
+            # Check if it's a downgrade (can't use bc, use version comparison)
+            if printf '%s\n' "$VOLUME_MAJOR_MINOR" "$SELECTED_MAJOR_MINOR" | sort -V | head -1 | grep -q "^${SELECTED_MAJOR_MINOR}$"; then
+                IS_DOWNGRADE=true
+            fi
+        fi
+
         echo ""
         echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${YELLOW}║          Existing MariaDB Database Detected                      ║${NC}"
@@ -1305,55 +1326,167 @@ ask_existing_volume() {
         echo ""
         echo "A previous KVS database was found:"
         echo "  Volume: ${VOLUME_NAME}"
-        echo ""
-        echo -e "${YELLOW}You selected 'Restart installation' but a database already exists.${NC}"
-        echo ""
-        echo "What do you want to do with the existing database?"
-        echo ""
-        echo "  1) Fresh start - Delete old database (recommended for reinstall)"
-        echo -e "     ${RED}⚠ All data will be lost${NC} (videos metadata, users, etc.)"
-        echo ""
-        echo "  2) Keep existing database (for Docker setup updates only)"
-        echo "     Use this if you're just updating Docker config/versions"
-        echo -e "     ${YELLOW}⚠ May cause issues if MariaDB version changed${NC}"
-        echo ""
-        echo "  3) Exit - Backup database first"
-        echo "     Backup command: docker run --rm -v ${VOLUME_NAME}:/backup ..."
-        echo ""
-
-        # Skip prompt if headless mode
-        if [[ -z "$VOLUME_CHOICE" ]]; then
-            echo -n "Select [1-3] (default: 3): "
-            read -r VOLUME_CHOICE
-            VOLUME_CHOICE=${VOLUME_CHOICE:-3}
+        if [ -n "$VOLUME_MAJOR_MINOR" ]; then
+            echo "  MariaDB version in volume: ${VOLUME_MAJOR_MINOR}"
+            echo "  Selected MariaDB version: ${SELECTED_MAJOR_MINOR}"
         fi
+        echo ""
 
-        case $VOLUME_CHOICE in
-            1)
-                echo ""
-                echo -e "${YELLOW}Deleting existing database...${NC}"
-                docker compose down 2>/dev/null || true
-                docker volume rm "$VOLUME_NAME" 2>/dev/null || true
-                echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
-                KEEP_EXISTING_DB=false
-                ;;
-            2)
-                echo ""
-                echo -e "${YELLOW}Keeping existing database...${NC}"
-                echo "Will verify connection after MariaDB starts."
-                KEEP_EXISTING_DB=true
-                ;;
-            *)
-                echo ""
-                echo "Exiting. Please backup your database before reinstalling."
-                echo ""
-                echo "Backup example:"
-                echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql:ro \\"
-                echo "    -v \$(pwd)/backup:/backup mariadb:11.8 \\"
-                echo "    mariadb-dump --all-databases > /backup/db-backup.sql"
-                exit 0
-                ;;
-        esac
+        # Downgrade detection
+        if [ "$IS_DOWNGRADE" = true ]; then
+            echo -e "${RED}╔══════════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${RED}║                  ⚠ VERSION DOWNGRADE DETECTED ⚠                  ║${NC}"
+            echo -e "${RED}╚══════════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo -e "${RED}ERROR: Cannot downgrade MariaDB ${VOLUME_MAJOR_MINOR} → ${SELECTED_MAJOR_MINOR}${NC}"
+            echo ""
+            echo "MariaDB does not support downgrading between major versions."
+            echo "The redo log format is incompatible and will cause startup failures."
+            echo ""
+            echo -e "${YELLOW}You MUST delete the existing database to use an older version.${NC}"
+            echo ""
+            echo "Your options:"
+            echo ""
+            echo "  1) Delete existing database and install fresh (data loss)"
+            echo -e "     ${RED}⚠ All data will be lost${NC} (videos metadata, users, etc.)"
+            echo ""
+            echo "  2) Exit and keep MariaDB ${VOLUME_MAJOR_MINOR} (cancel downgrade)"
+            echo "     Re-run setup and select MariaDB ${VOLUME_MAJOR_MINOR} or newer"
+            echo ""
+            echo "  3) Exit and backup database first"
+            echo "     Then re-run setup with option 1 to delete and reinstall"
+            echo ""
+
+            if [[ -z "$VOLUME_CHOICE" ]]; then
+                echo -n "Select [1-3] (default: 3): "
+                read -r VOLUME_CHOICE
+                VOLUME_CHOICE=${VOLUME_CHOICE:-3}
+            fi
+
+            case $VOLUME_CHOICE in
+                1)
+                    echo ""
+                    echo -e "${YELLOW}Deleting existing database...${NC}"
+                    docker compose down 2>/dev/null || true
+                    docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                    echo -e "${GREEN}✓ Database deleted. Will create fresh MariaDB ${SELECTED_MAJOR_MINOR} installation.${NC}"
+                    KEEP_EXISTING_DB=false
+                    ;;
+                2)
+                    echo ""
+                    echo "Exiting. Re-run setup and select MariaDB ${VOLUME_MAJOR_MINOR} or newer."
+                    exit 0
+                    ;;
+                *)
+                    echo ""
+                    echo "Exiting. Please backup your database before downgrading."
+                    echo ""
+                    echo "Backup example:"
+                    echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql:ro \\"
+                    echo "    -v \$(pwd)/backup:/backup mariadb:${VOLUME_MAJOR_MINOR} \\"
+                    echo "    mariadb-dump --all-databases > /backup/db-backup.sql"
+                    exit 0
+                    ;;
+            esac
+        elif [ "$VERSION_MISMATCH" = true ]; then
+            # Upgrade detected (minor version change or major upgrade)
+            echo -e "${YELLOW}You selected 'Restart installation' but a database already exists.${NC}"
+            echo -e "${YELLOW}Note: MariaDB version will change from ${VOLUME_MAJOR_MINOR} → ${SELECTED_MAJOR_MINOR}${NC}"
+            echo ""
+            echo "What do you want to do with the existing database?"
+            echo ""
+            echo "  1) Fresh start - Delete old database (recommended for reinstall)"
+            echo -e "     ${RED}⚠ All data will be lost${NC} (videos metadata, users, etc.)"
+            echo ""
+            echo "  2) Keep existing database and upgrade MariaDB"
+            echo "     Use this if you want to keep your data"
+            echo -e "     ${YELLOW}⚠ MariaDB will auto-upgrade the database format${NC}"
+            echo ""
+            echo "  3) Exit - Backup database first"
+            echo "     Backup command: docker run --rm -v ${VOLUME_NAME}:/backup ..."
+            echo ""
+
+            if [[ -z "$VOLUME_CHOICE" ]]; then
+                echo -n "Select [1-3] (default: 3): "
+                read -r VOLUME_CHOICE
+                VOLUME_CHOICE=${VOLUME_CHOICE:-3}
+            fi
+
+            case $VOLUME_CHOICE in
+                1)
+                    echo ""
+                    echo -e "${YELLOW}Deleting existing database...${NC}"
+                    docker compose down 2>/dev/null || true
+                    docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                    echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
+                    KEEP_EXISTING_DB=false
+                    ;;
+                2)
+                    echo ""
+                    echo -e "${YELLOW}Keeping existing database for upgrade...${NC}"
+                    echo "MariaDB will auto-upgrade from ${VOLUME_MAJOR_MINOR} to ${SELECTED_MAJOR_MINOR}"
+                    KEEP_EXISTING_DB=true
+                    ;;
+                *)
+                    echo ""
+                    echo "Exiting. Please backup your database before making version changes."
+                    echo ""
+                    echo "Backup example:"
+                    echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql:ro \\"
+                    echo "    -v \$(pwd)/backup:/backup mariadb:${VOLUME_MAJOR_MINOR} \\"
+                    echo "    mariadb-dump --all-databases > /backup/db-backup.sql"
+                    exit 0
+                    ;;
+            esac
+        else
+            # Same version - standard flow
+            echo -e "${YELLOW}You selected 'Restart installation' but a database already exists.${NC}"
+            echo ""
+            echo "What do you want to do with the existing database?"
+            echo ""
+            echo "  1) Fresh start - Delete old database (recommended for reinstall)"
+            echo -e "     ${RED}⚠ All data will be lost${NC} (videos metadata, users, etc.)"
+            echo ""
+            echo "  2) Keep existing database (for Docker setup updates only)"
+            echo "     Use this if you're just updating Docker config/versions"
+            echo ""
+            echo "  3) Exit - Backup database first"
+            echo "     Backup command: docker run --rm -v ${VOLUME_NAME}:/backup ..."
+            echo ""
+
+            if [[ -z "$VOLUME_CHOICE" ]]; then
+                echo -n "Select [1-3] (default: 3): "
+                read -r VOLUME_CHOICE
+                VOLUME_CHOICE=${VOLUME_CHOICE:-3}
+            fi
+
+            case $VOLUME_CHOICE in
+                1)
+                    echo ""
+                    echo -e "${YELLOW}Deleting existing database...${NC}"
+                    docker compose down 2>/dev/null || true
+                    docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                    echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
+                    KEEP_EXISTING_DB=false
+                    ;;
+                2)
+                    echo ""
+                    echo -e "${YELLOW}Keeping existing database...${NC}"
+                    echo "Will verify connection after MariaDB starts."
+                    KEEP_EXISTING_DB=true
+                    ;;
+                *)
+                    echo ""
+                    echo "Exiting. Please backup your database before reinstalling."
+                    echo ""
+                    echo "Backup example:"
+                    echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql:ro \\"
+                    echo "    -v \$(pwd)/backup:/backup mariadb:${SELECTED_MAJOR_MINOR} \\"
+                    echo "    mariadb-dump --all-databases > /backup/db-backup.sql"
+                    exit 0
+                    ;;
+            esac
+        fi
     else
         echo "No existing database found - will create fresh installation."
         KEEP_EXISTING_DB=false
