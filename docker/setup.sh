@@ -1282,93 +1282,85 @@ select_manticore() {
 
 select_manticore
 
-# Check for existing MariaDB volume
-# Based on MariaDB Docker best practices: env vars are IGNORED if data exists
-# See: https://mariadb.com/kb/en/docker-official-image-frequently-asked-questions/
-check_existing_volume() {
+# Check for existing MariaDB volume and ask what to do
+ask_existing_volume() {
     echo ""
-    echo -e "${CYAN}Checking for existing MariaDB data...${NC}"
+    echo -e "${CYAN}Checking for existing database...${NC}"
 
-    # Get the actual volume name from docker compose (most reliable method)
-    # This respects COMPOSE_PROJECT_NAME and any compose config
+    # Get the volume name from docker compose config
     VOLUME_NAME=$(docker compose config 2>/dev/null | grep -A1 'mariadb-data:' | grep 'name:' | awk '{print $2}')
 
-    # Fallback: compute from docker compose project name
+    # Fallback: compute from directory name
     if [ -z "$VOLUME_NAME" ]; then
-        # Docker Compose uses directory name, lowercased, non-alphanumeric removed
         PROJECT_NAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
         VOLUME_NAME="${PROJECT_NAME}_mariadb-data"
     fi
 
+    # Check if volume exists
     if docker volume ls -q | grep -q "^${VOLUME_NAME}$"; then
-        echo -e "${YELLOW}Existing MariaDB volume found: ${VOLUME_NAME}${NC}"
-        echo -e "${YELLOW}Note: MariaDB ignores password env vars when data exists${NC}"
-
-        # Check if .env has non-default passwords (meaning we generated them before)
-        source .env
-        if [ "$MARIADB_ROOT_PASSWORD" != "CHANGE_ME_ROOT_PASSWORD" ] && [ -n "$MARIADB_ROOT_PASSWORD" ]; then  # pragma: allowlist secret
-            echo "Saved credentials found in .env"
-
-            # Try to verify connection by starting container briefly
-            echo "Verifying database connection..."
-            log_command docker compose up -d --force-recreate mariadb
-
-            # Wait for healthcheck (up to 60 seconds)
-            for i in {1..12}; do
-                if log_command docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1"; then
-                    break
-                fi
-                sleep 5
-            done
-
-            if log_command docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1"; then
-                echo -e "${GREEN}Connection verified - using existing database${NC}"
-                log_command docker compose down
-                return 0
-            else
-                echo -e "${RED}Connection failed - credentials may not match volume${NC}"
-                log_command docker compose down
-            fi
-        fi
-
-        # Volume exists but credentials don't work or don't exist
         echo ""
-        echo -e "${RED}WARNING: Cannot connect with saved credentials${NC}"
-        echo "The volume contains data created with different credentials."
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║          Existing MariaDB Database Detected                      ║${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        echo "Options:"
-        echo "  1) Delete volume and start fresh (DATA WILL BE LOST)"
-        echo "  2) Exit - manually backup or reset password first"
+        echo "A previous KVS database was found:"
+        echo "  Volume: ${VOLUME_NAME}"
         echo ""
-        echo "To reset password manually:"
-        echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql mariadb:${MARIADB_VERSION:-11.8} \\"
-        echo "    --skip-grant-tables --user=mysql &"
-        echo "  # Then connect and reset: ALTER USER 'root'@'localhost' IDENTIFIED BY 'newpass';"
+        echo -e "${YELLOW}You selected 'Restart installation' but a database already exists.${NC}"
         echo ""
-        # Skip prompt if already set (headless mode)
+        echo "What do you want to do with the existing database?"
+        echo ""
+        echo "  1) Fresh start - Delete old database (recommended for reinstall)"
+        echo "     ${RED}⚠ All data will be lost${NC} (videos metadata, users, etc.)"
+        echo ""
+        echo "  2) Keep existing database (for Docker setup updates only)"
+        echo "     Use this if you're just updating Docker config/versions"
+        echo "     ${YELLOW}⚠ May cause issues if MariaDB version changed${NC}"
+        echo ""
+        echo "  3) Exit - Backup database first"
+        echo "     Backup command: docker run --rm -v ${VOLUME_NAME}:/backup ..."
+        echo ""
+
+        # Skip prompt if headless mode
         if [[ -z "$VOLUME_CHOICE" ]]; then
-            echo -n "Select [1-2]: "
-        read -r VOLUME_CHOICE
+            echo -n "Select [1-3] (default: 3): "
+            read -r VOLUME_CHOICE
+            VOLUME_CHOICE=${VOLUME_CHOICE:-3}
         fi
 
         case $VOLUME_CHOICE in
             1)
-                echo -e "${YELLOW}Stopping containers and removing volume...${NC}"
+                echo ""
+                echo -e "${YELLOW}Deleting existing database...${NC}"
                 docker compose down 2>/dev/null || true
                 docker volume rm "$VOLUME_NAME" 2>/dev/null || true
-                echo -e "${GREEN}Volume removed. Will create fresh database.${NC}"
+                echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
+                KEEP_EXISTING_DB=false
+                ;;
+            2)
+                echo ""
+                echo -e "${YELLOW}Keeping existing database...${NC}"
+                echo "Will verify connection after MariaDB starts."
+                KEEP_EXISTING_DB=true
                 ;;
             *)
-                echo "Exiting. Please backup your data or fix credentials."
-                exit 1
+                echo ""
+                echo "Exiting. Please backup your database before reinstalling."
+                echo ""
+                echo "Backup example:"
+                echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql:ro \\"
+                echo "    -v \$(pwd)/backup:/backup mariadb:11.8 \\"
+                echo "    mariadb-dump --all-databases > /backup/db-backup.sql"
+                exit 0
                 ;;
         esac
     else
-        echo "No existing MariaDB volume - will create fresh database."
+        echo "No existing database found - will create fresh installation."
+        KEEP_EXISTING_DB=false
     fi
 }
 
-check_existing_volume
+ask_existing_volume
 
 # Generate passwords if still defaults
 source .env
@@ -1549,9 +1541,36 @@ while ! docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD
 done
 echo -e " ${GREEN}✓${NC}"
 
+# Verify credentials if keeping existing database
+if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
+    echo ""
+    echo -e "${CYAN}Verifying existing database connection...${NC}"
+    if docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ Connection successful - using existing database${NC}"
+    else
+        echo -e "${RED}✗ Cannot connect with saved credentials${NC}"
+        echo ""
+        echo "The database exists but your .env credentials don't work."
+        echo "This can happen if:"
+        echo "  • Passwords were changed manually"
+        echo "  • .env was reset but volume kept"
+        echo "  • Database is corrupted"
+        echo ""
+        echo "Please either:"
+        echo "  1. Restore correct passwords to .env"
+        echo "  2. Re-run setup and choose 'Delete old database'"
+        echo "  3. Manually reset password in MariaDB container"
+        exit 1
+    fi
+fi
+
 # Step 3: Initialize phpMyAdmin and KVS
 progress_bar "Initializing phpMyAdmin"
 run_step "Initializing phpMyAdmin" docker compose --profile setup up --force-recreate phpmyadmin-init
+
+if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
+    echo -e "${YELLOW}Note: Keeping existing database - KVS settings will be updated but data preserved${NC}"
+fi
 
 progress_bar "Initializing KVS"
 run_step "Initializing KVS" docker compose --profile setup up --force-recreate kvs-init
