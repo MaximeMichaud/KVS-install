@@ -52,8 +52,13 @@ OPTIONS:
                 - Skip GeoIP download
                 - Auto-cleanup volumes
                 - Skip Manticore (faster startup)
+                - Bypass pre-flight warnings (disk space, internet)
 
     --help      Show this help message
+
+ENVIRONMENT VARIABLES:
+    PREFLIGHT_BYPASS=y    Bypass pre-flight warnings (disk space, internet)
+                          Note: Critical checks (Docker, commands) cannot be bypassed
 
 EXAMPLES:
     # Production installation
@@ -64,6 +69,9 @@ EXAMPLES:
 
     # Headless production (CI/CD)
     HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com ./setup.sh
+
+    # Bypass pre-flight warnings (e.g., low disk space)
+    PREFLIGHT_BYPASS=y ./setup.sh
 EOF
             exit 0
             ;;
@@ -114,6 +122,7 @@ if [[ "$HEADLESS" == "y" ]]; then
     DNS_CHOICE=${DNS_CHOICE:-2}             # 1=retry, 2=continue anyway, 3=exit
     GEOIP_CHOICE=${GEOIP_CHOICE:-1}         # 1=download GeoLite2-Country, 2=skip
     SKIP_PRESS_ENTER=1                      # Skip "press enter" prompts
+    # Note: PREFLIGHT_BYPASS can be set as environment variable (no default)
 fi
 
 # Colors
@@ -208,7 +217,8 @@ preflight_checks() {
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    local failed=0
+    local critical_failed=0
+    local warnings=0
 
     # 1. Docker installed
     if command -v docker >/dev/null 2>&1; then
@@ -218,7 +228,7 @@ preflight_checks() {
     else
         echo -e "${RED}✗${NC} Docker not installed"
         echo "  Install: curl -fsSL https://get.docker.com | sh"
-        ((failed++))
+        ((critical_failed++))
     fi
 
     # 2. Docker Compose installed
@@ -229,10 +239,10 @@ preflight_checks() {
     else
         echo -e "${RED}✗${NC} Docker Compose not installed"
         echo "  Docker Compose v2 is required (plugin, not standalone)"
-        ((failed++))
+        ((critical_failed++))
     fi
 
-    # 3. Disk space check
+    # 3. Disk space check (can be bypassed)
     local free_gb
     free_gb=$(df / | awk 'NR==2 {print int($4/1024/1024)}')
     if (( free_gb >= 20 )); then
@@ -241,10 +251,10 @@ preflight_checks() {
         echo -e "${YELLOW}⚠${NC} Disk space: ${free_gb} GB available (minimum 10 GB, recommended 20 GB)"
     else
         echo -e "${RED}✗${NC} Disk space: ${free_gb} GB available (need at least 10 GB)"
-        ((failed++))
+        ((warnings++))
     fi
 
-    # 4. RAM check
+    # 4. RAM check (informational only)
     local total_ram free_ram
     total_ram=$(free -m | awk 'NR==2 {print int($2/1024)}')
     free_ram=$(free -m | awk 'NR==2 {print int($7/1024)}')
@@ -254,14 +264,14 @@ preflight_checks() {
         echo -e "${YELLOW}⚠${NC} RAM: ${total_ram} GB total (recommended 2 GB minimum)"
     fi
 
-    # 5. Internet connectivity
+    # 5. Internet connectivity (can be bypassed)
     echo -n "  Checking internet connectivity... "
     if check_internet; then
         echo -e "${GREEN}✓${NC} Connected"
     else
         echo -e "${RED}✗${NC} No internet connection"
         echo "  Internet required for downloading Docker images and dependencies"
-        ((failed++))
+        ((warnings++))
     fi
 
     # 6. Required commands
@@ -278,19 +288,44 @@ preflight_checks() {
     else
         echo -e "${RED}✗${NC} Missing commands: ${missing_cmds[*]}"
         echo "  Install: apt update && apt install -y ${missing_cmds[*]}"
-        ((failed++))
+        ((critical_failed++))
     fi
 
     echo ""
 
-    # Exit if critical checks failed
-    if (( failed > 0 )); then
-        echo -e "${RED}Pre-flight checks failed. Please fix the issues above before continuing.${NC}"
+    # Handle critical failures (cannot bypass)
+    if (( critical_failed > 0 )); then
+        echo -e "${RED}Critical requirements missing. Cannot continue.${NC}"
+        echo "Please install the missing requirements above."
         exit 1
     fi
 
-    echo -e "${GREEN}✓ All pre-flight checks passed${NC}"
-    echo ""
+    # Handle warnings (can bypass in dev mode or with confirmation)
+    if (( warnings > 0 )); then
+        if [ "$DEV_MODE" = true ]; then
+            echo -e "${YELLOW}⚠ Warnings detected, but DEV_MODE enabled - continuing anyway${NC}"
+            echo ""
+        else
+            echo -e "${YELLOW}⚠ Some checks have warnings or failed.${NC}"
+            echo ""
+            # Skip prompt if headless mode
+            if [[ -z "$PREFLIGHT_BYPASS" ]]; then
+                echo -n "Continue anyway? This may cause issues. [y/N]: "
+                read -r PREFLIGHT_BYPASS
+            fi
+
+            if [[ "$PREFLIGHT_BYPASS" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}Continuing with warnings...${NC}"
+                echo ""
+            else
+                echo -e "${RED}Installation cancelled. Please fix the issues above.${NC}"
+                exit 1
+            fi
+        fi
+    else
+        echo -e "${GREEN}✓ All pre-flight checks passed${NC}"
+        echo ""
+    fi
 }
 
 # Install gum for better UX (if not present)
