@@ -12,6 +12,23 @@
 #################################################################
 # shellcheck disable=SC1091
 #################################################################
+# Parse arguments before anything else
+# Save --dev flag to pass to docker/setup.sh
+SETUP_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dev)
+            SETUP_ARGS+=("$1")
+            shift
+            ;;
+        *)
+            # Unknown args are ignored (for backward compatibility)
+            shift
+            ;;
+    esac
+done
+
+#################################################################
 # Script constants
 readonly SCRIPT_VERSION="3.0.0"
 readonly LOG_FILE="/root/kvs-install.log"
@@ -886,6 +903,7 @@ function install_acme.sh() {
     fi
 
     # Try to issue certificate
+    # shellcheck disable=SC2086  # Intentional word splitting for multiple flags
     if /root/.acme.sh/acme.sh $ACME_ARGS; then
         echo "SSL certificate issued successfully"
         /root/.acme.sh/acme.sh --install-cert --ecc -d "$DOMAIN" -d www."$DOMAIN" \
@@ -1151,9 +1169,9 @@ function dockerInstall() {
 
   # Email, SSL provider, and password prompts are handled by setup.sh
 
-  # Run Docker setup
+  # Run Docker setup (pass any flags like --dev)
   chmod +x setup.sh
-  ./setup.sh
+  ./setup.sh "${SETUP_ARGS[@]}"
 }
 
 function manageMenu() {
