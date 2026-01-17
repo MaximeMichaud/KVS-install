@@ -1005,9 +1005,22 @@ select_ioncube() {
     esac
 }
 
-# Run version selections if using defaults
-if [ "$MARIADB_VERSION" = "11.8" ]; then
-    select_mariadb_version
+# Run version selections
+# Always ask for MariaDB version in interactive mode (allow changing from previous install)
+if [[ -z "$MARIADB_VERSION_CONFIRMED" ]]; then
+    if [ "$MARIADB_VERSION" != "11.8" ]; then
+        echo ""
+        echo "Current MariaDB version in .env: ${MARIADB_VERSION}"
+        echo -n "Keep this version? [Y/n]: "
+        read -r KEEP_VERSION
+        if [[ "$KEEP_VERSION" =~ ^[Nn]$ ]]; then
+            select_mariadb_version
+        else
+            echo "Keeping MariaDB ${MARIADB_VERSION}"
+        fi
+    else
+        select_mariadb_version
+    fi
 fi
 
 # Check for KVS archive first (needed for PHP version detection)
