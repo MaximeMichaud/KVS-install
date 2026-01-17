@@ -175,16 +175,17 @@ if [ -n "$GEOIP_DB" ]; then
 
     # Update geoip_database in ktvs_settings JSON (system section)
     # KVS stores settings as JSON in the 'value' column
-    if mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" <<-EOSQL 2>/dev/null
+    if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 2>&1 <<-EOSQL
 		UPDATE ktvs_settings
 		SET value = JSON_SET(value, '$.geoip_database', '$GEOIP_DB')
 		WHERE section = 'system';
 	EOSQL
-    then
+    ); then
         echo "✓ GeoIP database configured: $GEOIP_DB"
         echo "  Note: system.dat will be auto-generated on first admin access"
     else
-        echo "⚠ Failed to configure GeoIP in database"
+        echo "⚠ Failed to configure GeoIP in database:"
+        echo "  $SQL_OUTPUT"
     fi
 else
     echo "No GeoIP database found in /usr/share/geoip/"
@@ -193,7 +194,7 @@ fi
 
 # Optimize system settings for nginx and Docker environment
 echo "Configuring system settings..."
-if mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" <<-EOSQL 2>/dev/null
+if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 2>&1 <<-EOSQL
 	UPDATE ktvs_settings
 	SET value = JSON_SET(
 		value,
@@ -203,13 +204,14 @@ if mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" <<-EOSQL 2>/d
 	)
 	WHERE section = 'system';
 EOSQL
-then
+); then
     echo "✓ System settings optimized:"
     echo "  - Server type: nginx (optimized file serving)"
     echo "  - Memory limit: 256 MB (increased from default 128 MB)"
     echo "  - Upload limit: 2048 MB (matches PHP/Nginx configuration)"
 else
-    echo "⚠ Failed to update system settings"
+    echo "⚠ Failed to update system settings:"
+    echo "  $SQL_OUTPUT"
 fi
 
 # Final permissions
