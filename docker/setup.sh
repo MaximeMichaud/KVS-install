@@ -228,7 +228,7 @@ preflight_checks() {
     else
         echo -e "${RED}✗${NC} Docker not installed"
         echo "  Install: curl -fsSL https://get.docker.com | sh"
-        ((critical_failed++))
+        critical_failed=$((critical_failed + 1))
     fi
 
     # 2. Docker Compose installed
@@ -239,7 +239,7 @@ preflight_checks() {
     else
         echo -e "${RED}✗${NC} Docker Compose not installed"
         echo "  Docker Compose v2 is required (plugin, not standalone)"
-        ((critical_failed++))
+        critical_failed=$((critical_failed + 1))
     fi
 
     # 3. Disk space check (can be bypassed)
@@ -251,7 +251,7 @@ preflight_checks() {
         echo -e "${YELLOW}⚠${NC} Disk space: ${free_gb} GB available (minimum 10 GB, recommended 20 GB)"
     else
         echo -e "${RED}✗${NC} Disk space: ${free_gb} GB available (need at least 10 GB)"
-        ((warnings++))
+        warnings=$((warnings + 1))
     fi
 
     # 4. RAM check (informational only)
@@ -271,7 +271,7 @@ preflight_checks() {
     else
         echo -e "${RED}✗${NC} No internet connection"
         echo "  Internet required for downloading Docker images and dependencies"
-        ((warnings++))
+        warnings=$((warnings + 1))
     fi
 
     # 6. Required commands
@@ -288,7 +288,7 @@ preflight_checks() {
     else
         echo -e "${RED}✗${NC} Missing commands: ${missing_cmds[*]}"
         echo "  Install: apt update && apt install -y ${missing_cmds[*]}"
-        ((critical_failed++))
+        critical_failed=$((critical_failed + 1))
     fi
 
     echo ""
