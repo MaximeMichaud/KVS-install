@@ -26,6 +26,81 @@ BASH_XTRACEFD=19
 set -x
 
 #################################################################
+# Dev mode flag parsing
+# Usage: ./setup.sh --dev
+# Enables: no-cache builds, self-signed SSL, skip GeoIP, auto-cleanup
+DEV_MODE=false
+DOCKER_BUILD_FLAGS=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dev)
+            DEV_MODE=true
+            shift
+            ;;
+        --help)
+            cat << 'EOF'
+KVS Docker Setup Script
+
+USAGE:
+    ./setup.sh [OPTIONS]
+
+OPTIONS:
+    --dev       Development mode (fast iteration)
+                - Docker builds without cache
+                - Self-signed SSL (no Let's Encrypt wait)
+                - Skip GeoIP download
+                - Auto-cleanup volumes
+                - Skip Manticore (faster startup)
+
+    --help      Show this help message
+
+EXAMPLES:
+    # Production installation
+    ./setup.sh
+
+    # Development mode (fast testing)
+    ./setup.sh --dev
+
+    # Headless production (CI/CD)
+    HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com ./setup.sh
+EOF
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage"
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$DEV_MODE" = true ]; then
+    echo ""
+    echo "🔧 DEV MODE ENABLED"
+    echo "  • Docker builds without cache (force fresh build)"
+    echo "  • Self-signed SSL certificate (no Let's Encrypt delay)"
+    echo "  • Skip GeoIP database download"
+    echo "  • Auto-cleanup existing containers/volumes"
+    echo "  • Skip Manticore Search (faster startup)"
+    echo ""
+
+    # Enable headless mode with dev-specific overrides
+    export HEADLESS=y
+    export SSL_CHOICE=3              # Self-signed SSL (fast)
+    export GEOIP_CHOICE=2            # Skip GeoIP download
+    export VOLUME_CHOICE=1           # Delete volumes (clean slate)
+    export STOP_EXISTING=Y           # Always stop existing
+    export DNS_CHOICE=2              # Continue anyway (localhost testing)
+    export MANTICORE_CHOICE=2        # Skip Manticore
+    export DOMAIN="${DOMAIN:-maximemichaud.ca}"  # Default test domain
+    export EMAIL="${EMAIL:-dev@localhost}"
+
+    # Docker build flags
+    DOCKER_BUILD_FLAGS="--no-cache"
+fi
+
+#################################################################
 # Headless mode defaults (inherit from parent kvs-install.sh)
 if [[ "$HEADLESS" == "y" ]]; then
     PREFIX_CHOICE=${PREFIX_CHOICE:-1}       # 1=default (kvs-domain), 2=legacy (kvs), 3=custom
@@ -1047,7 +1122,8 @@ mkdir -p "nginx/ssl/${DOMAIN}"
 
 # Step 1: Build images
 progress_bar "Building PHP-FPM container"
-if ! run_step "Building PHP-FPM container" docker compose build php-fpm; then
+# shellcheck disable=SC2086  # Intentional word splitting for optional --no-cache flag
+if ! run_step "Building PHP-FPM container" docker compose build $DOCKER_BUILD_FLAGS php-fpm; then
     echo -e "${RED}Docker build failed${NC}"
     echo -e "${YELLOW}If error mentions 'parent snapshot does not exist', run:${NC}"
     echo "  docker builder prune -af"
@@ -1056,10 +1132,12 @@ if ! run_step "Building PHP-FPM container" docker compose build php-fpm; then
 fi
 
 progress_bar "Building Cron container"
-run_step "Building Cron container" docker compose build cron
+# shellcheck disable=SC2086  # Intentional word splitting for optional --no-cache flag
+run_step "Building Cron container" docker compose build $DOCKER_BUILD_FLAGS cron
 
 progress_bar "Building Nginx container"
-run_step "Building Nginx container" docker compose build nginx
+# shellcheck disable=SC2086  # Intentional word splitting for optional --no-cache flag
+run_step "Building Nginx container" docker compose build $DOCKER_BUILD_FLAGS nginx
 
 # Create bind mount directory
 mkdir -p /var/www/"$DOMAIN"
