@@ -1298,8 +1298,9 @@ ask_existing_volume() {
 
     # Check if volume exists
     if docker volume ls -q | grep -q "^${VOLUME_NAME}$"; then
-        # Detect MariaDB version in volume by reading mariadb_upgrade_info
-        VOLUME_VERSION=$(docker run --rm -v "$VOLUME_NAME:/data:ro" alpine cat /data/mariadb_upgrade_info 2>/dev/null || echo "")
+        # Detect MariaDB version in volume by reading upgrade info file
+        # MariaDB 11.0+ uses mariadb_upgrade_info, 10.x uses mysql_upgrade_info
+        VOLUME_VERSION=$(docker run --rm -v "$VOLUME_NAME:/data:ro" alpine sh -c 'cat /data/mariadb_upgrade_info 2>/dev/null || cat /data/mysql_upgrade_info 2>/dev/null' || echo "")
         VOLUME_MAJOR_MINOR=""
         if [ -n "$VOLUME_VERSION" ]; then
             # Extract major.minor (e.g., "10.6.24-MariaDB" → "10.6")
