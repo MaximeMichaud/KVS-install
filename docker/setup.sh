@@ -123,6 +123,176 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+#################################################################
+# Pre-flight Checks
+#################################################################
+
+# Check internet connectivity with multiple fallbacks
+check_internet() {
+    local endpoints=(
+        "https://1.1.1.1"              # Cloudflare DNS (fast, reliable)
+        "https://8.8.8.8"              # Google DNS (backup)
+        "https://cloudflare.com/cdn-cgi/trace"  # Cloudflare trace (fast)
+        "https://www.google.com"       # Google homepage (widely available)
+    )
+
+    for endpoint in "${endpoints[@]}"; do
+        if curl -sf --connect-timeout 3 --max-time 5 "$endpoint" >/dev/null 2>&1; then
+            return 0  # Internet OK
+        fi
+    done
+
+    return 1  # All endpoints failed
+}
+
+# Detect if domain is using Cloudflare CDN (orange cloud proxy)
+# NOTE: This detects PROXY (orange cloud), not just DNS nameservers
+# Only orange cloud proxy provides CF-IPCountry header for GeoIP
+detect_cloudflare() {
+    local domain="$1"
+    local cf_detected=0
+
+    # Test multiple endpoints to avoid false negatives
+    local endpoints=("$domain" "www.$domain")
+
+    for endpoint in "${endpoints[@]}"; do
+        # Try HTTPS first, fallback to HTTP
+        local response
+        response=$(curl -sI --max-time 5 "https://$endpoint" 2>/dev/null) || \
+        response=$(curl -sI --max-time 5 "http://$endpoint" 2>/dev/null)
+
+        if [ -z "$response" ]; then
+            continue  # Try next endpoint
+        fi
+
+        # Check for Cloudflare proxy indicators (orange cloud only)
+        # 1. CF-Ray - Most reliable, present on 99%+ of proxied requests
+        if echo "$response" | grep -qi "^cf-ray:"; then
+            cf_detected=1
+            break
+        fi
+
+        # 2. Server header - Backup check (can be customized but usually present)
+        if echo "$response" | grep -qi "^server:.*cloudflare"; then
+            cf_detected=1
+            break
+        fi
+
+        # 3. CF-Cache-Status - Present when caching is active
+        if echo "$response" | grep -qi "^cf-cache-status:"; then
+            cf_detected=1
+            break
+        fi
+    done
+
+    if [ "$cf_detected" -eq 1 ]; then
+        return 0  # Cloudflare proxy detected (orange cloud)
+    fi
+
+    # Check if any endpoint was reachable
+    for endpoint in "${endpoints[@]}"; do
+        if curl -sf --max-time 5 "https://$endpoint" >/dev/null 2>&1 || \
+           curl -sf --max-time 5 "http://$endpoint" >/dev/null 2>&1; then
+            return 1  # Reachable but not using Cloudflare proxy
+        fi
+    done
+
+    return 2  # Cannot reach domain
+}
+
+# Pre-flight checks before installation
+preflight_checks() {
+    echo ""
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                     Pre-flight Checks                            ║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    local failed=0
+
+    # 1. Docker installed
+    if command -v docker >/dev/null 2>&1; then
+        local docker_version
+        docker_version=$(docker --version | grep -oP '\d+\.\d+\.\d+' | head -1)
+        echo -e "${GREEN}✓${NC} Docker installed: ${docker_version}"
+    else
+        echo -e "${RED}✗${NC} Docker not installed"
+        echo "  Install: curl -fsSL https://get.docker.com | sh"
+        ((failed++))
+    fi
+
+    # 2. Docker Compose installed
+    if docker compose version >/dev/null 2>&1; then
+        local compose_version
+        compose_version=$(docker compose version | grep -oP '\d+\.\d+\.\d+' | head -1)
+        echo -e "${GREEN}✓${NC} Docker Compose installed: ${compose_version}"
+    else
+        echo -e "${RED}✗${NC} Docker Compose not installed"
+        echo "  Docker Compose v2 is required (plugin, not standalone)"
+        ((failed++))
+    fi
+
+    # 3. Disk space check
+    local free_gb
+    free_gb=$(df / | awk 'NR==2 {print int($4/1024/1024)}')
+    if (( free_gb >= 20 )); then
+        echo -e "${GREEN}✓${NC} Disk space: ${free_gb} GB available"
+    elif (( free_gb >= 10 )); then
+        echo -e "${YELLOW}⚠${NC} Disk space: ${free_gb} GB available (minimum 10 GB, recommended 20 GB)"
+    else
+        echo -e "${RED}✗${NC} Disk space: ${free_gb} GB available (need at least 10 GB)"
+        ((failed++))
+    fi
+
+    # 4. RAM check
+    local total_ram free_ram
+    total_ram=$(free -m | awk 'NR==2 {print int($2/1024)}')
+    free_ram=$(free -m | awk 'NR==2 {print int($7/1024)}')
+    if (( total_ram >= 2 )); then
+        echo -e "${GREEN}✓${NC} RAM: ${total_ram} GB total, ${free_ram} GB available"
+    else
+        echo -e "${YELLOW}⚠${NC} RAM: ${total_ram} GB total (recommended 2 GB minimum)"
+    fi
+
+    # 5. Internet connectivity
+    echo -n "  Checking internet connectivity... "
+    if check_internet; then
+        echo -e "${GREEN}✓${NC} Connected"
+    else
+        echo -e "${RED}✗${NC} No internet connection"
+        echo "  Internet required for downloading Docker images and dependencies"
+        ((failed++))
+    fi
+
+    # 6. Required commands
+    local required_cmds=("curl" "unzip" "sed" "awk" "grep")
+    local missing_cmds=()
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_cmds+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing_cmds[@]} -eq 0 ]; then
+        echo -e "${GREEN}✓${NC} Required commands: all present"
+    else
+        echo -e "${RED}✗${NC} Missing commands: ${missing_cmds[*]}"
+        echo "  Install: apt update && apt install -y ${missing_cmds[*]}"
+        ((failed++))
+    fi
+
+    echo ""
+
+    # Exit if critical checks failed
+    if (( failed > 0 )); then
+        echo -e "${RED}Pre-flight checks failed. Please fix the issues above before continuing.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✓ All pre-flight checks passed${NC}"
+    echo ""
+}
+
 # Install gum for better UX (if not present)
 install_gum() {
     if command -v gum &>/dev/null; then
@@ -380,6 +550,9 @@ configure_disk_space_limit() {
 
 # Install gum silently at startup
 install_gum
+
+# Run pre-flight checks
+preflight_checks
 
 echo -e "${CYAN}=== KVS Docker Setup ===${NC}"
 echo ""
@@ -639,6 +812,66 @@ select_mariadb_version() {
     fi
 }
 
+# Auto-detect IonCube encoding in KVS archive
+detect_ioncube() {
+    echo ""
+    echo -e "${CYAN}Detecting IonCube encoding...${NC}"
+
+    # Find KVS archive
+    local KVS_FILE
+    KVS_FILE=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
+    if [ -z "$KVS_FILE" ]; then
+        echo -e "${YELLOW}KVS archive not found. Defaulting to IonCube=YES${NC}"
+        return
+    fi
+
+    # Create temp directory for extraction
+    local TEMP_DIR="/tmp/kvs-detect-$$"
+    mkdir -p "$TEMP_DIR"
+
+    # Extract a key PHP file for inspection (functions_base.php loads early)
+    if unzip -q -j "$KVS_FILE" "admin/include/functions_base.php" -d "$TEMP_DIR" 2>/dev/null; then
+        local TEST_FILE="$TEMP_DIR/functions_base.php"
+
+        # Check for IonCube signatures (100% reliable)
+        # 1. extension_loaded('ionCube Loader') - present in ALL IonCube files
+        # 2. _il_exec - IonCube Loader execution function
+        # 3. <?php //[hex] - IonCube file header pattern
+        if grep -q "extension_loaded('ionCube Loader')" "$TEST_FILE" 2>/dev/null || \
+           grep -q "_il_exec" "$TEST_FILE" 2>/dev/null || \
+           head -n 1 "$TEST_FILE" | grep -qE '^\s*<\?php\s+//[0-9a-f]{5,6}'; then
+            echo -e "${GREEN}✓ IonCube encoded files detected${NC}"
+            sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+        else
+            echo -e "${GREEN}✓ Plain PHP files detected (no IonCube)${NC}"
+            sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+        fi
+    else
+        # Fallback: try admin/index.php
+        if unzip -q -j "$KVS_FILE" "admin/index.php" -d "$TEMP_DIR" 2>/dev/null; then
+            local TEST_FILE="$TEMP_DIR/index.php"
+
+            if grep -q "extension_loaded('ionCube Loader')" "$TEST_FILE" 2>/dev/null || \
+               grep -q "_il_exec" "$TEST_FILE" 2>/dev/null || \
+               head -n 1 "$TEST_FILE" | grep -qE '^\s*<\?php\s+//[0-9a-f]{5,6}'; then
+                echo -e "${GREEN}✓ IonCube encoded files detected${NC}"
+                sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+            else
+                echo -e "${GREEN}✓ Plain PHP files detected (no IonCube)${NC}"
+                sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+            fi
+        else
+            echo -e "${YELLOW}Could not extract PHP files for inspection. Defaulting to IonCube=YES${NC}"
+        fi
+    fi
+
+    # Cleanup
+    rm -rf "$TEMP_DIR"
+
+    # Reload .env to get detected value
+    source .env
+}
+
 # PHP version selection based on KVS version
 # Official requirements from kvs-cli CheckCommand.php
 select_php_version() {
@@ -754,9 +987,41 @@ echo -e "${GREEN}KVS archive found${NC}"
 # Now select PHP version based on KVS
 select_php_version
 
-# IonCube selection
+# Auto-detect IonCube encoding
+detect_ioncube
+
+# IonCube version selection (only if IonCube detected)
 if [ "$IONCUBE" = "YES" ]; then
     select_ioncube
+fi
+
+# Reload .env to get user's IonCube choice
+source .env
+
+# Configure JIT if IonCube is disabled (PHP 8.0+ only, incompatible with IonCube)
+if [ "$IONCUBE" = "NO" ]; then
+    echo ""
+    echo -e "${CYAN}PHP JIT Configuration${NC}"
+    echo "IonCube disabled - enabling JIT compilation for better performance"
+    echo ""
+
+    # Check if JIT config already exists
+    if ! grep -q "opcache.jit_buffer_size" php/php.ini 2>/dev/null; then
+        cat >> php/php.ini << 'EOF'
+
+; JIT Configuration (PHP 8.0+ without IonCube)
+; Note: JIT is incompatible with IonCube Loader
+opcache.jit_buffer_size = 256M
+opcache.jit = 1255
+EOF
+        echo -e "${GREEN}✓ JIT enabled${NC}"
+        echo "  - Buffer: 256M"
+        echo "  - Mode: 1255 (tracing with all optimizations)"
+        echo ""
+        echo -e "${YELLOW}Note: JIT provides 10-30% performance boost for compute-intensive code.${NC}"
+    else
+        echo -e "${GREEN}✓ JIT already configured in php.ini${NC}"
+    fi
 fi
 
 # Cache selection (dragonfly/memcached)
@@ -830,24 +1095,76 @@ select_geoip() {
     # Check if file already exists
     if [ -f geoip/GeoLite2-Country.mmdb ] || [ -f geoip/GeoLite2-City.mmdb ]; then
         echo -e "${GREEN}✓ GeoIP database already configured${NC}"
+        echo -e "${YELLOW}Note: Admin → Settings → System → GEOIP info may show ❌ on first page load.${NC}"
+        echo -e "${YELLOW}      Refresh (F5) to see ✔️ IP, Country.${NC}"
         return 0
     fi
 
     echo "Enables visitor geolocation (country/state detection) in KVS admin."
     echo ""
-    echo -e "${YELLOW}Note: If using Cloudflare CDN (orange cloud), skip this.${NC}"
-    echo -e "${YELLOW}Cloudflare provides GeoIP automatically via CF-IPCountry header.${NC}"
-    echo ""
 
-    # Skip prompt if already set (headless mode)
-    if [[ -z "$GEOIP_CHOICE" ]]; then
-        echo "Options:"
-        echo "  1) Download GeoLite2-Country database (default)"
-        echo "  2) Skip (not needed if using Cloudflare, or add manually later)"
+    # Auto-detect Cloudflare CDN
+    local cf_detected=0
+    if [ -n "$DOMAIN" ]; then
+        echo -n "Checking if domain uses Cloudflare CDN... "
+        if detect_cloudflare "$DOMAIN"; then
+            echo -e "${GREEN}✓ Cloudflare detected${NC}"
+            cf_detected=1
+            echo ""
+            echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${CYAN}║              Cloudflare CDN Detected (Orange Cloud)              ║${NC}"
+            echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo -e "${YELLOW}Your domain is using Cloudflare's proxy (orange cloud).${NC}"
+            echo ""
+            echo "Cloudflare provides GeoIP data automatically via CF-IPCountry header,"
+            echo "so downloading MaxMind GeoLite2 database is ${YELLOW}NOT necessary${NC}."
+            echo ""
+            echo -e "${GREEN}Recommendation: Skip GeoIP download${NC}"
+            echo ""
+        elif [ $? -eq 2 ]; then
+            echo -e "${YELLOW}Cannot reach domain (may not be configured yet)${NC}"
+            echo ""
+        else
+            echo -e "Not using Cloudflare CDN"
+            echo ""
+        fi
+    fi
+
+    # Different prompts based on Cloudflare detection
+    if [ "$cf_detected" -eq 1 ]; then
+        echo -e "${YELLOW}Note: If using Cloudflare CDN (orange cloud), skip this.${NC}"
+        echo -e "${YELLOW}Cloudflare provides GeoIP automatically via CF-IPCountry header.${NC}"
         echo ""
-        echo -n "Choice [1]: "
-        read -r GEOIP_CHOICE
-        GEOIP_CHOICE=${GEOIP_CHOICE:-1}
+        # Skip prompt if already set (headless mode)
+        if [[ -z "$GEOIP_CHOICE" ]]; then
+            echo "Do you still want to download MaxMind GeoLite2 database?"
+            echo "  1) No - Skip (recommended, Cloudflare handles GeoIP)"
+            echo "  2) Yes - Download anyway (redundant but harmless)"
+            echo ""
+            echo -n "Choice [1]: "
+            read -r CF_GEOIP_OVERRIDE
+            CF_GEOIP_OVERRIDE=${CF_GEOIP_OVERRIDE:-1}
+            if [ "$CF_GEOIP_OVERRIDE" = "1" ]; then
+                GEOIP_CHOICE=2  # Skip
+            else
+                GEOIP_CHOICE=1  # Download
+            fi
+        fi
+    else
+        # Standard prompt (no Cloudflare)
+        echo -e "${YELLOW}Note: If using Cloudflare CDN (orange cloud), you can skip this.${NC}"
+        echo ""
+        # Skip prompt if already set (headless mode)
+        if [[ -z "$GEOIP_CHOICE" ]]; then
+            echo "Options:"
+            echo "  1) Download GeoLite2-Country database (default)"
+            echo "  2) Skip (not needed if using Cloudflare, or add manually later)"
+            echo ""
+            echo -n "Choice [1]: "
+            read -r GEOIP_CHOICE
+            GEOIP_CHOICE=${GEOIP_CHOICE:-1}
+        fi
     fi
 
     if [ "$GEOIP_CHOICE" = "1" ]; then
@@ -857,6 +1174,9 @@ select_geoip() {
 
         if curl -fsSL "$GEOIP_URL" -o geoip/GeoLite2-Country.mmdb; then
             echo -e "${GREEN}✓ GeoIP database downloaded${NC}"
+            echo ""
+            echo -e "${YELLOW}Note: After installation, Admin → Settings → System → GEOIP info may show ❌ on first load.${NC}"
+            echo -e "${YELLOW}      This is cosmetic - refresh the page (F5) and it will show ✔️ IP, Country.${NC}"
         else
             echo -e "${YELLOW}⚠ Download failed - continuing without GeoIP${NC}"
             echo "  You can manually add it later to: $PWD/geoip/"
