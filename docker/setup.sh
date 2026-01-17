@@ -79,7 +79,7 @@ if [ "$DEV_MODE" = true ]; then
     echo ""
     echo "🔧 DEV MODE ENABLED"
     echo "  • Docker builds without cache (force fresh build)"
-    echo "  • Self-signed SSL certificate (no Let's Encrypt delay)"
+    echo "  • Intelligent SSL: reuse Let's Encrypt if exists, else self-signed"
     echo "  • Skip GeoIP database download"
     echo "  • Auto-cleanup existing containers/volumes"
     echo "  • Skip Manticore Search (faster startup)"
@@ -87,7 +87,7 @@ if [ "$DEV_MODE" = true ]; then
 
     # Enable headless mode with dev-specific overrides
     export HEADLESS=y
-    export SSL_CHOICE=3              # Self-signed SSL (fast)
+    export DEV_SSL_INTELLIGENT=true  # Smart SSL detection (check existing cert)
     export GEOIP_CHOICE=2            # Skip GeoIP download
     export VOLUME_CHOICE=1           # Delete volumes (clean slate)
     export STOP_EXISTING=Y           # Always stop existing
@@ -1184,6 +1184,31 @@ run_step "Starting Nginx" docker compose up -d --force-recreate nginx
 
 # SSL Certificate based on SSL_PROVIDER
 SSL_PROVIDER="${SSL_PROVIDER:-letsencrypt}"
+
+# Dev mode: intelligent SSL detection (reuse existing cert if available)
+if [ "${DEV_SSL_INTELLIGENT:-false}" = "true" ]; then
+    echo ""
+    echo "🔍 Dev mode: Checking for existing SSL certificate..."
+
+    # Check if acme-certs volume exists and contains a valid certificate
+    VOLUME_NAME="${COMPOSE_PROJECT_NAME}_acme-certs"
+
+    if docker volume inspect "$VOLUME_NAME" &>/dev/null; then
+        # Volume exists - check if certificate files exist for this domain
+        if docker run --rm -v "$VOLUME_NAME:/certs:ro" alpine \
+           sh -c "test -f /certs/${DOMAIN}/cert.pem && test -f /certs/${DOMAIN}/key.pem" 2>/dev/null; then
+            SSL_PROVIDER="letsencrypt"
+            echo -e "  ${GREEN}✓${NC} Found existing Let's Encrypt certificate - reusing (0s, no warnings)"
+        else
+            SSL_PROVIDER="selfsigned"
+            echo -e "  ${YELLOW}✓${NC} No existing certificate - using self-signed (fast, but browser warnings)"
+        fi
+    else
+        SSL_PROVIDER="selfsigned"
+        echo -e "  ${YELLOW}✓${NC} No acme-certs volume - using self-signed (fast, but browser warnings)"
+    fi
+    echo ""
+fi
 
 if [ "$SSL_PROVIDER" = "selfsigned" ]; then
     echo -e "  ${GREEN}✓${NC} Using self-signed certificate"
