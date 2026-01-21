@@ -769,7 +769,8 @@ function aptinstall_php() {
                 s|memory_limit = 128M|memory_limit = 512M|
                 s|;max_input_vars = 1000|max_input_vars = 10000|
                 s|;max_execution_time = 30|max_execution_time = 300|
-                s|;max_input_time = 30|max_input_time = 360|" /etc/php/"$PHP"/fpm/php.ini
+                s|;max_input_time = 30|max_input_time = 360|
+                s|;*opcache.interned_strings_buffer.*|opcache.interned_strings_buffer=16|" /etc/php/"$PHP"/fpm/php.ini
     systemctl restart php"$PHP"-fpm
 }
 
