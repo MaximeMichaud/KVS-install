@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     imagemagick \
     imagemagick-7-common \
+    fonts-dejavu-core \
+    fonts-liberation \
     libmagickwand-dev \
     libheif1 \
     libheif-plugin-aomenc \
