@@ -1456,6 +1456,57 @@ ask_existing_volume() {
                     exit 0
                     ;;
             esac
+        elif [ -z "$VOLUME_MAJOR_MINOR" ]; then
+            # Unknown version - upgrade info file missing or unreadable
+            echo -e "${RED}╔══════════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${RED}║              ⚠ VOLUME VERSION UNKNOWN ⚠                          ║${NC}"
+            echo -e "${RED}╚══════════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo -e "${YELLOW}Could not determine MariaDB version of the existing volume.${NC}"
+            echo "Neither mariadb_upgrade_info nor mysql_upgrade_info could be read."
+            echo ""
+            echo "This may indicate a corrupted volume, a very old MariaDB, or a pull/run failure."
+            echo "Keeping the volume without knowing its version could hide a downgrade and"
+            echo "cause MariaDB ${SELECTED_MAJOR_MINOR} to fail on startup (data risk)."
+            echo ""
+            echo "Your options:"
+            echo ""
+            echo "  1) Delete existing database and install fresh (data loss, but safe)"
+            echo -e "     ${RED}⚠ All data will be lost${NC} (videos metadata, users, etc.)"
+            echo ""
+            echo "  2) Keep existing database (at your own risk)"
+            echo -e "     ${RED}⚠ MariaDB may fail to start if a downgrade is hidden${NC}"
+            echo ""
+            echo "  3) Exit - Investigate the volume or backup first"
+            echo ""
+
+            if [[ -z "$VOLUME_CHOICE" ]]; then
+                echo -n "Select [1-3] (default: 3): "
+                read -r VOLUME_CHOICE
+                VOLUME_CHOICE=${VOLUME_CHOICE:-3}
+            fi
+
+            case $VOLUME_CHOICE in
+                1)
+                    echo ""
+                    echo -e "${YELLOW}Deleting existing database...${NC}"
+                    docker compose down 2>/dev/null || true
+                    docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                    echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
+                    KEEP_EXISTING_DB=false
+                    ;;
+                2)
+                    echo ""
+                    echo -e "${YELLOW}Keeping existing database (version unknown)...${NC}"
+                    echo "Will verify connection after MariaDB starts."
+                    KEEP_EXISTING_DB=true
+                    ;;
+                *)
+                    echo ""
+                    echo "Exiting. Investigate the volume contents before proceeding."
+                    exit 0
+                    ;;
+            esac
         else
             # Same version - standard flow
             echo -e "${YELLOW}You selected 'Restart installation' but a database already exists.${NC}"
