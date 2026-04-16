@@ -121,6 +121,7 @@ if [[ "$HEADLESS" == "y" ]]; then
     STOP_EXISTING=${STOP_EXISTING:-Y}       # Y=stop existing containers
     DNS_CHOICE=${DNS_CHOICE:-2}             # 1=retry, 2=continue anyway, 3=exit
     GEOIP_CHOICE=${GEOIP_CHOICE:-1}         # 1=download GeoLite2-Country, 2=skip
+    KEEP_VERSION=${KEEP_VERSION:-Y}         # Keep existing MariaDB version from .env by default
     SKIP_PRESS_ENTER=1                      # Skip "press enter" prompts
     # Note: PREFLIGHT_BYPASS can be set as environment variable (no default)
 fi
@@ -1009,10 +1010,13 @@ select_ioncube() {
 # Always ask for MariaDB version in interactive mode (allow changing from previous install)
 if [[ -z "$MARIADB_VERSION_CONFIRMED" ]]; then
     if [ "$MARIADB_VERSION" != "11.8" ]; then
-        echo ""
-        echo "Current MariaDB version in .env: ${MARIADB_VERSION}"
-        echo -n "Keep this version? [Y/n]: "
-        read -r KEEP_VERSION
+        # Skip prompt if KEEP_VERSION already set (headless mode)
+        if [[ -z "$KEEP_VERSION" ]]; then
+            echo ""
+            echo "Current MariaDB version in .env: ${MARIADB_VERSION}"
+            echo -n "Keep this version? [Y/n]: "
+            read -r KEEP_VERSION
+        fi
         if [[ "$KEEP_VERSION" =~ ^[Nn]$ ]]; then
             select_mariadb_version
         else
