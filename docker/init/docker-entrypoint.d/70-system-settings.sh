@@ -21,6 +21,14 @@ fi
 # Optimize system settings for nginx and Docker environment
 log_info "Configuring system settings..."
 
+# Only update $.geoip_database on existing rows when a GeoIP file is present,
+# otherwise a missing file at restart would wipe a previously configured path.
+if [ -n "$GEOIP_DB" ]; then
+	GEOIP_UPDATE_CLAUSE=", '\$.geoip_database', '$GEOIP_DB'"
+else
+	GEOIP_UPDATE_CLAUSE=""
+fi
+
 if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 2>&1 <<-EOSQL
 	INSERT INTO ktvs_settings (section, satellite_prefix, value, added_date, version_control)
 	VALUES (
@@ -54,8 +62,7 @@ if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 
 			value,
 			'$.server_type', 'nginx',
 			'$.memory_limit_default', 256,
-			'$.file_upload_max_size', 2048,
-			'$.geoip_database', '$GEOIP_DB'
+			'$.file_upload_max_size', 2048$GEOIP_UPDATE_CLAUSE
 		),
 		version_control = version_control + 1;
 	EOSQL
