@@ -10,3 +10,7 @@ nginx/conf.d/*.conf
 # Docker volumes (if using bind mounts)
 data/
 docker-compose.override.yml
+
+# Multi-site generated files
+multi-site/sites/
+multi-site/caddy/sites/*.caddy
