@@ -133,6 +133,50 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+readonly DEBIAN_11_EOL_DATE="2026-08-31"
+readonly DEBIAN_11_EOL_SOURCE="https://endoflife.date/debian"
+
+debian11_support_ended() {
+    local today
+    today=$(date +%F)
+    [[ "$today" > "$DEBIAN_11_EOL_DATE" || "$today" == "$DEBIAN_11_EOL_DATE" ]]
+}
+
+check_debian11_host_support() {
+    local ID=""
+    local VERSION_ID=""
+
+    if [[ ! -r /etc/os-release ]]; then
+        return
+    fi
+
+    source /etc/os-release
+
+    if [[ "$ID" != "debian" || "$VERSION_ID" != "11" ]]; then
+        return
+    fi
+
+    if debian11_support_ended; then
+        echo ""
+        echo -e "${RED}Debian 11 (bullseye) is no longer supported by KVS-install Docker setup.${NC}"
+        echo "Debian 11 LTS ended on ${DEBIAN_11_EOL_DATE}: ${DEBIAN_11_EOL_SOURCE}"
+        echo "Please upgrade this host to Debian 12 (bookworm) or Debian 13 (trixie)."
+        echo ""
+        exit 1
+    fi
+
+    if [[ "${KVS_DEBIAN_11_NOTICE_SHOWN:-}" != "1" ]]; then
+        echo ""
+        echo -e "${YELLOW}Debian 11 (bullseye) is nearing end of life.${NC}"
+        echo -e "${YELLOW}Debian 11 LTS ends on ${DEBIAN_11_EOL_DATE}: ${DEBIAN_11_EOL_SOURCE}${NC}"
+        echo -e "${YELLOW}KVS-install support for Debian 11 will be removed on ${DEBIAN_11_EOL_DATE}.${NC}"
+        echo -e "${YELLOW}Please upgrade to Debian 12 (bookworm) or Debian 13 (trixie).${NC}"
+        echo ""
+    fi
+}
+
+check_debian11_host_support
+
 #################################################################
 # Pre-flight Checks
 #################################################################

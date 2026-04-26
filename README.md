@@ -104,15 +104,17 @@ AUTOPACKAGEUPDATE=YES \
 
 ## Compatibility
 
-The latest versions are more stable and we recommended using Debian 13 for the best support.
+The latest versions are more stable and we recommend using Debian 13 for the best support.
 
 This script supports the following Linux distributions:
 
 | Operating System | Support |
 | --- | --- |
-| Debian 11 | ✅ |
+| Debian 11 | Deprecated, supported until 2026-08-31 |
 | Debian 12 | ✅ |
 | Debian 13 | ✅ |
+
+Debian 11 follows the lifecycle tracked at [endoflife.date/debian](https://endoflife.date/debian). KVS-install displays a runtime warning on Debian 11 and will stop supporting Debian 11 hosts on 2026-08-31. Upgrade to Debian 12 or Debian 13 before that date.
 
 At present, non-Debian-based distros are not a priority. We recommend using the latest stable version of Debian as it was the development platform for this script. If you wish to use another distro, please open an issue on GitHub with a valid reason for consideration. Your case will be studied, and may provide support through Docker to achieve similar results.
 
