@@ -26,10 +26,12 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
         "$KVS_PATH/admin/include/setup.php"
     log_info "Project URL: $PROJECT_URL"
 
-    # Configure memcache to use Docker network alias
-    sed -i "s|\$config\['memcache_server'\]=\"[^\"]*\"|\$config['memcache_server']=\"cache\"|" \
+    # Keep KVS configured with localhost. Its audit plugin checks Memcached from
+    # the PHP runtime as 127.0.0.1:11211; PHP and cron containers expose that
+    # loopback via socat to the Docker cache service.
+    sed -i "s|\$config\['memcache_server'\]=\"[^\"]*\"|\$config['memcache_server']=\"127.0.0.1\"|" \
         "$KVS_PATH/admin/include/setup.php"
-    log_info "Memcache: cache:11211"
+    log_info "Memcache: 127.0.0.1:11211 via container loopback"
 else
     log_warn "setup.php not found, skipping PHP configuration"
 fi

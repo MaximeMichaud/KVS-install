@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     aria2 \
     procps \
     mariadb-client \
+    socat \
     unzip \
     curl \
     wget \

@@ -104,9 +104,11 @@ services:
     restart: unless-stopped
     ulimits:
       memlock: -1
-    command: ["--maxmemory", "${CACHE_MEMORY:-512}mb", "--proactor_threads", "2"]
+    command: ["--memcached_port=11211", "--maxmemory", "${CACHE_MEMORY:-512}mb", "--proactor_threads", "2"]
     networks:
-      - site-internal
+      site-internal:
+        aliases:
+          - cache
     profiles:
       - dragonfly
 
@@ -119,7 +121,9 @@ services:
     restart: unless-stopped
     command: ["-m", "${CACHE_MEMORY:-512}"]
     networks:
-      - site-internal
+      site-internal:
+        aliases:
+          - cache
     profiles:
       - memcached
 

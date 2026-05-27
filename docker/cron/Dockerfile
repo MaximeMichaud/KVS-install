@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mariadb-client \
     libmemcached-dev \
     libz-dev \
+    socat \
     curl \
     wget \
     ca-certificates \
@@ -61,4 +62,8 @@ RUN chmod 0644 /etc/cron.d/kvs-cron \
     && crontab /etc/cron.d/kvs-cron \
     && touch /var/log/cron.log
 
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["cron", "-f"]
