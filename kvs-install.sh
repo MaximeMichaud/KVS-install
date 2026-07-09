@@ -461,7 +461,7 @@ function installQuestions() {
 
     # Determining PHP version and PHP path
     # Official KVS requirements:
-    # 6.4, 6.3, 6.2.1+ → PHP 8.1
+    # 7.0.x, 6.4, 6.3, 6.2.1+ → PHP 8.1
     # 6.2.0, 6.1, 6.0, 5.5 → PHP 7.4
     PHP="7.4"
     php_path="/usr/lib/php/20190902"
@@ -477,7 +477,7 @@ function installQuestions() {
       PHP="7.4"
       php_path="/usr/lib/php/20190902"
     elif ver_compare "6.2.1" "$version"; then
-      # 6.2.1+ → PHP 8.1
+      # 6.2.1+ (incl. 7.0.x) → PHP 8.1
       PHP="8.1"
       php_path="/usr/lib/php/20210902"
     fi
