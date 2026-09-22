@@ -36,7 +36,7 @@ services:
     networks:
       kvs-proxy:
         aliases:
-          - ${SITE_PREFIX}-nginx
+          - n.${DOMAIN}
       site-internal:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/health"]

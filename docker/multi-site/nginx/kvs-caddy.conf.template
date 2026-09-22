@@ -80,6 +80,14 @@ server {
             fastcgi_pass ${PHP_FPM_UPSTREAM};
             fastcgi_param SCRIPT_FILENAME $request_filename;
             include fastcgi_params;
+            fastcgi_param HTTP_HOST $host;
+            fastcgi_param HTTPS on;
+            fastcgi_param REQUEST_SCHEME https;
+            fastcgi_param SERVER_PORT 443;
+            fastcgi_param REMOTE_ADDR $http_x_real_ip;
+            fastcgi_param HTTP_X_REAL_IP $http_x_real_ip;
+            fastcgi_param HTTP_X_FORWARDED_FOR $http_x_forwarded_for;
+            fastcgi_param HTTP_X_FORWARDED_PROTO $http_x_forwarded_proto;
         }
     }
 
@@ -98,6 +106,14 @@ server {
         fastcgi_pass ${PHP_FPM_UPSTREAM};
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
         include fastcgi_params;
+        fastcgi_param HTTP_HOST $host;
+        fastcgi_param HTTPS on;
+        fastcgi_param REQUEST_SCHEME https;
+        fastcgi_param SERVER_PORT 443;
+        fastcgi_param REMOTE_ADDR $http_x_real_ip;
+        fastcgi_param HTTP_X_REAL_IP $http_x_real_ip;
+        fastcgi_param HTTP_X_FORWARDED_FOR $http_x_forwarded_for;
+        fastcgi_param HTTP_X_FORWARDED_PROTO $http_x_forwarded_proto;
         fastcgi_hide_header X-Powered-By;
 
         # Timeouts

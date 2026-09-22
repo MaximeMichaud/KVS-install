@@ -1,0 +1,26 @@
+# Multi-site override for the primary KVS site behind the central Caddy proxy.
+services:
+  nginx:
+    ports: !reset []
+    environment:
+      - SSL_PROVIDER=none
+      - PROJECT_HTTPS_PORT=443
+    volumes:
+      - ./multi-site/nginx/kvs-caddy.conf.template:/etc/nginx/templates/kvs.conf.tpl:ro
+    networks:
+      kvs-proxy:
+        aliases:
+          - n.${DOMAIN}
+
+  acme:
+    profiles:
+      - direct-tls
+
+  kvs-init:
+    environment:
+      - PROJECT_HTTPS_PORT=443
+
+networks:
+  kvs-proxy:
+    external: true
+    name: kvs-proxy

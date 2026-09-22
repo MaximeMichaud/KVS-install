@@ -5,9 +5,9 @@
 # Replace DOMAIN with your actual domain
 # =============================================================================
 
-DOMAIN, www.DOMAIN {
+DOMAIN {
     # Reverse proxy to site's nginx container
-    reverse_proxy kvs-DOMAIN_SAFE-nginx:80 {
+    reverse_proxy n.DOMAIN:80 {
         # Health check
         health_uri /health
         health_interval 30s
@@ -37,4 +37,8 @@ DOMAIN, www.DOMAIN {
 
     # Gzip compression
     encode gzip zstd
+}
+
+www.DOMAIN {
+    redir https://DOMAIN{uri} permanent
 }
