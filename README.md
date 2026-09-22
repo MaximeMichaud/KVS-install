@@ -91,6 +91,7 @@ MODE_CHOICE=1 \
 | `STOP_EXISTING` | `Y`/`n` | `Y` | Stop existing KVS containers |
 | `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry, 2=Continue anyway, 3=Exit |
 | `DISABLE_KVS_SUPPORT_ACCESS` | `true`/`false` | `false` | Turn off KVS support access (Kernel Team login with kvs_support); the admin dashboard re-enables it |
+| `KVS_PHP_VERSION` | `7.4`, `8.1`-`8.4` | detected | PHP release for an unencoded archive (IONCUBE_CHOICE=2 or IONCUBE=NO); an encoded archive keeps the release KVS documents |
 
 #### Standalone Headless (Legacy)
 
@@ -102,6 +103,8 @@ IONCUBE=YES \
 AUTOPACKAGEUPDATE=YES \
 ./kvs-install.sh
 ```
+
+With `IONCUBE=NO` the archive is treated as unencoded and `KVS_PHP_VERSION` picks the PHP release to install (7.4, 8.1, 8.2, 8.3 or 8.4); interactive runs ask instead. An IonCube encoded archive keeps the release KVS documents for it.
 
 ## Compatibility
 
