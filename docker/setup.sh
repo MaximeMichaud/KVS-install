@@ -656,16 +656,38 @@ preflight_checks
 echo -e "${CYAN}=== KVS Docker Setup ===${NC}"
 echo ""
 
-# Detect existing installation and warn
-# Look for KVS-related containers (any prefix ending with -php, -mariadb, etc.)
-EXISTING_CONTAINERS=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep -cE -- '-(php|mariadb|nginx|dragonfly|memcached|cron)$') || EXISTING_CONTAINERS=0
-EXISTING_VOLUMES=$(docker volume ls --filter "name=docker_" -q 2>/dev/null | wc -l)
+# Detect only resources owned by the final Compose project. The project name
+# is not reliable until .env and the site prefix have been configured.
+warn_if_existing_project_resources() {
+    local project_name="$1"
+    local container_ids=""
+    local volume_names=""
+    local container_count=0
+    local volume_count=0
 
-if [ "$EXISTING_CONTAINERS" -gt 0 ] || [ "$EXISTING_VOLUMES" -gt 0 ]; then
-    echo -e "${YELLOW}WARNING: Re-running on existing installation (${EXISTING_CONTAINERS} container(s), ${EXISTING_VOLUMES} volume(s))${NC}"
-    echo -e "${YELLOW}Persisted data from a previous run may cause issues if it was misconfigured.${NC}"
-    echo ""
-fi
+    if [[ ! "$project_name" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+        return
+    fi
+
+    if container_ids=$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${project_name}" \
+        2>/dev/null); then
+        container_count=$(printf '%s\n' "$container_ids" |
+            awk 'NF { count++ } END { print count + 0 }')
+    fi
+    if volume_names=$(docker volume ls -q \
+        --filter "label=com.docker.compose.project=${project_name}" \
+        2>/dev/null); then
+        volume_count=$(printf '%s\n' "$volume_names" |
+            awk 'NF { count++ } END { print count + 0 }')
+    fi
+
+    if [ "$container_count" -gt 0 ] || [ "$volume_count" -gt 0 ]; then
+        echo -e "${YELLOW}WARNING: Re-running on existing installation (${container_count} container(s), ${volume_count} volume(s))${NC}"
+        echo -e "${YELLOW}Persisted data from a previous run may cause issues if it was misconfigured.${NC}"
+        echo ""
+    fi
+}
 
 # Preserve explicit environment overrides before loading .env. Docker Compose
 # gives shell variables precedence over .env, so the setup script must do the
@@ -932,8 +954,11 @@ if [ "$COMPOSE_PROJECT_NAME" != "$SITE_PREFIX" ] 2>/dev/null; then
     else
         echo "COMPOSE_PROJECT_NAME=$SITE_PREFIX" >> .env
     fi
-    export COMPOSE_PROJECT_NAME="$SITE_PREFIX"
 fi
+COMPOSE_PROJECT_NAME="$SITE_PREFIX"
+export COMPOSE_PROJECT_NAME
+
+warn_if_existing_project_resources "$COMPOSE_PROJECT_NAME"
 
 # SSL provider selection FIRST (before email)
 echo ""
@@ -1824,22 +1849,28 @@ fi
 echo ""
 echo -e "${CYAN}Checking if ports 80 and 443 are available...${NC}"
 if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
-    # Check if it's a KVS docker container (use SITE_PREFIX or detect by service suffix)
-    KVS_CONTAINERS=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E -- "^${SITE_PREFIX}-|-(php|mariadb|nginx)$" || true)
+    # Only manage containers from this Compose project. Name-prefix filters
+    # can accidentally stop the central proxy or another KVS site.
+    KVS_CONTAINERS=$(docker ps \
+        --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+        --format '{{.Names}}' 2>/dev/null || true)
     if [ -n "$KVS_CONTAINERS" ]; then
         echo -e "${YELLOW}Existing KVS containers detected${NC}"
-        docker ps --filter "name=${SITE_PREFIX}-" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null || \
-            docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E -- "-(php|mariadb|nginx)"
+        docker ps \
+            --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+            --format "table {{.Names}}\t{{.Status}}" 2>/dev/null
         echo ""
         # Skip prompt if already set (headless mode)
         if [[ -z "$STOP_EXISTING" ]]; then
             echo -n "Stop existing KVS containers? [Y/n]: "
-        read -r STOP_EXISTING
+            read -r STOP_EXISTING
         fi
         if [ "$STOP_EXISTING" != "n" ] && [ "$STOP_EXISTING" != "N" ]; then
             echo "Stopping existing containers..."
             docker compose down 2>/dev/null || true
-            docker ps -q --filter "name=${SITE_PREFIX}-" 2>/dev/null | xargs -r docker stop 2>/dev/null || true
+            docker ps -q \
+                --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" 2>/dev/null | \
+                xargs -r docker stop 2>/dev/null || true
             echo -e "${GREEN}Existing containers stopped${NC}"
         fi
     else
