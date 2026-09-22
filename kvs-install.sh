@@ -244,80 +244,50 @@ function checkOS() {
   fi
 }
 
+run_install_step() {
+  local title="$1"
+  local completed_title="$2"
+  local status
+  shift 2
+
+  progress_step "$title"
+  "$@"
+  status=$?
+  if ((status != 0)); then
+    echo "${red}Installation step failed: $title (exit status $status)${normal}" >&2
+    return "$status"
+  fi
+
+  progress_done "$completed_title" || true
+  return 0
+}
 
 function script() {
   # Install gum for progress display (optional, has fallback)
-  install_gum
+  install_gum || true
 
   # Configuration questions (not counted in progress)
-  installQuestions
+  installQuestions || return $?
 
   # Show installation header
   progress_header "KVS-install v${SCRIPT_VERSION}" "Standalone Installation"
 
-  progress_step "Updating package lists"
-  aptupdate
-  progress_done "Package lists updated"
-
-  progress_step "Installing base packages"
-  aptinstall
-  progress_done "Base packages installed"
-
-  progress_step "Configuring domain"
-  whatisdomain
-  progress_done "Domain configured"
-
-  progress_step "Checking DNS configuration"
-  check_dns_configuration
-  progress_done "DNS configuration verified"
-
-  progress_step "Installing yt-dlp"
-  install_yt-dlp
-  progress_done "yt-dlp installed"
-
-  progress_step "Installing PHP"
-  aptinstall_php
-  progress_done "PHP installed"
-
-  progress_step "Installing Memcached"
-  aptinstall_memcached
-  progress_done "Memcached installed"
-
-  progress_step "Installing NGINX"
-  aptinstall_nginx
-  progress_done "NGINX installed"
-
-  progress_step "Installing MariaDB"
-  aptinstall_mariadb
-  progress_done "MariaDB installed"
-
-  progress_step "Installing phpMyAdmin"
-  aptinstall_phpmyadmin
-  progress_done "phpMyAdmin installed"
-
-  progress_step "Installing KVS"
-  install_KVS
-  progress_done "KVS installed"
-
-  progress_step "Installing IonCube"
-  install_ioncube
-  progress_done "IonCube configured"
-
-  progress_step "Setting up cron jobs"
-  insert_cronjob
-  progress_done "Cron jobs configured"
-
-  progress_step "Installing acme.sh"
-  install_acme.sh
-  progress_done "SSL certificates configured"
-
-  progress_step "Configuring PHP-FPM"
-  configure_dynamic_php_fpm
-  progress_done "PHP-FPM optimized"
-
-  progress_step "Configuring auto-updates"
-  autoUpdate
-  progress_done "Auto-updates configured"
+  run_install_step "Updating package lists" "Package lists updated" aptupdate || return $?
+  run_install_step "Installing base packages" "Base packages installed" aptinstall || return $?
+  run_install_step "Configuring domain" "Domain configured" whatisdomain || return $?
+  run_install_step "Checking DNS configuration" "DNS configuration verified" check_dns_configuration || return $?
+  run_install_step "Installing yt-dlp" "yt-dlp installed" install_yt-dlp || return $?
+  run_install_step "Installing PHP" "PHP installed" aptinstall_php || return $?
+  run_install_step "Installing Memcached" "Memcached installed" aptinstall_memcached || return $?
+  run_install_step "Installing NGINX" "NGINX installed" aptinstall_nginx || return $?
+  run_install_step "Installing MariaDB" "MariaDB installed" aptinstall_mariadb || return $?
+  run_install_step "Installing phpMyAdmin" "phpMyAdmin installed" aptinstall_phpmyadmin || return $?
+  run_install_step "Installing KVS" "KVS installed" install_KVS || return $?
+  run_install_step "Installing IonCube" "IonCube configured" install_ioncube || return $?
+  run_install_step "Setting up cron jobs" "Cron jobs configured" insert_cronjob || return $?
+  run_install_step "Installing acme.sh" "SSL certificates configured" install_acme.sh || return $?
+  run_install_step "Configuring PHP-FPM" "PHP-FPM optimized" configure_dynamic_php_fpm || return $?
+  run_install_step "Configuring auto-updates" "Auto-updates configured" autoUpdate || return $?
 
   progress_success "KVS Installation Complete!"
   setupdone
