@@ -492,6 +492,10 @@ PHP_UPLOAD_MAX_FILESIZE=2048M
 PHP_POST_MAX_SIZE=2048M
 PHP_MAX_EXECUTION_TIME=300
 
+# KVS support access (Kernel Team login with the kvs_support account).
+# KVS ships it enabled; true turns it off, the admin dashboard re-enables it.
+DISABLE_KVS_SUPPORT_ACCESS=false
+
 # Cache
 COMPOSE_PROFILES=dragonfly
 CACHE_MEMORY=512

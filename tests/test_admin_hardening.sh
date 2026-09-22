@@ -43,6 +43,7 @@ make_case() {
     mkdir -p "$case_dir/www/admin/data/system"
     printf '%s\n' 1 > "$case_dir/admin-count"
     printf '%s\n' 1 > "$case_dir/admin-default"
+    printf '%s\n' 1 > "$case_dir/support-option"
     printf '{"admins":[{"id":"1","hash":"%s"},{"id":"2","hash":"%s"}]}' \
         "$DEFAULT_ADMIN_FINGERPRINT" "$SUPPORT_FINGERPRINT" > "$(fingerprint_file "$case_dir")"
     cat > "$case_dir/common.sh" <<'EOF'
@@ -57,6 +58,7 @@ db_query() {
     case "$query" in
         *"user_id=1 AND login='admin' AND pass="*) cat "$TEST_STATE/admin-default" ;;
         *"user_id=1 AND login='admin'"*) cat "$TEST_STATE/admin-count" ;;
+        *"variable='ENABLE_KVS_SUPPORT_ACCESS'"*) cat "$TEST_STATE/support-option" ;;
         *) return 90 ;;
     esac
 }
@@ -70,6 +72,14 @@ db_exec() {
         fi
         printf '%s\n' 0 > "$TEST_STATE/admin-default"
         : > "$TEST_STATE/admin-updated"
+    elif [[ "$query" == *"ktvs_options"* ]]; then
+        if [ "${TEST_DB_EXEC_FAIL:-none}" = support ]; then
+            return 42
+        fi
+        if [ "${TEST_SUPPORT_STUCK:-0}" != 1 ]; then
+            printf '%s\n' 0 > "$TEST_STATE/support-option"
+        fi
+        : > "$TEST_STATE/support-updated"
     else
         : > "$TEST_STATE/unexpected-exec"
         return 91
@@ -169,6 +179,50 @@ TEST_STATE="$case_dir" KVS_ADMIN_PASSWORD="$valid_password" \
 grep -Fq "{\"id\":\"1\",\"hash\":\"${valid_fingerprint}\",\"lock_ip\":\"\"}" "$(fingerprint_file "$case_dir")" ||
     fail "missing admin entry was not added to ap.dat"
 
+# KVS support access stays enabled unless the operator opts out.
+case_dir=$(make_case support-default)
+TEST_STATE="$case_dir" KVS_ADMIN_PASSWORD="$valid_password" \
+    bash "$case_dir/script.sh" > "$case_dir/output.log" 2>&1
+[ ! -e "$case_dir/support-updated" ] || fail "support access was changed without an opt-out"
+[ "$(cat "$case_dir/support-option")" = 1 ] || fail "support access option was altered by default"
+grep -Fq 'left as configured' "$case_dir/output.log" || fail "support access default was not reported"
+
+case_dir=$(make_case support-disabled)
+TEST_STATE="$case_dir" DISABLE_KVS_SUPPORT_ACCESS=true KVS_ADMIN_PASSWORD="$valid_password" \
+    bash "$case_dir/script.sh" > "$case_dir/output.log" 2>&1
+[ -f "$case_dir/support-updated" ] || fail "support access opt-out was not applied"
+[ "$(cat "$case_dir/support-option")" = 0 ] || fail "support access option was not disabled"
+assert_fingerprints "$case_dir" "$valid_fingerprint"
+grep -Fq 'support access disabled' "$case_dir/output.log" || fail "support access opt-out was not reported"
+
+case_dir=$(make_case support-disabled-rerun)
+printf '%s\n' 0 > "$case_dir/admin-default"
+TEST_STATE="$case_dir" DISABLE_KVS_SUPPORT_ACCESS=true KVS_ADMIN_PASSWORD='' \
+    bash "$case_dir/script.sh" > "$case_dir/output.log" 2>&1
+[ "$(cat "$case_dir/support-option")" = 0 ] || fail "support access opt-out was skipped on rerun"
+[ ! -e "$case_dir/admin-updated" ] || fail "rerun opt-out rotated the admin password"
+
+case_dir=$(make_case support-invalid-value)
+if TEST_STATE="$case_dir" DISABLE_KVS_SUPPORT_ACCESS=yes KVS_ADMIN_PASSWORD="$valid_password" \
+    bash "$case_dir/script.sh" > "$case_dir/output.log" 2>&1; then
+    fail "invalid DISABLE_KVS_SUPPORT_ACCESS value was accepted"
+fi
+[ ! -e "$case_dir/support-updated" ] || fail "invalid opt-out value changed support access"
+grep -Fq 'must be true or false' "$case_dir/output.log" || fail "invalid opt-out value was not explained"
+
+case_dir=$(make_case support-not-applied)
+if TEST_STATE="$case_dir" TEST_SUPPORT_STUCK=1 DISABLE_KVS_SUPPORT_ACCESS=true KVS_ADMIN_PASSWORD="$valid_password" \
+    bash "$case_dir/script.sh" > "$case_dir/output.log" 2>&1; then
+    fail "unchanged support access option was accepted"
+fi
+grep -Fq 'could not be disabled' "$case_dir/output.log" || fail "unchanged support access was not explained"
+
+case_dir=$(make_case support-sql-failure)
+if TEST_STATE="$case_dir" TEST_DB_EXEC_FAIL=support DISABLE_KVS_SUPPORT_ACCESS=true KVS_ADMIN_PASSWORD="$valid_password" \
+    bash "$case_dir/script.sh" > "$case_dir/output.log" 2>&1; then
+    fail "support access SQL failure was ignored"
+fi
+
 if grep -q '^KVS_ADMIN_PASSWORD=' "$ROOT_DIR/docker/.env.example"; then
     fail "admin password was added to the persistent environment template"
 fi
@@ -185,6 +239,18 @@ next_step_line=$(grep -nF 'progress_bar "Configuring disk space limit"' \
 [ "$init_line" -lt "$unset_line" ] && [ "$unset_line" -lt "$next_step_line" ] ||
     fail "one-time admin password is not reported and cleared immediately after init"
 
+# The opt-out reaches the init container in both compose layouts and defaults
+# to keeping support access.
+grep -q '^DISABLE_KVS_SUPPORT_ACCESS=false$' "$ROOT_DIR/docker/.env.example" ||
+    fail "environment template does not default DISABLE_KVS_SUPPORT_ACCESS to false"
+# shellcheck disable=SC2016  # The literal compose substitution is the pattern.
+grep -Fq 'DISABLE_KVS_SUPPORT_ACCESS=${DISABLE_KVS_SUPPORT_ACCESS:-false}' \
+    "$ROOT_DIR/docker/docker-compose.yml" ||
+    fail "single-site compose does not pass DISABLE_KVS_SUPPORT_ACCESS to kvs-init"
+# shellcheck disable=SC2016  # The literal compose substitution is the pattern.
+grep -Fq 'DISABLE_KVS_SUPPORT_ACCESS=${DISABLE_KVS_SUPPORT_ACCESS:-false}' \
+    "$ROOT_DIR/docker/multi-site/docker-compose.site.yml.template" ||
+    fail "multi-site compose template does not pass DISABLE_KVS_SUPPORT_ACCESS to kvs-init"
 grep -Eq "ktvs_admin_users[^;]*(kvs_support|status_id=0)" \
     "$ROOT_DIR/docker/init/docker-entrypoint.d/35-harden-admin-users.sh" &&
     fail "init step still touches the kvs_support account row"
@@ -206,5 +272,12 @@ if KVS_ADMIN_PASSWORD=short HEADLESS=y bash "$setup_copy" \
 fi
 grep -Fq 'must contain at least 20 characters' "$TEST_DIR/setup-short.log" ||
     fail "setup did not explain the admin password requirement"
+
+if DISABLE_KVS_SUPPORT_ACCESS=yes HEADLESS=y bash "$setup_copy" \
+    > "$TEST_DIR/setup-support.log" 2>&1; then
+    fail "setup accepted an invalid DISABLE_KVS_SUPPORT_ACCESS value"
+fi
+grep -Fq 'DISABLE_KVS_SUPPORT_ACCESS must be true or false' "$TEST_DIR/setup-support.log" ||
+    fail "setup did not explain the support access opt-out values"
 
 echo "PASS: Administrative account hardening"

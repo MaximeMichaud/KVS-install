@@ -2,7 +2,8 @@
 set -e
 
 # Replace the admin credential shipped in the KVS seed database before public
-# services start, and register it where the admin login looks it up.
+# services start, and register it where the admin login looks it up. KVS
+# support access stays as KVS ships it unless the operator opts out.
 # shellcheck disable=SC1091
 source /init/lib/common.sh
 
@@ -100,4 +101,27 @@ if [ "$DEFAULT_ADMIN_COUNT" -ne 0 ]; then
     exit 1
 fi
 
+# KVS ships the kvs_support account with ENABLE_KVS_SUPPORT_ACCESS=1 so that
+# Kernel Team can log in from its own address when the owner asks for help.
+# That access is kept as shipped unless the operator opts out; the dashboard
+# button re-enables it at any time.
+case "${DISABLE_KVS_SUPPORT_ACCESS:-false}" in
+    true)
+        db_exec "UPDATE ktvs_options SET value='0' WHERE variable='ENABLE_KVS_SUPPORT_ACCESS';" \
+            >/dev/null
+        SUPPORT_ACCESS=$(db_query "SELECT value FROM ktvs_options WHERE variable='ENABLE_KVS_SUPPORT_ACCESS'" || echo query-failed)
+        if [ "$SUPPORT_ACCESS" != "0" ]; then
+            log_error "KVS support access could not be disabled (ENABLE_KVS_SUPPORT_ACCESS is '${SUPPORT_ACCESS}')"
+            exit 1
+        fi
+        log_info "KVS support access disabled; the admin dashboard can re-enable it"
+        ;;
+    false)
+        log_info "KVS support access left as configured in KVS (enabled by default); set DISABLE_KVS_SUPPORT_ACCESS=true to turn it off"
+        ;;
+    *)
+        log_error "DISABLE_KVS_SUPPORT_ACCESS must be true or false"
+        exit 1
+        ;;
+esac
 log_info "Seeded KVS admin account hardened"
