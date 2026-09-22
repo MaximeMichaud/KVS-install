@@ -1759,9 +1759,14 @@ progress_bar "Building Cron container"
 # shellcheck disable=SC2086  # Intentional word splitting for optional --no-cache flag
 run_step "Building Cron container" docker compose build $DOCKER_BUILD_FLAGS cron
 
-progress_bar "Building Nginx container"
+progress_bar "Building Nginx and initialization containers"
+BUILD_TARGETS=(nginx kvs-init)
+if [ "${ENABLE_MANTICORE:-false}" = "true" ]; then
+    BUILD_TARGETS+=(manticore)
+fi
 # shellcheck disable=SC2086  # Intentional word splitting for optional --no-cache flag
-run_step "Building Nginx container" docker compose build $DOCKER_BUILD_FLAGS nginx
+run_step "Building Nginx and initialization containers" \
+    docker compose build $DOCKER_BUILD_FLAGS "${BUILD_TARGETS[@]}"
 
 # Create bind mount directory
 mkdir -p /var/www/"$DOMAIN"

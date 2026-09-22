@@ -126,3 +126,25 @@ server {
         return 301 https://${REDIRECT_HOST}$request_uri;
     }
 }
+
+# Internal-only endpoint used by the KVS Manticore integration. Port 8080 is
+# not published by Compose, which avoids redirecting container-local API calls
+# through the public TLS virtual host.
+server {
+    listen      8080;
+    server_name manticore-api;
+    root        ${KVS_ROOT};
+    access_log  off;
+
+    location ~ ^/kvs_manticore_search_(videos|albums|searches)\.php$ {
+        ${RESOLVER_LINE}
+        fastcgi_pass ${PHP_FPM_UPSTREAM};
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_hide_header X-Powered-By;
+    }
+
+    location / {
+        return 404;
+    }
+}

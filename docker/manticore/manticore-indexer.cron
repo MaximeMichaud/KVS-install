@@ -1,0 +1,5 @@
+# /etc/cron.d system crontab for hourly Manticore index rotation.
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
+
+0 * * * * manticore /usr/bin/indexer --rotate --all >> /var/log/manticore/indexer-cron.log 2>&1
