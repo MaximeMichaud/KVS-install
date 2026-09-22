@@ -29,6 +29,7 @@ services:
       - DOMAIN=${DOMAIN}
       - USE_WWW=${USE_WWW:-false}
       - SSL_PROVIDER=none
+      - PROJECT_HTTPS_PORT=443
     depends_on:
       php-fpm:
         condition: service_started
@@ -163,6 +164,7 @@ services:
       - MARIADB_PASSWORD=${MARIADB_PASSWORD}
       - MARIADB_DATABASE=${DOMAIN}
       - SSL_PROVIDER=selfsigned
+      - PROJECT_HTTPS_PORT=443
     depends_on:
       mariadb:
         condition: service_healthy

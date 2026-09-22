@@ -52,6 +52,8 @@ server {
         fastcgi_pass ${PHP_FPM_UPSTREAM};
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
         include fastcgi_params;
+        fastcgi_param HTTP_HOST $host;
+        fastcgi_param SERVER_PORT ${PROJECT_HTTPS_PORT};
         fastcgi_hide_header X-Powered-By;
 
         # Timeouts
@@ -96,6 +98,8 @@ server {
             fastcgi_pass ${PHP_FPM_UPSTREAM};
             fastcgi_param SCRIPT_FILENAME $request_filename;
             include fastcgi_params;
+            fastcgi_param HTTP_HOST $host;
+            fastcgi_param SERVER_PORT ${PROJECT_HTTPS_PORT};
         }
     }
 
@@ -123,7 +127,7 @@ server {
     }
 
     location / {
-        return 301 https://${REDIRECT_HOST}$request_uri;
+        return 301 https://${REDIRECT_HOST}${HTTPS_PORT_SUFFIX}$request_uri;
     }
 }
 

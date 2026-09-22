@@ -62,11 +62,31 @@ db_is_ready() {
 
 # Get project URL based on USE_WWW setting
 get_project_url() {
-    if [ "$USE_WWW" = "true" ]; then
-        echo "https://www.${DOMAIN}"
-    else
-        echo "https://${DOMAIN}"
+    local host
+    local port="${PROJECT_HTTPS_PORT:-443}"
+    local port_suffix=""
+
+    case "$port" in
+        ''|*[!0-9]*)
+            log_error "PROJECT_HTTPS_PORT must be a numeric TCP port"
+            return 1
+            ;;
+    esac
+    if ((10#$port < 1 || 10#$port > 65535)); then
+        log_error "PROJECT_HTTPS_PORT must be between 1 and 65535"
+        return 1
     fi
+    port=$((10#$port))
+    if [ "$port" -ne 443 ]; then
+        port_suffix=":${port}"
+    fi
+
+    if [ "$USE_WWW" = "true" ]; then
+        host="www.${DOMAIN}"
+    else
+        host="$DOMAIN"
+    fi
+    printf 'https://%s%s\n' "$host" "$port_suffix"
 }
 
 # Safe domain name for use in identifiers (replaces . and - with _)

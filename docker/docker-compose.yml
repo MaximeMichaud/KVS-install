@@ -10,6 +10,7 @@ services:
     environment:
       - DOMAIN=${DOMAIN}
       - USE_WWW=${USE_WWW:-false}
+      - PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT:-443}
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ../conf/nginx/templates:/etc/nginx/templates:ro
@@ -62,7 +63,7 @@ services:
     restart: unless-stopped
     ports:
       # Localhost only - safe for kvs-cli access
-      - "127.0.0.1:3306:3306"
+      - "127.0.0.1:${MARIADB_HOST_PORT:-3306}:3306"
     environment:
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?error}
       MARIADB_DATABASE: ${DOMAIN:?error}
@@ -89,7 +90,7 @@ services:
     command: memcached -m ${CACHE_MEMORY:-256}
     ports:
       # Localhost only - for kvs-cli access
-      - "127.0.0.1:11211:11211"
+      - "127.0.0.1:${CACHE_HOST_PORT:-11211}:11211"
     networks:
       kvs-network:
         aliases:
@@ -105,7 +106,7 @@ services:
     command: dragonfly --memcached_port=11211 --maxmemory=${CACHE_MEMORY:-256}mb --proactor_threads=2 --logtostderr
     ports:
       # Localhost only - for kvs-cli access
-      - "127.0.0.1:11211:11211"
+      - "127.0.0.1:${CACHE_HOST_PORT:-11211}:11211"
     ulimits:
       memlock: -1
     networks:
@@ -123,8 +124,8 @@ services:
     restart: unless-stopped
     ports:
       # Localhost only - for kvs-cli access
-      - "127.0.0.1:9306:9306"  # MySQL protocol
-      - "127.0.0.1:9308:9308"  # HTTP protocol
+      - "127.0.0.1:${MANTICORE_MYSQL_HOST_PORT:-9306}:9306"  # MySQL protocol
+      - "127.0.0.1:${MANTICORE_HTTP_HOST_PORT:-9308}:9308"  # HTTP protocol
     environment:
       - DOMAIN=${DOMAIN}
       - MARIADB_PASSWORD=${MARIADB_PASSWORD}
@@ -194,6 +195,7 @@ services:
       - USE_WWW=${USE_WWW:-false}
       - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
       - ENABLE_MANTICORE=${ENABLE_MANTICORE:-false}
+      - PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT:-443}
     depends_on:
       mariadb:
         condition: service_healthy
