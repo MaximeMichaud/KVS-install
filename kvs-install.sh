@@ -12,10 +12,10 @@
 #################################################################
 # shellcheck disable=SC1091
 #################################################################
-# Parse arguments before anything else
-# Save --dev flag to pass to docker/setup.sh
 SETUP_ARGS=()
-while [[ $# -gt 0 ]]; do
+parse_arguments() {
+  SETUP_ARGS=()
+  while [[ $# -gt 0 ]]; do
     case $1 in
         --dev)
             SETUP_ARGS+=("$1")
@@ -26,7 +26,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
     esac
-done
+  done
+}
 
 #################################################################
 # Script constants
@@ -37,19 +38,37 @@ readonly PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
 readonly DEBIAN_11_EOL_DATE="2026-08-31"
 readonly DEBIAN_11_EOL_SOURCE="https://endoflife.date/debian"
 #################################################################
-#Logs
-exec 3<&1
-coproc mytee { tee "${LOG_FILE}" >&3; }
-exec >&"${mytee[1]}" 2>&1
-#Colors
-red=$(tput setaf 1)
-green=$(tput setaf 2)
-yellow=$(tput setaf 3)
-cyan=$(tput setaf 6)
-white=$(tput setaf 7)
-normal=$(tput sgr0)
-on_red=$(tput setab 1)
-alert=${white}${on_red}
+# Runtime output is initialized from main so sourcing this file is side-effect free.
+red=""
+green=""
+yellow=""
+cyan=""
+white=""
+normal=""
+on_red=""
+alert=""
+
+initialize_runtime_output() {
+  exec 3<&1
+  coproc mytee { tee "${LOG_FILE}" >&3; }
+  exec >&"${mytee[1]}" 2>&1
+
+  red=$(tput setaf 1)
+  green=$(tput setaf 2)
+  yellow=$(tput setaf 3)
+  cyan=$(tput setaf 6)
+  white=$(tput setaf 7)
+  normal=$(tput sgr0)
+  on_red=$(tput setab 1)
+  alert=${white}${on_red}
+}
+
+initialize_runtime_input() {
+  # Use the controlling terminal for interactive input when run through a pipe.
+  if [[ ! -t 0 ]] && [[ -e /dev/tty ]]; then
+    exec < /dev/tty
+  fi
+}
 #################################################################
 # Progress Tracking (gum-based with fallback)
 #################################################################
@@ -138,26 +157,21 @@ progress_success() {
   fi
 }
 #################################################################
-# Variables Shell
-export DEBIAN_FRONTEND=noninteractive
-# Variables Services
-webserver=nginx
-# Define installation parameters for headless install (fallback if unspecified)
-if [[ $HEADLESS == "y" ]]; then
-  # Define options
-  INSTALL_TYPE=${INSTALL_TYPE:-1}  # 1=Docker (default), 2=Standalone
-  MENU_OPTION=${MENU_OPTION:-1}    # 1=Restart install, 2=Add site, 3=Update PMA, 4=Update script, 5=Quit
-  database_ver=${DATABASE_VER:-11.8}
-  IONCUBE=${IONCUBE:-YES}
-  AUTOPACKAGEUPDATE=${AUTOPACKAGEUPDATE:-YES}
-  SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}  # letsencrypt, zerossl, or selfsigned
-  USE_WWW=${USE_WWW:-false}  # true or false
-fi
-#################################################################
-# Redirect stdin to /dev/tty for interactive input when piped (curl | bash)
-if [[ ! -t 0 ]] && [[ -e /dev/tty ]]; then
-  exec < /dev/tty
-fi
+initialize_runtime_defaults() {
+  export DEBIAN_FRONTEND=noninteractive
+  webserver=nginx
+
+  # Define installation parameters for headless installs when unspecified.
+  if [[ $HEADLESS == "y" ]]; then
+    INSTALL_TYPE=${INSTALL_TYPE:-1}  # 1=Docker (default), 2=Standalone
+    MENU_OPTION=${MENU_OPTION:-1}    # 1=Restart install, 2=Add site, 3=Update PMA, 4=Update script, 5=Quit
+    database_ver=${DATABASE_VER:-11.8}
+    IONCUBE=${IONCUBE:-YES}
+    AUTOPACKAGEUPDATE=${AUTOPACKAGEUPDATE:-YES}
+    SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}  # letsencrypt, zerossl, or selfsigned
+    USE_WWW=${USE_WWW:-false}  # true or false
+  fi
+}
 #################################################################
 function isRoot() {
   if [[ "$EUID" -ne 0 ]]; then
@@ -1285,10 +1299,20 @@ function updatephpMyAdmin() {
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "${PHPMYADMIN_INSTALL_DIR}/config.sample.inc.php" >"${PHPMYADMIN_INSTALL_DIR}/config.inc.php"
 }
 
-initialCheck
+main() {
+  parse_arguments "$@"
+  initialize_runtime_defaults
+  initialize_runtime_output
+  initialize_runtime_input
+  initialCheck
 
-if [[ -e /var/www ]]; then
-  manageMenu
-else
-  chooseInstallationType
+  if [[ -e /var/www ]]; then
+    manageMenu
+  else
+    chooseInstallationType
+  fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
