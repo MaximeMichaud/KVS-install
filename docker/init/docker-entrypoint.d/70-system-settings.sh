@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+
 # Configure KVS system settings (GeoIP, nginx, memory limits)
 # shellcheck disable=SC1091
 source /init/lib/common.sh
