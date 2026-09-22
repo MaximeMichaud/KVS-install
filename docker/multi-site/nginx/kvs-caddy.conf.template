@@ -3,7 +3,7 @@
 
 server {
     listen 80;
-    server_name ${DOMAIN} www.${DOMAIN};
+    server_name ${PUBLIC_SERVER_NAMES};
     set $base ${KVS_ROOT};
     root $base;
 
