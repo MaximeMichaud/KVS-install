@@ -120,7 +120,6 @@ if [[ "$HEADLESS" == "y" ]]; then
     DB_CHOICE=${DB_CHOICE:-1}               # 1=latest LTS (11.8)
     IONCUBE_CHOICE=${IONCUBE_CHOICE:-1}     # 1=yes, 2=no
     CACHE_CHOICE=${CACHE_CHOICE:-1}         # 1=dragonfly, 2=memcached
-    MODE_CHOICE=${MODE_CHOICE:-1}           # 1=performance, 2=compatibility
     VOLUME_CHOICE=${VOLUME_CHOICE:-2}       # For credential mismatch: 1=delete volume, 2=exit (safe default)
     STOP_EXISTING=${STOP_EXISTING:-Y}       # Y=stop existing containers
     DNS_CHOICE=${DNS_CHOICE:-2}             # 1=retry, 2=continue anyway, 3=exit
@@ -871,6 +870,13 @@ remove_compose_profile() {
     export COMPOSE_PROFILES
 }
 
+version_at_least() {
+    local current="$1"
+    local minimum="$2"
+
+    [ "$(printf '%s\n' "$minimum" "$current" | sort -V | head -n 1)" = "$minimum" ]
+}
+
 parse_publish_endpoint() {
     local endpoint="$1"
     local host=""
@@ -933,9 +939,40 @@ publish_endpoint_is_listening() {
     return 1
 }
 
+container_publishes_host_port() {
+    local container="$1"
+    local container_port="$2"
+    local protocol="$3"
+    local expected_host_port="$4"
+    local mapping
+    local mapped_port
+
+    while IFS= read -r mapping; do
+        [ -n "$mapping" ] || continue
+        mapped_port=${mapping##*:}
+        if [ "$mapped_port" = "$expected_host_port" ]; then
+            return 0
+        fi
+    done < <(docker port "$container" "${container_port}/${protocol}" 2>/dev/null || true)
+    return 1
+}
+
+caddy_publishes_required_multi_site_ports() {
+    docker ps --filter "name=^/kvs-caddy$" --format '{{.Names}}' 2>/dev/null |
+        grep -Fxq kvs-caddy || return 1
+    container_publishes_host_port kvs-caddy 80 tcp 80 &&
+        container_publishes_host_port kvs-caddy 443 tcp 443 &&
+        container_publishes_host_port kvs-caddy 443 udp 443
+}
+
 resolve_public_port_configuration() {
-    PUBLIC_HTTP_ENDPOINT=${HTTP_PORT:-80}
-    PUBLIC_HTTPS_ENDPOINT=${HTTPS_PORT:-443}
+    if [ "$MODE" = "multi" ]; then
+        PUBLIC_HTTP_ENDPOINT=80
+        PUBLIC_HTTPS_ENDPOINT=443
+    else
+        PUBLIC_HTTP_ENDPOINT=${HTTP_PORT:-80}
+        PUBLIC_HTTPS_ENDPOINT=${HTTPS_PORT:-443}
+    fi
 
     if ! parse_publish_endpoint "$PUBLIC_HTTP_ENDPOINT"; then
         echo -e "${RED}ERROR: Invalid HTTP_PORT endpoint: ${PUBLIC_HTTP_ENDPOINT}${NC}"
@@ -958,6 +995,9 @@ public_port_conflicts_exist() {
     fi
     if publish_endpoint_is_listening "$PUBLIC_HTTPS_ENDPOINT" tcp; then
         PUBLIC_PORT_CONFLICTS+=("${PUBLIC_HTTPS_ENDPOINT}/tcp")
+    fi
+    if [ "$MODE" = "multi" ] && publish_endpoint_is_listening 443 udp; then
+        PUBLIC_PORT_CONFLICTS+=("443/udp")
     fi
 
     [ "${#PUBLIC_PORT_CONFLICTS[@]}" -gt 0 ]
@@ -1497,28 +1537,79 @@ select_cache() {
 select_cache
 
 # Mode selection (single/multi)
+require_multi_compose_version() {
+    local compose_version
+
+    compose_version=$(docker compose version | grep -oP '\d+\.\d+\.\d+' | head -n 1)
+    if [ -z "$compose_version" ] || ! version_at_least "$compose_version" "2.24.4"; then
+        echo -e "${RED}ERROR: Multi-site mode requires Docker Compose 2.24.4 or newer${NC}"
+        return 1
+    fi
+}
+
 select_mode() {
+    local compose_files
+
     echo ""
     echo -e "${CYAN}Installation Mode${NC}"
     # Skip prompt if already set (headless mode)
     if [[ -z "$MODE_CHOICE" ]]; then
-        echo "  1) Single site (default) - direct nginx, best performance"
-        echo "  2) Multi site - Caddy proxy (see multi-site/site-manager.sh)"
-        echo -n "Select mode [1-2] (default: 1): "
-        read -r MODE_CHOICE
+        if [ "${HEADLESS:-}" = "y" ]; then
+            MODE_CHOICE=1
+        else
+            echo "  1) Single site (default) - direct nginx, best performance"
+            echo "  2) Multi site - Caddy proxy (see multi-site/site-manager.sh)"
+            echo -n "Select mode [1-2] (default: 1): "
+            read -r MODE_CHOICE
+        fi
     fi
 
     case $MODE_CHOICE in
         2)
+            require_multi_compose_version || return $?
+
             echo -e "${YELLOW}Multi-site mode uses Caddy reverse proxy${NC}"
-            echo "After setup, use: ./multi-site/site-manager.sh add <domain>"
-            sed -i "s/MODE=.*/MODE=single/" .env
-            echo -e "${GREEN}Single site mode configured (add more sites via site-manager.sh)${NC}"
+            MODE="multi"
+            compose_files="docker-compose.yml"
+            if [ -f docker-compose.override.yml ]; then
+                compose_files="${compose_files}:docker-compose.override.yml"
+            fi
+            # Keep the hardening override last so a user override cannot
+            # accidentally publish Nginx on Caddy's ports again.
+            compose_files="${compose_files}:docker-compose.multi.yml"
+            set_env_value MODE "$MODE"
+            set_env_value COMPOSE_FILE "$compose_files"
+            COMPOSE_FILE="$compose_files"
+            export MODE COMPOSE_FILE
+            echo -e "${GREEN}Multi-site mode configured for the primary site${NC}"
+            ;;
+        1|'')
+            if [ "$MODE" = "multi" ] && \
+               docker ps --filter "name=^/kvs-caddy$" --format '{{.Names}}' \
+                   2>/dev/null | grep -Fxq 'kvs-caddy'; then
+                echo -e "${RED}ERROR: Stop the shared Caddy proxy before switching to single-site mode${NC}"
+                echo "Run: ./multi-site/site-manager.sh caddy-stop"
+                return 1
+            fi
+
+            if [ "$MODE" = "multi" ]; then
+                if ! ./multi-site/site-manager.sh primary-remove \
+                    "$DOMAIN" "$SITE_PREFIX"; then
+                    echo -e "${RED}ERROR: Failed to remove the primary Caddy route${NC}"
+                    return 1
+                fi
+            fi
+
+            MODE="single"
+            set_env_value MODE "$MODE"
+            remove_env_value COMPOSE_FILE
+            unset COMPOSE_FILE
+            export MODE
+            echo -e "${GREEN}Single site mode (direct nginx)${NC}"
             ;;
         *)
-            sed -i "s/MODE=.*/MODE=single/" .env
-            rm -f docker-compose.override.yml
-            echo -e "${GREEN}Single site mode (direct nginx)${NC}"
+            echo -e "${RED}ERROR: Invalid installation mode choice: ${MODE_CHOICE}${NC}"
+            return 1
             ;;
     esac
 }
@@ -1556,11 +1647,51 @@ configure_direct_tls_profile() {
     esac
 }
 
-if [ "$MODE" = "single" ]; then
-    select_mode
+configure_mode() {
+    if [ -n "${MODE_CHOICE:-}" ] || [ "$MODE" = "single" ]; then
+        select_mode || return $?
+    elif [ "$MODE" = "multi" ]; then
+        require_multi_compose_version || return $?
+        COMPOSE_FILE="docker-compose.yml"
+        if [ -f docker-compose.override.yml ]; then
+            COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.override.yml"
+        fi
+        COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.multi.yml"
+        set_env_value COMPOSE_FILE "$COMPOSE_FILE"
+        export MODE COMPOSE_FILE
+    else
+        echo -e "${RED}ERROR: Invalid installation mode in .env: $MODE${NC}"
+        return 1
+    fi
+
+    configure_direct_tls_profile || return $?
+
+    if [ "$MODE" = "multi" ]; then
+        PROGRESS_TOTAL=12
+    else
+        PROGRESS_TOTAL=11
+    fi
+}
+
+configure_mode || exit $?
+
+if [ "$MODE" = "multi" ] && [ "$SSL_PROVIDER" = "zerossl" ]; then
+    echo -e "${RED}ERROR: Multi-site mode does not support selecting ZeroSSL explicitly${NC}"
+    echo "Use Let's Encrypt, or self-signed certificates for local testing."
+    exit 1
 fi
 
-configure_direct_tls_profile || exit $?
+prepare_multi_site_proxy() {
+    local tls_mode="public"
+
+    if [ "$SSL_PROVIDER" = "selfsigned" ]; then
+        tls_mode="internal"
+    fi
+
+    ./multi-site/site-manager.sh primary-config \
+        "$DOMAIN" "$SITE_PREFIX" "$tls_mode" "$USE_WWW"
+    ./multi-site/site-manager.sh proxy-network
+}
 
 # GeoIP database selection
 select_geoip() {
@@ -2018,9 +2149,10 @@ resolve_public_port_configuration || exit $?
 set_env_value PROJECT_HTTPS_PORT "$PUBLIC_HTTPS_PORT"
 PROJECT_HTTPS_PORT="$PUBLIC_HTTPS_PORT"
 export PROJECT_HTTPS_PORT
-if [ "$SSL_PROVIDER" != "selfsigned" ] && [ "$PUBLIC_HTTP_PORT" -ne 80 ]; then
+if [ "$MODE" = "single" ] && [ "$SSL_PROVIDER" != "selfsigned" ] &&
+    [ "$PUBLIC_HTTP_PORT" -ne 80 ]; then
     echo -e "${RED}ERROR: Direct ACME HTTP-01 validation requires host TCP port 80${NC}"
-    echo "Use HTTP_PORT with numeric port 80, or select self-signed certificates."
+    echo "Use HTTP_PORT with numeric port 80, or select self-signed/Caddy mode."
     exit 1
 fi
 
@@ -2031,6 +2163,9 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     if [ "$PUBLIC_HTTPS_PORT" != "$PUBLIC_HTTP_PORT" ]; then
         ufw allow "${PUBLIC_HTTPS_PORT}/tcp" >/dev/null 2>&1
     fi
+    if [ "$MODE" = "multi" ]; then
+        ufw allow 443/udp >/dev/null 2>&1
+    fi
     echo -e "${GREEN}Firewall ports opened${NC}"
 fi
 
@@ -2038,43 +2173,47 @@ fi
 echo ""
 echo -e "${CYAN}Checking configured public ports...${NC}"
 if public_port_conflicts_exist; then
-    # Only manage containers from this Compose project. Name-prefix filters
-    # can accidentally stop the central proxy or another KVS site.
-    KVS_CONTAINERS=$(docker ps \
-        --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-        --format '{{.Names}}' 2>/dev/null || true)
-    if [ -n "$KVS_CONTAINERS" ]; then
-        echo -e "${YELLOW}Existing KVS containers detected${NC}"
-        docker ps \
+    if [ "$MODE" = "multi" ] && caddy_publishes_required_multi_site_ports; then
+        echo -e "${GREEN}Caddy already publishes the required multi-site ports${NC}"
+    else
+        # Only manage containers from this Compose project. Name-prefix filters
+        # can accidentally stop the central proxy or another KVS site.
+        KVS_CONTAINERS=$(docker ps \
             --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-            --format "table {{.Names}}\t{{.Status}}" 2>/dev/null
-        echo ""
-        # Skip prompt if already set (headless mode)
-        if [[ -z "$STOP_EXISTING" ]]; then
-            echo -n "Stop existing KVS containers? [Y/n]: "
-            read -r STOP_EXISTING
-        fi
-        if [ "$STOP_EXISTING" != "n" ] && [ "$STOP_EXISTING" != "N" ]; then
-            echo "Stopping existing containers..."
-            docker compose down 2>/dev/null || true
-            docker ps -q \
-                --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" 2>/dev/null | \
-                xargs -r docker stop 2>/dev/null || true
-            echo -e "${GREEN}Existing containers stopped${NC}"
-        else
-            echo -e "${RED}ERROR: Cannot continue while the configured ports remain in use${NC}"
-            exit 1
-        fi
+            --format '{{.Names}}' 2>/dev/null || true)
+        if [ -n "$KVS_CONTAINERS" ]; then
+            echo -e "${YELLOW}Existing KVS containers detected${NC}"
+            docker ps \
+                --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+                --format "table {{.Names}}\t{{.Status}}" 2>/dev/null
+            echo ""
+            # Skip prompt if already set (headless mode)
+            if [[ -z "$STOP_EXISTING" ]]; then
+                echo -n "Stop existing KVS containers? [Y/n]: "
+                read -r STOP_EXISTING
+            fi
+            if [ "$STOP_EXISTING" != "n" ] && [ "$STOP_EXISTING" != "N" ]; then
+                echo "Stopping existing containers..."
+                docker compose down 2>/dev/null || true
+                docker ps -q \
+                    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" 2>/dev/null | \
+                    xargs -r docker stop 2>/dev/null || true
+                echo -e "${GREEN}Existing containers stopped${NC}"
+            else
+                echo -e "${RED}ERROR: Cannot continue while the configured ports remain in use${NC}"
+                exit 1
+            fi
 
-        if public_port_conflicts_exist; then
-            echo -e "${RED}ERROR: Configured ports are still in use after stopping this project:${NC}"
+            if public_port_conflicts_exist; then
+                echo -e "${RED}ERROR: Configured ports are still in use after stopping this project:${NC}"
+                printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
+                exit 1
+            fi
+        else
+            echo -e "${RED}ERROR: Configured ports are in use by another process:${NC}"
             printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
             exit 1
         fi
-    else
-        echo -e "${RED}ERROR: Configured ports are in use by another process:${NC}"
-        printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
-        exit 1
     fi
 fi
 
@@ -2144,6 +2283,10 @@ while true; do
         esac
     fi
 done
+
+if [ "$MODE" = "multi" ]; then
+    prepare_multi_site_proxy
+fi
 
 # Show progress header
 progress_header "KVS Docker Setup" "Building and deploying containers"
@@ -2282,6 +2425,13 @@ configure_disk_space_limit
 # Step 5: Start nginx and get certificate
 progress_bar "Starting Nginx"
 run_step "Starting Nginx" docker compose up -d --force-recreate nginx
+
+if [ "$MODE" = "multi" ]; then
+    progress_bar "Starting Caddy"
+    run_step "Starting Caddy reverse proxy" \
+        env ACME_EMAIL="${EMAIL:-admin@example.com}" \
+        ./multi-site/site-manager.sh caddy-start
+fi
 
 # SSL Certificate based on SSL_PROVIDER
 SSL_PROVIDER="${SSL_PROVIDER:-letsencrypt}"
@@ -2487,7 +2637,9 @@ if [ "${DEV_SSL_INTELLIGENT:-false}" = "true" ]; then
     echo ""
 fi
 
-if [ "$SSL_PROVIDER" = "selfsigned" ]; then
+if [ "$MODE" = "multi" ]; then
+    echo -e "  ${GREEN}✓${NC} Caddy manages TLS for the multi-site stack"
+elif [ "$SSL_PROVIDER" = "selfsigned" ]; then
     echo -e "  ${GREEN}✓${NC} Using self-signed certificate"
 else
     configure_direct_acme_certificate || exit $?
@@ -2536,6 +2688,11 @@ fi
 echo "To view logs: docker compose logs -f"
 echo "To stop: docker compose down"
 echo "To restart: docker compose up -d"
+if [ "$MODE" = "multi" ]; then
+    echo "Caddy logs: docker logs kvs-caddy"
+    echo "Stop Caddy: ./multi-site/site-manager.sh caddy-stop"
+    echo "Add a site: ./multi-site/site-manager.sh add <domain>"
+fi
 echo ""
 echo -e "${CYAN}Debug logs:${NC}"
 echo "  Setup:  $DEBUG_LOG"

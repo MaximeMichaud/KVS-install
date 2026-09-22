@@ -8,7 +8,9 @@
 # - HTTP to HTTPS redirect
 #
 # USAGE:
-#   docker compose -f docker-compose.caddy.yml up -d
+#   ./site-manager.sh caddy-start
+#
+# The manager creates the external kvs-proxy network before Compose starts.
 #
 # Each KVS site connects to the 'kvs-proxy' network and Caddy routes
 # traffic based on the domain name.
@@ -32,7 +34,7 @@ services:
     networks:
       - kvs-proxy
     environment:
-      - CADDY_ADMIN=0.0.0.0:2019
+      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
     healthcheck:
       test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
       interval: 30s
@@ -42,7 +44,7 @@ services:
 networks:
   kvs-proxy:
     name: kvs-proxy
-    driver: bridge
+    external: true
 
 volumes:
   caddy-data:

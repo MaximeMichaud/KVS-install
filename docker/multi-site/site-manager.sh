@@ -34,6 +34,12 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SITES_DIR="${SCRIPT_DIR}/sites"
 CADDY_SITES_DIR="${SCRIPT_DIR}/caddy/sites"
+PRIMARY_SITE_FILE="${SITES_DIR}/.primary.env"
+KVS_ARCHIVE_DIR="${KVS_ARCHIVE_DIR:-${SCRIPT_DIR}/../kvs-archive}"
+WEBROOT_BASE="${KVS_WEBROOT_BASE:-/var/www}"
+MAX_DOMAIN_LENGTH=64
+# Reserve 20 characters for the longest generated volume suffix.
+MAX_SITE_PREFIX_LENGTH=235
 
 # =============================================================================
 # Helper Functions
@@ -44,22 +50,370 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+validate_domain() {
+    local domain="$1"
+    local label
+    local -a labels
+
+    if [ -z "$domain" ] || [ "${#domain}" -gt "$MAX_DOMAIN_LENGTH" ]; then
+        log_error "Domain must contain between 1 and ${MAX_DOMAIN_LENGTH} characters"
+        return 1
+    fi
+
+    if [[ ! "$domain" =~ ^[a-z0-9.-]+$ ]] ||
+        [[ "$domain" == .* ]] ||
+        [[ "$domain" == *. ]] ||
+        [[ "$domain" == *..* ]]; then
+        log_error "Invalid domain: ${domain}"
+        return 1
+    fi
+
+    IFS='.' read -r -a labels <<< "$domain"
+    for label in "${labels[@]}"; do
+        if [ "${#label}" -gt 63 ] ||
+            [[ ! "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            log_error "Invalid domain label in: ${domain}"
+            return 1
+        fi
+    done
+}
+
+validate_site_prefix() {
+    local prefix="$1"
+
+    if [ -z "$prefix" ] || [ "${#prefix}" -gt "$MAX_SITE_PREFIX_LENGTH" ] ||
+        [[ ! "$prefix" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+        log_error "Invalid site prefix: ${prefix}"
+        return 1
+    fi
+}
+
+primary_site_value() {
+    local key="$1"
+
+    [ -f "$PRIMARY_SITE_FILE" ] || return 0
+    sed -n "s/^${key}=//p" "$PRIMARY_SITE_FILE" | head -n 1
+}
+
+validate_primary_site_file() {
+    local line_count
+    local domain_count
+    local prefix_count
+    local reserved_domain
+    local reserved_prefix
+
+    if [ ! -e "$PRIMARY_SITE_FILE" ] && [ ! -L "$PRIMARY_SITE_FILE" ]; then
+        return 0
+    fi
+    if [ -L "$PRIMARY_SITE_FILE" ] || [ ! -f "$PRIMARY_SITE_FILE" ]; then
+        log_error "Primary site reservation must be a regular file"
+        return 1
+    fi
+    if [ "$(stat -c '%a' "$PRIMARY_SITE_FILE")" != 600 ]; then
+        log_error "Primary site reservation must have mode 0600"
+        return 1
+    fi
+
+    line_count=$(awk 'END { print NR + 0 }' "$PRIMARY_SITE_FILE")
+    domain_count=$(grep -c '^DOMAIN=' "$PRIMARY_SITE_FILE" || true)
+    prefix_count=$(grep -c '^SITE_PREFIX=' "$PRIMARY_SITE_FILE" || true)
+    if [ "$line_count" -ne 2 ] || [ "$domain_count" -ne 1 ] ||
+        [ "$prefix_count" -ne 1 ] ||
+        [ "$(tail -c 1 "$PRIMARY_SITE_FILE" | od -An -t x1 | tr -d '[:space:]')" != 0a ]; then
+        log_error "Primary site reservation must contain exactly DOMAIN and SITE_PREFIX"
+        return 1
+    fi
+
+    reserved_domain=$(sed -n 's/^DOMAIN=//p' "$PRIMARY_SITE_FILE")
+    reserved_prefix=$(sed -n 's/^SITE_PREFIX=//p' "$PRIMARY_SITE_FILE")
+    validate_domain "$reserved_domain" || return 1
+    validate_site_prefix "$reserved_prefix" || return 1
+}
+
 domain_to_safe() {
-    echo "$1" | tr '.' '-' | tr '[:upper:]' '[:lower:]'
+    local safe="$1"
+
+    # DNS names cannot contain underscores, so these two substitutions are
+    # reversible: original hyphens become underscores and dots become hyphens.
+    safe=${safe//-/_}
+    safe=${safe//./-}
+    printf '%s\n' "$safe"
+}
+
+ensure_site_prefix_available() {
+    local requested_domain="$1"
+    local requested_prefix="$2"
+    local env_file
+    local existing_domain
+    local existing_prefix
+
+    validate_primary_site_file || return 1
+    existing_domain=$(primary_site_value DOMAIN)
+    existing_prefix=$(primary_site_value SITE_PREFIX)
+    if [ -n "$existing_prefix" ] && [ "$existing_prefix" = "$requested_prefix" ] &&
+        [ "$existing_domain" != "$requested_domain" ]; then
+        log_error "Site prefix ${requested_prefix} is reserved by primary site ${existing_domain}"
+        return 1
+    fi
+
+    [ -d "$SITES_DIR" ] || return 0
+
+    for env_file in "$SITES_DIR"/*/.env; do
+        [ -f "$env_file" ] || continue
+        existing_prefix=$(sed -n 's/^SITE_PREFIX=//p' "$env_file" | head -n 1)
+        [ "$existing_prefix" = "$requested_prefix" ] || continue
+
+        existing_domain=$(basename "$(dirname "$env_file")")
+        if [ "$existing_domain" != "$requested_domain" ]; then
+            log_error "Site prefix ${requested_prefix} is already used by ${existing_domain}"
+            return 1
+        fi
+    done
 }
 
 check_caddy_running() {
-    if ! docker ps --format '{{.Names}}' | grep -q "kvs-caddy"; then
+    if ! docker ps --format '{{.Names}}' | grep -Fxq "kvs-caddy"; then
         log_error "Caddy is not running. Start it first:"
-        echo "  cd ${SCRIPT_DIR} && docker compose -f docker-compose.caddy.yml up -d"
+        echo "  cd ${SCRIPT_DIR} && ./site-manager.sh caddy-start"
         exit 1
     fi
 }
 
 reload_caddy() {
     log_info "Reloading Caddy configuration..."
-    docker exec kvs-caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true
+    # Force reprovisioning even when the route text is unchanged. Site
+    # containers can receive a new Docker IP after recreation, and an
+    # unchanged reload would otherwise keep an upstream marked unhealthy until
+    # the next active-health interval.
+    if ! docker exec kvs-caddy caddy reload --force \
+        --config /etc/caddy/Caddyfile; then
+        log_error "Failed to reload Caddy configuration"
+        return 1
+    fi
     log_success "Caddy reloaded"
+}
+
+wait_for_caddy() {
+    local attempt
+
+    for ((attempt = 1; attempt <= 30; attempt++)); do
+        if docker exec kvs-caddy \
+            wget -T 2 -qO- http://127.0.0.1:2019/config/ >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    log_error "Caddy did not become ready within 30 seconds"
+    return 1
+}
+
+ensure_proxy_network() {
+    if docker network inspect kvs-proxy >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log_info "Creating shared proxy network..."
+    docker network create kvs-proxy >/dev/null
+    log_success "Created network: kvs-proxy"
+}
+
+write_caddy_site_config() {
+    local domain="$1"
+    local tls_mode="${2:-public}"
+    local use_www="${3:-false}"
+    local include_www="${4:-auto}"
+    local canonical_host
+    local alternate_host=""
+    local dot_count
+    local tls_directive=""
+    local temp_file
+
+    validate_domain "$domain" || return 1
+    case "$tls_mode" in
+        public)
+            ;;
+        internal)
+            tls_directive="    tls internal"
+            ;;
+        *)
+            log_error "Invalid Caddy TLS mode: ${tls_mode}"
+            return 1
+            ;;
+    esac
+    case "$use_www" in
+        true|false)
+            ;;
+        *)
+            log_error "Invalid USE_WWW value: ${use_www}"
+            return 1
+            ;;
+    esac
+    case "$include_www" in
+        true|false)
+            ;;
+        auto)
+            dot_count=$(tr -cd '.' <<< "$domain" | wc -c)
+            if [ "$dot_count" -eq 1 ]; then
+                include_www=true
+            else
+                include_www=false
+            fi
+            ;;
+        *)
+            log_error "Invalid Caddy www routing mode: ${include_www}"
+            return 1
+            ;;
+    esac
+
+    # A canonical www host necessarily requires a route and certificate for it.
+    if [ "$use_www" = true ]; then
+        include_www=true
+        canonical_host="www.${domain}"
+        alternate_host="$domain"
+    else
+        canonical_host="$domain"
+        if [ "$include_www" = true ]; then
+            alternate_host="www.${domain}"
+        fi
+    fi
+
+    mkdir -p "$CADDY_SITES_DIR"
+    temp_file=$(mktemp "${CADDY_SITES_DIR}/.${domain}.caddy.XXXXXX")
+    {
+        cat << EOF
+# KVS Site: ${domain}
+${canonical_host} {
+    reverse_proxy n.${domain}:80 {
+        health_uri /health
+        health_interval 30s
+        header_up X-Real-IP {remote_host}
+    }
+${tls_directive}
+
+    encode gzip zstd
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        -Server
+    }
+
+    log {
+        output file /data/logs/${domain}.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+    }
+}
+EOF
+        if [ -n "$alternate_host" ]; then
+            cat << EOF
+
+${alternate_host} {
+    redir https://${canonical_host}{uri} permanent
+${tls_directive}
+}
+EOF
+        fi
+    } > "$temp_file"
+    mv -f "$temp_file" "${CADDY_SITES_DIR}/${domain}.caddy"
+    log_success "Generated Caddy config: ${CADDY_SITES_DIR}/${domain}.caddy"
+}
+
+configure_primary_site() {
+    local domain="$1"
+    local site_prefix="$2"
+    local tls_mode="${3:-public}"
+    local use_www="${4:-false}"
+    local existing_domain
+    local existing_prefix
+    local temp_file
+    local created_registration=false
+
+    validate_domain "$domain" || return 1
+    validate_site_prefix "$site_prefix" || return 1
+
+    validate_primary_site_file || return 1
+    existing_domain=$(primary_site_value DOMAIN)
+    existing_prefix=$(primary_site_value SITE_PREFIX)
+    if [ -n "$existing_domain" ] || [ -n "$existing_prefix" ]; then
+        if [ "$existing_domain" != "$domain" ] || [ "$existing_prefix" != "$site_prefix" ]; then
+            log_error "Primary site is already reserved as ${existing_domain} (${existing_prefix})"
+            return 1
+        fi
+    else
+        [ ! -d "${SITES_DIR}/${domain}" ] || {
+            log_error "A managed site already uses primary domain ${domain}"
+            return 1
+        }
+        ensure_site_prefix_available "$domain" "$site_prefix" || return 1
+
+        mkdir -p "$SITES_DIR"
+        temp_file=$(mktemp "${SITES_DIR}/.primary.env.XXXXXX")
+        chmod 600 "$temp_file"
+        {
+            printf 'DOMAIN=%s\n' "$domain"
+            printf 'SITE_PREFIX=%s\n' "$site_prefix"
+        } > "$temp_file"
+        mv -f "$temp_file" "$PRIMARY_SITE_FILE"
+        created_registration=true
+    fi
+
+    if ! write_caddy_site_config "$domain" "$tls_mode" "$use_www" auto; then
+        if [ "$created_registration" = true ]; then
+            rm -f "$PRIMARY_SITE_FILE"
+        fi
+        return 1
+    fi
+}
+
+remove_primary_site() {
+    local domain="$1"
+    local site_prefix="$2"
+    local existing_domain
+    local existing_prefix
+    local route_file="${CADDY_SITES_DIR}/${domain}.caddy"
+    local managed_site_dir="${SITES_DIR}/${domain}"
+
+    validate_domain "$domain" || return 1
+    validate_site_prefix "$site_prefix" || return 1
+
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "kvs-caddy"; then
+        log_error "Stop Caddy before removing the primary route"
+        return 1
+    fi
+    if [ -d "$managed_site_dir" ]; then
+        log_error "Refusing to remove a primary route used by a managed site: ${domain}"
+        return 1
+    fi
+    validate_primary_site_file || return 1
+    existing_domain=$(primary_site_value DOMAIN)
+    existing_prefix=$(primary_site_value SITE_PREFIX)
+    if [ -z "$existing_domain" ] && [ -z "$existing_prefix" ]; then
+        if [ -e "$route_file" ] || [ -L "$route_file" ]; then
+            log_error "Refusing to remove an orphaned Caddy route without a reservation"
+            return 1
+        fi
+        log_success "Primary Caddy route is already absent for ${domain}"
+        return 0
+    fi
+    if [ "$existing_domain" != "$domain" ] || [ "$existing_prefix" != "$site_prefix" ]; then
+        log_error "Primary site reservation does not match ${domain} (${site_prefix})"
+        return 1
+    fi
+
+    if [ -e "$route_file" ] || [ -L "$route_file" ]; then
+        if [ -L "$route_file" ] || [ ! -f "$route_file" ] ||
+            ! grep -Fxq "# KVS Site: ${domain}" "$route_file" ||
+            ! grep -Fq "reverse_proxy n.${domain}:80" "$route_file"; then
+            log_error "Refusing to remove an unexpected primary Caddy route"
+            return 1
+        fi
+        rm -f "$route_file" || return 1
+    fi
+    rm -f "$PRIMARY_SITE_FILE" || return 1
+    log_success "Removed primary Caddy route and reservation for ${domain}"
 }
 
 # =============================================================================
@@ -68,10 +422,20 @@ reload_caddy() {
 
 add_site() {
     local domain="$1"
+    validate_domain "$domain" || return 1
+    validate_primary_site_file || return 1
+
     local domain_safe
     domain_safe=$(domain_to_safe "$domain")
     local site_dir="${SITES_DIR}/${domain}"
     local site_prefix="kvs-${domain_safe}"
+    local primary_domain
+
+    primary_domain=$(primary_site_value DOMAIN)
+    if [ "$primary_domain" = "$domain" ]; then
+        log_error "Domain ${domain} is reserved by the primary site"
+        return 1
+    fi
 
     log_info "Adding site: ${domain}"
 
@@ -81,27 +445,38 @@ add_site() {
         exit 1
     fi
 
+    if [ -e "${CADDY_SITES_DIR}/${domain}.caddy" ]; then
+        log_error "A Caddy route already exists for ${domain}"
+        return 1
+    fi
+
+    ensure_site_prefix_available "$domain" "$site_prefix" || return 1
+
     # Check KVS archive
-    if ! ls ../kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
-        log_error "No KVS archive found in ../kvs-archive/"
+    if ! compgen -G "${KVS_ARCHIVE_DIR}/KVS_*.zip" >/dev/null; then
+        log_error "No KVS archive found in ${KVS_ARCHIVE_DIR}/"
         exit 1
     fi
 
     # Create site directory
+    mkdir -p "$SITES_DIR" "$CADDY_SITES_DIR"
     mkdir -p "${site_dir}"
     log_success "Created site directory: ${site_dir}"
 
     # Create webroot directory
-    local webroot="/var/www/${domain}"
+    local webroot="${WEBROOT_BASE}/${domain}"
     mkdir -p "${webroot}"
     chown 1000:1000 "${webroot}"
     log_success "Created webroot: ${webroot}"
 
     # Generate .env file
-    cat > "${site_dir}/.env" << EOF
+    (
+        umask 077
+        cat > "${site_dir}/.env" << EOF
 # Site configuration for ${domain}
 DOMAIN=${domain}
 SITE_PREFIX=${site_prefix}
+COMPOSE_PROJECT_NAME=${site_prefix}
 USE_WWW=false
 
 # Database
@@ -121,6 +496,7 @@ PHP_MAX_EXECUTION_TIME=300
 COMPOSE_PROFILES=dragonfly
 CACHE_MEMORY=512
 EOF
+    )
     log_success "Generated .env file"
 
     # Copy docker-compose template
@@ -128,48 +504,14 @@ EOF
     log_success "Created docker-compose.yml"
 
     # Generate Caddy site config
-    # Detect if subdomain (more than 2 parts = subdomain, no www needed)
-    local domain_parts
-    domain_parts=$(echo "$domain" | tr '.' '\n' | wc -l)
-    local server_names="$domain"
-    if [ "$domain_parts" -le 2 ]; then
-        server_names="${domain}, www.${domain}"
-    fi
-
-    cat > "${CADDY_SITES_DIR}/${domain}.caddy" << EOF
-# KVS Site: ${domain}
-${server_names} {
-    reverse_proxy ${site_prefix}-nginx:80 {
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-    }
-
-    encode gzip zstd
-
-    header {
-        X-Content-Type-Options nosniff
-        X-Frame-Options SAMEORIGIN
-        -Server
-    }
-
-    log {
-        output file /data/logs/${domain}.log {
-            roll_size 10mb
-            roll_keep 5
-        }
-    }
-}
-EOF
-    log_success "Generated Caddy config: ${CADDY_SITES_DIR}/${domain}.caddy"
+    write_caddy_site_config "$domain" "${CADDY_TLS_MODE:-public}" false auto
 
     echo ""
     log_success "Site ${domain} created successfully!"
     echo ""
     echo "Next steps:"
     echo "  1. Start Caddy (if not running):"
-    echo "     cd ${SCRIPT_DIR} && docker compose -f docker-compose.caddy.yml up -d"
+    echo "     cd ${SCRIPT_DIR} && ./site-manager.sh caddy-start"
     echo ""
     echo "  2. Start the site:"
     echo "     ./site-manager.sh start ${domain}"
@@ -188,6 +530,8 @@ start_site() {
     local attempt
     local admin_table_count
     local default_admin_count
+    validate_domain "$domain" || return 1
+
     local site_dir="${SITES_DIR}/${domain}"
 
     if [ ! -d "$site_dir" ]; then
@@ -281,6 +625,8 @@ start_site() {
 
 stop_site() {
     local domain="$1"
+    validate_domain "$domain" || return 1
+
     local site_dir="${SITES_DIR}/${domain}"
 
     if [ ! -d "$site_dir" ]; then
@@ -301,9 +647,11 @@ stop_site() {
 
 remove_site() {
     local domain="$1"
+    validate_domain "$domain" || return 1
+
     local site_dir="${SITES_DIR}/${domain}"
     local caddy_config="${CADDY_SITES_DIR}/${domain}.caddy"
-    local webroot="/var/www/${domain}"
+    local webroot="${WEBROOT_BASE}/${domain}"
 
     if [ ! -d "$site_dir" ]; then
         log_error "Site ${domain} does not exist"
@@ -347,7 +695,7 @@ remove_site() {
     fi
 
     # Reload Caddy
-    if docker ps --format '{{.Names}}' | grep -q "kvs-caddy"; then
+    if docker ps --format '{{.Names}}' | grep -Fxq "kvs-caddy"; then
         reload_caddy
     fi
 
@@ -362,7 +710,7 @@ list_sites() {
     echo -e "${CYAN}=== KVS Sites ===${NC}"
     echo ""
 
-    if [ ! -d "$SITES_DIR" ] || [ -z "$(ls -A $SITES_DIR 2>/dev/null)" ]; then
+    if [ ! -d "$SITES_DIR" ] || [ -z "$(ls -A "$SITES_DIR" 2>/dev/null)" ]; then
         log_info "No sites configured yet"
         echo "Add a site with: ./site-manager.sh add <domain>"
         return
@@ -376,8 +724,14 @@ list_sites() {
             domain_safe=$(domain_to_safe "$domain")
             local site_prefix="kvs-${domain_safe}"
 
+            if [ -f "${site_dir}/.env" ]; then
+                local configured_prefix
+                configured_prefix=$(sed -n 's/^SITE_PREFIX=//p' "${site_dir}/.env" | head -n 1)
+                [ -n "$configured_prefix" ] && site_prefix="$configured_prefix"
+            fi
+
             # Check if running
-            if docker ps --format '{{.Names}}' | grep -q "${site_prefix}-nginx"; then
+            if docker ps --format '{{.Names}}' | grep -Fxq "${site_prefix}-nginx"; then
                 echo -e "  ${GREEN}●${NC} ${domain} (running)"
             else
                 echo -e "  ${RED}○${NC} ${domain} (stopped)"
@@ -396,7 +750,7 @@ show_status() {
     echo ""
 
     # Caddy status
-    if docker ps --format '{{.Names}}' | grep -q "kvs-caddy"; then
+    if docker ps --format '{{.Names}}' | grep -Fxq "kvs-caddy"; then
         echo -e "Caddy Proxy: ${GREEN}running${NC}"
     else
         echo -e "Caddy Proxy: ${RED}stopped${NC}"
@@ -418,8 +772,14 @@ show_status() {
 
 start_caddy() {
     log_info "Starting Caddy proxy..."
+    mkdir -p "$CADDY_SITES_DIR"
+    ensure_proxy_network
     cd "$SCRIPT_DIR"
-    docker compose -f docker-compose.caddy.yml up -d
+    # Preserve the historical implicit Compose project and its certificate
+    # volumes while still using the externally managed kvs-proxy network.
+    docker compose -p multi-site -f docker-compose.caddy.yml up -d
+    wait_for_caddy
+    reload_caddy
     log_success "Caddy proxy started"
 }
 
@@ -430,7 +790,7 @@ start_caddy() {
 stop_caddy() {
     log_info "Stopping Caddy proxy..."
     cd "$SCRIPT_DIR"
-    docker compose -f docker-compose.caddy.yml down
+    docker compose -p multi-site -f docker-compose.caddy.yml down
     log_success "Caddy proxy stopped"
 }
 
@@ -450,6 +810,13 @@ usage() {
     echo "  stop <domain>      Stop a site"
     echo "  list               List all sites"
     echo "  status             Show status of all sites"
+    echo "  proxy-config <domain> [public|internal] [true|false] [auto|true|false]"
+    echo "                     Generate only the central Caddy route"
+    echo "  primary-config <domain> <site-prefix> [public|internal] [true|false]"
+    echo "                     Reserve and route the primary Compose site"
+    echo "  primary-remove <domain> <site-prefix>"
+    echo "                     Remove the primary route after Caddy is stopped"
+    echo "  proxy-network      Create the shared proxy network"
     echo "  caddy-start        Start Caddy proxy"
     echo "  caddy-stop         Stop Caddy proxy"
     echo ""
@@ -462,9 +829,6 @@ usage() {
 # =============================================================================
 # Main
 # =============================================================================
-
-mkdir -p "$SITES_DIR"
-mkdir -p "$CADDY_SITES_DIR"
 
 case "${1:-}" in
     add)
@@ -488,6 +852,23 @@ case "${1:-}" in
         ;;
     status)
         show_status
+        ;;
+    proxy-config)
+        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
+        write_caddy_site_config "$2" "${3:-public}" "${4:-false}" "${5:-auto}"
+        ;;
+    primary-config)
+        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
+        [ -z "${3:-}" ] && { log_error "Site prefix required"; usage; exit 1; }
+        configure_primary_site "$2" "$3" "${4:-public}" "${5:-false}"
+        ;;
+    primary-remove)
+        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
+        [ -z "${3:-}" ] && { log_error "Site prefix required"; usage; exit 1; }
+        remove_primary_site "$2" "$3"
+        ;;
+    proxy-network)
+        ensure_proxy_network
         ;;
     caddy-start)
         start_caddy

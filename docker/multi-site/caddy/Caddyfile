@@ -24,8 +24,8 @@
         protocols h1 h2 h3
     }
 
-    # Admin API (for health checks)
-    admin 0.0.0.0:2019
+    # Keep the unauthenticated admin API private to the Caddy container.
+    admin localhost:2019
 }
 
 # Import all site configurations
