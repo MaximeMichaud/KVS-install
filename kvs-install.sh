@@ -1129,7 +1129,52 @@ function chooseInstallationType() {
   esac
 }
 
+backup_user_data() {
+  local install_dir="$1"
+  local backup_dir="$2"
+
+  if [[ ! -f "$install_dir/docker/.env" ]] && [[ ! -d "$install_dir/docker/kvs-archive" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$backup_dir" || return $?
+  chmod 700 "$backup_dir" || return $?
+  if [[ -f "$install_dir/docker/.env" ]]; then
+    cp "$install_dir/docker/.env" "$backup_dir/" || return $?
+    chmod 600 "$backup_dir/.env" || return $?
+  fi
+  if [[ -d "$install_dir/docker/kvs-archive" ]]; then
+    cp -r "$install_dir/docker/kvs-archive" "$backup_dir/" || return $?
+  fi
+  echo "${cyan}Backed up .env and kvs-archive${normal}"
+}
+
+restore_user_data() {
+  local install_dir="$1"
+  local backup_dir="$2"
+
+  [[ -d "$backup_dir" ]] || return 0
+  if [[ ! -d "$install_dir/docker" ]]; then
+    echo "${red}Cannot restore user data: $install_dir/docker does not exist${normal}" >&2
+    return 1
+  fi
+
+  if [[ -f "$backup_dir/.env" ]]; then
+    cp "$backup_dir/.env" "$install_dir/docker/" || return $?
+  fi
+  if [[ -d "$backup_dir/kvs-archive" ]]; then
+    cp -r "$backup_dir/kvs-archive" "$install_dir/docker/" || return $?
+  fi
+
+  rm -rf "$backup_dir" || return $?
+  echo "${green}Restored .env and kvs-archive${normal}"
+}
+
 function dockerInstall() {
+  local INSTALL_DIR
+  local BACKUP_DIR
+  local clone_status
+
   echo ""
   echo "${cyan}=== Docker Installation ===${normal}"
 
@@ -1152,47 +1197,45 @@ function dockerInstall() {
   echo "${green}Docker Compose is available${normal}"
 
   # Clone or update KVS-install repo
-  INSTALL_DIR="/opt/kvs"
-  BACKUP_DIR="/tmp/kvs-backup-$$"
-
-  # Backup user data before any potential rm -rf
-  backup_user_data() {
-    if [[ -f "$INSTALL_DIR/docker/.env" ]] || [[ -d "$INSTALL_DIR/docker/kvs-archive" ]]; then
-      mkdir -p "$BACKUP_DIR"
-      [[ -f "$INSTALL_DIR/docker/.env" ]] && cp "$INSTALL_DIR/docker/.env" "$BACKUP_DIR/"
-      [[ -d "$INSTALL_DIR/docker/kvs-archive" ]] && cp -r "$INSTALL_DIR/docker/kvs-archive" "$BACKUP_DIR/"
-      echo "${cyan}Backed up .env and kvs-archive${normal}"
-    fi
-  }
-
-  # Restore user data after clone
-  restore_user_data() {
-    if [[ -d "$BACKUP_DIR" ]]; then
-      [[ -f "$BACKUP_DIR/.env" ]] && cp "$BACKUP_DIR/.env" "$INSTALL_DIR/docker/"
-      [[ -d "$BACKUP_DIR/kvs-archive" ]] && cp -r "$BACKUP_DIR/kvs-archive" "$INSTALL_DIR/docker/"
-      rm -rf "$BACKUP_DIR"
-      echo "${green}Restored .env and kvs-archive${normal}"
-    fi
-  }
+  INSTALL_DIR="${KVS_INSTALL_DIR:-/opt/kvs}"
+  if [[ -n "${KVS_BACKUP_DIR:-}" ]]; then
+    BACKUP_DIR="$KVS_BACKUP_DIR"
+  else
+    BACKUP_DIR=$(mktemp -d /tmp/kvs-backup.XXXXXX) || return $?
+  fi
 
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "Updating existing installation..."
     if cd "$INSTALL_DIR" && git pull; then
       echo "${green}Updated successfully${normal}"
+      if [[ -z "${KVS_BACKUP_DIR:-}" ]]; then
+        rmdir "$BACKUP_DIR" 2>/dev/null || true
+      fi
     else
       echo "${red}Git pull failed, re-cloning...${normal}"
-      backup_user_data
-      cd /opt && rm -rf "$INSTALL_DIR"
+      backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
+      cd "${INSTALL_DIR%/*}" || return $?
+      rm -rf "$INSTALL_DIR" || return $?
       git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
-      restore_user_data
+      clone_status=$?
+      if ((clone_status != 0)); then
+        [[ -d "$BACKUP_DIR" ]] && echo "${yellow}Clone failed; user data remains in $BACKUP_DIR${normal}" >&2
+        return "$clone_status"
+      fi
+      restore_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
     fi
   else
     # Directory doesn't exist or is not a git repo
-    backup_user_data
-    rm -rf "$INSTALL_DIR" 2>/dev/null
+    backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
+    rm -rf "$INSTALL_DIR" 2>/dev/null || return $?
     echo "Cloning KVS-install..."
     git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
-    restore_user_data
+    clone_status=$?
+    if ((clone_status != 0)); then
+      [[ -d "$BACKUP_DIR" ]] && echo "${yellow}Clone failed; user data remains in $BACKUP_DIR${normal}" >&2
+      return "$clone_status"
+    fi
+    restore_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
   fi
 
   cd "$INSTALL_DIR/docker" || { echo "${red}Failed to enter docker directory${normal}"; exit 1; }
@@ -1237,6 +1280,7 @@ function dockerInstall() {
     cp .env.example .env
     echo "${green}Created .env from .env.example${normal}"
   fi
+  chmod 600 .env
 
   # Update .env with domain from archive
   if [[ -n "$archive_domain" ]] && validate_kvs_domain "$archive_domain"; then
