@@ -769,6 +769,14 @@ function check_ports() {
     fi
 }
 
+reset_nginx_configuration_dirs() {
+    local conf_dir="${1:-/etc/nginx/conf.d}"
+    local globals_dir="${2:-/etc/nginx/globals}"
+
+    rm -rf "$conf_dir" || return $?
+    mkdir -p "$conf_dir" "$globals_dir"
+}
+
 function aptinstall_nginx() {
     check_ports
     echo "NGINX Installation"
@@ -778,7 +786,7 @@ function aptinstall_nginx() {
       echo "deb [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
       echo "deb-src [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
       apt-get update && apt-get install nginx -y
-      rm -rf conf.d && mkdir -p /etc/nginx/globals
+      reset_nginx_configuration_dirs || return $?
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -o /etc/nginx/nginx.conf
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/general.conf -o /etc/nginx/globals/general.conf
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/security.conf -o /etc/nginx/globals/security.conf
