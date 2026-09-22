@@ -165,6 +165,7 @@ services:
       - MARIADB_DATABASE=${DOMAIN}
       - SSL_PROVIDER=selfsigned
       - PROJECT_HTTPS_PORT=443
+      - KVS_ADMIN_PASSWORD=${KVS_ADMIN_PASSWORD:-}
     depends_on:
       mariadb:
         condition: service_healthy

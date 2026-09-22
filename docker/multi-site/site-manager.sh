@@ -183,7 +183,11 @@ EOF
 
 start_site() {
     local domain="$1"
+    local admin_password="${KVS_ADMIN_PASSWORD:-}"
+    local generated_admin_password=false
     local attempt
+    local admin_table_count
+    local default_admin_count
     local site_dir="${SITES_DIR}/${domain}"
 
     if [ ! -d "$site_dir" ]; then
@@ -212,7 +216,50 @@ start_site() {
         return 1
     fi
     docker compose --profile setup run --rm --no-deps phpmyadmin-init
-    docker compose --profile setup run --rm --no-deps kvs-init
+    if [ -z "$admin_password" ]; then
+        if ! admin_table_count=$(docker compose exec -T mariadb sh -c '
+            MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N -e \
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"$MARIADB_DATABASE\" AND table_name=\"ktvs_admin_users\";"
+        ' 2>/dev/null); then
+            log_error "Could not inspect the KVS admin account before initialization"
+            return 1
+        fi
+        case "$admin_table_count" in
+            ''|*[!0-9]*)
+                log_error "Invalid KVS admin table count"
+                return 1
+                ;;
+        esac
+        if [ "$admin_table_count" -eq 0 ]; then
+            generated_admin_password=true
+        else
+            if ! default_admin_count=$(docker compose exec -T mariadb sh -c '
+                MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N "$MARIADB_DATABASE" -e \
+                    "SELECT COUNT(*) FROM ktvs_admin_users WHERE user_id=1 AND login=\"admin\" AND pass=MD5(CONCAT(\"pass:\",MD5(\"123\")));"
+            ' 2>/dev/null); then
+                log_error "Could not verify the KVS admin account before initialization"
+                return 1
+            fi
+            case "$default_admin_count" in
+                ''|*[!0-9]*)
+                    log_error "Invalid default admin account count"
+                    return 1
+                    ;;
+            esac
+            [ "$default_admin_count" -gt 0 ] && generated_admin_password=true
+        fi
+        if [ "$generated_admin_password" = true ]; then
+            admin_password=$(openssl rand -base64 30 | tr -d '/+=' | cut -c 1-32)
+        fi
+    fi
+    KVS_ADMIN_PASSWORD="$admin_password" \
+        docker compose --profile setup run --rm --no-deps kvs-init
+    if [ "$generated_admin_password" = true ]; then
+        echo "Admin login: admin"
+        echo "One-time admin password: ${admin_password}"
+        echo "Save it now; it is not written to the site .env file."
+    fi
+    unset admin_password
 
     # Start all services
     log_info "Starting services..."
