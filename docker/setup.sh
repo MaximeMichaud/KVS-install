@@ -333,7 +333,7 @@ preflight_checks() {
     fi
 
     # 6. Required commands
-    local required_cmds=("curl" "unzip" "sed" "awk" "grep")
+    local required_cmds=("curl" "unzip" "sed" "awk" "grep" "ss")
     local missing_cmds=()
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -708,6 +708,14 @@ if [[ -v EMAIL ]]; then
     KVS_EMAIL_OVERRIDE_SET=true
     KVS_EMAIL_OVERRIDE="$EMAIL"
 fi
+declare -A KVS_PORT_OVERRIDES=()
+for KVS_PORT_VARIABLE in \
+    HTTP_PORT HTTPS_PORT MARIADB_HOST_PORT CACHE_HOST_PORT \
+    MANTICORE_MYSQL_HOST_PORT MANTICORE_HTTP_HOST_PORT; do
+    if [[ -v "$KVS_PORT_VARIABLE" ]]; then
+        KVS_PORT_OVERRIDES["$KVS_PORT_VARIABLE"]="${!KVS_PORT_VARIABLE}"
+    fi
+done
 
 # Check if .env exists
 if [ ! -f .env ]; then
@@ -844,6 +852,106 @@ remove_compose_profile() {
     COMPOSE_PROFILES="$filtered"
     export COMPOSE_PROFILES
 }
+
+parse_publish_endpoint() {
+    local endpoint="$1"
+    local host=""
+    local port=""
+    local octet
+    local -a octets
+
+    if [[ "$endpoint" =~ ^([0-9]+)$ ]]; then
+        port="${BASH_REMATCH[1]}"
+    elif [[ "$endpoint" =~ ^\[([0-9A-Fa-f:.%]+)\]:([0-9]+)$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[2]}"
+    elif [[ "$endpoint" =~ ^(([0-9]{1,3}\.){3}[0-9]{1,3}):([0-9]+)$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[3]}"
+        IFS='.' read -r -a octets <<< "$host"
+        for octet in "${octets[@]}"; do
+            ((10#$octet <= 255)) || return 1
+        done
+    else
+        return 1
+    fi
+
+    [ "${#port}" -le 5 ] || return 1
+    ((10#$port >= 1 && 10#$port <= 65535)) || return 1
+    PUBLISH_HOST="$host"
+    PUBLISH_PORT=$((10#$port))
+}
+
+publish_endpoint_is_listening() {
+    local endpoint="$1"
+    local protocol="${2:-tcp}"
+    local local_address
+    local listener_address
+    local -a ss_args=(-H -ltn)
+
+    parse_publish_endpoint "$endpoint" || return 2
+    if [ "$protocol" = "udp" ]; then
+        ss_args=(-H -lun)
+    fi
+
+    while read -r _ _ _ local_address _; do
+        [ -n "$local_address" ] || continue
+        listener_address=${local_address%:*}
+        listener_address=${listener_address#[}
+        listener_address=${listener_address%]}
+
+        if [ -z "$PUBLISH_HOST" ] || [ "$PUBLISH_HOST" = "0.0.0.0" ] || \
+            [ "$PUBLISH_HOST" = "::" ]; then
+            return 0
+        fi
+        case "$listener_address" in
+            '*'|'0.0.0.0'|'::') return 0 ;;
+        esac
+        if [ "$listener_address" = "$PUBLISH_HOST" ]; then
+            return 0
+        fi
+    done < <(ss "${ss_args[@]}" "sport = :$PUBLISH_PORT" 2>/dev/null)
+
+    return 1
+}
+
+resolve_public_port_configuration() {
+    PUBLIC_HTTP_ENDPOINT=${HTTP_PORT:-80}
+    PUBLIC_HTTPS_ENDPOINT=${HTTPS_PORT:-443}
+
+    if ! parse_publish_endpoint "$PUBLIC_HTTP_ENDPOINT"; then
+        echo -e "${RED}ERROR: Invalid HTTP_PORT endpoint: ${PUBLIC_HTTP_ENDPOINT}${NC}"
+        return 1
+    fi
+    PUBLIC_HTTP_PORT=$PUBLISH_PORT
+
+    if ! parse_publish_endpoint "$PUBLIC_HTTPS_ENDPOINT"; then
+        echo -e "${RED}ERROR: Invalid HTTPS_PORT endpoint: ${PUBLIC_HTTPS_ENDPOINT}${NC}"
+        return 1
+    fi
+    PUBLIC_HTTPS_PORT=$PUBLISH_PORT
+}
+
+public_port_conflicts_exist() {
+    PUBLIC_PORT_CONFLICTS=()
+
+    if publish_endpoint_is_listening "$PUBLIC_HTTP_ENDPOINT" tcp; then
+        PUBLIC_PORT_CONFLICTS+=("${PUBLIC_HTTP_ENDPOINT}/tcp")
+    fi
+    if publish_endpoint_is_listening "$PUBLIC_HTTPS_ENDPOINT" tcp; then
+        PUBLIC_PORT_CONFLICTS+=("${PUBLIC_HTTPS_ENDPOINT}/tcp")
+    fi
+
+    [ "${#PUBLIC_PORT_CONFLICTS[@]}" -gt 0 ]
+}
+
+# Persist explicit port overrides before later `source .env` calls. This keeps
+# setup behavior consistent with Docker Compose environment precedence.
+for KVS_PORT_VARIABLE in "${!KVS_PORT_OVERRIDES[@]}"; do
+    printf -v "$KVS_PORT_VARIABLE" '%s' "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}"
+    export "${KVS_PORT_VARIABLE?}"
+    set_env_value "$KVS_PORT_VARIABLE" "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}"
+done
 
 if [ -n "$KVS_DOMAIN_OVERRIDE" ]; then
     DOMAIN="$KVS_DOMAIN_OVERRIDE"
@@ -1846,18 +1954,30 @@ fi
 # Reload .env
 source .env
 
+resolve_public_port_configuration || exit $?
+set_env_value PROJECT_HTTPS_PORT "$PUBLIC_HTTPS_PORT"
+PROJECT_HTTPS_PORT="$PUBLIC_HTTPS_PORT"
+export PROJECT_HTTPS_PORT
+if [ "$SSL_PROVIDER" != "selfsigned" ] && [ "$PUBLIC_HTTP_PORT" -ne 80 ]; then
+    echo -e "${RED}ERROR: Direct ACME HTTP-01 validation requires host TCP port 80${NC}"
+    echo "Use HTTP_PORT with numeric port 80, or select self-signed certificates."
+    exit 1
+fi
+
 # Open firewall ports if ufw is active
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-    echo -e "${CYAN}Opening firewall ports 80 and 443...${NC}"
-    ufw allow 80/tcp >/dev/null 2>&1
-    ufw allow 443/tcp >/dev/null 2>&1
+    echo -e "${CYAN}Opening configured public firewall ports...${NC}"
+    ufw allow "${PUBLIC_HTTP_PORT}/tcp" >/dev/null 2>&1
+    if [ "$PUBLIC_HTTPS_PORT" != "$PUBLIC_HTTP_PORT" ]; then
+        ufw allow "${PUBLIC_HTTPS_PORT}/tcp" >/dev/null 2>&1
+    fi
     echo -e "${GREEN}Firewall ports opened${NC}"
 fi
 
-# Check if ports are available
+# Check if configured ports are available
 echo ""
-echo -e "${CYAN}Checking if ports 80 and 443 are available...${NC}"
-if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
+echo -e "${CYAN}Checking configured public ports...${NC}"
+if public_port_conflicts_exist; then
     # Only manage containers from this Compose project. Name-prefix filters
     # can accidentally stop the central proxy or another KVS site.
     KVS_CONTAINERS=$(docker ps \
@@ -1881,10 +2001,20 @@ if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
                 --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" 2>/dev/null | \
                 xargs -r docker stop 2>/dev/null || true
             echo -e "${GREEN}Existing containers stopped${NC}"
+        else
+            echo -e "${RED}ERROR: Cannot continue while the configured ports remain in use${NC}"
+            exit 1
+        fi
+
+        if public_port_conflicts_exist; then
+            echo -e "${RED}ERROR: Configured ports are still in use after stopping this project:${NC}"
+            printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
+            exit 1
         fi
     else
-        echo -e "${RED}WARNING: Ports 80/443 in use by non-KVS process${NC}"
-        ss -tuln | grep -E ':(80|443)\s'
+        echo -e "${RED}ERROR: Configured ports are in use by another process:${NC}"
+        printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
+        exit 1
     fi
 fi
 
@@ -2152,12 +2282,17 @@ run_step "Reloading Nginx" docker compose exec nginx nginx -s reload
 # Done
 progress_success "KVS Docker Setup Complete!"
 echo ""
-if [ "$USE_WWW" = "true" ]; then
-    echo -e "${CYAN}Website:${NC}     https://www.$DOMAIN"
-else
-    echo -e "${CYAN}Website:${NC}     https://$DOMAIN"
+PUBLIC_HTTPS_PORT_SUFFIX=""
+if [ "$PUBLIC_HTTPS_PORT" != "443" ]; then
+    PUBLIC_HTTPS_PORT_SUFFIX=":${PUBLIC_HTTPS_PORT}"
 fi
-echo -e "${CYAN}phpMyAdmin:${NC}  https://$DOMAIN/phpmyadmin"
+if [ "$USE_WWW" = "true" ]; then
+    PUBLIC_PROJECT_URL="https://www.${DOMAIN}${PUBLIC_HTTPS_PORT_SUFFIX}"
+else
+    PUBLIC_PROJECT_URL="https://${DOMAIN}${PUBLIC_HTTPS_PORT_SUFFIX}"
+fi
+echo -e "${CYAN}Website:${NC}     ${PUBLIC_PROJECT_URL}"
+echo -e "${CYAN}phpMyAdmin:${NC}  ${PUBLIC_PROJECT_URL}/phpmyadmin"
 echo -e "${CYAN}Database:${NC}    $DOMAIN"
 echo -e "${CYAN}DB User:${NC}     $DOMAIN"
 echo -e "${CYAN}Database credentials:${NC} saved in the mode-0600 .env file"
@@ -2180,6 +2315,7 @@ echo "  Login:    admin"
 echo "  Password: 123"
 echo ""
 echo -e "${RED}Change this immediately after first login${NC}"
+unset PUBLIC_PROJECT_URL
 
 # Mark end of installation in logs
 {

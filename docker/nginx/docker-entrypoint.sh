@@ -4,6 +4,22 @@ set -e
 DOMAIN="${DOMAIN:-example.com}"
 USE_WWW="${USE_WWW:-false}"
 SSL_PROVIDER="${SSL_PROVIDER:-selfsigned}"
+PROJECT_HTTPS_PORT="${PROJECT_HTTPS_PORT:-443}"
+
+case "$PROJECT_HTTPS_PORT" in
+    ''|*[!0-9]*)
+        echo "ERROR: PROJECT_HTTPS_PORT must be a numeric TCP port" >&2
+        exit 1
+        ;;
+esac
+if [ "$PROJECT_HTTPS_PORT" -lt 1 ] || [ "$PROJECT_HTTPS_PORT" -gt 65535 ]; then
+    echo "ERROR: PROJECT_HTTPS_PORT must be between 1 and 65535" >&2
+    exit 1
+fi
+HTTPS_PORT_SUFFIX=""
+if [ "$PROJECT_HTTPS_PORT" -ne 443 ]; then
+    HTTPS_PORT_SUFFIX=":${PROJECT_HTTPS_PORT}"
+fi
 
 # Generate self-signed cert if not exists (fallback until ACME runs)
 # Skip if SSL_PROVIDER=none (behind reverse proxy like Caddy)
@@ -42,7 +58,7 @@ if [ "$USE_WWW" = "true" ]; then
     server_name ${DOMAIN};
     ssl_certificate /etc/nginx/ssl/${DOMAIN}/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/${DOMAIN}/key.pem;
-    return 301 https://www.${DOMAIN}\$request_uri;
+    return 301 https://www.${DOMAIN}${HTTPS_PORT_SUFFIX}\$request_uri;
 }"
 else
     MAIN_SERVER_NAME="${DOMAIN}"
@@ -53,16 +69,17 @@ else
     server_name www.${DOMAIN};
     ssl_certificate /etc/nginx/ssl/${DOMAIN}/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/${DOMAIN}/key.pem;
-    return 301 https://${DOMAIN}\$request_uri;
+    return 301 https://${DOMAIN}${HTTPS_PORT_SUFFIX}\$request_uri;
 }"
 fi
 
-export DOMAIN MAIN_SERVER_NAME REDIRECT_HOST WWW_REDIRECT_BLOCK
+export DOMAIN MAIN_SERVER_NAME REDIRECT_HOST \
+    PROJECT_HTTPS_PORT HTTPS_PORT_SUFFIX WWW_REDIRECT_BLOCK
 
 # Generate site config from template (before official entrypoint runs)
 if [ -f /etc/nginx/templates/kvs.conf.tpl ]; then
     # shellcheck disable=SC2016
-    envsubst '${DOMAIN} ${MAIN_SERVER_NAME} ${REDIRECT_HOST} ${WWW_REDIRECT_BLOCK} ${KVS_ROOT} ${PHP_FPM_UPSTREAM} ${RESOLVER_LINE}' \
+    envsubst '${DOMAIN} ${MAIN_SERVER_NAME} ${REDIRECT_HOST} ${PROJECT_HTTPS_PORT} ${HTTPS_PORT_SUFFIX} ${WWW_REDIRECT_BLOCK} ${KVS_ROOT} ${PHP_FPM_UPSTREAM} ${RESOLVER_LINE}' \
         < /etc/nginx/templates/kvs.conf.tpl \
         > /etc/nginx/conf.d/kvs.conf
     echo "Generated kvs.conf for domain: ${DOMAIN} (USE_WWW=${USE_WWW})"
