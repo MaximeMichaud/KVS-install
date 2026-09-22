@@ -119,7 +119,7 @@ ${WWW_REDIRECT_BLOCK}
 # HTTP redirect + ACME challenge
 server {
     listen      80;
-    server_name ${DOMAIN} www.${DOMAIN};
+    server_name ${PUBLIC_SERVER_NAMES};
 
     # ACME challenge
     location ^~ /.well-known/acme-challenge/ {

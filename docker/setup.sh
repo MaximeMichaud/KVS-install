@@ -769,6 +769,14 @@ validate_email() {
     return 0
 }
 
+include_www_for_domain() {
+    local dot_count
+
+    [ "${USE_WWW:-false}" = "true" ] && return 0
+    dot_count=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
+    [ "$dot_count" -eq 1 ]
+}
+
 set_env_value() {
     local key="$1"
     local value="$2"
@@ -2025,7 +2033,10 @@ check_dns() {
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org)
     # Use getent instead of dig (more portable)
     DOMAIN_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
-    WWW_IP=$(getent hosts "www.$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
+    WWW_IP=""
+    if include_www_for_domain; then
+        WWW_IP=$(getent hosts "www.$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
+    fi
 
     dns_ok=true
     echo "Server IP: $SERVER_IP"
@@ -2035,11 +2046,13 @@ check_dns() {
         echo -e "  $DOMAIN: ${RED}MISMATCH${NC} -> $DOMAIN_IP (expected: $SERVER_IP)"
         dns_ok=false
     fi
-    if [ "$WWW_IP" = "$SERVER_IP" ]; then
-        echo -e "  www.$DOMAIN: ${GREEN}OK${NC} -> $WWW_IP"
-    else
-        echo -e "  www.$DOMAIN: ${RED}MISMATCH${NC} -> $WWW_IP (expected: $SERVER_IP)"
-        dns_ok=false
+    if include_www_for_domain; then
+        if [ "$WWW_IP" = "$SERVER_IP" ]; then
+            echo -e "  www.$DOMAIN: ${GREEN}OK${NC} -> $WWW_IP"
+        else
+            echo -e "  www.$DOMAIN: ${RED}MISMATCH${NC} -> $WWW_IP (expected: $SERVER_IP)"
+            dns_ok=false
+        fi
     fi
 
     if [ "$dns_ok" = false ]; then
@@ -2058,7 +2071,9 @@ while true; do
         echo -e "${RED}DNS not configured correctly!${NC}"
         echo "Please configure your DNS records:"
         echo "  - A record for $DOMAIN -> $SERVER_IP"
-        echo "  - A record for www.$DOMAIN -> $SERVER_IP"
+        if include_www_for_domain; then
+            echo "  - A record for www.$DOMAIN -> $SERVER_IP"
+        fi
         echo ""
         echo "Options:"
         echo "  1) Retry DNS check"
@@ -2229,7 +2244,10 @@ else
     echo "Issuing SSL certificate for $DOMAIN..."
 
     # Build acme.sh command
-    ACME_ARGS="--issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --keylength ec-256 --accountemail $EMAIL"
+    ACME_ARGS="--issue -d $DOMAIN --webroot /var/www/_letsencrypt --keylength ec-256 --accountemail $EMAIL"
+    if include_www_for_domain; then
+        ACME_ARGS="$ACME_ARGS -d www.$DOMAIN"
+    fi
     if [ "$SSL_PROVIDER" = "letsencrypt" ]; then
         ACME_ARGS="$ACME_ARGS --server letsencrypt"
     fi
@@ -2258,7 +2276,7 @@ else
         echo -e "${RED}SSL certificate issue failed${NC}"
         echo "$ACME_OUTPUT"
         echo "Site will use self-signed certificate until you run:"
-        echo "  docker compose exec acme acme.sh --issue -d $DOMAIN -d www.$DOMAIN --webroot /var/www/_letsencrypt --force"
+        echo "  docker compose exec acme acme.sh --issue -d $DOMAIN --webroot /var/www/_letsencrypt --force"
     fi
 fi
 
