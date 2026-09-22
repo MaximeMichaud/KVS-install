@@ -5,25 +5,8 @@ set -e
 #################################################################
 # Debug Logging Setup
 #################################################################
-readonly DEBUG_LOG="/opt/kvs/logs/setup-debug.log"
-readonly TRACE_LOG="/opt/kvs/logs/setup-trace.log"
-
-# Create logs directory
-mkdir -p /opt/kvs/logs 2>/dev/null || true
-
-# Initialize logs
-{
-    echo "========================================"
-    echo "KVS Docker Setup - $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "========================================"
-    echo ""
-} >> "$DEBUG_LOG" 2>/dev/null || true
-
-# Enable command tracing (set -x) to a separate log
-export PS4='+ $(date "+%H:%M:%S") ${BASH_SOURCE##*/}:${LINENO}: '
-exec 19>>"$TRACE_LOG" 2>/dev/null || exec 19>/dev/null
-BASH_XTRACEFD=19
-set -x
+readonly LOG_DIR="/opt/kvs/logs"
+readonly DEBUG_LOG="${LOG_DIR}/setup-debug.log"
 
 #################################################################
 # Dev mode flag parsing
@@ -82,6 +65,27 @@ EOF
             ;;
     esac
 done
+
+# Keep help and option validation available to every user, but reject any
+# operational invocation before logs, network checks, or host changes.
+if [ "$EUID" -ne 0 ]; then
+    echo "ERROR: Please run as root" >&2
+    exit 1
+fi
+
+# Create logs only after the privilege requirement has been satisfied.
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+chmod 700 "$LOG_DIR" 2>/dev/null || true
+# Remove traces created by older releases because they may contain credentials.
+rm -f "${LOG_DIR}/setup-trace.log" 2>/dev/null || true
+
+{
+    echo "========================================"
+    echo "KVS Docker Setup - $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "========================================"
+    echo ""
+} >> "$DEBUG_LOG" 2>/dev/null || true
+chmod 600 "$DEBUG_LOG" 2>/dev/null || true
 
 if [ "$DEV_MODE" = true ]; then
     echo ""
@@ -650,12 +654,6 @@ preflight_checks
 
 echo -e "${CYAN}=== KVS Docker Setup ===${NC}"
 echo ""
-
-# Check root
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}ERROR: Please run as root${NC}"
-    exit 1
-fi
 
 # Detect existing installation and warn
 # Look for KVS-related containers (any prefix ending with -php, -mariadb, etc.)
@@ -1964,7 +1962,6 @@ echo "To restart: docker compose up -d"
 echo ""
 echo -e "${CYAN}Debug logs:${NC}"
 echo "  Setup:  $DEBUG_LOG"
-echo "  Trace:  $TRACE_LOG"
 echo ""
 echo -e "${RED}=== SECURITY WARNING ===${NC}"
 echo -e "${YELLOW}Default admin credentials:${NC}"
