@@ -34,5 +34,6 @@ if [ "$USE_WWW" != "true" ]; then
 fi
 
 # Import database
-mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" < "$KVS_PATH/_INSTALL/install_db.sql"
+MYSQL_PWD="$MARIADB_PASSWORD" \
+    mariadb -h mariadb -u "$DOMAIN" "$DOMAIN" < "$KVS_PATH/_INSTALL/install_db.sql"
 log_info "Database imported successfully"

@@ -43,18 +43,21 @@ kvs_is_installed() {
 # Execute SQL query against MariaDB
 # Usage: db_exec "SELECT 1"
 db_exec() {
-    mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" -e "$1" 2>/dev/null
+    MYSQL_PWD="$MARIADB_PASSWORD" \
+        mariadb -h mariadb -u "$DOMAIN" "$DOMAIN" -e "$1" 2>/dev/null
 }
 
 # Execute SQL query and capture output
 # Usage: result=$(db_query "SELECT COUNT(*) FROM table")
 db_query() {
-    mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -N -e "$1" "$DOMAIN" 2>/dev/null
+    MYSQL_PWD="$MARIADB_PASSWORD" \
+        mariadb -h mariadb -u "$DOMAIN" -N -e "$1" "$DOMAIN" 2>/dev/null
 }
 
 # Check if database connection works
 db_is_ready() {
-    mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1
+    MYSQL_PWD="$MARIADB_PASSWORD" \
+        mariadb -h mariadb -u "$DOMAIN" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1
 }
 
 # Get project URL based on USE_WWW setting

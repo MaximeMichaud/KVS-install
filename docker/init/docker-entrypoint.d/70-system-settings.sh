@@ -29,7 +29,8 @@ else
 	GEOIP_UPDATE_CLAUSE=""
 fi
 
-if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 2>&1 <<-EOSQL
+if SQL_OUTPUT=$(MYSQL_PWD="$MARIADB_PASSWORD" \
+    mariadb -h mariadb -u "$DOMAIN" "$DOMAIN" 2>&1 <<-EOSQL
 	INSERT INTO ktvs_settings (section, satellite_prefix, value, added_date, version_control)
 	VALUES (
 		'system',
@@ -71,7 +72,9 @@ if SQL_OUTPUT=$(mariadb -h mariadb -u "$DOMAIN" -p"$MARIADB_PASSWORD" "$DOMAIN" 
     log_info "  - Server type: nginx"
     log_info "  - Memory limit: 256 MB"
     log_info "  - Upload limit: 2048 MB"
-    [ -n "$GEOIP_DB" ] && log_info "  - GeoIP: $GEOIP_DB"
+    if [ -n "$GEOIP_DB" ]; then
+        log_info "  - GeoIP: $GEOIP_DB"
+    fi
 else
     log_warn "Failed to update system settings: $SQL_OUTPUT"
 fi

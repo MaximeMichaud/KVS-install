@@ -548,6 +548,15 @@ progress_success() {
     fi
 }
 
+run_root_mariadb() {
+    docker compose exec -T mariadb sh -c '
+        [ -n "${MARIADB_ROOT_PASSWORD:-}" ] || exit 1
+        MYSQL_PWD=$MARIADB_ROOT_PASSWORD
+        export MYSQL_PWD
+        exec mariadb "$@"
+    ' sh "$@"
+}
+
 # Calculate and configure dynamic disk space limit for KVS
 # Formula: MIN_FREE = MAX(2048, MIN(32768, TOTAL_DISK_MB × 5%))
 configure_disk_space_limit() {
@@ -609,17 +618,17 @@ configure_disk_space_limit() {
     # Find the KVS options table and update the setting
     # KVS uses different table prefixes, so we detect it dynamically
     # Use || true to prevent set -e from crashing if DB query fails
-    OPTIONS_TABLE=$(docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -N -e \
+    OPTIONS_TABLE=$(run_root_mariadb -u root "$DOMAIN" -N -e \
         "SHOW TABLES LIKE '%options%';" 2>/dev/null | grep -E 'options$' | head -1) || OPTIONS_TABLE=""
 
     if [ -n "$OPTIONS_TABLE" ]; then
         # Update the disk space limit setting (|| true to prevent set -e crash)
         # KVS uses 'variable' column, not 'name'
-        docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -e \
+        run_root_mariadb -u root "$DOMAIN" -e \
             "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE variable='MAIN_SERVER_MIN_FREE_SPACE_MB';" 2>/dev/null || true
 
         # Also update storage server group limit
-        docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$DOMAIN" -e \
+        run_root_mariadb -u root "$DOMAIN" -e \
             "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE variable='SERVER_GROUP_MIN_FREE_SPACE_MB';" 2>/dev/null || true
 
         echo -e "${GREEN}✓ KVS disk space limit configured${NC}"
@@ -1998,7 +2007,7 @@ run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
 echo -n "  Waiting for MariaDB..."
 TRIES=0
 MAX_TRIES=90
-while ! docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" > /dev/null 2>&1; do
+while ! run_root_mariadb -u root -e "SELECT 1" > /dev/null 2>&1; do
     TRIES=$((TRIES + 1))
     if [ $TRIES -ge $MAX_TRIES ]; then
         echo -e " ${RED}✗${NC}"
@@ -2014,7 +2023,7 @@ echo -e " ${GREEN}✓${NC}"
 if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
     echo ""
     echo -e "${CYAN}Verifying existing database connection...${NC}"
-    if docker compose exec -T mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" -e "SELECT 1" > /dev/null 2>&1; then
+    if run_root_mariadb -u root -e "SELECT 1" > /dev/null 2>&1; then
         echo -e "${GREEN}✓ Connection successful - using existing database${NC}"
     else
         echo -e "${RED}✗ Cannot connect with saved credentials${NC}"
