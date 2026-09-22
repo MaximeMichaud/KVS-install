@@ -1513,9 +1513,44 @@ select_mode() {
     esac
 }
 
+configure_direct_tls_profile() {
+    local acme_container_names
+
+    case "${MODE}:${SSL_PROVIDER}" in
+        single:letsencrypt|single:zerossl) add_compose_profile direct-tls ;;
+        *)
+            remove_compose_profile direct-tls
+            if ! acme_container_names=$(docker ps -a --format '{{.Names}}' 2>/dev/null); then
+                echo -e "${RED}ERROR: Could not inspect ACME containers${NC}"
+                return 1
+            fi
+            if grep -Fxq "${SITE_PREFIX}-acme" <<< "$acme_container_names"; then
+                if ! docker stop "${SITE_PREFIX}-acme" >/dev/null; then
+                    echo -e "${RED}ERROR: Could not stop ${SITE_PREFIX}-acme${NC}"
+                    return 1
+                fi
+                if ! docker rm "${SITE_PREFIX}-acme" >/dev/null; then
+                    echo -e "${RED}ERROR: Could not remove ${SITE_PREFIX}-acme${NC}"
+                    return 1
+                fi
+            fi
+            if ! acme_container_names=$(docker ps -a --format '{{.Names}}' 2>/dev/null); then
+                echo -e "${RED}ERROR: Could not verify ACME container removal${NC}"
+                return 1
+            fi
+            if grep -Fxq "${SITE_PREFIX}-acme" <<< "$acme_container_names"; then
+                echo -e "${RED}ERROR: ${SITE_PREFIX}-acme is still present${NC}"
+                return 1
+            fi
+            ;;
+    esac
+}
+
 if [ "$MODE" = "single" ]; then
     select_mode
 fi
+
+configure_direct_tls_profile || exit $?
 
 # GeoIP database selection
 select_geoip() {
@@ -2212,72 +2247,210 @@ run_step "Starting Nginx" docker compose up -d --force-recreate nginx
 SSL_PROVIDER="${SSL_PROVIDER:-letsencrypt}"
 
 # Dev mode: intelligent SSL detection (reuse existing cert if available)
+nginx_has_public_certificate() {
+    local expected_provider="${1:-public}"
+
+    docker compose exec -T -e KVS_CERT_PROVIDER="$expected_provider" nginx sh -c '
+        cert="/etc/nginx/ssl/${DOMAIN}/cert.pem"
+        key="/etc/nginx/ssl/${DOMAIN}/key.pem"
+        [ -s "$cert" ] && [ -s "$key" ] || exit 1
+        san_entries=$(
+            openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null |
+                sed "1d; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d" |
+                tr "," "\n" |
+                sed "s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d"
+        ) || exit 1
+        [ -n "$san_entries" ] || exit 1
+        if printf "%s\n" "$san_entries" | grep -Ev "^DNS:" >/dev/null; then
+            exit 1
+        fi
+        actual_dns_names=$(
+            printf "%s\n" "$san_entries" |
+                sed -n "s/^DNS://p" | LC_ALL=C sort
+        ) || exit 1
+        expected_dns_names=$(
+            printf "%s\n" "$DOMAIN"
+            dot_count=$(printf %s "$DOMAIN" | tr -cd . | wc -c)
+            if [ "${USE_WWW:-false}" = true ] || [ "$dot_count" -eq 1 ]; then
+                printf "%s\n" "www.${DOMAIN}"
+            fi
+        )
+        expected_dns_names=$(
+            printf "%s\n" "$expected_dns_names" | LC_ALL=C sort
+        ) || exit 1
+        [ "$actual_dns_names" = "$expected_dns_names" ] || exit 1
+        not_before=$(openssl x509 -in "$cert" -noout -startdate) || exit 1
+        not_before=${not_before#notBefore=}
+        not_before_epoch=$(LC_ALL=C date -u -d "$not_before" +%s) || exit 1
+        now_epoch=$(date -u +%s) || exit 1
+        [ "$not_before_epoch" -le "$now_epoch" ] || exit 1
+        openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1 || exit 1
+        openssl x509 -in "$cert" -noout -checkhost "$DOMAIN" >/dev/null 2>&1 || exit 1
+        dot_count=$(printf %s "$DOMAIN" | tr -cd . | wc -c)
+        if [ "${USE_WWW:-false}" = true ] || [ "$dot_count" -eq 1 ]; then
+            openssl x509 -in "$cert" -noout -checkhost "www.${DOMAIN}" \
+                >/dev/null 2>&1 || exit 1
+        fi
+        subject=$(openssl x509 -in "$cert" -noout -subject -nameopt RFC2253) || exit 1
+        issuer=$(openssl x509 -in "$cert" -noout -issuer -nameopt RFC2253) || exit 1
+        [ "${subject#subject=}" != "${issuer#issuer=}" ] || exit 1
+        ca_bundle=/etc/ssl/certs/ca-certificates.crt
+        [ -s "$ca_bundle" ] || exit 1
+        openssl verify -purpose sslserver -CAfile "$ca_bundle" \
+            -untrusted "$cert" "$cert" >/dev/null 2>&1 || exit 1
+        case "$KVS_CERT_PROVIDER" in
+            public) ;;
+            letsencrypt)
+                case "$issuer" in
+                    *"O=Let"*"s Encrypt"*) ;;
+                    *) exit 1 ;;
+                esac
+                ;;
+            zerossl)
+                case "$issuer" in
+                    *"O=ZeroSSL"*|*"CN=ZeroSSL"*) ;;
+                    *) exit 1 ;;
+                esac
+                ;;
+            *) exit 1 ;;
+        esac
+        cert_public_key=$(openssl x509 -in "$cert" -pubkey -noout) || exit 1
+        private_public_key=$(openssl pkey -in "$key" -pubout -passin pass:) || exit 1
+        [ "$cert_public_key" = "$private_public_key" ]
+    ' >/dev/null 2>&1
+}
+
+get_configured_acme_api() {
+    docker compose exec -T acme sh -c '
+        domain=$1
+        config_file="/acme.sh/${domain}_ecc/${domain}.conf"
+        if [ ! -e "$config_file" ]; then
+            printf "%s\n" __KVS_ABSENT__
+            exit 0
+        fi
+        [ -f "$config_file" ] && [ -r "$config_file" ] || exit 1
+        api=$(sed -n "s/^Le_API=//p" "$config_file" | tail -n 1)
+        [ -n "$api" ] || {
+            printf "%s\n" __KVS_UNKNOWN__
+            exit 0
+        }
+        single_quote=$(printf "\047")
+        api=${api#"$single_quote"}
+        api=${api%"$single_quote"}
+        api=${api#\"}
+        api=${api%\"}
+        printf "%s\n" "$api"
+    ' sh "$DOMAIN"
+}
+
+acme_api_matches_provider() {
+    local api="$1"
+
+    case "$SSL_PROVIDER:$api" in
+        letsencrypt:*letsencrypt*) return 0 ;;
+        zerossl:*zerossl*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+configure_direct_acme_certificate() {
+    local acme_output
+    local acme_status=0
+    local configured_acme_api
+    local force_issuance=false
+    local -a acme_args
+
+    run_step "Starting ACME" docker compose up -d --force-recreate acme || return $?
+    sleep 3
+    echo "Issuing SSL certificate for $DOMAIN..."
+
+    acme_args=(
+        acme.sh --issue
+        -d "$DOMAIN"
+        --webroot /var/www/_letsencrypt
+        --keylength ec-256
+        --accountemail "$EMAIL"
+    )
+    if include_www_for_domain; then
+        acme_args+=( -d "www.${DOMAIN}" )
+    fi
+    if [ "$SSL_PROVIDER" = "letsencrypt" ]; then
+        acme_args+=( --server letsencrypt )
+    else
+        acme_args+=( --server zerossl )
+    fi
+    if ! configured_acme_api=$(get_configured_acme_api); then
+        echo -e "${RED}Could not inspect the configured ACME provider${NC}"
+        return 1
+    fi
+    if [ "$configured_acme_api" != __KVS_ABSENT__ ] &&
+        ! acme_api_matches_provider "$configured_acme_api"; then
+        force_issuance=true
+    fi
+    if ! nginx_has_public_certificate "$SSL_PROVIDER"; then
+        force_issuance=true
+    fi
+    if [ "$force_issuance" = true ]; then
+        acme_args+=( --force )
+    fi
+
+    if acme_output=$(docker compose exec -T acme "${acme_args[@]}" 2>&1); then
+        acme_status=0
+    else
+        acme_status=$?
+    fi
+    if [ "$acme_status" -ne 0 ] &&
+        ! { [ "$acme_status" -eq 2 ] &&
+            grep -Fq 'Domains not changed.' <<< "$acme_output" &&
+            grep -Eq 'Skipping|Skip' <<< "$acme_output"; }; then
+        echo -e "${RED}SSL certificate issue failed${NC}"
+        printf '%s\n' "$acme_output"
+        return 1
+    fi
+    if ! configured_acme_api=$(get_configured_acme_api) ||
+        ! acme_api_matches_provider "$configured_acme_api"; then
+        echo -e "${RED}ACME did not persist the requested certificate provider${NC}"
+        return 1
+    fi
+    if ! docker compose exec -T acme acme.sh --install-cert \
+        -d "$DOMAIN" \
+        --ecc \
+        --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
+        --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
+        --reloadcmd true; then
+        echo -e "${RED}SSL certificate installation failed${NC}"
+        return 1
+    fi
+    if ! nginx_has_public_certificate "$SSL_PROVIDER"; then
+        echo -e "${RED}Installed SSL certificate was not issued by the requested provider${NC}"
+        return 1
+    fi
+    run_step "Reloading Nginx after certificate installation" \
+        docker compose exec -T nginx nginx -s reload || return $?
+    echo -e "${GREEN}SSL certificate installed and validated${NC}"
+}
+
 if [ "${DEV_SSL_INTELLIGENT:-false}" = "true" ]; then
     echo ""
     echo "🔍 Dev mode: Checking for existing SSL certificate..."
 
-    # Check if acme-certs volume exists and contains a valid certificate
-    VOLUME_NAME="${COMPOSE_PROJECT_NAME}_acme-certs"
-
-    if docker volume inspect "$VOLUME_NAME" &>/dev/null; then
-        # Volume exists - check if certificate files exist for this domain
-        if docker run --rm -v "$VOLUME_NAME:/certs:ro" alpine \
-           sh -c "test -f /certs/${DOMAIN}/cert.pem && test -f /certs/${DOMAIN}/key.pem" 2>/dev/null; then
-            SSL_PROVIDER="letsencrypt"
-            echo -e "  ${GREEN}✓${NC} Found existing Let's Encrypt certificate - reusing (0s, no warnings)"
-        else
-            SSL_PROVIDER="selfsigned"
-            echo -e "  ${YELLOW}✓${NC} No existing certificate - using self-signed (fast, but browser warnings)"
-        fi
+    if nginx_has_public_certificate; then
+        SSL_PROVIDER="letsencrypt"
+        echo -e "  ${GREEN}✓${NC} Found a valid non-self-signed certificate - reusing it"
     else
         SSL_PROVIDER="selfsigned"
-        echo -e "  ${YELLOW}✓${NC} No acme-certs volume - using self-signed (fast, but browser warnings)"
+        echo -e "  ${YELLOW}✓${NC} No valid public certificate - using self-signed TLS"
     fi
+    set_env_value SSL_PROVIDER "$SSL_PROVIDER"
+    export SSL_PROVIDER
+    configure_direct_tls_profile
     echo ""
 fi
 
 if [ "$SSL_PROVIDER" = "selfsigned" ]; then
     echo -e "  ${GREEN}✓${NC} Using self-signed certificate"
 else
-    run_step "Starting ACME" docker compose up -d --force-recreate acme
-    sleep 3
-    echo "Issuing SSL certificate for $DOMAIN..."
-
-    # Build acme.sh command
-    ACME_ARGS="--issue -d $DOMAIN --webroot /var/www/_letsencrypt --keylength ec-256 --accountemail $EMAIL"
-    if include_www_for_domain; then
-        ACME_ARGS="$ACME_ARGS -d www.$DOMAIN"
-    fi
-    if [ "$SSL_PROVIDER" = "letsencrypt" ]; then
-        ACME_ARGS="$ACME_ARGS --server letsencrypt"
-    fi
-
-    ACME_OUTPUT=$(docker compose exec acme sh -c "acme.sh $ACME_ARGS" 2>&1) || true
-
-    if echo "$ACME_OUTPUT" | grep -q "Cert success"; then
-        # New certificate issued - install it
-        docker compose exec acme acme.sh --install-cert \
-            -d "$DOMAIN" \
-            --ecc \
-            --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
-            --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
-            --reloadcmd "true"
-        echo -e "${GREEN}SSL certificate installed${NC}"
-    elif echo "$ACME_OUTPUT" | grep -q "Skipping"; then
-        # Certificate still valid - just reinstall to ensure files are in place
-        docker compose exec acme acme.sh --install-cert \
-            -d "$DOMAIN" \
-            --ecc \
-            --key-file "/etc/nginx/ssl/${DOMAIN}/key.pem" \
-            --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
-            --reloadcmd "true" 2>/dev/null || true
-        echo -e "${GREEN}SSL certificate still valid, using existing${NC}"
-    else
-        echo -e "${RED}SSL certificate issue failed${NC}"
-        echo "$ACME_OUTPUT"
-        echo "Site will use self-signed certificate until you run:"
-        echo "  docker compose exec acme acme.sh --issue -d $DOMAIN --webroot /var/www/_letsencrypt --force"
-    fi
+    configure_direct_acme_certificate || exit $?
 fi
 
 # Step 6: Pull images and start all services

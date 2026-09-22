@@ -25,7 +25,6 @@ services:
       - nginx-includes:/etc/nginx/includes:ro
     depends_on:
       - php-fpm
-      - acme
     networks:
       kvs-network:
         aliases:
@@ -151,14 +150,13 @@ services:
     image: neilpang/acme.sh
     container_name: ${SITE_PREFIX:-kvs}-acme
     restart: unless-stopped
+    profiles:
+      - direct-tls
     command: daemon
-    environment:
-      - DEPLOY_DOCKER_CONTAINER_LABEL=sh.acme.autoload.domain=${DOMAIN}
     volumes:
       - acme-data:/acme.sh
       - acme-certs:/etc/nginx/ssl
       - letsencrypt-webroot:/var/www/_letsencrypt
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - kvs-network
 
