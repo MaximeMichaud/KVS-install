@@ -292,6 +292,57 @@ function script() {
   progress_success "KVS Installation Complete!"
   setupdone
 }
+
+find_kvs_archive() {
+  local archive_dir="${1:-/root}"
+  local candidate
+  local -a archives=()
+
+  for candidate in "$archive_dir"/KVS_*.zip; do
+    [[ -f "$candidate" ]] && archives+=("$candidate")
+  done
+
+  if ((${#archives[@]} == 0)); then
+    echo "Error: No KVS archive found in $archive_dir" >&2
+    return 1
+  fi
+  if ((${#archives[@]} > 1)); then
+    echo "Error: Multiple KVS archives found in $archive_dir; keep exactly one archive" >&2
+    return 1
+  fi
+
+  printf '%s\n' "${archives[0]}"
+}
+
+configure_php_for_kvs_archive() {
+  local archive="$1"
+  local archive_name="${archive##*/}"
+  local version_major
+  local version_minor
+  local version_patch
+
+  if [[ ! -f "$archive" ]]; then
+    echo "Error: KVS archive does not exist: $archive" >&2
+    return 1
+  fi
+  if [[ ! "$archive_name" =~ KVS_([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    echo "Error: Cannot determine the KVS version from archive: $archive_name" >&2
+    return 1
+  fi
+
+  version_major=$((10#${BASH_REMATCH[1]}))
+  version_minor=$((10#${BASH_REMATCH[2]}))
+  version_patch=$((10#${BASH_REMATCH[3]}))
+  PHP="7.4"
+  php_path="/usr/lib/php/20190902"
+  if ((version_major > 6 ||
+       (version_major == 6 && version_minor > 2) ||
+       (version_major == 6 && version_minor == 2 && version_patch >= 1))); then
+    PHP="8.1"
+    php_path="/usr/lib/php/20210902"
+  fi
+}
+
 function installQuestions() {
   if [[ $HEADLESS != "y" ]]; then
     yes '' | sed 20q
@@ -434,43 +485,18 @@ function installQuestions() {
       echo "Waiting for KVS .ZIP file in /root"
       echo "Press CTRL + C for exiting"
     done
-    file=$(ls /root/KVS_*.zip)
+    file=$(find_kvs_archive "${KVS_ARCHIVE_DIR:-/root}") || return $?
     ls -l "$file"
-    version=$(echo "$file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+')
-
-    # KVS Version comparison
-    ver_compare() {
-      [[ "$1" = "$(echo -e "$1\n$2" | sort -V | head -n1)" ]]
-    }
-
-    # Determining PHP version and PHP path
-    # Official KVS requirements:
-    # 7.0.x, 6.4, 6.3, 6.2.1+ → PHP 8.1
-    # 6.2.0, 6.1, 6.0, 5.5 → PHP 7.4
-    PHP="7.4"
-    php_path="/usr/lib/php/20190902"
-
-    # Extract major.minor.patch for 6.2.0 vs 6.2.1+ distinction
-    version_major=$(echo "$version" | cut -d. -f1)
-    version_minor=$(echo "$version" | cut -d. -f2)
-    version_patch=$(echo "$version" | cut -d. -f3)
-
-    # KVS 6.2.1+ supports PHP 8.1 (but NOT 6.2.0)
-    if [ "$version_major" -eq 6 ] && [ "$version_minor" -eq 2 ] && [ "$version_patch" -eq 0 ]; then
-      # 6.2.0 specifically → PHP 7.4
-      PHP="7.4"
-      php_path="/usr/lib/php/20190902"
-    elif ver_compare "6.2.1" "$version"; then
-      # 6.2.1+ (incl. 7.0.x) → PHP 8.1
-      PHP="8.1"
-      php_path="/usr/lib/php/20210902"
-    fi
+    configure_php_for_kvs_archive "$file" || return $?
 
     echo "We are ready to start the installation !"
     APPROVE_INSTALL=${APPROVE_INSTALL:-n}
     if [[ $APPROVE_INSTALL =~ n ]]; then
       read -n1 -r -p "Press any key to continue..."
     fi
+  else
+    file=$(find_kvs_archive "${KVS_ARCHIVE_DIR:-/root}") || return $?
+    configure_php_for_kvs_archive "$file" || return $?
   fi
 }
 
