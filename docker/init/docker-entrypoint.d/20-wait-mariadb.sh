@@ -13,8 +13,10 @@ MAX_TRIES=30
 until db_is_ready; do
     TRIES=$((TRIES + 1))
     if [ $TRIES -ge $MAX_TRIES ]; then
-        log_error "Cannot connect to MariaDB after 1 minute"
-        log_error "Check credentials: DOMAIN=$DOMAIN"
+        log_error "Cannot connect to MariaDB after 1 minute as user $DOMAIN"
+        log_error "Check the credentials in .env for DOMAIN=$DOMAIN"
+        log_error "A volume initialized for another domain has no $DOMAIN database or user:"
+        log_error "restore that DOMAIN in .env or delete the volume to start from scratch"
         exit 1
     fi
     echo "  Waiting for MariaDB... ($TRIES/$MAX_TRIES)"

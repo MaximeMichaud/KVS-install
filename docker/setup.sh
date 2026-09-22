@@ -2444,6 +2444,43 @@ if [ -z "${KVS_ADMIN_PASSWORD:-}" ]; then
     fi
 fi
 
+# The MariaDB image creates the database and user named in .env only when it
+# initializes an empty volume. A volume initialized for another domain keeps
+# that domain's schema and user, and kvs-init later fails with an opaque
+# connection error. Explain the mismatch here, while the fix is still cheap.
+verify_existing_database_domain() {
+    local schema_count
+    local user_count
+
+    if ! schema_count=$(run_root_mariadb -u root -N -e \
+            "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${DOMAIN}';" \
+            2>/dev/null) ||
+        ! user_count=$(run_root_mariadb -u root -N -e \
+            "SELECT COUNT(*) FROM mysql.user WHERE user='${DOMAIN}';" \
+            2>/dev/null); then
+        echo -e "${YELLOW}Could not verify that the existing database belongs to ${DOMAIN}${NC}"
+        return 0
+    fi
+    schema_count=${schema_count//[[:space:]]/}
+    user_count=${user_count//[[:space:]]/}
+    if [ "$schema_count" = "1" ] && [ "$user_count" = "1" ]; then
+        echo -e "${GREEN}✓ Database and user for ${DOMAIN} are present${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}✗ The existing database volume was initialized for another domain${NC}"
+    echo ""
+    echo "MariaDB creates the ${DOMAIN} database and user only when it initializes"
+    echo "an empty volume. This volume already belongs to a different site, so the"
+    echo "KVS initialization would fail with a connection error."
+    echo ""
+    echo "Please either:"
+    echo "  1. Restore the original DOMAIN in .env"
+    echo "  2. Re-run setup and choose 'Delete old database' to start ${DOMAIN} from scratch"
+    echo "  3. Create the ${DOMAIN} database and user in MariaDB before re-running setup"
+    return 1
+}
+
 # Verify credentials if keeping existing database
 if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
     echo ""
@@ -2465,6 +2502,7 @@ if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
         echo "  3. Manually reset password in MariaDB container"
         exit 1
     fi
+    verify_existing_database_domain || exit $?
 fi
 
 # Step 3: Initialize phpMyAdmin and KVS
