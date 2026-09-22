@@ -46,22 +46,6 @@ server {
         access_log off;
     }
 
-    # Handle PHP
-    location ~ \.php$ {
-        ${RESOLVER_LINE}
-        fastcgi_pass ${PHP_FPM_UPSTREAM};
-        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
-        include fastcgi_params;
-        fastcgi_hide_header X-Powered-By;
-
-        # Timeouts
-        fastcgi_connect_timeout 60;
-        fastcgi_send_timeout 300;
-        fastcgi_read_timeout 300;
-        fastcgi_buffer_size 64k;
-        fastcgi_buffers 4 64k;
-    }
-
     # KVS internal locations
     location ~* /blocks/.*\.php$ { internal; }
     location ~* /langs/.*\.php$ { internal; }
@@ -106,6 +90,22 @@ server {
 
     location ~ ^/(admin/include|tmp)/ {
         deny all;
+    }
+
+    # Handle PHP after all protected regular expression locations
+    location ~ \.php$ {
+        ${RESOLVER_LINE}
+        fastcgi_pass ${PHP_FPM_UPSTREAM};
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
+
+        # Timeouts
+        fastcgi_connect_timeout 60;
+        fastcgi_send_timeout 300;
+        fastcgi_read_timeout 300;
+        fastcgi_buffer_size 64k;
+        fastcgi_buffers 4 64k;
     }
 }
 
