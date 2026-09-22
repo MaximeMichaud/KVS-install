@@ -56,11 +56,18 @@ RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o 
 # Symlink PHP to /usr/bin (KVS scripts expect it there)
 RUN ln -sf /usr/local/bin/php /usr/bin/php
 
-# Setup crontab
+# Match the KVS bind-mount ownership used by the PHP-FPM container.
+RUN groupmod --gid 1000 www-data \
+    && usermod --uid 1000 --gid 1000 www-data
+
+# Install system crontabs. Files in /etc/cron.d include an explicit user field,
+# so the KVS task can run unprivileged while the binary updater remains root.
 COPY crontab /etc/cron.d/kvs-cron
-RUN chmod 0644 /etc/cron.d/kvs-cron \
-    && crontab /etc/cron.d/kvs-cron \
-    && touch /var/log/cron.log
+COPY yt-dlp-update.cron /etc/cron.d/yt-dlp-update
+RUN chown root:root /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update \
+    && chmod 0644 /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update \
+    && install -o www-data -g www-data -m 0660 /dev/null /var/log/cron.log \
+    && install -o root -g root -m 0600 /dev/null /var/log/yt-dlp-update.log
 
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
