@@ -3,6 +3,45 @@
 # Applies .env changes without full reinstall
 
 set -e
+set -o pipefail
+
+# Keep help and option validation available from anywhere, before any check
+# that assumes an installed stack.
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --help)
+            cat << 'EOF'
+KVS Docker Reconfiguration Script
+
+USAGE:
+    ./reconfigure.sh [OPTIONS]
+
+DESCRIPTION:
+    Applies the settings currently stored in .env to a running
+    installation, without reinstalling it. It synchronizes the TLS
+    services, rewrites the KVS server URLs when USE_WWW or the public
+    HTTPS port changed, recreates Nginx with the updated environment,
+    and verifies the persisted state afterwards.
+
+    Switching MODE between single and multi is not handled here,
+    because it requires the orchestration performed by setup.sh.
+
+OPTIONS:
+    --help      Show this help message
+
+REQUIREMENTS:
+    Run it from the docker directory of the installation. The .env file
+    must exist and the stack must already be running.
+EOF
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage"
+            exit 1
+            ;;
+    esac
+done
 
 # Colors
 RED='\033[0;31m'
