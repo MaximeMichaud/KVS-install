@@ -1049,18 +1049,180 @@ configure_dynamic_php_fpm() {
   # echo "Max Spare Servers: $max_spare_servers"
 }
 
+read_crontab() {
+  local user="$1"
+  local error_file
+  local output
+  local status
+
+  error_file=$(mktemp) || return $?
+  if [[ "$user" == root ]]; then
+    output=$(LC_ALL=C crontab -l 2>"$error_file")
+  else
+    output=$(LC_ALL=C crontab -u "$user" -l 2>"$error_file")
+  fi
+  status=$?
+
+  if ((status == 0)); then
+    rm -f "$error_file"
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  if ((status == 1)) && grep -Fq "no crontab for ${user}" "$error_file"; then
+    rm -f "$error_file"
+    return 0
+  fi
+
+  cat "$error_file" >&2
+  rm -f "$error_file"
+  return "$status"
+}
+
 insert_cronjob() {
-  echo "* Installing cronjob.. "
+  local original_root_crontab
+  local original_www_data_crontab
+  local new_root_crontab
+  local new_www_data_crontab
+  local rollback_status
+  local status
 
-  crontab -l | {
-    cat
-    echo "#KVS"
-    echo "* * * * * cd /var/www/$DOMAIN/admin/include && /usr/bin/php$PHP cron.php > /dev/null 2>&1"
-    echo "#yt-dlp Automatic Update"
+  echo "* Installing cron jobs..."
+
+  original_root_crontab=$(read_crontab root) || return $?
+  original_www_data_crontab=$(read_crontab www-data) || return $?
+
+  # Keep the privileged binary updater in root's crontab, but remove every
+  # historical KVS PHP job, regardless of domain. Those jobs are migrated to
+  # www-data below before root's crontab is changed.
+  new_root_crontab=$(printf '%s\n' "$original_root_crontab" | awk '
+    function kvs_domain(line, offset, remainder, suffix, tail, domain) {
+      if (line ~ /^[[:space:]]*#/) return ""
+      if (match(line, /cd[[:space:]]+\/var\/www\//) == 0) return ""
+      offset = RSTART + RLENGTH
+      remainder = substr(line, offset)
+      suffix = index(remainder, "/admin/include")
+      if (suffix <= 1) return ""
+      domain = substr(remainder, 1, suffix - 1)
+      if (domain !~ /^[A-Za-z0-9.-]+$/) return ""
+      tail = substr(remainder, suffix)
+      if (tail !~ /^\/admin\/include[[:space:]]+&&[[:space:]]+\/usr\/bin\/php[0-9.]*[[:space:]]+cron\.php([[:space:]]|$)/) return ""
+      return tolower(domain)
+    }
+
+    $0 == "# BEGIN KVS CRON" { skip = 1; next }
+    $0 == "# END KVS CRON" { skip = 0; next }
+    $0 ~ /^# BEGIN KVS CRON: / { skip = 1; next }
+    $0 ~ /^# END KVS CRON: / { skip = 0; next }
+    $0 == "# BEGIN KVS YT-DLP UPDATE" { skip = 1; next }
+    $0 == "# END KVS YT-DLP UPDATE" { skip = 0; next }
+    skip { next }
+    $0 == "#KVS" || $0 == "#yt-dlp Automatic Update" { next }
+    kvs_domain($0) != "" { next }
+    index($0, "yt-dlp/releases/latest/download/yt-dlp") { next }
+    { print }
+  ')
+
+  # Normalize and merge KVS jobs by domain. Existing www-data entries take
+  # precedence over migrated root entries, and the current domain is rebuilt
+  # with the PHP version selected by this installation.
+  new_www_data_crontab=$({
+    printf '%s\n' "$original_www_data_crontab"
+    printf '%s\n' '__KVS_ROOT_CRONTAB__'
+    printf '%s\n' "$original_root_crontab"
+  } | awk \
+    -v current_domain="${DOMAIN,,}" \
+    -v current_job="* * * * * cd /var/www/$DOMAIN/admin/include && /usr/bin/php$PHP cron.php > /dev/null 2>&1" '
+    function kvs_domain(line, offset, remainder, suffix, tail, domain) {
+      if (line ~ /^[[:space:]]*#/) return ""
+      if (match(line, /cd[[:space:]]+\/var\/www\//) == 0) return ""
+      offset = RSTART + RLENGTH
+      remainder = substr(line, offset)
+      suffix = index(remainder, "/admin/include")
+      if (suffix <= 1) return ""
+      domain = substr(remainder, 1, suffix - 1)
+      if (domain !~ /^[A-Za-z0-9.-]+$/) return ""
+      tail = substr(remainder, suffix)
+      if (tail !~ /^\/admin\/include[[:space:]]+&&[[:space:]]+\/usr\/bin\/php[0-9.]*[[:space:]]+cron\.php([[:space:]]|$)/) return ""
+      return tolower(domain)
+    }
+
+    $0 == "__KVS_ROOT_CRONTAB__" { root_source = 1; next }
+    {
+      domain = kvs_domain($0)
+      if (root_source) {
+        if (domain != "" && domain != current_domain &&
+            !(domain in seen) && !(domain in root_jobs)) {
+          root_jobs[domain] = $0
+          root_order[++root_count] = domain
+        }
+        next
+      }
+
+      if ($0 == "#KVS" || $0 == "# BEGIN KVS CRON" || $0 == "# END KVS CRON" ||
+          $0 ~ /^# BEGIN KVS CRON: / || $0 ~ /^# END KVS CRON: /) next
+
+      if (domain != "") {
+        if (domain == current_domain) {
+          if (!current_emitted) {
+            print "# BEGIN KVS CRON: " current_domain
+            print current_job
+            print "# END KVS CRON: " current_domain
+            current_emitted = 1
+          }
+        } else if (!(domain in seen)) {
+            seen[domain] = 1
+            print "# BEGIN KVS CRON: " domain
+            print $0
+            print "# END KVS CRON: " domain
+        }
+        next
+      }
+
+      print
+    }
+
+    END {
+      for (i = 1; i <= root_count; i++) {
+        domain = root_order[i]
+        print "# BEGIN KVS CRON: " domain
+        print root_jobs[domain]
+        print "# END KVS CRON: " domain
+      }
+      if (!current_emitted) {
+        print "# BEGIN KVS CRON: " current_domain
+        print current_job
+        print "# END KVS CRON: " current_domain
+      }
+    }
+  ')
+
+  # Install the unprivileged jobs first. If updating root fails, restore the
+  # previous www-data snapshot so the migration is not left half-applied.
+  printf '%s\n' "$new_www_data_crontab" | crontab -u www-data -
+  status=$?
+  ((status == 0)) || return "$status"
+
+  {
+    [[ -n "$new_root_crontab" ]] && printf '%s\n' "$new_root_crontab"
+    echo "# BEGIN KVS YT-DLP UPDATE"
     echo "0 0 * * * /bin/bash -c 'curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp' > /dev/null 2>&1"
-} | crontab -
+    echo "# END KVS YT-DLP UPDATE"
+  } | crontab -
+  status=$?
+  if ((status != 0)); then
+    printf '%s\n' "$original_www_data_crontab" | crontab -u www-data - \
+      >/dev/null 2>&1
+    rollback_status=$?
+    if ((rollback_status != 0)); then
+      echo "ERROR: Failed to restore www-data crontab after root crontab update failure" >&2
+      echo "Restore the saved crontab state manually before retrying." >&2
+      return "$rollback_status"
+    fi
+    return "$status"
+  fi
 
-  echo "* Cronjob installed!"
+  echo "* Cron jobs installed!"
 }
 
 function install_ioncube() {
