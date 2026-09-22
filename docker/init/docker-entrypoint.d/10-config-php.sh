@@ -1,7 +1,26 @@
 #!/bin/bash
+set -e
+
 # Configure KVS PHP files (setup.php, setup_db.php)
 # shellcheck disable=SC1091
 source /init/lib/common.sh
+
+escape_php_single_quoted() {
+    local value="$1"
+
+    value=${value//\\/\\\\}
+    value=${value//\'/\\\'}
+    printf '%s' "$value"
+}
+
+escape_sed_replacement() {
+    local value="$1"
+
+    value=${value//\\/\\\\}
+    value=${value//&/\\&}
+    value=${value//#/\\#}
+    printf '%s' "$value"
+}
 
 # Configure setup.php
 if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
@@ -39,10 +58,16 @@ fi
 # Configure database connection
 if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
     log_info "Configuring database connection..."
+    DB_PASSWORD_PHP=$(escape_php_single_quoted "$MARIADB_PASSWORD")
+    DB_PASSWORD_SED=$(escape_sed_replacement "$DB_PASSWORD_PHP")
+
     sed -i "s|'DB_HOST','[^']*'|'DB_HOST','mariadb'|" "$KVS_PATH/admin/include/setup_db.php"
     sed -i "s|'DB_LOGIN','[^']*'|'DB_LOGIN','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
-    sed -i "s|'DB_PASS','[^']*'|'DB_PASS','$MARIADB_PASSWORD'|" "$KVS_PATH/admin/include/setup_db.php"
+    sed -E -i "s#('DB_PASS',[[:space:]]*)'([^'\\\\]|\\\\.)*'#\\1'${DB_PASSWORD_SED}'#" \
+        "$KVS_PATH/admin/include/setup_db.php"
     sed -i "s|'DB_DEVICE','[^']*'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH/admin/include/setup_db.php"
+    chown 1000:1000 "$KVS_PATH/admin/include/setup_db.php"
+    chmod 600 "$KVS_PATH/admin/include/setup_db.php"
     log_info "Database configured: mariadb/$DOMAIN"
 else
     log_warn "setup_db.php not found, skipping database configuration"
