@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+
 # Clean up installation files
 # shellcheck disable=SC1091
 source /init/lib/common.sh

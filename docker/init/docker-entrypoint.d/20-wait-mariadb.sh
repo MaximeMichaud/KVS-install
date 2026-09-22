@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+
 # Wait for MariaDB to be ready
 # shellcheck disable=SC1091
 source /init/lib/common.sh
