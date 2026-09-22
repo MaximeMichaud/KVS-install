@@ -130,6 +130,16 @@ if [[ "$HEADLESS" == "y" ]]; then
     # Note: PREFLIGHT_BYPASS can be set as environment variable (no default)
 fi
 
+KVS_ADMIN_PASSWORD_PROVIDED=false
+if [ -n "${KVS_ADMIN_PASSWORD:-}" ]; then
+    KVS_ADMIN_PASSWORD_PROVIDED=true
+    if [ "${#KVS_ADMIN_PASSWORD}" -lt 20 ]; then
+        echo "ERROR: KVS_ADMIN_PASSWORD must contain at least 20 characters" >&2
+        exit 1
+    fi
+fi
+KVS_ADMIN_PASSWORD_GENERATED=false
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -1980,6 +1990,13 @@ ask_existing_volume() {
 
 ask_existing_volume
 
+if [ "$KVS_ADMIN_PASSWORD_PROVIDED" != true ] &&
+    [ "${KEEP_EXISTING_DB:-false}" != true ]; then
+    KVS_ADMIN_PASSWORD=$(openssl rand -base64 30 | tr -d '/+=' | cut -c 1-32)
+    KVS_ADMIN_PASSWORD_GENERATED=true
+fi
+export KVS_ADMIN_PASSWORD
+
 # Generate passwords if still defaults
 source .env
 if [ "$MARIADB_ROOT_PASSWORD" = "CHANGE_ME_ROOT_PASSWORD" ]; then  # pragma: allowlist secret
@@ -2199,6 +2216,21 @@ while ! run_root_mariadb -u root -e "SELECT 1" > /dev/null 2>&1; do
 done
 echo -e " ${GREEN}✓${NC}"
 
+# Older installations may still contain the archive's default admin account.
+# Rotate it during this run without changing an already-hardened credential.
+if [ -z "${KVS_ADMIN_PASSWORD:-}" ]; then
+    DEFAULT_ADMIN_COUNT=$(
+        run_root_mariadb -u root "$DOMAIN" -N -e \
+            "SELECT COUNT(*) FROM ktvs_admin_users WHERE user_id=1 AND login='admin' AND pass=MD5(CONCAT('pass:',MD5('123')));" \
+            2>/dev/null || echo 0
+    )
+    if [ "$DEFAULT_ADMIN_COUNT" -gt 0 ]; then
+        KVS_ADMIN_PASSWORD=$(openssl rand -base64 30 | tr -d '/+=' | cut -c 1-32)
+        KVS_ADMIN_PASSWORD_GENERATED=true
+        export KVS_ADMIN_PASSWORD
+    fi
+fi
+
 # Verify credentials if keeping existing database
 if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
     echo ""
@@ -2234,6 +2266,14 @@ fi
 progress_bar "Initializing KVS"
 run_step "Initializing KVS" \
     docker compose --profile setup run --rm --no-deps kvs-init
+if [ "$KVS_ADMIN_PASSWORD_GENERATED" = true ]; then
+    echo -e "  ${CYAN}Admin login:${NC} admin"
+    echo -e "  ${CYAN}One-time admin password:${NC} $KVS_ADMIN_PASSWORD"
+    echo -e "  ${YELLOW}Save it now. It is not written to .env or the setup log.${NC}"
+elif [ "$KVS_ADMIN_PASSWORD_PROVIDED" = true ]; then
+    echo -e "  ${GREEN}The password supplied through KVS_ADMIN_PASSWORD was applied.${NC}"
+fi
+unset KVS_ADMIN_PASSWORD
 
 # Step 4: Configure KVS disk space limit
 progress_bar "Configuring disk space limit"
@@ -2500,12 +2540,13 @@ echo ""
 echo -e "${CYAN}Debug logs:${NC}"
 echo "  Setup:  $DEBUG_LOG"
 echo ""
-echo -e "${RED}=== SECURITY WARNING ===${NC}"
-echo -e "${YELLOW}Default admin credentials:${NC}"
-echo "  Login:    admin"
-echo "  Password: 123"
-echo ""
-echo -e "${RED}Change this immediately after first login${NC}"
+echo -e "${CYAN}Admin account:${NC}"
+if [ "$KVS_ADMIN_PASSWORD_GENERATED" = true ] ||
+    [ "$KVS_ADMIN_PASSWORD_PROVIDED" = true ]; then
+    echo "  Non-default password applied and reported after initialization."
+else
+    echo "  Existing non-default password preserved and verified."
+fi
 unset PUBLIC_PROJECT_URL
 
 # Mark end of installation in logs
