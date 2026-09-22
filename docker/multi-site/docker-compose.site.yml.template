@@ -175,11 +175,12 @@ services:
   # phpMyAdmin Init
   # ===========================================================================
   phpmyadmin-init:
-    image: phpmyadmin:fpm-alpine
+    image: alpine:latest
     container_name: ${SITE_PREFIX}-phpmyadmin-init
-    entrypoint: ["/bin/sh", "-c", "cp -r /var/www/html/* /usr/share/phpmyadmin/ && echo 'phpMyAdmin copied'"]
+    entrypoint: ["/usr/local/bin/init-phpmyadmin"]
     volumes:
       - phpmyadmin-data:/usr/share/phpmyadmin
+      - ../../../phpmyadmin/init.sh:/usr/local/bin/init-phpmyadmin:ro
     profiles:
       - setup
 
