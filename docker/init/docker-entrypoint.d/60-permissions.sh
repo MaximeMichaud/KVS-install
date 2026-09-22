@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+
 # Verify and fix KVS permissions
 # This is a failsafe that mirrors install_permissions.sh from KVS
 # shellcheck disable=SC1091
@@ -79,9 +81,22 @@ fix_dir "$KVS_PATH/admin/data/engine" "777" "true"
 # Final ownership
 chown -R 1000:1000 "$KVS_PATH"
 
-# Re-run KVS permission script if available
+# Run the archive's permission script once at the end. KVS releases use xargs
+# without --no-run-if-empty, which calls chmod with no operands on fresh sites.
+# Patch only that portability issue in the disposable _INSTALL copy.
 if [ -f "$KVS_PATH/_INSTALL/install_permissions.sh" ]; then
-    (cd "$KVS_PATH/_INSTALL" && bash install_permissions.sh) || true
+    sed -E -i 's/\|[[:space:]]*xargs[[:space:]]+chmod/| xargs -r chmod/g' \
+        "$KVS_PATH/_INSTALL/install_permissions.sh"
+    if ! (cd "$KVS_PATH/_INSTALL" && bash install_permissions.sh); then
+        log_warn "KVS permission script reported an error after container safeguards were applied"
+    fi
+fi
+
+# The archive permission script makes most PHP files world-readable. Database
+# credentials only need to be readable by PHP-FPM's owner and root-run cron.
+if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
+    chown 1000:1000 "$KVS_PATH/admin/include/setup_db.php"
+    fix_file "$KVS_PATH/admin/include/setup_db.php" "600"
 fi
 
 if [ "$PERM_FIXED" -eq 0 ]; then
