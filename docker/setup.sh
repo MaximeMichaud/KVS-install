@@ -139,6 +139,17 @@ if [ -n "${KVS_ADMIN_PASSWORD:-}" ]; then
 fi
 KVS_ADMIN_PASSWORD_GENERATED=false
 
+# KVS support access opt-out. The request is captured before .env is sourced
+# so that a value stored by an earlier run cannot override an explicit one.
+DISABLE_KVS_SUPPORT_ACCESS_REQUEST="${DISABLE_KVS_SUPPORT_ACCESS:-}"
+case "$DISABLE_KVS_SUPPORT_ACCESS_REQUEST" in
+    ''|true|false) ;;
+    *)
+        echo "ERROR: DISABLE_KVS_SUPPORT_ACCESS must be true or false" >&2
+        exit 1
+        ;;
+esac
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -2215,6 +2226,22 @@ fi
 # Reload .env
 source .env
 
+# Persist the support access opt-out so later runs and the compose files see
+# the same value; kvs-init acts on true only, false leaves KVS untouched.
+if [ -n "$DISABLE_KVS_SUPPORT_ACCESS_REQUEST" ]; then
+    set_env_value DISABLE_KVS_SUPPORT_ACCESS "$DISABLE_KVS_SUPPORT_ACCESS_REQUEST"
+fi
+DISABLE_KVS_SUPPORT_ACCESS=$(sed -n 's/^DISABLE_KVS_SUPPORT_ACCESS=//p' .env | head -n 1)
+DISABLE_KVS_SUPPORT_ACCESS=${DISABLE_KVS_SUPPORT_ACCESS:-false}
+case "$DISABLE_KVS_SUPPORT_ACCESS" in
+    true|false) ;;
+    *)
+        echo -e "${RED}ERROR: DISABLE_KVS_SUPPORT_ACCESS in .env must be true or false${NC}"
+        exit 1
+        ;;
+esac
+export DISABLE_KVS_SUPPORT_ACCESS
+
 resolve_public_port_configuration || exit $?
 set_env_value PROJECT_HTTPS_PORT "$PUBLIC_HTTPS_PORT"
 PROJECT_HTTPS_PORT="$PUBLIC_HTTPS_PORT"
@@ -2811,6 +2838,11 @@ if [ "$KVS_ADMIN_PASSWORD_GENERATED" = true ] ||
     echo "  Non-default password applied and reported after initialization."
 else
     echo "  Existing non-default password preserved and verified."
+fi
+if [ "$DISABLE_KVS_SUPPORT_ACCESS" = "true" ]; then
+    echo "  KVS support access disabled (ENABLE_KVS_SUPPORT_ACCESS=0); the admin dashboard can re-enable it."
+else
+    echo "  KVS support access left as configured in KVS (enabled by default). Set DISABLE_KVS_SUPPORT_ACCESS=true to turn it off."
 fi
 unset PUBLIC_PROJECT_URL
 
