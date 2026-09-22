@@ -541,6 +541,23 @@ function install_yt-dlp() {
   [[ ! -e /usr/local/bin/youtube-dl ]] && ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
 }
 
+validate_kvs_domain() {
+  local domain="${1,,}"
+  local label
+  local -a labels
+
+  if [[ -z "$domain" || ${#domain} -gt 64 ]] ||
+     [[ ! "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$ ]]; then
+    return 1
+  fi
+
+  IFS='.' read -r -a labels <<< "$domain"
+  for label in "${labels[@]}"; do
+    [[ ${#label} -le 63 ]] || return 1
+  done
+  return 0
+}
+
 function whatisdomain() {
   mkdir -p /root/tmp
   cp KVS_* /root/tmp/
@@ -568,8 +585,9 @@ function whatisdomain() {
     fi
   fi
 
-  # Validate domain format
-  if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+  DOMAIN=${DOMAIN,,}
+  # Validate both DNS syntax and the MariaDB identifier length.
+  if ! validate_kvs_domain "$DOMAIN"; then
     echo "Error: Invalid or empty domain extracted: '$DOMAIN'"
     exit 1
   fi
@@ -1212,6 +1230,7 @@ function dockerInstall() {
   local archive_domain
   archive_domain=${kvs_file#*[}
   archive_domain=${archive_domain%]*}
+  archive_domain=${archive_domain,,}
 
   # Setup .env file
   if [ ! -f .env ]; then
@@ -1220,9 +1239,12 @@ function dockerInstall() {
   fi
 
   # Update .env with domain from archive
-  if [[ -n "$archive_domain" ]] && [[ "$archive_domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+  if [[ -n "$archive_domain" ]] && validate_kvs_domain "$archive_domain"; then
     sed -i "s/^DOMAIN=.*/DOMAIN=$archive_domain/" .env
     echo "Domain set to: ${green}$archive_domain${normal}"
+  elif [[ -n "$archive_domain" ]]; then
+    echo "${red}Invalid archive domain: $archive_domain${normal}" >&2
+    return 1
   fi
 
   # Email, SSL provider, and password prompts are handled by setup.sh
