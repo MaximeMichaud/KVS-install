@@ -51,7 +51,7 @@ EXAMPLES:
     ./setup.sh --dev
 
     # Headless production (CI/CD)
-    HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com ./setup.sh
+    HEADLESS=y DOMAIN=mysite.com EMAIL=admin@mysite.com ./setup.sh
 
     # Bypass pre-flight warnings (e.g., low disk space)
     PREFLIGHT_BYPASS=y ./setup.sh
@@ -106,7 +106,7 @@ if [ "$DEV_MODE" = true ]; then
     export DNS_CHOICE=2              # Continue anyway (localhost testing)
     export MANTICORE_CHOICE=2        # Skip Manticore
     export DOMAIN="${DOMAIN:-maximemichaud.ca}"  # Default test domain
-    export EMAIL="${EMAIL:-dev@localhost}"
+    export EMAIL="${EMAIL:-dev@localhost.local}"
 
     # Docker build flags
     DOCKER_BUILD_FLAGS="--no-cache"
@@ -139,6 +139,7 @@ NC='\033[0m'
 
 readonly DEBIAN_11_EOL_DATE="2026-08-31"
 readonly DEBIAN_11_EOL_SOURCE="https://endoflife.date/debian"
+readonly MAX_SITE_PREFIX_LENGTH=235
 
 debian11_support_ended() {
     local today
@@ -666,6 +667,17 @@ if [ "$EXISTING_CONTAINERS" -gt 0 ] || [ "$EXISTING_VOLUMES" -gt 0 ]; then
     echo ""
 fi
 
+# Preserve explicit environment overrides before loading .env. Docker Compose
+# gives shell variables precedence over .env, so the setup script must do the
+# same in headless mode.
+KVS_DOMAIN_OVERRIDE="${DOMAIN:-}"
+KVS_EMAIL_OVERRIDE_SET=false
+KVS_EMAIL_OVERRIDE=""
+if [[ -v EMAIL ]]; then
+    KVS_EMAIL_OVERRIDE_SET=true
+    KVS_EMAIL_OVERRIDE="$EMAIL"
+fi
+
 # Check if .env exists
 if [ ! -f .env ]; then
     if [ -f .env.example ]; then
@@ -676,6 +688,7 @@ if [ ! -f .env ]; then
         exit 1
     fi
 fi
+chmod 600 .env
 
 # Load environment
 source .env
@@ -683,10 +696,29 @@ source .env
 # Domain validation
 validate_domain() {
     local domain="$1"
+    local label
+    local -a labels
+
+    # The domain is also used directly as the MariaDB database identifier.
+    if [ -z "$domain" ] || [ "${#domain}" -gt 64 ]; then
+        return 1
+    fi
     if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
         return 1
     fi
+
+    IFS='.' read -r -a labels <<< "$domain"
+    for label in "${labels[@]}"; do
+        [ "${#label}" -le 63 ] || return 1
+    done
     return 0
+}
+
+validate_site_prefix() {
+    local prefix="$1"
+
+    [ -n "$prefix" ] && [ "${#prefix}" -le "$MAX_SITE_PREFIX_LENGTH" ] &&
+        [[ "$prefix" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
 }
 
 # Email validation
@@ -698,22 +730,130 @@ validate_email() {
     return 0
 }
 
+set_env_value() {
+    local key="$1"
+    local value="$2"
+    local env_owner
+    local temporary
+    local temporary_owner
+    local line
+    local matches=0
+
+    [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    if ! env_owner=$(stat -c '%u:%g' .env) ||
+        ! temporary=$(mktemp ./.env.tmp.XXXXXX); then
+        return 1
+    fi
+    if ! sed "/^${key}=/d" .env > "$temporary" ||
+        ! printf '%s=%s\n' "$key" "$value" >> "$temporary" ||
+        ! chmod 600 "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    if ! temporary_owner=$(stat -c '%u:%g' "$temporary"); then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    if [ "$temporary_owner" != "$env_owner" ] &&
+        ! chown "$env_owner" "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$line" = "${key}=${value}" ]; then
+            matches=$((matches + 1))
+        fi
+    done < "$temporary"
+    if [ "$matches" -ne 1 ] || ! mv -f -- "$temporary" .env; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+}
+
+remove_env_value() {
+    local key="$1"
+    sed -i "/^${key}=/d" .env
+}
+
+add_compose_profile() {
+    local profile="$1"
+    local profiles
+
+    profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' .env | tail -n 1)
+    case ",${profiles}," in
+        *",${profile},"*) ;;
+        ",,") profiles="$profile" ;;
+        *) profiles="${profiles},${profile}" ;;
+    esac
+    set_env_value COMPOSE_PROFILES "$profiles"
+    COMPOSE_PROFILES="$profiles"
+    export COMPOSE_PROFILES
+}
+
+remove_compose_profile() {
+    local profile="$1"
+    local profiles
+    local filtered=""
+    local item
+    local -a profile_items
+
+    profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' .env | tail -n 1)
+    IFS=',' read -r -a profile_items <<< "$profiles"
+    for item in "${profile_items[@]}"; do
+        [ -n "$item" ] || continue
+        [ "$item" = "$profile" ] && continue
+        if [ -n "$filtered" ]; then
+            filtered="${filtered},${item}"
+        else
+            filtered="$item"
+        fi
+    done
+    set_env_value COMPOSE_PROFILES "$filtered"
+    COMPOSE_PROFILES="$filtered"
+    export COMPOSE_PROFILES
+}
+
+if [ -n "$KVS_DOMAIN_OVERRIDE" ]; then
+    DOMAIN="$KVS_DOMAIN_OVERRIDE"
+fi
+
+# DNS names are case-insensitive. Keep a single canonical form so the setup
+# and the multi-site manager generate identical paths, aliases, and routes.
+DOMAIN=${DOMAIN,,}
+
+if [ "$KVS_EMAIL_OVERRIDE_SET" = true ]; then
+    EMAIL="$KVS_EMAIL_OVERRIDE"
+fi
+
 # Prompt for domain
 if [ "$DOMAIN" = "example.com" ]; then
+    if [ "${HEADLESS:-}" = "y" ]; then
+        echo -e "${RED}ERROR: Set DOMAIN to a real domain in headless mode${NC}"
+        exit 1
+    fi
+
     while true; do
         echo -n "Enter your domain (e.g., mysite.com): "
         read -r DOMAIN
+        DOMAIN=${DOMAIN,,}
         if validate_domain "$DOMAIN"; then
-            sed -i "s/DOMAIN=example.com/DOMAIN=$DOMAIN/" .env
             break
         else
             echo -e "${RED}Invalid domain format. Please try again.${NC}"
         fi
     done
+elif ! validate_domain "$DOMAIN"; then
+    echo -e "${RED}ERROR: Invalid domain format: $DOMAIN${NC}"
+    exit 1
 fi
+
+set_env_value DOMAIN "$DOMAIN"
+export DOMAIN EMAIL
 
 # Site prefix for container naming (multi-site support)
 select_site_prefix() {
+    local generated_prefix
     echo ""
     echo -e "${CYAN}Container Prefix (for multi-site support)${NC}"
 
@@ -722,9 +862,10 @@ select_site_prefix() {
     DEFAULT_PREFIX="${DOMAIN%.*}"
     # Sanitize: lowercase, replace dots/underscores with hyphens
     DEFAULT_PREFIX=$(echo "$DEFAULT_PREFIX" | tr '[:upper:]' '[:lower:]' | tr '._' '-')
+    generated_prefix="kvs-${DEFAULT_PREFIX}"
 
     echo "Container names will be: {prefix}-php, {prefix}-mariadb, etc."
-    echo "  Default: kvs-${DEFAULT_PREFIX} (e.g., kvs-${DEFAULT_PREFIX}-php)"
+    echo "  Default: ${generated_prefix} (e.g., ${generated_prefix}-php)"
 
     # Skip prompt if already set (headless mode)
     if [[ -z "$PREFIX_CHOICE" ]]; then
@@ -747,16 +888,16 @@ select_site_prefix() {
                 echo -n "Enter custom prefix (e.g., kvs-mysite): "
         read -r SITE_PREFIX
                 # Validate: lowercase, alphanumeric and hyphens only
-                if [[ "$SITE_PREFIX" =~ ^[a-z][a-z0-9-]*$ ]]; then
+                if validate_site_prefix "$SITE_PREFIX"; then
                     break
                 else
-                    echo -e "${RED}Invalid prefix. Use lowercase letters, numbers, and hyphens only.${NC}"
+                    echo -e "${RED}Invalid prefix. Use up to ${MAX_SITE_PREFIX_LENGTH} lowercase letters, numbers, hyphens, or underscores.${NC}"
                 fi
             done
             echo -e "${GREEN}Using custom prefix: ${SITE_PREFIX}${NC}"
             ;;
         *)
-            SITE_PREFIX="kvs-${DEFAULT_PREFIX}"
+            SITE_PREFIX="$generated_prefix"
             echo -e "${GREEN}Using prefix: ${SITE_PREFIX}${NC}"
             ;;
     esac
@@ -772,8 +913,16 @@ select_site_prefix() {
 
 # Only ask about prefix if using default
 source .env
+if [ "$KVS_EMAIL_OVERRIDE_SET" = true ]; then
+    EMAIL="$KVS_EMAIL_OVERRIDE"
+fi
 if [ "$SITE_PREFIX" = "kvs" ]; then
     select_site_prefix
+fi
+
+if ! validate_site_prefix "$SITE_PREFIX"; then
+    echo -e "${RED}ERROR: Invalid site prefix in .env: $SITE_PREFIX${NC}"
+    exit 1
 fi
 
 # Ensure COMPOSE_PROJECT_NAME matches SITE_PREFIX (for existing .env files)
@@ -818,25 +967,46 @@ case $SSL_CHOICE in
         ;;
 esac
 
-# Prompt for email only if using letsencrypt or zerossl
-if [ "$SSL_PROVIDER" != "selfsigned" ] && [ "$EMAIL" = "admin@example.com" ]; then
-    # Use EMAIL from environment if set (headless mode)
-    if [[ -n "$KVS_EMAIL" ]]; then
+# Email is optional for self-signed certificates. ACME providers require a
+# valid address after all environment and legacy overrides have been applied.
+if [ "$SSL_PROVIDER" = "selfsigned" ]; then
+    if [ -n "${EMAIL:-}" ] && ! validate_email "$EMAIL"; then
+        echo -e "${RED}ERROR: Invalid email format: $EMAIL${NC}"
+        exit 1
+    fi
+    set_env_value EMAIL "${EMAIL:-}"
+else
+    # The .env.example placeholder is well-formed but ACME providers reject
+    # it, so treat it as unset.
+    if [ "${EMAIL:-}" = "admin@example.com" ]; then
+        EMAIL=""
+    fi
+    if [ -z "${EMAIL:-}" ] && [[ -n "${KVS_EMAIL:-}" ]]; then
         EMAIL="$KVS_EMAIL"
-        sed -i "s/EMAIL=admin@example.com/EMAIL=$EMAIL/" .env
-    else
+    fi
+
+    if ! validate_email "${EMAIL:-}"; then
+        if [ "${HEADLESS:-}" = "y" ]; then
+            if [ -z "${EMAIL:-}" ]; then
+                echo -e "${RED}ERROR: Set EMAIL to a valid address in headless mode${NC}"
+            else
+                echo -e "${RED}ERROR: Invalid email format: $EMAIL${NC}"
+            fi
+            exit 1
+        fi
+
         while true; do
             echo -n "Enter your email (required for $SSL_PROVIDER): "
-        read -r EMAIL
+            read -r EMAIL
             if validate_email "$EMAIL"; then
-                sed -i "s/EMAIL=admin@example.com/EMAIL=$EMAIL/" .env
                 break
-            else
-                echo -e "${RED}Invalid email format. Please try again.${NC}"
             fi
+            echo -e "${RED}Invalid email format. Please try again.${NC}"
         done
     fi
+    set_env_value EMAIL "$EMAIL"
 fi
+export EMAIL
 
 # MariaDB version selection with endoflife.date API
 select_mariadb_version() {
@@ -1146,14 +1316,16 @@ select_cache() {
 
     case $CACHE_CHOICE in
         2)
-            sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=memcached/" .env
+            remove_compose_profile dragonfly
+            add_compose_profile memcached
             echo -e "${GREEN}Selected Memcached${NC}"
             # Remove orphan dragonfly container if exists (port conflict)
             docker stop "${SITE_PREFIX}-dragonfly" 2>/dev/null || true
             docker rm "${SITE_PREFIX}-dragonfly" 2>/dev/null || true
             ;;
         *)
-            sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=dragonfly/" .env
+            remove_compose_profile memcached
+            add_compose_profile dragonfly
             echo -e "${GREEN}Selected Dragonfly${NC}"
             # Remove orphan memcached container if exists (port conflict)
             docker stop "${SITE_PREFIX}-memcached" 2>/dev/null || true
@@ -1322,20 +1494,21 @@ select_manticore() {
     fi
 
     if [ "$MANTICORE_CHOICE" = "1" ]; then
-        echo "ENABLE_MANTICORE=true" >> .env
-        # Add manticore to COMPOSE_PROFILES (supports multiple profiles)
-        CURRENT_PROFILES=$(grep "^COMPOSE_PROFILES=" .env | cut -d'=' -f2)
-        if [[ "$CURRENT_PROFILES" != *"manticore"* ]]; then
-            if [ -n "$CURRENT_PROFILES" ]; then
-                sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=${CURRENT_PROFILES},manticore/" .env
-            else
-                sed -i "s/COMPOSE_PROFILES=.*/COMPOSE_PROFILES=manticore/" .env
-            fi
-        fi
+        remove_env_value ENABLE_MANTICORE
+        set_env_value ENABLE_MANTICORE true
+        ENABLE_MANTICORE=true
+        export ENABLE_MANTICORE
+        add_compose_profile manticore
         echo -e "${GREEN}✓ Manticore Search enabled${NC}"
         echo "  External Search plugin will be auto-configured during installation"
     else
-        echo "ENABLE_MANTICORE=false" >> .env
+        remove_env_value ENABLE_MANTICORE
+        set_env_value ENABLE_MANTICORE false
+        ENABLE_MANTICORE=false
+        export ENABLE_MANTICORE
+        remove_compose_profile manticore
+        docker stop "${SITE_PREFIX}-manticore" >/dev/null 2>&1 || true
+        docker rm "${SITE_PREFIX}-manticore" >/dev/null 2>&1 || true
         echo -e "${YELLOW}Manticore Search disabled${NC}"
     fi
 }
@@ -1626,13 +1799,13 @@ ask_existing_volume
 source .env
 if [ "$MARIADB_ROOT_PASSWORD" = "CHANGE_ME_ROOT_PASSWORD" ]; then  # pragma: allowlist secret
     MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
-    sed -i "s|MARIADB_ROOT_PASSWORD=CHANGE_ME_ROOT_PASSWORD|MARIADB_ROOT_PASSWORD=$MARIADB_ROOT_PASSWORD|" .env
+    set_env_value MARIADB_ROOT_PASSWORD "$MARIADB_ROOT_PASSWORD"
     echo -e "${GREEN}Generated MariaDB root password${NC}"
 fi
 
 if [ "$MARIADB_PASSWORD" = "CHANGE_ME_KVS_PASSWORD" ]; then  # pragma: allowlist secret
     MARIADB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
-    sed -i "s|MARIADB_PASSWORD=CHANGE_ME_KVS_PASSWORD|MARIADB_PASSWORD=$MARIADB_PASSWORD|" .env
+    set_env_value MARIADB_PASSWORD "$MARIADB_PASSWORD"
     echo -e "${GREEN}Generated MariaDB KVS password${NC}"
 fi
 
@@ -1947,9 +2120,7 @@ fi
 echo -e "${CYAN}phpMyAdmin:${NC}  https://$DOMAIN/phpmyadmin"
 echo -e "${CYAN}Database:${NC}    $DOMAIN"
 echo -e "${CYAN}DB User:${NC}     $DOMAIN"
-echo -e "${CYAN}DB Password:${NC} $MARIADB_PASSWORD"
-echo ""
-echo -e "${CYAN}Credentials saved in .env file${NC}"
+echo -e "${CYAN}Database credentials:${NC} saved in the mode-0600 .env file"
 echo ""
 if [ -f docker-compose.override.yml ]; then
     echo -e "${CYAN}KVS Files:${NC}   /var/www/$DOMAIN"
