@@ -1518,17 +1518,148 @@ function update() {
 }
 
 function updatephpMyAdmin() {
-    rm -rf "${PHPMYADMIN_INSTALL_DIR:?}"/*
-    PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
-    curl -fsSL "${PHPMYADMIN_URL}" -o phpmyadmin.tar.gz
-    mkdir -p "${PHPMYADMIN_INSTALL_DIR}"
-    tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${PHPMYADMIN_INSTALL_DIR}"
-    rm phpmyadmin.tar.gz
-    mkdir /usr/share/phpmyadmin/tmp || exit
-    chown www-data:www-data "${PHPMYADMIN_INSTALL_DIR}/tmp"
-    chmod 700 "${PHPMYADMIN_INSTALL_DIR}/tmp"
-    randomBlowfishSecret=$(openssl rand -base64 22)
-    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "${PHPMYADMIN_INSTALL_DIR}/config.sample.inc.php" >"${PHPMYADMIN_INSTALL_DIR}/config.inc.php"
+    local install_dir="${1:-$PHPMYADMIN_INSTALL_DIR}"
+    local download_page="${2:-$PHPMYADMIN_DOWNLOAD_PAGE}"
+    local install_parent
+    local work_dir
+    local new_dir
+    local old_dir
+    local archive
+    local download_page_content
+    local phpmyadmin_url
+    local random_blowfish_secret
+    local install_metadata
+    local install_mode
+    local install_uid
+    local install_gid
+    local status
+    local old_moved=false
+
+    install_parent=$(dirname "$install_dir") || return $?
+    mkdir -p "$install_parent" || return $?
+    if [[ -e "$install_dir" || -L "$install_dir" ]]; then
+      if [[ ! -d "$install_dir" ]]; then
+        echo "phpMyAdmin update failed: installation path is not a directory" >&2
+        return 1
+      fi
+      install_metadata=$(stat -Lc '%a %u %g' "$install_dir") || return $?
+      read -r install_mode install_uid install_gid <<< "$install_metadata"
+    else
+      install_metadata=$(stat -Lc '%u %g' "$install_parent") || return $?
+      read -r install_uid install_gid <<< "$install_metadata"
+      install_mode=755
+    fi
+
+    work_dir=$(mktemp -d "${install_dir}.update.XXXXXX") || return $?
+    new_dir="$work_dir/new"
+    old_dir="$work_dir/old"
+    archive="$work_dir/phpmyadmin.tar.gz"
+
+    download_page_content=$(curl -fsSL "$download_page")
+    status=$?
+    if ((status != 0)); then
+      echo "phpMyAdmin update failed: cannot fetch the download page" >&2
+      rm -rf "$work_dir"
+      return "$status"
+    fi
+
+    phpmyadmin_url=$(printf '%s\n' "$download_page_content" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
+    if [[ -z "$phpmyadmin_url" ]]; then
+      echo "phpMyAdmin update failed: no download URL found" >&2
+      rm -rf "$work_dir"
+      return 1
+    fi
+
+    curl -fsSL "$phpmyadmin_url" -o "$archive"
+    status=$?
+    if ((status != 0)); then
+      echo "phpMyAdmin update failed: archive download failed" >&2
+      rm -rf "$work_dir"
+      return "$status"
+    fi
+
+    mkdir -p "$new_dir" || {
+      status=$?
+      rm -rf "$work_dir"
+      return "$status"
+    }
+    tar xzf "$archive" --strip-components=1 -C "$new_dir"
+    status=$?
+    if ((status != 0)); then
+      echo "phpMyAdmin update failed: invalid archive" >&2
+      rm -rf "$work_dir"
+      return "$status"
+    fi
+    if [[ ! -f "$new_dir/config.sample.inc.php" ]]; then
+      echo "phpMyAdmin update failed: config.sample.inc.php is missing" >&2
+      rm -rf "$work_dir"
+      return 1
+    fi
+
+    mkdir -p "$new_dir/tmp" || {
+      status=$?
+      rm -rf "$work_dir"
+      return "$status"
+    }
+    chown www-data:www-data "$new_dir/tmp" || {
+      status=$?
+      rm -rf "$work_dir"
+      return "$status"
+    }
+    chmod 700 "$new_dir/tmp" || {
+      status=$?
+      rm -rf "$work_dir"
+      return "$status"
+    }
+    random_blowfish_secret=$(openssl rand -base64 22)
+    status=$?
+    if ((status != 0)); then
+      rm -rf "$work_dir"
+      return "$status"
+    fi
+    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$random_blowfish_secret'|" \
+      "$new_dir/config.sample.inc.php" >"$new_dir/config.inc.php"
+    status=$?
+    if ((status != 0)); then
+      rm -rf "$work_dir"
+      return "$status"
+    fi
+
+    chown "$install_uid:$install_gid" "$new_dir" || {
+      status=$?
+      rm -rf "$work_dir"
+      return "$status"
+    }
+    chmod "$install_mode" "$new_dir" || {
+      status=$?
+      rm -rf "$work_dir"
+      return "$status"
+    }
+
+    if [[ -e "$install_dir" || -L "$install_dir" ]]; then
+      mv "$install_dir" "$old_dir"
+      status=$?
+      if ((status != 0)); then
+        rm -rf "$work_dir"
+        return "$status"
+      fi
+      old_moved=true
+    fi
+
+    mv "$new_dir" "$install_dir"
+    status=$?
+    if ((status != 0)); then
+      if [[ "$old_moved" == true ]]; then
+        if ! mv "$old_dir" "$install_dir"; then
+          echo "phpMyAdmin rollback failed; previous files remain in $old_dir" >&2
+          return "$status"
+        fi
+      fi
+      rm -rf "$work_dir"
+      return "$status"
+    fi
+
+    rm -rf "$work_dir"
 }
 
 main() {
