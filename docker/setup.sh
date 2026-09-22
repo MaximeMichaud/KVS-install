@@ -1336,62 +1336,132 @@ detect_ioncube() {
 
 # PHP version selection based on KVS version
 # Official requirements from kvs-cli CheckCommand.php
+# Versions with an official php:<version>-fpm image this stack can build.
+readonly SUPPORTED_PHP_VERSIONS="7.4 8.1 8.2 8.3 8.4"
+
+php_version_is_supported() {
+    local candidate="$1"
+    local supported
+
+    for supported in $SUPPORTED_PHP_VERSIONS; do
+        [ "$candidate" = "$supported" ] && return 0
+    done
+    return 1
+}
+
+# Read the version KVS documents for the archive in kvs-archive/. Prints
+# nothing and fails when the archive or its version cannot be read.
+kvs_documented_php_version() {
+    local kvs_file
+    local kvs_version
+    local major
+    local minor
+    local patch
+
+    kvs_file=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
+    [ -n "$kvs_file" ] || return 1
+
+    kvs_version=$(basename "$kvs_file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    [ -n "$kvs_version" ] || return 1
+
+    major=$(echo "$kvs_version" | cut -d. -f1)
+    minor=$(echo "$kvs_version" | cut -d. -f2)
+    patch=$(echo "$kvs_version" | cut -d. -f3)
+
+    # 7.0.x, 6.4, 6.3, 6.2.1+ -> PHP 8.1
+    # 6.2.0, 6.1, 6.0, 5.x    -> PHP 7.4
+    if [ "$major" -lt 6 ] ||
+        { [ "$major" -eq 6 ] && [ "$minor" -lt 2 ]; } ||
+        { [ "$major" -eq 6 ] && [ "$minor" -eq 2 ] && [ "$patch" -eq 0 ]; }; then
+        printf '%s\t%s\n' "$kvs_version" "7.4"
+    else
+        printf '%s\t%s\n' "$kvs_version" "8.1"
+    fi
+}
+
+# Apply the PHP version to build the PHP-FPM and cron images with.
+#
+# An IonCube encoded archive is locked to the version its encoder targeted:
+# the loader refuses a file encoded for any other one, so the documented
+# version is enforced. An unencoded archive carries no such constraint, so
+# the operator picks the version.
 select_php_version() {
+    local marker
+    local kvs_version
+    local documented
+    local requested
+    local choice
+
+    # KVS_PHP_VERSION is the operator override. It carries the KVS_ prefix
+    # every environment input uses, which also keeps `source .env` from
+    # overwriting it with the stored PHP_VERSION.
+    requested="${KVS_PHP_VERSION:-}"
+
     echo ""
     echo -e "${CYAN}Checking KVS version for PHP compatibility...${NC}"
 
-    # Find KVS archive and extract version
-    KVS_FILE=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
-    if [ -z "$KVS_FILE" ]; then
-        echo -e "${YELLOW}KVS archive not found yet. Using default PHP 8.1${NC}"
-        return
-    fi
-
-    # Extract version from filename (KVS_X.X.X_domain.zip)
-    KVS_VERSION=$(basename "$KVS_FILE" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-
-    if [ -z "$KVS_VERSION" ]; then
-        echo -e "${YELLOW}Could not detect KVS version. Using default PHP 8.1${NC}"
-        return
-    fi
-
-    echo "Detected KVS version: $KVS_VERSION"
-
-    # Version comparison (major.minor.patch)
-    KVS_MAJOR=$(echo "$KVS_VERSION" | cut -d. -f1)
-    KVS_MINOR=$(echo "$KVS_VERSION" | cut -d. -f2)
-    KVS_PATCH=$(echo "$KVS_VERSION" | cut -d. -f3)
-
-    # Official KVS PHP requirements:
-    # 7.0.x, 6.4, 6.3, 6.2.1+ → PHP 8.1
-    # 6.2.0            → PHP 7.1-7.4
-    # 6.1, 6.0         → PHP 7.1-7.4
-    # 5.5              → PHP 7.2-7.4
-
-    if [ "$KVS_MAJOR" -lt 6 ]; then
-        # KVS 5.x → PHP 7.4
-        echo -e "${YELLOW}KVS $KVS_VERSION requires PHP 7.2-7.4${NC}"
-        echo -e "${YELLOW}Warning: PHP 7.x is EOL. Consider upgrading KVS.${NC}"
-        sed -i "s/PHP_VERSION=.*/PHP_VERSION=7.4/" .env
-        echo "Set PHP version to 7.4"
-    elif [ "$KVS_MAJOR" -eq 6 ] && [ "$KVS_MINOR" -lt 2 ]; then
-        # KVS 6.0-6.1 → PHP 7.4
-        echo -e "${YELLOW}KVS $KVS_VERSION requires PHP 7.1-7.4${NC}"
-        echo -e "${YELLOW}Warning: PHP 7.x is EOL. Consider upgrading KVS.${NC}"
-        sed -i "s/PHP_VERSION=.*/PHP_VERSION=7.4/" .env
-        echo "Set PHP version to 7.4"
-    elif [ "$KVS_MAJOR" -eq 6 ] && [ "$KVS_MINOR" -eq 2 ] && [ "$KVS_PATCH" -eq 0 ]; then
-        # KVS 6.2.0 → PHP 7.4
-        echo -e "${YELLOW}KVS 6.2.0 requires PHP 7.1-7.4${NC}"
-        echo -e "${YELLOW}Warning: Upgrade to KVS 6.2.1+ for PHP 8.1 support.${NC}"
-        sed -i "s/PHP_VERSION=.*/PHP_VERSION=7.4/" .env
-        echo "Set PHP version to 7.4"
+    if marker=$(kvs_documented_php_version); then
+        kvs_version=${marker%%$'\t'*}
+        documented=${marker#*$'\t'}
+        echo "Detected KVS version: $kvs_version"
     else
-        # KVS 6.2.1+, 6.3.x, 6.4.x, 7.0.x → PHP 8.1
-        echo "KVS $KVS_VERSION requires PHP 8.1"
-        sed -i "s/PHP_VERSION=.*/PHP_VERSION=8.1/" .env
-        echo -e "${GREEN}Set PHP 8.1${NC}"
+        kvs_version=""
+        documented="8.1"
+        echo -e "${YELLOW}Could not read the KVS version. Using PHP $documented${NC}"
     fi
+
+    if [ -n "$requested" ] &&
+        ! php_version_is_supported "$requested"; then
+        echo -e "${RED}ERROR: Unsupported PHP version: $requested${NC}"
+        echo "Supported versions: $SUPPORTED_PHP_VERSIONS"
+        exit 1
+    fi
+
+    if [ "${IONCUBE:-YES}" = "YES" ]; then
+        if [ -n "$requested" ] &&
+            [ "$requested" != "$documented" ]; then
+            echo -e "${YELLOW}WARNING: the archive is IonCube encoded and its files were${NC}"
+            echo -e "${YELLOW}encoded for PHP $documented. Building PHP $requested makes${NC}"
+            echo -e "${YELLOW}the loader refuse every encoded file, so the site returns 500.${NC}"
+            echo -e "${YELLOW}Proceeding because KVS_PHP_VERSION was set explicitly.${NC}"
+            set_env_value PHP_VERSION "$requested"
+            echo "Set PHP version to $requested"
+            return
+        fi
+
+        if [ "$documented" = "7.4" ]; then
+            echo -e "${YELLOW}KVS $kvs_version requires PHP 7.4${NC}"
+            echo -e "${YELLOW}Warning: PHP 7.x is EOL. Consider upgrading KVS.${NC}"
+        else
+            echo "KVS ${kvs_version:-archive} requires PHP $documented"
+        fi
+        set_env_value PHP_VERSION "$documented"
+        echo -e "${GREEN}Set PHP $documented${NC}"
+        return
+    fi
+
+    # Unencoded archive: no encoder to satisfy, so any supported version runs.
+    echo ""
+    echo -e "${CYAN}PHP Version${NC}"
+    echo "The archive is not IonCube encoded, so any supported version can run it."
+    echo "KVS documents PHP $documented for this release; newer versions are untested"
+    echo "by Kernel Team."
+
+    choice="$requested"
+    if [ -z "$choice" ] && [ "${HEADLESS:-}" != "y" ]; then
+        echo -n "PHP version to build [$SUPPORTED_PHP_VERSIONS] (default: $documented): "
+        read -r choice
+    fi
+    choice=${choice:-$documented}
+
+    if ! php_version_is_supported "$choice"; then
+        echo -e "${RED}ERROR: Unsupported PHP version: $choice${NC}"
+        echo "Supported versions: $SUPPORTED_PHP_VERSIONS"
+        exit 1
+    fi
+
+    set_env_value PHP_VERSION "$choice"
+    echo -e "${GREEN}Set PHP $choice${NC}"
 }
 
 # IonCube selection
@@ -1462,9 +1532,6 @@ fi
 
 echo -e "${GREEN}KVS archive found${NC}"
 
-# Now select PHP version based on KVS
-select_php_version
-
 # Auto-detect IonCube encoding
 detect_ioncube
 
@@ -1475,6 +1542,9 @@ fi
 
 # Reload .env to get user's IonCube choice
 source .env
+
+# Select PHP last: the IonCube decision above constrains which versions run.
+select_php_version
 
 # Configure JIT if IonCube is disabled (PHP 8.0+ only, incompatible with IonCube)
 if [ "$IONCUBE" = "NO" ]; then
