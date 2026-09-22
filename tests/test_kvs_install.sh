@@ -122,6 +122,79 @@ test_headless_php_detection() {
   [[ $status -ne 0 ]] || fail "headless detection accepted a missing KVS archive" || return 1
 }
 
+test_php_version_choice_for_unencoded_archive() {
+  local temp_dir
+  local archive
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  HEADLESS=y
+  KVS_ARCHIVE_DIR="$temp_dir"
+  archive="$temp_dir/KVS_7.0.2_[example.com].zip"
+  : >"$archive"
+
+  # Encoded archive: the documented release is kept.
+  IONCUBE=YES
+  KVS_PHP_VERSION=""
+  installQuestions >/dev/null 2>&1 || fail "encoded archive detection failed" || return 1
+  assert_equal "8.1" "$PHP" "encoded archive must keep the documented PHP release" || return 1
+
+  # Encoded archive with an explicit request: honored, with a warning.
+  IONCUBE=YES
+  KVS_PHP_VERSION=8.3
+  installQuestions >"$temp_dir/output" 2>&1 || fail "explicit PHP request failed on an encoded archive" || return 1
+  assert_equal "8.3" "$PHP" "explicit KVS_PHP_VERSION was not honored" || return 1
+  assert_equal "/usr/lib/php/20230831" "$php_path" "PHP 8.3 used the wrong extension path" || return 1
+  assert_file_contains "$temp_dir/output" "Proceeding because KVS_PHP_VERSION was set explicitly" \
+    "encoded archive override did not warn" || return 1
+
+  # Unencoded archive, headless, no request: the documented release.
+  IONCUBE=NO
+  KVS_PHP_VERSION=""
+  installQuestions >/dev/null 2>&1 || fail "unencoded archive detection failed" || return 1
+  assert_equal "8.1" "$PHP" "unencoded archive must default to the documented release" || return 1
+
+  # Unencoded archive, headless request: honored.
+  IONCUBE=NO
+  KVS_PHP_VERSION=8.4
+  installQuestions >/dev/null 2>&1 || fail "headless PHP choice failed" || return 1
+  assert_equal "8.4" "$PHP" "headless KVS_PHP_VERSION was not applied" || return 1
+  assert_equal "/usr/lib/php/20240924" "$php_path" "PHP 8.4 used the wrong extension path" || return 1
+
+  # Unsupported request: refused.
+  IONCUBE=NO
+  KVS_PHP_VERSION=8.0
+  installQuestions >/dev/null 2>&1
+  status=$?
+  [[ $status -ne 0 ]] || fail "unsupported PHP release was accepted" || return 1
+
+  # Interactive unencoded archive: the prompt answer wins, Enter keeps the
+  # documented release, and an invalid answer falls back to it at end of input.
+  HEADLESS=n
+  IONCUBE=NO
+  KVS_PHP_VERSION=""
+  configure_php_for_kvs_archive "$archive" <<<"8.2" >/dev/null 2>&1 ||
+    fail "interactive PHP choice failed" || return 1
+  assert_equal "8.2" "$PHP" "interactive PHP answer was not applied" || return 1
+  assert_equal "/usr/lib/php/20220829" "$php_path" "PHP 8.2 used the wrong extension path" || return 1
+  configure_php_for_kvs_archive "$archive" </dev/null >/dev/null 2>&1 ||
+    fail "interactive PHP default failed" || return 1
+  assert_equal "8.1" "$PHP" "Enter must keep the documented PHP release" || return 1
+  configure_php_for_kvs_archive "$archive" <<<"nope" >/dev/null 2>&1 ||
+    fail "interactive PHP fallback failed" || return 1
+  assert_equal "8.1" "$PHP" "invalid PHP answer must fall back to the documented release" || return 1
+
+  # Interactive encoded archive: no prompt, the documented release is kept.
+  IONCUBE=YES
+  configure_php_for_kvs_archive "$archive" <<<"8.4" >/dev/null 2>&1 ||
+    fail "interactive encoded detection failed" || return 1
+  assert_equal "8.1" "$PHP" "encoded archive must not offer a PHP choice" || return 1
+
+  HEADLESS=y
+  IONCUBE=YES
+  KVS_PHP_VERSION=""
+}
+
 test_domain_validation_respects_database_limit() {
   local max_label
   local oversized_label
@@ -529,6 +602,7 @@ failures=0
 run_test "installation failures stop the pipeline" test_install_failure_stops_pipeline || failures=$((failures + 1))
 run_test "visual progress failures are non-fatal" test_visual_progress_failure_is_nonfatal || failures=$((failures + 1))
 run_test "headless PHP detection" test_headless_php_detection || failures=$((failures + 1))
+run_test "PHP choice for unencoded archives" test_php_version_choice_for_unencoded_archive || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))

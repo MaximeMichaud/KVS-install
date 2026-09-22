@@ -314,12 +314,81 @@ find_kvs_archive() {
   printf '%s\n' "${archives[0]}"
 }
 
+# PHP releases the standalone installer can set up from the Sury repository.
+SUPPORTED_PHP_VERSIONS="7.4 8.1 8.2 8.3 8.4"
+
+php_version_is_supported() {
+  local version
+
+  for version in $SUPPORTED_PHP_VERSIONS; do
+    [[ "$1" == "$version" ]] && return 0
+  done
+  return 1
+}
+
+# Extension directory of a PHP release, where the IonCube loader is placed.
+php_extension_dir() {
+  case "$1" in
+  7.4) echo "/usr/lib/php/20190902" ;;
+  8.1) echo "/usr/lib/php/20210902" ;;
+  8.2) echo "/usr/lib/php/20220829" ;;
+  8.3) echo "/usr/lib/php/20230831" ;;
+  8.4) echo "/usr/lib/php/20240924" ;;
+  *) return 1 ;;
+  esac
+}
+
+# Apply the PHP release to install. An IonCube encoded archive only runs on
+# the release its encoder targeted, so the documented one is kept. An
+# unencoded archive runs on any supported release, so the operator picks:
+# KVS_PHP_VERSION in headless mode, a prompt otherwise.
+select_php_version_for_archive() {
+  local documented="$1"
+  local kvs_version="$2"
+  local requested="${KVS_PHP_VERSION:-}"
+  local choice
+
+  if [[ -n "$requested" ]] && ! php_version_is_supported "$requested"; then
+    echo "Error: Unsupported PHP version: $requested (supported: $SUPPORTED_PHP_VERSIONS)" >&2
+    return 1
+  fi
+
+  if [[ "${IONCUBE:-YES}" == "YES" ]]; then
+    if [[ -n "$requested" && "$requested" != "$documented" ]]; then
+      echo "Warning: the archive is IonCube encoded for PHP $documented. With PHP $requested the loader refuses every encoded file." >&2
+      echo "Proceeding because KVS_PHP_VERSION was set explicitly." >&2
+      PHP="$requested"
+    else
+      PHP="$documented"
+    fi
+  else
+    choice="$requested"
+    if [[ -z "$choice" && "${HEADLESS:-}" != "y" ]]; then
+      echo "KVS $kvs_version is documented for PHP $documented."
+      echo "The archive is not IonCube encoded, so any supported release can run it."
+      echo "Newer releases are untested by Kernel Team."
+      until php_version_is_supported "$choice"; do
+        read -rp "PHP version to install [$SUPPORTED_PHP_VERSIONS] (default: $documented): " choice
+        choice=${choice:-$documented}
+      done
+    fi
+    choice=${choice:-$documented}
+    if ! php_version_is_supported "$choice"; then
+      echo "Error: Unsupported PHP version: $choice (supported: $SUPPORTED_PHP_VERSIONS)" >&2
+      return 1
+    fi
+    PHP="$choice"
+  fi
+  php_path=$(php_extension_dir "$PHP") || return 1
+}
+
 configure_php_for_kvs_archive() {
   local archive="$1"
   local archive_name="${archive##*/}"
   local version_major
   local version_minor
   local version_patch
+  local documented
 
   if [[ ! -f "$archive" ]]; then
     echo "Error: KVS archive does not exist: $archive" >&2
@@ -333,14 +402,14 @@ configure_php_for_kvs_archive() {
   version_major=$((10#${BASH_REMATCH[1]}))
   version_minor=$((10#${BASH_REMATCH[2]}))
   version_patch=$((10#${BASH_REMATCH[3]}))
-  PHP="7.4"
-  php_path="/usr/lib/php/20190902"
+  documented="7.4"
   if ((version_major > 6 ||
        (version_major == 6 && version_minor > 2) ||
        (version_major == 6 && version_minor == 2 && version_patch >= 1))); then
-    PHP="8.1"
-    php_path="/usr/lib/php/20210902"
+    documented="8.1"
   fi
+  select_php_version_for_archive "$documented" \
+    "${version_major}.${version_minor}.${version_patch}" || return $?
 }
 
 function installQuestions() {
