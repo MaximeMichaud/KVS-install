@@ -183,6 +183,7 @@ EOF
 
 start_site() {
     local domain="$1"
+    local attempt
     local site_dir="${SITES_DIR}/${domain}"
 
     if [ ! -d "$site_dir" ]; then
@@ -197,8 +198,21 @@ start_site() {
 
     # Run init containers first
     log_info "Running initialization..."
-    docker compose --profile setup up phpmyadmin-init
-    docker compose --profile setup up kvs-init
+    docker compose up -d mariadb
+    for ((attempt = 1; attempt <= 60; attempt++)); do
+        if docker compose exec -T mariadb \
+            healthcheck.sh --connect --innodb_initialized >/dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+    done
+    if ! docker compose exec -T mariadb \
+        healthcheck.sh --connect --innodb_initialized >/dev/null 2>&1; then
+        log_error "MariaDB did not become healthy before site initialization"
+        return 1
+    fi
+    docker compose --profile setup run --rm --no-deps phpmyadmin-init
+    docker compose --profile setup run --rm --no-deps kvs-init
 
     # Start all services
     log_info "Starting services..."

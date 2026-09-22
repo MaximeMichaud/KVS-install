@@ -641,8 +641,9 @@ configure_disk_space_limit() {
     echo -e "${CYAN}└──────────────────────────────────────────────────────────────────┘${NC}"
 }
 
-# Install gum silently at startup
-install_gum
+# Gum only improves the interactive output. Network or archive extraction
+# failures must not prevent the plain-text fallback from running.
+install_gum >/dev/null 2>&1 || true
 
 # Run pre-flight checks
 preflight_checks
@@ -1344,6 +1345,25 @@ select_manticore() {
 select_manticore
 
 # Check for existing MariaDB volume and ask what to do
+delete_database_volume() {
+    local volume_name="$1"
+
+    if ! docker compose down; then
+        echo -e "${RED}ERROR: Could not stop this Compose project${NC}"
+        return 1
+    fi
+    if docker volume inspect "$volume_name" >/dev/null 2>&1; then
+        if ! docker volume rm "$volume_name" >/dev/null; then
+            echo -e "${RED}ERROR: Could not delete database volume ${volume_name}${NC}"
+            return 1
+        fi
+    fi
+    if docker volume inspect "$volume_name" >/dev/null 2>&1; then
+        echo -e "${RED}ERROR: Database volume still exists after deletion${NC}"
+        return 1
+    fi
+}
+
 ask_existing_volume() {
     echo ""
     echo -e "${CYAN}Checking for existing database...${NC}"
@@ -1429,8 +1449,7 @@ ask_existing_volume() {
                 1)
                     echo ""
                     echo -e "${YELLOW}Deleting existing database...${NC}"
-                    docker compose down 2>/dev/null || true
-                    docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                    delete_database_volume "$VOLUME_NAME" || exit 1
                     echo -e "${GREEN}✓ Database deleted. Will create fresh MariaDB ${SELECTED_MAJOR_MINOR} installation.${NC}"
                     KEEP_EXISTING_DB=false
                     ;;
@@ -1478,8 +1497,7 @@ ask_existing_volume() {
                 1)
                     echo ""
                     echo -e "${YELLOW}Deleting existing database...${NC}"
-                    docker compose down 2>/dev/null || true
-                    docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                    delete_database_volume "$VOLUME_NAME" || exit 1
                     echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
                     KEEP_EXISTING_DB=false
                     ;;
@@ -1534,8 +1552,7 @@ ask_existing_volume() {
                 1)
                     echo ""
                     echo -e "${YELLOW}Deleting existing database...${NC}"
-                    docker compose down 2>/dev/null || true
-                    docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                    delete_database_volume "$VOLUME_NAME" || exit 1
                     echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
                     KEEP_EXISTING_DB=false
                     ;;
@@ -1577,8 +1594,7 @@ ask_existing_volume() {
                 1)
                     echo ""
                     echo -e "${YELLOW}Deleting existing database...${NC}"
-                    docker compose down 2>/dev/null || true
-                    docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+                    delete_database_volume "$VOLUME_NAME" || exit 1
                     echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
                     KEEP_EXISTING_DB=false
                     ;;
@@ -1817,18 +1833,16 @@ fi
 
 # Step 3: Initialize phpMyAdmin and KVS
 progress_bar "Initializing phpMyAdmin"
-run_step "Initializing phpMyAdmin" docker compose --profile setup up --force-recreate phpmyadmin-init
+run_step "Initializing phpMyAdmin" \
+    docker compose --profile setup run --rm --no-deps phpmyadmin-init
 
 if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
     echo -e "${YELLOW}Note: Keeping existing database - KVS settings will be updated but data preserved${NC}"
 fi
 
 progress_bar "Initializing KVS"
-run_step "Initializing KVS" docker compose --profile setup up --force-recreate kvs-init
-
-# Show permission verification result from kvs-init logs
-echo -e "  ${CYAN}Permission verification:${NC}"
-docker compose logs kvs-init 2>/dev/null | grep -E "(permissions|Permission|CREATED|FIXED|OK)" | tail -5 | sed 's/^/    /'
+run_step "Initializing KVS" \
+    docker compose --profile setup run --rm --no-deps kvs-init
 
 # Step 4: Configure KVS disk space limit
 progress_bar "Configuring disk space limit"
@@ -1918,6 +1932,7 @@ else
     echo -e " ${RED}✗${NC}"
     echo "    Check: docker compose logs"
     echo "    Debug: tail -50 $DEBUG_LOG"
+    exit 1
 fi
 
 progress_bar "Reloading Nginx"
