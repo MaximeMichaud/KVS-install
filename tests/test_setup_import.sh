@@ -250,6 +250,8 @@ test_setup_and_init_are_wired_for_imports() {
         grep -Eq "^${step}$|^    ${step}$|^${step}\$" "$setup" || grep -Eq "^\s*${step}(\s|$)" "$setup" || fail "setup.sh must call $step"
     done
     grep -Fq 'KVS_IMPORT_COMPLETED' "$setup" || fail "a completed import must be recorded in .env"
+    grep -Fq 'importing again (VOLUME_CHOICE=1 replaces the database)' "$setup" || fail "VOLUME_CHOICE=1 must repeat a completed import"
+    grep -Fq 'IMPORT_SITE_DIR and IMPORT_DB_DUMP are ignored for this run' "$setup" || fail "without VOLUME_CHOICE=1 a completed import must turn into a re-run"
     grep -A2 -F '[ "${KEEP_EXISTING_DB:-false}" != true ] &&' "$setup" | grep -Fq '[ "$IMPORT_MODE" != true ]; then' ||
         fail "an imported database must keep its admin password instead of getting a one-time one"
     grep -Fq "SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';" "$setup" || fail "the completion marker must be verified before the KVS init"

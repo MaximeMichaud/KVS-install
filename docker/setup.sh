@@ -171,11 +171,18 @@ prepare_import() {
 
     [ "$IMPORT_MODE" = true ] || return 0
     if completed_on=$(grep '^KVS_IMPORT_COMPLETED=' .env 2>/dev/null | cut -d= -f2-) && [ -n "$completed_on" ]; then
+        # VOLUME_CHOICE=1 is the explicit consent to replace the database:
+        # with it the import runs again, without it the command line is an
+        # ordinary re-run and the imported site stays as it is.
+        if [ "${VOLUME_CHOICE:-}" != "1" ]; then
+            echo ""
+            echo -e "${YELLOW}An import already completed on ${completed_on}; IMPORT_SITE_DIR and IMPORT_DB_DUMP are ignored for this run.${NC}"
+            echo "Run again with VOLUME_CHOICE=1 to replace the database and import again."
+            IMPORT_MODE=false
+            return 0
+        fi
         echo ""
-        echo -e "${YELLOW}An import already completed on ${completed_on}; IMPORT_SITE_DIR and IMPORT_DB_DUMP are ignored for this run.${NC}"
-        echo "Remove KVS_IMPORT_COMPLETED from .env and delete the database volume to import again."
-        IMPORT_MODE=false
-        return 0
+        echo -e "${YELLOW}An import already completed on ${completed_on}; importing again (VOLUME_CHOICE=1 replaces the database).${NC}"
     fi
     echo ""
     echo -e "${CYAN}Import of an existing KVS site (experimental)${NC}"
