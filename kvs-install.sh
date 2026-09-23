@@ -895,7 +895,10 @@ function aptinstall_php() {
     # Download GPG key, overwrite if exists
     curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --yes --dearmor -o /usr/share/keyrings/php.sury.org.gpg
     if [[ "$webserver" =~ (nginx) ]]; then
-      if [[ "$VERSION_ID" =~ (11|12|13) ]]; then
+      # A box provisioned with the Sury repository already (deb822 or list
+      # file) must not get a second entry, which apt reports on every run.
+      if [[ "$VERSION_ID" =~ (11|12|13) ]] &&
+         ! grep -rqs 'packages.sury.org/php' /etc/apt/sources.list /etc/apt/sources.list.d/; then
         echo "deb [signed-by=/usr/share/keyrings/php.sury.org.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
       fi
       if [[ "$VERSION_ID" =~ (22.04|24.04) ]]; then
