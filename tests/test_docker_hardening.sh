@@ -852,6 +852,45 @@ test_preflight_disk_check_measures_the_tightest_filesystem() {
     pass "preflight disk check measures the site, Docker root and containerd root filesystems"
 }
 
+test_failed_step_shows_its_last_lines_and_a_full_disk() {
+    local functions_file="$TMP_ROOT/report-step-failure.sh"
+    local logfile="$TMP_ROOT/failed-step.log"
+    local output
+
+    awk '
+        $0 == "report_step_failure() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    {
+        echo "#1 [internal] load build definition from Dockerfile"
+        seq 2 40 | sed 's/^/#/'
+        echo "E: Write error - write (28: No space left on device)"
+    } > "$logfile"
+
+    output=$(
+        # shellcheck source=/dev/null
+        source "$functions_file"
+        # shellcheck disable=SC2034  # Read by the extracted production function.
+        DEBUG_LOG="$TMP_ROOT/setup-debug.log"
+        report_step_failure "$logfile"
+    )
+    grep -Fq "No space left on device" <<< "$output" || fail "the last line of a failed step must be shown"
+    grep -Fq "load build definition" <<< "$output" && fail "the BuildKit preamble must not crowd out the cause"
+    grep -Fq "$TMP_ROOT/setup-debug.log" <<< "$output" || fail "the debug log must be named"
+    grep -Fq "The filesystem is full" <<< "$output" || fail "a full filesystem must be called out"
+
+    : > "$logfile"
+    output=$(
+        # shellcheck source=/dev/null
+        source "$functions_file"
+        report_step_failure "$logfile"
+    )
+    [ -z "$output" ] || fail "an empty log must print nothing: got '$output'"
+
+    pass "failed step reports its last lines and a full disk"
+}
+
 test_optional_gum_install_failure_is_nonfatal() {
     local block_file="$TMP_ROOT/optional-gum.sh"
     local output="$TMP_ROOT/optional-gum-output.log"
@@ -1122,6 +1161,7 @@ test_setup_rebuilds_init_and_optional_manticore_images
 test_final_compose_failure_is_fatal
 test_optional_gum_install_failure_is_nonfatal
 test_preflight_disk_check_measures_the_tightest_filesystem
+test_failed_step_shows_its_last_lines_and_a_full_disk
 test_reconfigure_fails_when_container_inspection_fails
 test_reconfigure_issues_the_exact_requested_sans_and_installs
 test_php_password_escaping
