@@ -584,6 +584,36 @@ apt_install() {
     "$@"
 }
 
+# nginx is the exception: the installer replaces its whole configuration
+# right after the package lands, so the packaged files must win over what a
+# previous provisioning left in /etc/nginx. A CDN-trimmed mime.types kept by
+# the policy above made nginx serve stylesheets and scripts as octet-stream.
+apt_install_pristine() {
+  apt-get install -y \
+    -o Dpkg::Options::=--force-confnew \
+    -o Dpkg::Options::=--force-confmiss \
+    "$@"
+}
+
+# The types map must cover the stylesheets and scripts KVS serves. apt does
+# not reconfigure a package that is already installed, so a trimmed file
+# survives a re-run; the copy dpkg kept aside is restored when it exists,
+# otherwise the step stops instead of leaving a site browsers refuse.
+ensure_nginx_mime_types() {
+  local mime="${NGINX_MIME_TYPES:-/etc/nginx/mime.types}"
+
+  if grep -qs 'text/css' "$mime" && grep -qs 'javascript' "$mime"; then
+    return 0
+  fi
+  if grep -qs 'text/css' "$mime.dpkg-dist" && grep -qs 'javascript' "$mime.dpkg-dist"; then
+    echo "Restoring the packaged $mime: the existing file does not map CSS or JavaScript"
+    cp -f "$mime.dpkg-dist" "$mime" || return $?
+    return 0
+  fi
+  echo "ERROR: $mime does not map CSS or JavaScript and no packaged copy is available; reinstall nginx before running the installer again" >&2
+  return 1
+}
+
 function aptinstall() {
     packages=(
       ca-certificates
@@ -871,9 +901,11 @@ function aptinstall_nginx() {
     if [[ "$VERSION_ID" =~ (11|12|13|22.04|24.04) ]]; then
       echo "deb [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >"$sources_dir/nginx.list"
       echo "deb-src [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>"$sources_dir/nginx.list"
-      # Stop here when the package cannot be installed: the configuration
-      # directory below must not be reset for a web server that is not there.
-      apt-get update && apt_install nginx || return $?
+      # Stop here when the package cannot be installed or cannot serve the
+      # site: the configuration directory below must not be reset for a web
+      # server that is not there.
+      apt-get update && apt_install_pristine nginx || return $?
+      ensure_nginx_mime_types || return $?
       reset_nginx_configuration_dirs || return $?
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -o /etc/nginx/nginx.conf
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/general.conf -o /etc/nginx/globals/general.conf
