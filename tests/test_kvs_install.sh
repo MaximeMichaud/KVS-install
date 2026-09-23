@@ -195,6 +195,42 @@ test_php_version_choice_for_unencoded_archive() {
   KVS_PHP_VERSION=""
 }
 
+test_certificate_names_follow_the_www_record() {
+  local names
+  DOMAIN=example.com
+  SERVER_IP=203.0.113.10
+
+  dig() { printf '%s\n' "$MOCK_WWW_IP"; }
+
+  MOCK_WWW_IP=198.51.100.7
+  USE_WWW=false
+  names=$(certificate_domain_names)
+  assert_equal "-d example.com" "$names" "a www record hosted elsewhere must stay off the certificate" || return 1
+
+  MOCK_WWW_IP=203.0.113.10
+  USE_WWW=false
+  names=$(certificate_domain_names)
+  assert_equal "-d example.com -d www.example.com" "$names" "a www record pointing here must be covered" || return 1
+
+  MOCK_WWW_IP=198.51.100.7
+  USE_WWW=true
+  names=$(certificate_domain_names)
+  assert_equal "-d example.com -d www.example.com" "$names" "an explicit www site must request its name" || return 1
+
+  MOCK_WWW_IP=""
+  USE_WWW=false
+  names=$(certificate_domain_names)
+  assert_equal "-d example.com" "$names" "a missing www record must stay off the certificate" || return 1
+
+  SERVER_IP=""
+  MOCK_WWW_IP=203.0.113.10
+  names=$(certificate_domain_names)
+  assert_equal "-d example.com" "$names" "an unknown server address must not add www" || return 1
+
+  unset -f dig
+  USE_WWW=false
+}
+
 test_domain_validation_respects_database_limit() {
   local max_label
   local oversized_label
@@ -603,6 +639,7 @@ run_test "installation failures stop the pipeline" test_install_failure_stops_pi
 run_test "visual progress failures are non-fatal" test_visual_progress_failure_is_nonfatal || failures=$((failures + 1))
 run_test "headless PHP detection" test_headless_php_detection || failures=$((failures + 1))
 run_test "PHP choice for unencoded archives" test_php_version_choice_for_unencoded_archive || failures=$((failures + 1))
+run_test "certificate names follow the www record" test_certificate_names_follow_the_www_record || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))

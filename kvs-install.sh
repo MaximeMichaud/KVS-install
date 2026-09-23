@@ -1024,6 +1024,31 @@ function generate_selfsigned_cert() {
     echo "Self-signed certificate generated for $DOMAIN"
 }
 
+# True when the A record of the given name points at this server.
+dns_record_points_here() {
+  local record_ip
+
+  [[ -n "${SERVER_IP:-}" ]] || return 1
+  record_ip=$(
+    dig +short "$1" A 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+    | head -n1
+  )
+  [[ -n "$record_ip" && "$record_ip" == "$SERVER_IP" ]]
+}
+
+# Names to put on the certificate: the apex always, www only when the site
+# uses it or when its record already points here. A www record hosted
+# elsewhere would otherwise fail its challenge and sink the whole issuance.
+certificate_domain_names() {
+  local names="-d $DOMAIN"
+
+  if [[ "${USE_WWW:-false}" == "true" ]] || dns_record_points_here "www.$DOMAIN"; then
+    names="$names -d www.$DOMAIN"
+  fi
+  printf '%s\n' "$names"
+}
+
 function install_acme.sh() {
     mkdir -p /etc/nginx/ssl/"$DOMAIN"
 
@@ -1050,7 +1075,7 @@ function install_acme.sh() {
     service nginx restart
 
     # Build acme.sh command based on provider
-    ACME_ARGS="--issue -d $DOMAIN -d www.$DOMAIN -w /var/www/_letsencrypt --keylength ec-256"
+    ACME_ARGS="--issue $(certificate_domain_names) -w /var/www/_letsencrypt --keylength ec-256"
     if [[ "$SSL_PROVIDER" == "letsencrypt" ]]; then
         ACME_ARGS="$ACME_ARGS --server letsencrypt"
     fi
@@ -1059,7 +1084,7 @@ function install_acme.sh() {
     # shellcheck disable=SC2086  # Intentional word splitting for multiple flags
     if /root/.acme.sh/acme.sh $ACME_ARGS; then
         echo "SSL certificate issued successfully"
-        /root/.acme.sh/acme.sh --install-cert --ecc -d "$DOMAIN" -d www."$DOMAIN" \
+        /root/.acme.sh/acme.sh --install-cert --ecc -d "$DOMAIN" \
           --key-file /etc/nginx/ssl/"$DOMAIN"/key.pem \
           --fullchain-file /etc/nginx/ssl/"$DOMAIN"/cert.pem \
           --reloadcmd "service nginx force-reload"
