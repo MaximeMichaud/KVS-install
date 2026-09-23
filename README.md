@@ -108,20 +108,41 @@ With `IONCUBE=NO` the archive is treated as unencoded and `KVS_PHP_VERSION` pick
 
 ### Importing an existing site (Docker, experimental)
 
-An existing KVS site moves into the Docker stack from two inputs: its files and a dump of its database. KVS keeps everything else (videos, members, categories, settings) in that database, so the files alone cannot rebuild a site.
+An existing KVS site moves into the Docker stack from two inputs: its files and a dump of its database. KVS keeps everything else (videos, members, categories, settings) in that database, so the files alone cannot rebuild a site. The setup takes both from one of three sources:
 
-1. On the old server, dump the database (`mariadb-dump --single-transaction --routines --triggers <database>`, optionally compressed with gzip, xz or zstd) and copy the site directory, the one holding `admin/include/setup.php`, to the new host, for example under `/var/www/<domain>` on the disk meant for the site.
-2. Put the KVS archive of the same version as the site in `docker/kvs-archive/`. The nginx rewrites and the PHP version come from it.
-3. Run the setup with `IMPORT_SITE_DIR` pointing at the copied files and `IMPORT_DB_DUMP` at the dump. The files are copied to `/var/www/<domain>` unless they already are there. The MariaDB container replays the dump when it initializes its empty volume, so an earlier database volume of the project must be deleted first (`VOLUME_CHOICE=1` does it). Start with a self-signed certificate when the DNS still points at the old server, then run the setup again with Let's Encrypt after the switch.
+- **An archive on the new server**, made by `kvs-export.sh` on the old server or by hand: a zip, 7z, tar, tar.gz, tar.zst, tar.xz or tar.bz2 that holds the site directory (the one with `admin/include/setup.php`, at the top or nested) and one dump (`.sql`, `.sql.gz`, `.sql.xz` or `.sql.zst`) next to it, nothing else. The tool the archive needs (`unzip`, `7zip`, `zstd`, `xz-utils` or `bzip2`) is installed when missing, and only that one.
+- **A directory and a dump on the new server**, copied there by any means.
+- **The old server over SSH**: the setup pipes `kvs-export.sh` to it, shows what it found (KVS version, domain, paths, database name, host and user with the password masked, table count, sizes), then streams the dump and mirrors the files with rsync (a tar stream when the old server has no rsync). One SSH connection serves the whole import, so a password is typed once, on ssh's own prompt. Nothing is installed or written on the old server, and its credentials are never stored on the new one.
+
+Procedure:
+
+1. Put the KVS archive of the same version as the site in `docker/kvs-archive/`. The nginx rewrites and the PHP version come from it.
+2. For the archive source, run the exporter on the old server. It finds the site, checks the database access with the credentials of `admin/include/setup_db.php`, dumps the database (zstd when installed, gzip otherwise) and writes one tar with the files, the dump and a manifest. Copy the result to the new server.
 
 ```bash
-IMPORT_SITE_DIR=/var/www/example.com IMPORT_DB_DUMP=/root/example.sql.zst \
-  HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=2 VOLUME_CHOICE=1 ./setup.sh
+curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-export.sh -o kvs-export.sh
+sudo bash kvs-export.sh                  # archive in the current directory
+sudo bash kvs-export.sh --dump-only      # the compressed dump alone
 ```
 
-The setup checks the site (table prefix `ktvs_`, version against the archive), prepares the dump for the container (database statements dropped, `INITIAL_VERSION` recorded when the old site never did, storage and conversion server paths moved from the old project path to `/var/www/kvs`, completion marker at the end) and refuses to continue if the replay stopped part way. The init then adopts the site as it does for a fresh one: connection settings, project URL, server URLs on the site domain (URLs on other hosts, such as a CDN, stay), permissions, server type nginx. The admin password is kept unless it is still the KVS default. After the run, `logs/import-rows.txt` lists the rows of every table for a comparison with the old server, and `KVS_IMPORT_COMPLETED` in `.env` turns later runs of the same command into ordinary re-runs, unless `VOLUME_CHOICE=1` asks to replace the database and import again.
+3. Run the installer on the new server. Interactive runs ask whether to import and from where, show what was found and ask for confirmation. Headless runs set one source:
 
-Not covered: sites with another table prefix, a domain change (the KVS license is bound to the domain, request a new archive), Sphinx or Manticore indexes (rebuild them) and custom web server rules from the old vhost.
+```bash
+IMPORT_ARCHIVE=/root/example.com-kvs-export-20260923-1200.tar \
+  HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
+
+IMPORT_SITE_DIR=/var/www/example.com IMPORT_DB_DUMP=/root/example.sql.zst \
+  HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
+
+IMPORT_REMOTE_HOST=old.example.com IMPORT_SSH_KEY=/root/.ssh/id_ed25519 \
+  HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
+```
+
+`IMPORT_REMOTE_USER` (root), `IMPORT_REMOTE_PORT` (22) and `IMPORT_REMOTE_DIR` (searched for when empty) complete the remote source; headless runs need key authentication. Start with a self-signed certificate (`SSL_CHOICE=3`) when the DNS still points at the old server, then run the setup again with Let's Encrypt after the switch.
+
+The setup extracts an archive straight into `/var/www/<domain>` (the dump leaves the webroot before anything starts) or mirrors the remote site there, then checks the site (table prefix `ktvs_`, version against the archive, dump complete), prepares the dump for the container (database statements dropped, `INITIAL_VERSION` recorded when the old site never did, storage and conversion server paths moved from the old project path to `/var/www/kvs`, completion marker at the end), deletes the database volume of an earlier installation right before MariaDB starts (`VOLUME_CHOICE=1` gives the consent, interactive runs ask) and refuses to continue if the replay stopped part way. The init then adopts the site as it does for a fresh one: connection settings, project URL, server URLs on the site domain (URLs on other hosts, such as a CDN, stay), permissions, server type nginx. The admin password is kept unless it is still the KVS default. After the run, `logs/import-rows.txt` lists the rows of every table for a comparison with the old server, and `KVS_IMPORT_COMPLETED` in `.env` turns later runs of the same command into ordinary re-runs, unless `VOLUME_CHOICE=1` asks to replace the database and import again. A transfer or extraction that failed can be repeated with the same command: the site directory remembers its source and refuses any other.
+
+Not covered: sites with another table prefix, a domain change (the KVS license is bound to the domain, request a new archive), Sphinx or Manticore indexes (rebuild them), custom web server rules from the old vhost, and the standalone installer.
 
 ## Compatibility
 
