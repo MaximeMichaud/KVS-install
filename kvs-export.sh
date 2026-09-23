@@ -65,6 +65,7 @@ DB_ERROR=""
 DB_SERVER_VERSION=""
 DB_TABLES="0"
 DB_SIZE_MB="0"
+DB_NON_TRANSACTIONAL="0"
 SITE_SIZE_MB="0"
 COMPRESSOR=""
 HAS_RSYNC="no"
@@ -458,8 +459,10 @@ kvs_build_connection_args() {
     fi
 }
 
-# One query for the three numbers the summary shows. A failure is not fatal:
-# detect reports db_ok=no and the caller decides what to do about it.
+# One query for the numbers the summary shows: server version, tables of
+# the prefix, size, and the tables on a non-transactional engine (MyISAM,
+# Aria), which decide how the dump keeps the data consistent. A failure is
+# not fatal: detect reports db_ok=no and the caller decides what to do.
 kvs_probe_database() {
     local like
     local query
@@ -473,6 +476,7 @@ kvs_probe_database() {
     DB_SERVER_VERSION=""
     DB_TABLES="0"
     DB_SIZE_MB="0"
+    DB_NON_TRANSACTIONAL="0"
     if [ -z "$DB_CLIENT" ]; then
         DB_ERROR="no mariadb or mysql client on this server"
         return 0
@@ -482,7 +486,7 @@ kvs_probe_database() {
         return 0
     fi
     like=$(kvs_sql_like_escape "$TABLES_PREFIX")
-    query="SELECT VERSION(), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE '${like}%'), (SELECT ROUND(COALESCE(SUM(data_length + index_length), 0) / 1048576) FROM information_schema.tables WHERE table_schema = DATABASE())"
+    query="SELECT VERSION(), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE '${like}%'), (SELECT ROUND(COALESCE(SUM(data_length + index_length), 0) / 1048576) FROM information_schema.tables WHERE table_schema = DATABASE()), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND engine IS NOT NULL AND engine NOT IN ('InnoDB'))"
     TEMP_ERR_FILE=$(mktemp 2> /dev/null) || TEMP_ERR_FILE=""
     if [ -z "$TEMP_ERR_FILE" ]; then
         DB_ERROR="cannot create a temporary file"
@@ -508,13 +512,14 @@ kvs_probe_database() {
         return 0
     fi
     line=${out%%$'\n'*}
-    IFS=$'\t' read -r DB_SERVER_VERSION DB_TABLES DB_SIZE_MB <<< "$line"
+    IFS=$'\t' read -r DB_SERVER_VERSION DB_TABLES DB_SIZE_MB DB_NON_TRANSACTIONAL <<< "$line"
     if [ -z "$DB_SERVER_VERSION" ]; then
         DB_ERROR="the probe query returned nothing"
         return 0
     fi
     kvs_is_number "$DB_TABLES" || DB_TABLES="0"
     kvs_is_number "$DB_SIZE_MB" || DB_SIZE_MB="0"
+    kvs_is_number "$DB_NON_TRANSACTIONAL" || DB_NON_TRANSACTIONAL="0"
     DB_OK="yes"
     return 0
 }
@@ -634,8 +639,17 @@ kvs_tool_advertises() {
 }
 
 kvs_build_dump_args() {
-    DUMP_ARGS=(
-        --single-transaction
+    # A single transaction gives a consistent dump of InnoDB tables without
+    # blocking the site. It does nothing for MyISAM or Aria tables: those
+    # are only consistent under a table lock, which holds the writes of the
+    # site while the dump runs.
+    if [ "$DB_NON_TRANSACTIONAL" -gt 0 ]; then
+        DUMP_ARGS=(--lock-tables)
+        kvs_warn "$DB_NON_TRANSACTIONAL tables use MyISAM or Aria: the dump locks the tables while it runs, writes on the site wait"
+    else
+        DUMP_ARGS=(--single-transaction)
+    fi
+    DUMP_ARGS+=(
         --quick
         --hex-blob
         --triggers
@@ -645,9 +659,13 @@ kvs_build_dump_args() {
     )
     # MySQL 8 writes column statistics a MariaDB server cannot read back, and
     # the option does not exist in the MariaDB tools, so it is passed only to
-    # a tool that advertises it.
+    # a tool that advertises it. The same tool records the GTID state of a
+    # replication source as SET @@GLOBAL.GTID_PURGED, which MariaDB refuses.
     if kvs_tool_advertises "$DB_DUMP_TOOL" "column-statistics"; then
         DUMP_ARGS+=(--column-statistics=0)
+    fi
+    if kvs_tool_advertises "$DB_DUMP_TOOL" "set-gtid-purged"; then
+        DUMP_ARGS+=(--set-gtid-purged=OFF)
     fi
     # No --routines: KVS has none and the site user rarely has the privilege.
     # No --databases: the importer drops CREATE DATABASE and USE anyway.
@@ -701,6 +719,7 @@ kvs_print_detect() {
     printf 'db_server_version=%s\n' "$DB_SERVER_VERSION"
     printf 'db_tables=%s\n' "$DB_TABLES"
     printf 'db_size_mb=%s\n' "$DB_SIZE_MB"
+    printf 'db_non_transactional=%s\n' "$DB_NON_TRANSACTIONAL"
     printf 'site_size_mb=%s\n' "$SITE_SIZE_MB"
     printf 'compressor=%s\n' "$COMPRESSOR"
     printf 'rsync=%s\n' "$HAS_RSYNC"
@@ -727,6 +746,9 @@ kvs_print_summary() {
     kvs_say "  Database:        ${DB_NAME:-unknown} on ${DB_HOST_RAW:-localhost}, user ${DB_USER:-unknown}, password ${DB_PASSWORD_HINT:-<empty>}"
     if [ "$DB_OK" = "yes" ]; then
         kvs_say "  Database access: OK ($DB_SERVER_VERSION, $DB_TABLES tables, $(kvs_human_mb "$DB_SIZE_MB"))"
+        if [ "$DB_NON_TRANSACTIONAL" -gt 0 ]; then
+            kvs_say "  Table engines:   $DB_NON_TRANSACTIONAL tables use MyISAM or Aria, the dump locks the tables while it runs"
+        fi
     else
         kvs_say "  Database access: FAILED ($DB_ERROR)"
     fi

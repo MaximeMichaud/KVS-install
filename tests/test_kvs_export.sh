@@ -94,7 +94,7 @@ if [ "${STUB_DB_FAIL:-no}" = yes ]; then
     echo "ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)" >&2
     exit 1
 fi
-printf '11.8.2-MariaDB\t127\t45\n'
+printf '11.8.2-MariaDB\t127\t45\t%s\n' "${STUB_NON_TRANSACTIONAL:-0}"
 EOF
     cat > "$STUB_BIN/mariadb-dump" <<'EOF'
 #!/bin/bash
@@ -117,6 +117,9 @@ for arg in "$@"; do
         printf '  --single-transaction\n'
         if [ "${STUB_DUMP_COLUMN_STATISTICS:-no}" = yes ]; then
             printf '  --column-statistics=0\n'
+        fi
+        if [ "${STUB_DUMP_GTID:-no}" = yes ]; then
+            printf '  --set-gtid-purged=name\n'
         fi
         exit 0
     fi
@@ -410,6 +413,47 @@ test_column_statistics_is_passed_only_to_a_tool_that_knows_it() {
     pass "column statistics is passed only to a tool that knows it"
 }
 
+test_gtid_state_is_left_out_by_a_tool_that_records_it() {
+    local site="$TMP_ROOT/gtid-site"
+    local out="$TMP_ROOT/gtid.out"
+    local err="$TMP_ROOT/gtid.err"
+
+    make_site "$site"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "the dump must succeed"
+    argv_lines | grep -Fq -- '[--set-gtid-purged=OFF]' &&
+        fail "a tool without the GTID option must not be given it"
+
+    export STUB_DUMP_GTID=yes
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "the dump must succeed"
+    argv_lines | grep -Fq -- '[--set-gtid-purged=OFF]' ||
+        fail "a tool that records the GTID state must be told not to"
+    unset STUB_DUMP_GTID
+    pass "GTID state is left out by a tool that records it"
+}
+
+test_non_transactional_tables_switch_the_dump_to_table_locks() {
+    local site="$TMP_ROOT/engine-site"
+    local out="$TMP_ROOT/engine.out"
+    local err="$TMP_ROOT/engine.err"
+
+    make_site "$site"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed"
+    assert_key "$out" db_non_transactional 0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "the dump must succeed"
+    argv_lines | grep -Fq -- '[--single-transaction]' || fail "InnoDB tables are dumped in one transaction"
+    argv_lines | grep -Fq -- '[--lock-tables]' && fail "no table lock when every table is transactional"
+
+    export STUB_NON_TRANSACTIONAL=3
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed"
+    assert_key "$out" db_non_transactional 3
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "the dump must succeed"
+    argv_lines | grep -Fq -- '[--lock-tables]' || fail "MyISAM or Aria tables need a table lock"
+    argv_lines | grep -Fq -- '[--single-transaction]' && fail "the transaction option is useless with a table lock"
+    grep -q '3 tables use MyISAM or Aria' "$err" || fail "the lock must be announced"
+    unset STUB_NON_TRANSACTIONAL
+    pass "non transactional tables switch the dump to table locks"
+}
+
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent() {
     local site="$TMP_ROOT/mysql-site"
     local bin="$TMP_ROOT/bin-mysql"
@@ -690,6 +734,8 @@ test_the_connection_follows_the_host_written_in_setup_db
 test_an_unreachable_database_is_reported_without_stopping_detect
 test_the_dump_uses_the_compressor_that_is_installed
 test_column_statistics_is_passed_only_to_a_tool_that_knows_it
+test_gtid_state_is_left_out_by_a_tool_that_records_it
+test_non_transactional_tables_switch_the_dump_to_table_locks
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent
 test_the_archive_holds_the_site_the_dump_and_the_manifest
 test_the_archive_can_be_written_on_stdout
