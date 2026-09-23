@@ -338,6 +338,7 @@ import_validate_local_materials() {
     IMPORT_OLD_PATH=$(import_field "$site_info" 2)
     IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$IMPORT_SITE_DIR/admin/include/setup.php" project_url)")
     echo "  Site: $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
+    import_check_site_links
     dump_info=$(import_inspect_dump "$IMPORT_DB_DUMP" ktvs_) || exit 1
     IMPORT_DUMP_TABLES=$(import_field "$dump_info" 1)
     dump_initial_version=$(import_field "$dump_info" 2)
@@ -361,6 +362,32 @@ import_validate_local_materials() {
     if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
         echo "  Server paths: $IMPORT_OLD_PATH -> /var/www/kvs"
     fi
+}
+
+# Symbolic links that leave the site directory resolve on this server at
+# best and never in the container, which mounts the site directory alone.
+# The copy the setup makes from a directory follows them (rsync brings
+# their targets); a site already in place or extracted from an archive
+# keeps them as they are and has to be fixed first.
+import_check_site_links() {
+    local links count
+
+    links=$(import_external_links "$IMPORT_SITE_DIR" | head -n 6)
+    [ -n "$links" ] || return 0
+    count=$(printf '%s\n' "$links" | wc -l)
+    if [ "$count" -gt 5 ]; then
+        links=$(printf '%s\n' "$links" | head -n 5; echo "...")
+    fi
+    if [ "$IMPORT_SOURCE" = directory ] && [ "$(readlink -f -- "$IMPORT_SITE_DIR")" != "$(readlink -f -- "/var/www/$DOMAIN" 2>/dev/null)" ] &&
+        ! printf '%s\n' "$links" | grep -q '(dangling)$'; then
+        echo "  Symbolic links leaving the site are copied with their targets:"
+        printf '%s\n' "$links" | sed 's/^/    /'
+        return 0
+    fi
+    echo -e "${RED}ERROR: symbolic links in $IMPORT_SITE_DIR point outside the site or nowhere; the container mounts the site directory alone, so they would break there:${NC}"
+    printf '%s\n' "$links" | sed 's/^/    /'
+    echo "Replace them by copies of their targets (cp -a --dereference), remove the dangling ones, or mount the targets in docker-compose.override.yml, then run the setup again."
+    exit 1
 }
 
 import_inspect_directory() {
@@ -450,10 +477,16 @@ import_inspect_remote() {
         *) accept_new=no ;;
     esac
     import_ssh_setup "$IMPORT_REMOTE_HOST" "$IMPORT_REMOTE_PORT" "$IMPORT_REMOTE_USER" "$IMPORT_SSH_KEY" "$batch" "$accept_new" || exit 1
+    trap import_ssh_close EXIT
+    echo "  Connecting to $IMPORT_SSH_TARGET (port $IMPORT_REMOTE_PORT)..."
+    if ! import_remote_privileges; then
+        echo -e "${RED}ERROR: cannot run a command on $IMPORT_SSH_TARGET (see the messages above)${NC}"
+        exit 1
+    fi
     IMPORT_REMOTE_REPORT="$LOG_DIR/import-remote.txt"
     rm -f "$IMPORT_REMOTE_REPORT"
     while :; do
-        echo "  Connecting to $IMPORT_SSH_TARGET (port $IMPORT_REMOTE_PORT)..."
+        echo "  Looking for the site on $IMPORT_SSH_TARGET..."
         if import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT"; then
             break
         fi
@@ -487,6 +520,11 @@ import_inspect_remote() {
     db_ok=$(import_kv "$IMPORT_REMOTE_REPORT" db_ok)
     echo ""
     echo -e "${GREEN}Installation detected on $IMPORT_REMOTE_HOST${NC}"
+    case "$IMPORT_REMOTE_PRIVILEGES" in
+        root) echo "  SSH user:        $IMPORT_REMOTE_USER (root)" ;;
+        sudo) echo "  SSH user:        $IMPORT_REMOTE_USER (passwordless sudo, used for the dump and the files)" ;;
+        *) echo -e "  SSH user:        $IMPORT_REMOTE_USER ${YELLOW}(neither root nor passwordless sudo${IMPORT_REMOTE_SUDO_ERROR:+: $IMPORT_REMOTE_SUDO_ERROR}; files it cannot read stay behind)${NC}" ;;
+    esac
     echo "  KVS version:     ${IMPORT_SITE_VERSION:-unknown}"
     echo "  Site directory:  $IMPORT_REMOTE_DIR ($(import_kv "$IMPORT_REMOTE_REPORT" site_size_mb) MB)"
     echo "  Project URL:     $(import_kv "$IMPORT_REMOTE_REPORT" project_url)"

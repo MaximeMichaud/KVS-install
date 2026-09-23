@@ -180,6 +180,22 @@ test_prepared_dump_loads_into_the_container_database() {
     { cat "$dump"; echo "SET @@SESSION.SQL_LOG_BIN= 0;"; echo "SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5';"; } > "$TMP_ROOT/mysql8.sql"
     import_prepare_dump "$TMP_ROOT/mysql8.sql" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/prepared-mysql8.sql" token >/dev/null || fail "a MySQL 8 dump must be prepared"
     grep -q 'GTID_PURGED\|SQL_LOG_BIN' "$TMP_ROOT/prepared-mysql8.sql" && fail "the GTID and binary log settings of a MySQL 8 dump must be dropped"
+
+    # Views and triggers name the user that created them on the old server,
+    # which does not exist here; the row data is never touched.
+    {
+        cat "$dump"
+        echo '/*!50001 CREATE ALGORITHM=UNDEFINED */'
+        echo '/*!50013 DEFINER=`kvs`@`localhost` SQL SECURITY DEFINER */'
+        echo '/*!50001 VIEW `ktvs_view` AS select 1 AS `one` */;'
+        echo '/*!50003 CREATE*/ /*!50017 DEFINER=`kvs`@`10.0.0.%`*/ /*!50003 TRIGGER `ktvs_trigger` BEFORE INSERT ON `ktvs_options` FOR EACH ROW SET NEW.value = NEW.value */;'
+        echo "INSERT INTO \`ktvs_options\` VALUES ('NOTE','DEFINER=\`keep\`@\`me\` in a value');"
+    } > "$TMP_ROOT/definers.sql"
+    import_prepare_dump "$TMP_ROOT/definers.sql" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/prepared-definers.sql" token-4 >/dev/null ||
+        fail "a dump with views and triggers must be prepared"
+    grep -q 'DEFINER=`kvs`' "$TMP_ROOT/prepared-definers.sql" && fail "the DEFINER clauses of views and triggers must be dropped"
+    grep -Fq '/*!50013  SQL SECURITY DEFINER */' "$TMP_ROOT/prepared-definers.sql" || fail "the view must keep its SQL SECURITY clause"
+    grep -Fq "DEFINER=\`keep\`@\`me\` in a value" "$TMP_ROOT/prepared-definers.sql" || fail "row data must never be rewritten"
     pass "prepared dump loads into the container database"
 }
 
@@ -294,6 +310,11 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'IMPORT_MARKER_DIR="$IMPORT_STAGING"' "$setup" || fail "the source marker must live outside the webroot"
     grep -Fq 'rm -f "/var/www/$DOMAIN/.kvs-import-source"' "$setup" && fail "the source marker must stay for a later pass from the same source"
     grep -Fq 'rm -f mariadb/init/*kvs-import*' "$setup" || fail "stale staged dumps must be removed before staging"
+    grep -Eq '^    trap import_ssh_close EXIT$' "$setup" || fail "the ssh master must be closed however the setup ends"
+    grep -Fq 'if ! import_remote_privileges; then' "$setup" || fail "the SSH user privileges must be probed on the first connection"
+    grep -Fq 'passwordless sudo, used for the dump and the files' "$setup" || fail "the use of sudo on the old server must be displayed"
+    grep -Eq '^    import_check_site_links$' "$setup" || fail "links leaving the site must be checked once the files are here"
+    grep -Fq 'remove the dangling ones' "$setup" || fail "dangling links must be refused with the fix spelled out"
 
     grep -Fq "'^https?://(www[.])?\${DOMAIN_PATTERN}(:[0-9]+)?/contents/'" "$configure" || fail "http storage URLs must be adopted too"
     grep -Fq 'Storage servers use external hosts' "$configure" || fail "external storage hosts must be tolerated"
