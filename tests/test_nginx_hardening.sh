@@ -478,4 +478,20 @@ test_certificate_monitor
 grep -Fq 'location ^~ /admin/include/ {' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
     fail "standalone site config does not deny /admin/include/"
 
+# phpMyAdmin is installed outside the site root by the standalone installer
+# and needs its own location; its PHP sub-location must carry the socket
+# placeholder the installer rewrites, like the generic handler.
+grep -Fq 'location /phpmyadmin/ {' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
+    fail "standalone site config does not serve phpMyAdmin"
+[ "$(grep -c 'fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;' "$ROOT_DIR/conf/nginx/conf.d/domain.conf")" -eq 2 ] ||
+    fail "standalone site config must route phpMyAdmin PHP files through the placeholder socket"
+grep -Fq 'open_basedir=/usr/share/phpmyadmin/' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
+    fail "phpMyAdmin location must carry its own open_basedir (the site value sticks to FPM workers)"
+
+# Let's Encrypt certificates carry no OCSP responder any more, so stapling
+# only produces a warning at every reload.
+for conf in conf/nginx/nginx.conf docker/nginx/nginx.conf; do
+    grep -q 'ssl_stapling' "$ROOT_DIR/$conf" && fail "$conf still enables OCSP stapling"
+done
+
 echo "PASS: Nginx hardening"
