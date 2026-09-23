@@ -2731,6 +2731,9 @@ import_place_site_files
 # Wait for MariaDB: 3 minutes, or MARIADB_WAIT_SECONDS. An import replays
 # the dump during this time and waits up to an hour by default. A container
 # that restarted or stopped failed its initialization: report it at once.
+# The probe goes through TCP: while the image initializes the volume it runs
+# a temporary server reachable on the socket only, and the socket would
+# answer before the init files have been replayed.
 echo -n "  Waiting for MariaDB..."
 if [ "$IMPORT_MODE" = true ]; then
     MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}
@@ -2738,7 +2741,7 @@ else
     MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-180}
 fi
 WAITED=0
-while ! run_root_mariadb -u root -e "SELECT 1" > /dev/null 2>&1; do
+while ! run_root_mariadb -u root -h 127.0.0.1 --protocol=tcp -e "SELECT 1" > /dev/null 2>&1; do
     MARIADB_CONTAINER=$(docker compose ps -q mariadb 2>/dev/null | head -n 1)
     MARIADB_STATE=$(docker inspect --format '{{.RestartCount}} {{.State.Status}}' "$MARIADB_CONTAINER" 2>/dev/null || echo "0 unknown")
     if [ "${MARIADB_STATE%% *}" != "0" ] || [ "${MARIADB_STATE#* }" = "exited" ]; then
@@ -2871,6 +2874,7 @@ import_finish() {
     }
     set_env_value KVS_IMPORT_COMPLETED "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 1
     [ -n "$IMPORT_STAGED_DUMP" ] && rm -f "$IMPORT_STAGED_DUMP"
+    rm -f "/var/www/$DOMAIN/.kvs-import-source"
     echo -e "  ${GREEN}✓${NC} Import complete: $(grep -c -v '^#' "$report") tables, row counts in $report"
 }
 

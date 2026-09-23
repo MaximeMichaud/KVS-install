@@ -193,8 +193,21 @@ test_site_placement_copies_once_and_refuses_a_used_directory() {
     [ ! -e "$destination/.kvs-extraction-in-progress" ] || fail "an interrupted extraction marker must not travel"
     grep -q "copied" <<< "$output" || fail "the copy must be reported: $output"
 
-    output=$(import_place_site "$source" "$destination" 2>&1) && fail "a non-empty destination must be refused"
+    [ "$(cat "$destination/.kvs-import-source")" = "$(readlink -f "$source")" ] || fail "the copy must record its source"
+
+    echo "changed" > "$source/contents/videos/2.mp4"
+    output=$(import_place_site "$source" "$destination") || fail "a copy of the same source must be resumable"
+    grep -q "Resuming" <<< "$output" || fail "the resumed copy must be reported: $output"
+    [ -f "$destination/contents/videos/2.mp4" ] || fail "the resumed copy must bring the new files"
+
+    rm "$destination/.kvs-import-source"
+    output=$(import_place_site "$source" "$destination" 2>&1) && fail "a non-empty destination without the marker must be refused"
     grep -q "not empty" <<< "$output" || fail "the refusal must explain: $output"
+
+    make_site "$TMP_ROOT/place-other" /home/other/www
+    readlink -f "$TMP_ROOT/place-other" > "$destination/.kvs-import-source"
+    output=$(import_place_site "$source" "$destination" 2>&1) && fail "a copy of another source must be refused"
+    readlink -f "$source" > "$destination/.kvs-import-source"
 
     output=$(import_place_site "$destination" "$destination") || fail "the destination itself must be accepted as source"
     grep -q "already in place" <<< "$output" || fail "an in-place import must be reported: $output"
@@ -240,6 +253,8 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq "SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';" "$setup" || fail "the completion marker must be verified before the KVS init"
     grep -Fq 'MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}' "$setup" || fail "an import must wait for the dump replay"
     grep -Fq '{{.RestartCount}} {{.State.Status}}' "$setup" || fail "a restarted MariaDB container must be reported"
+    grep -Fq 'run_root_mariadb -u root -h 127.0.0.1 --protocol=tcp -e "SELECT 1"' "$setup" || fail "the readiness probe must use TCP, the socket answers during the init replay"
+    grep -Fq 'rm -f "/var/www/$DOMAIN/.kvs-import-source"' "$setup" || fail "the copy marker must go once the import completed"
     grep -Fq 'rm -f mariadb/init/*kvs-import*' "$setup" || fail "stale staged dumps must be removed before staging"
 
     grep -Fq "'^https?://(www[.])?\${DOMAIN_PATTERN}(:[0-9]+)?/contents/'" "$configure" || fail "http storage URLs must be adopted too"
