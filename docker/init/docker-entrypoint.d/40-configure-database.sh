@@ -29,27 +29,38 @@ DOMAIN_PATTERN=${DOMAIN//./[.]}
 if ! db_exec "UPDATE ktvs_admin_servers
     SET urls = REGEXP_REPLACE(
         urls,
-        '^https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/',
+        '^https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/',
         '${PROJECT_URL}/contents/'
     )
-    WHERE urls REGEXP '^https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/';"; then
+    WHERE urls REGEXP '^https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/';"; then
     log_error "Could not synchronize persisted server URLs"
     exit 1
 fi
 if ! MATCHING_URL_COUNT=$(db_query \
     "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls LIKE '${PROJECT_URL}/contents/%';") ||
     ! STALE_URL_COUNT=$(db_query \
-    "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls REGEXP '^https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/' AND urls NOT LIKE '${PROJECT_URL}/contents/%';"); then
+    "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls REGEXP '^https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/' AND urls NOT LIKE '${PROJECT_URL}/contents/%';"); then
     log_error "Could not verify persisted server URLs"
     exit 1
 fi
 if [[ ! "$MATCHING_URL_COUNT" =~ ^[0-9]+$ ]] ||
-    [[ ! "$STALE_URL_COUNT" =~ ^[0-9]+$ ]] ||
-    [ "$MATCHING_URL_COUNT" -lt 1 ] || [ "$STALE_URL_COUNT" -ne 0 ]; then
+    [[ ! "$STALE_URL_COUNT" =~ ^[0-9]+$ ]] || [ "$STALE_URL_COUNT" -ne 0 ]; then
     log_error "Persisted server URLs do not match $PROJECT_URL"
     exit 1
 fi
-log_info "Server URLs configured: ${PROJECT_URL}/contents/..."
+# An imported site may serve its storage from other hosts (a CDN, a
+# separate storage server): those URLs stay as they are.
+if [ "$MATCHING_URL_COUNT" -lt 1 ]; then
+    if ! EXTERNAL_URL_COUNT=$(db_query \
+        "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls NOT REGEXP '^https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/';") ||
+        [[ ! "$EXTERNAL_URL_COUNT" =~ ^[0-9]+$ ]] || [ "$EXTERNAL_URL_COUNT" -lt 1 ]; then
+        log_error "Persisted server URLs do not match $PROJECT_URL"
+        exit 1
+    fi
+    log_warn "Storage servers use external hosts ($EXTERNAL_URL_COUNT), their URLs are left as they are"
+else
+    log_info "Server URLs configured: ${PROJECT_URL}/contents/..."
+fi
 
 # Synchronize TLS verification in both directions. Public certificates must
 # not inherit the relaxed setting from an earlier self-signed deployment.

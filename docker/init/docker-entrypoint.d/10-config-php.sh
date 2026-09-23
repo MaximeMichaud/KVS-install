@@ -51,6 +51,20 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     sed -i "s|\$config\['memcache_server'\]=\"[^\"]*\"|\$config['memcache_server']=\"127.0.0.1\"|" \
         "$KVS_PATH/admin/include/setup.php"
     log_info "Memcache: 127.0.0.1:11211 via container loopback"
+
+    # A site imported from another server may point at an ffmpeg that does
+    # not exist in the PHP image; the image ships it at /usr/bin/ffmpeg.
+    # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
+    FFMPEG_PATH=$(sed -n 's/^[[:space:]]*\$config\[.ffmpeg_path.\][[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$KVS_PATH/admin/include/setup.php" | head -n 1)
+    case "$FFMPEG_PATH" in
+        ""|/usr/bin/ffmpeg|/usr/local/bin/ffmpeg) ;;
+        *)
+            sed -i "s|\$config\['ffmpeg_path'\]=\"[^\"]*\"|\$config['ffmpeg_path']=\"/usr/bin/ffmpeg\"|" \
+                "$KVS_PATH/admin/include/setup.php"
+            log_info "ffmpeg path: $FFMPEG_PATH is not in the container, set to /usr/bin/ffmpeg"
+            ;;
+    esac
 else
     log_warn "setup.php not found, skipping PHP configuration"
 fi
