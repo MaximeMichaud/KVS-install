@@ -425,6 +425,68 @@ test_kvs_system_settings_select_nginx() {
   unset MOCK_SERVER_TYPE DOMAIN
 }
 
+test_archive_extraction_skips_an_installed_site() {
+  local temp_dir
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  mkdir -p "$temp_dir/src/admin/include" "$temp_dir/root" "$temp_dir/www"
+  printf "define('DB_PASS','pass');\n" >"$temp_dir/src/admin/include/setup_db.php"
+  echo stock >"$temp_dir/src/index.php"
+  (cd "$temp_dir/src" && zip -qr "$temp_dir/root/KVS_7.0.2_[example.com].zip" .)
+
+  # First run: the archive is extracted and consumed.
+  extract_kvs_archive "$temp_dir/www" "$temp_dir/root" >/dev/null ||
+    fail "fresh extraction failed" || return 1
+  [[ -f "$temp_dir/www/index.php" ]] || fail "archive was not extracted" || return 1
+  [[ ! -e "$temp_dir/root/KVS_7.0.2_[example.com].zip" ]] || fail "archive was left behind after extraction" || return 1
+
+  # Later run over the installed site: nothing is overwritten, the archive stays.
+  echo customized >"$temp_dir/www/index.php"
+  echo "define('DB_PASS','configured');" >"$temp_dir/www/admin/include/setup_db.php"
+  echo dummy >"$temp_dir/root/KVS_7.0.2_[example.com].zip"
+  extract_kvs_archive "$temp_dir/www" "$temp_dir/root" >/dev/null ||
+    fail "re-run extraction guard failed" || return 1
+  assert_equal "customized" "$(cat "$temp_dir/www/index.php")" "installed files must not be overwritten on a re-run" || return 1
+  [[ -f "$temp_dir/root/KVS_7.0.2_[example.com].zip" ]] || fail "archive must stay in place on a re-run" || return 1
+}
+
+test_database_file_configuration_is_anchored() {
+  local temp_dir
+  local file
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  file="$temp_dir/setup_db.php"
+  printf "define('DB_HOST','localhost');\ndefine('DB_LOGIN','login');\ndefine('DB_PASS','pass');\ndefine('DB_DEVICE','base');\n" >"$file"
+
+  assert_equal "" "$(read_kvs_database_password "$file")" "stock placeholders must not read as a password" || return 1
+  configure_kvs_database_file "$file" example.com 'p4ss/w0rd=' || fail "configuration failed" || return 1
+  assert_file_contains "$file" "define('DB_LOGIN','example.com');" "login must be set" || return 1
+  assert_file_contains "$file" "define('DB_PASS','p4ss/w0rd=');" "password must be set" || return 1
+  assert_file_contains "$file" "define('DB_DEVICE','example.com');" "database must be set" || return 1
+  assert_equal "p4ss/w0rd=" "$(read_kvs_database_password "$file")" "configured password must be read back" || return 1
+
+  # A configured file is left alone, even with a new password on the re-run.
+  configure_kvs_database_file "$file" example.com 'another' || fail "re-run configuration failed" || return 1
+  assert_file_contains "$file" "define('DB_PASS','p4ss/w0rd=');" "configured password must survive a re-run" || return 1
+  assert_equal "" "$(read_kvs_database_password "$temp_dir/missing.php")" "a missing file reads as no password" || return 1
+}
+
+test_acme_issue_reuses_a_valid_certificate() {
+  local temp_dir
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  # shellcheck disable=SC2016  # the script must expand ACME_EXIT at run time
+  printf '#!/bin/bash\nexit "${ACME_EXIT:-0}"\n' >"$temp_dir/acme.sh"
+  chmod +x "$temp_dir/acme.sh"
+
+  ACME_EXIT=0 acme_issue_or_reuse "$temp_dir/acme.sh" --issue >/dev/null || fail "a fresh issue must succeed" || return 1
+  ACME_EXIT=2 acme_issue_or_reuse "$temp_dir/acme.sh" --issue >/dev/null || fail "a still valid certificate must count as success" || return 1
+  ACME_EXIT=1 acme_issue_or_reuse "$temp_dir/acme.sh" --issue >/dev/null 2>&1
+  status=$?
+  assert_equal "1" "$status" "a failed issue must stay a failure" || return 1
+}
+
 test_domain_validation_respects_database_limit() {
   local max_label
   local oversized_label
@@ -839,6 +901,9 @@ run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fa
 run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
 run_test "auto-updates follow upstream repositories" test_auto_updates_follow_upstream_repositories || failures=$((failures + 1))
 run_test "KVS system settings select nginx" test_kvs_system_settings_select_nginx || failures=$((failures + 1))
+run_test "archive extraction skips an installed site" test_archive_extraction_skips_an_installed_site || failures=$((failures + 1))
+run_test "database file configuration is anchored" test_database_file_configuration_is_anchored || failures=$((failures + 1))
+run_test "acme issue reuses a valid certificate" test_acme_issue_reuses_a_valid_certificate || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))
