@@ -119,24 +119,24 @@ Procedure:
 1. Put the KVS archive of the same version as the site in `docker/kvs-archive/`. The nginx rewrites and the PHP version come from it.
 2. For the archive source, run the exporter on the old server. It finds the site, checks the database access with the credentials of `admin/include/setup_db.php`, dumps the database (zstd when installed, gzip otherwise) and writes one tar with the files, the dump and a manifest. Copy the result to the new server.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-export.sh -o kvs-export.sh
-sudo bash kvs-export.sh                  # archive in the current directory
-sudo bash kvs-export.sh --dump-only      # the compressed dump alone
-```
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-export.sh -o kvs-export.sh
+   sudo bash kvs-export.sh                  # archive in the current directory
+   sudo bash kvs-export.sh --dump-only      # the compressed dump alone
+   ```
 
 3. Run the installer on the new server. Interactive runs ask whether to import and from where, show what was found and ask for confirmation. Headless runs set one source:
 
-```bash
-IMPORT_ARCHIVE=/root/example.com-kvs-export-20260923-1200.tar \
-  HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
+   ```bash
+   IMPORT_ARCHIVE=/root/example.com-kvs-export-20260923-1200.tar \
+     HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
 
-IMPORT_SITE_DIR=/var/www/example.com IMPORT_DB_DUMP=/root/example.sql.zst \
-  HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
+   IMPORT_SITE_DIR=/var/www/example.com IMPORT_DB_DUMP=/root/example.sql.zst \
+     HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
 
-IMPORT_REMOTE_HOST=old.example.com IMPORT_SSH_KEY=/root/.ssh/id_ed25519 \
-  HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
-```
+   IMPORT_REMOTE_HOST=old.example.com IMPORT_SSH_KEY=/root/.ssh/id_ed25519 \
+     HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=3 VOLUME_CHOICE=1 ./setup.sh
+   ```
 
 `IMPORT_REMOTE_USER` (root), `IMPORT_REMOTE_PORT` (22) and `IMPORT_REMOTE_DIR` (searched for when empty) complete the remote source; headless runs need key authentication, and `IMPORT_SSH_ACCEPT_NEW=y` to trust a host key that is not in `known_hosts` yet (interactive runs get ssh's own question). Start with a self-signed certificate (`SSL_CHOICE=3`) when the DNS still points at the old server, then run the setup again with Let's Encrypt after the switch.
 
