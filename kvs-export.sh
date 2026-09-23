@@ -530,15 +530,15 @@ kvs_probe_database() {
 # Sizes and free space
 #################################################################
 
-# du counts the symlinks themselves while the archive dereferences them, so
-# a contents directory living on another disk makes the real archive bigger
-# than this estimate. The free space check keeps a tenth of margin on top.
+# du follows the symbolic links, as the archive and the transfer do: a
+# contents directory living on another disk counts with what it holds. The
+# free space check keeps a tenth of margin on top.
 kvs_measure_site() {
     local raw
 
     kvs_say "Measuring the site size, this can take a while on a large installation..."
     # shellcheck disable=SC2217  # stdin is the script itself under bash -s.
-    raw=$(du -sm -- "$SITE_DIR" 2> /dev/null < /dev/null || true)
+    raw=$(du -sLm -- "$SITE_DIR" 2> /dev/null < /dev/null || true)
     raw=${raw%%$'\n'*}
     raw=${raw%%[[:space:]]*}
     if kvs_is_number "$raw"; then
@@ -857,7 +857,7 @@ kvs_collect() {
         return 1
     fi
     if [ ! -r "$setup_db" ]; then
-        kvs_error "$setup_db is not readable, run this as root"
+        kvs_error "$setup_db is not readable by $(id -un), run this as root or give this user passwordless sudo"
         return 1
     fi
     DB_HOST_RAW=$(kvs_define_value "$setup_db" DB_HOST)
