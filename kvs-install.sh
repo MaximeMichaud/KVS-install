@@ -991,9 +991,6 @@ function aptinstall_phpmyadmin() {
     chmod 700 "${PHPMYADMIN_INSTALL_DIR}/tmp"
     randomBlowfishSecret=$(openssl rand -base64 22)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "${PHPMYADMIN_INSTALL_DIR}/config.sample.inc.php" >"${PHPMYADMIN_INSTALL_DIR}/config.inc.php"
-    # 404
-	#curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf -o phpmyadmin.conf
-    ln -s "${PHPMYADMIN_INSTALL_DIR}" /var/www/phpmyadmin
     if [[ "$webserver" =~ (nginx) ]]; then
       apt-get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} || return $?
       service nginx restart
