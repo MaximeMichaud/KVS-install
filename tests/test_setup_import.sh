@@ -122,19 +122,26 @@ test_dump_inspection_counts_tables_and_finds_the_markers() {
     local dump="$TMP_ROOT/dump-with.sql"
     make_dump "$dump" yes
 
-    [ "$(import_inspect_dump "$dump" ktvs_)" = $'2\t5.5.1\t2' ] ||
+    [ "$(import_inspect_dump "$dump" ktvs_)" = $'2\t5.5.1\t2\tno' ] ||
         fail "inspection must count the ktvs_ tables, the INITIAL_VERSION and the database statements: got '$(import_inspect_dump "$dump" ktvs_)'"
 
     make_dump "$TMP_ROOT/dump-without.sql" no
-    [ "$(import_inspect_dump "$TMP_ROOT/dump-without.sql" ktvs_)" = $'2\t\t2' ] ||
+    [ "$(import_inspect_dump "$TMP_ROOT/dump-without.sql" ktvs_)" = $'2\t\t2\tno' ] ||
         fail "a dump without INITIAL_VERSION must report it empty"
 
     zstd -q -f "$dump" -o "$TMP_ROOT/dump.sql.zst"
     gzip -c "$dump" > "$TMP_ROOT/dump.sql.gz"
-    [ "$(import_inspect_dump "$TMP_ROOT/dump.sql.zst" ktvs_)" = $'2\t5.5.1\t2' ] || fail "a zstd dump must be read"
-    [ "$(import_inspect_dump "$TMP_ROOT/dump.sql.gz" ktvs_)" = $'2\t5.5.1\t2' ] || fail "a gzip dump must be read"
+    [ "$(import_inspect_dump "$TMP_ROOT/dump.sql.zst" ktvs_)" = $'2\t5.5.1\t2\tno' ] || fail "a zstd dump must be read"
+    [ "$(import_inspect_dump "$TMP_ROOT/dump.sql.gz" ktvs_)" = $'2\t5.5.1\t2\tno' ] || fail "a gzip dump must be read"
 
-    [ "$(import_inspect_dump "$dump" site_)" = $'0\t5.5.1\t2' ] || fail "tables of another prefix must not count"
+    [ "$(import_inspect_dump "$dump" site_)" = $'0\t5.5.1\t2\tno' ] || fail "tables of another prefix must not count"
+
+    { cat "$dump"; echo; echo "-- Dump completed on 2026-09-23 10:00:00"; echo; } > "$TMP_ROOT/dump-complete.sql"
+    [ "$(import_inspect_dump "$TMP_ROOT/dump-complete.sql" ktvs_)" = $'2\t5.5.1\t2\tyes' ] ||
+        fail "a dump that ends with the completion line must report it: got '$(import_inspect_dump "$TMP_ROOT/dump-complete.sql" ktvs_)'"
+    { cat "$TMP_ROOT/dump-complete.sql"; echo "INSERT INTO \`ktvs_options\` VALUES ('LATE','1');"; } > "$TMP_ROOT/dump-truncated.sql"
+    [ "$(import_inspect_dump "$TMP_ROOT/dump-truncated.sql" ktvs_)" = $'2\t5.5.1\t2\tno' ] ||
+        fail "statements after the completion line mean the dump did not end there"
     import_inspect_dump "$TMP_ROOT/missing.sql" ktvs_ 2>/dev/null && fail "a missing dump must be refused"
     pass "dump inspection counts tables and finds the markers"
 }
@@ -246,19 +253,42 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'Import an existing KVS site (experimental)' "$setup" || fail "the import must be labelled experimental"
     grep -Fq 'IMPORT_SITE_DIR=DIR' "$setup" || fail "the usage must document IMPORT_SITE_DIR"
     grep -Fq 'IMPORT_SITE_DIR and IMPORT_DB_DUMP must be set together' "$setup" || fail "the two inputs must be required together"
-    for step in prepare_import import_require_empty_volume import_stage_dump import_place_site_files import_verify_database import_finish; do
+    for step in select_import_source import_require_empty_volume import_fetch_source import_stage_dump import_place_site_files import_verify_database import_finish; do
         grep -Eq "^${step}$|^    ${step}$|^${step}\$" "$setup" || grep -Eq "^\s*${step}(\s|$)" "$setup" || fail "setup.sh must call $step"
     done
     grep -Fq 'KVS_IMPORT_COMPLETED' "$setup" || fail "a completed import must be recorded in .env"
+    grep -q 'prepare_import' "$setup" && fail "the early validation moved into the questionnaire; no call to prepare_import may remain"
     grep -Fq 'importing again (VOLUME_CHOICE=1 replaces the database)' "$setup" || fail "VOLUME_CHOICE=1 must repeat a completed import"
-    grep -Fq 'IMPORT_SITE_DIR and IMPORT_DB_DUMP are ignored for this run' "$setup" || fail "without VOLUME_CHOICE=1 a completed import must turn into a re-run"
+    grep -Fq 'the import source is ignored for this run' "$setup" || fail "without VOLUME_CHOICE=1 a completed import must turn into a re-run"
+    grep -Fq 'IMPORT_ARCHIVE=FILE' "$setup" || fail "the usage must document IMPORT_ARCHIVE"
+    grep -Fq 'IMPORT_REMOTE_HOST=H' "$setup" || fail "the usage must document IMPORT_REMOTE_HOST"
+    grep -Fq 'IMPORT_ARCHIVE, IMPORT_SITE_DIR with IMPORT_DB_DUMP, and IMPORT_REMOTE_HOST are exclusive' "$setup" || fail "the sources must be exclusive"
+    grep -Fq 'Import an existing KVS site (experimental)?' "$setup" || fail "interactive runs must ask about an import"
+    grep -Fq '4) Yes, from the old server over SSH' "$setup" || fail "the questionnaire must offer the remote source"
+    grep -Eq '^select_import_source$' "$setup" || fail "the questionnaire must run after the domain prompt"
+    grep -Eq '^import_fetch_source$' "$setup" || fail "the source must be fetched before the build"
+    grep -Fq 'IMPORT_VOLUME_TO_DELETE=$volume_name' "$setup" || fail "the volume deletion must be deferred"
+    grep -A3 -F 'if [ -n "$IMPORT_VOLUME_TO_DELETE" ]; then' "$setup" | grep -Fq 'delete_database_volume "$IMPORT_VOLUME_TO_DELETE"' || fail "the deferred deletion must happen before MariaDB starts"
+    grep -A5 -E '^import_require_empty_volume$' "$setup" | grep -Fq 'ask_existing_volume' || fail "the generic volume prompt must be skipped in import mode"
+    grep -A2 -E '^import_require_empty_volume$' "$setup" | grep -Fq 'if [ "$IMPORT_MODE" = true ]; then' || fail "the generic volume prompt must be skipped in import mode"
+    grep -Fq 'Installation detected on $IMPORT_REMOTE_HOST' "$setup" || fail "the remote detection must be displayed"
+    grep -Fq 'db_password_hint' "$setup" || fail "the database password must only be shown masked"
+    grep -Fq 'IMPORT_EXPORTER="$(dirname "${BASH_SOURCE[0]}")/../kvs-export.sh"' "$setup" || fail "the exporter travels from the repository root"
+    grep -Fq 'stage=$(import_stage_dir_for "$destination")' "$setup" || fail "an archive must be unpacked in a private stage, not in the webroot"
+    grep -Fq 'IMPORT_SSH_ACCEPT_NEW' "$setup" || fail "accepting unknown host keys must be an opt-in"
+    grep -B3 -F 'Receiving the database dump from $IMPORT_SSH_TARGET' "$setup" | grep -Fq 'Site files in $destination' || fail "the files must travel before the dump"
+    grep -Fq 'the transfer broke off' "$setup" || fail "a remote dump without the completion line must stop the import"
+    grep -Fq 'The KVS license is bound to the domain' "$setup" || fail "a domain mismatch must be explained"
+    grep -Fq '[ -n "$IMPORT_RAW_DUMP" ] && rm -f "$IMPORT_RAW_DUMP"' "$setup" || fail "the raw dump must go once the import completed"
+    grep -Fq 'docker/import/' "$REPO_ROOT/.gitignore" || fail "raw dumps must be ignored by git"
     grep -A2 -F '[ "${KEEP_EXISTING_DB:-false}" != true ] &&' "$setup" | grep -Fq '[ "$IMPORT_MODE" != true ]; then' ||
         fail "an imported database must keep its admin password instead of getting a one-time one"
     grep -Fq "SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';" "$setup" || fail "the completion marker must be verified before the KVS init"
     grep -Fq 'MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}' "$setup" || fail "an import must wait for the dump replay"
     grep -Fq '{{.RestartCount}} {{.State.Status}}' "$setup" || fail "a restarted MariaDB container must be reported"
     grep -Fq 'run_root_mariadb -u root -h 127.0.0.1 --protocol=tcp -e "SELECT 1"' "$setup" || fail "the readiness probe must use TCP, the socket answers during the init replay"
-    grep -Fq 'rm -f "/var/www/$DOMAIN/.kvs-import-source"' "$setup" || fail "the copy marker must go once the import completed"
+    grep -Fq 'IMPORT_MARKER_DIR="$IMPORT_STAGING"' "$setup" || fail "the source marker must live outside the webroot"
+    grep -Fq 'rm -f "/var/www/$DOMAIN/.kvs-import-source"' "$setup" && fail "the source marker must stay for a later pass from the same source"
     grep -Fq 'rm -f mariadb/init/*kvs-import*' "$setup" || fail "stale staged dumps must be removed before staging"
 
     grep -Fq "'^https?://(www[.])?\${DOMAIN_PATTERN}(:[0-9]+)?/contents/'" "$configure" || fail "http storage URLs must be adopted too"

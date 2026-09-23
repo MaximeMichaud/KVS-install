@@ -8,9 +8,10 @@ set -e
 readonly LOG_DIR="/opt/kvs/logs"
 readonly DEBUG_LOG="${LOG_DIR}/setup-debug.log"
 
-# Import of an existing site (IMPORT_SITE_DIR + IMPORT_DB_DUMP, experimental),
-# shared with the standalone installer. Only an import needs the library, so
-# a copy of this script running alone still installs a fresh site.
+# Import of an existing site (experimental): an archive, a directory plus a
+# dump, or the old server over SSH. The functions live in lib/import.sh,
+# shared with the standalone installer. Only an import needs the library,
+# so a copy of this script running alone still installs a fresh site.
 IMPORT_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/import.sh"
 if [ -f "$IMPORT_LIB" ]; then
     # shellcheck source=lib/import.sh
@@ -51,13 +52,23 @@ OPTIONS:
 ENVIRONMENT VARIABLES:
     PREFLIGHT_BYPASS=y    Bypass pre-flight warnings (disk space, internet)
                           Note: Critical checks (Docker, commands) cannot be bypassed
-    IMPORT_SITE_DIR=DIR   Import an existing KVS site (experimental): DIR holds
-                          its files (admin/include/setup.php), copied to
-                          /var/www/<domain> unless it already is that directory
-    IMPORT_DB_DUMP=FILE   ... and FILE its database dump (.sql, .sql.gz,
-                          .sql.xz or .sql.zst). Both go together; the KVS
-                          archive of the same version must be in kvs-archive/.
-                          See README, "Importing an existing site".
+    Import an existing KVS site (experimental), one source at a time; the
+    KVS archive of the same version must be in kvs-archive/. Interactive
+    runs ask instead. See README, "Importing an existing site".
+    IMPORT_ARCHIVE=FILE   An archive holding the site directory and its
+                          database dump: zip, 7z, tar, tar.gz, tar.zst,
+                          tar.xz or tar.bz2 (kvs-export.sh makes one)
+    IMPORT_SITE_DIR=DIR   The site files (admin/include/setup.php), copied to
+                          /var/www/<domain> unless they already are there...
+    IMPORT_DB_DUMP=FILE   ... with the database dump (.sql, .sql.gz, .sql.xz
+                          or .sql.zst). Both go together.
+    IMPORT_REMOTE_HOST=H  The old server, reached over SSH; optional
+                          IMPORT_REMOTE_PORT (22), IMPORT_REMOTE_USER (root),
+                          IMPORT_REMOTE_DIR (site directory, searched for
+                          when empty) and IMPORT_SSH_KEY (identity file).
+                          Headless runs need key authentication, and
+                          IMPORT_SSH_ACCEPT_NEW=y to trust a host key that
+                          is not in known_hosts yet.
 
 EXAMPLES:
     # Production installation
@@ -145,55 +156,384 @@ if [[ "$HEADLESS" == "y" ]]; then
     # Note: PREFLIGHT_BYPASS can be set as environment variable (no default)
 fi
 
-# Import of an existing site: both inputs go together (lib/import.sh).
+# Import of an existing site: one source at a time (lib/import.sh).
+# Interactive runs choose in the questionnaire; headless runs set the
+# variables.
 IMPORT_MODE=false
-if [ -n "${IMPORT_SITE_DIR:-}" ] || [ -n "${IMPORT_DB_DUMP:-}" ]; then
-    if [ -z "${IMPORT_SITE_DIR:-}" ] || [ -z "${IMPORT_DB_DUMP:-}" ]; then
+IMPORT_SOURCE=""
+IMPORT_ARCHIVE="${IMPORT_ARCHIVE:-}"
+IMPORT_SITE_DIR="${IMPORT_SITE_DIR:-}"
+IMPORT_DB_DUMP="${IMPORT_DB_DUMP:-}"
+IMPORT_REMOTE_HOST="${IMPORT_REMOTE_HOST:-}"
+IMPORT_REMOTE_PORT="${IMPORT_REMOTE_PORT:-22}"
+IMPORT_REMOTE_USER="${IMPORT_REMOTE_USER:-root}"
+IMPORT_REMOTE_DIR="${IMPORT_REMOTE_DIR:-}"
+IMPORT_SSH_KEY="${IMPORT_SSH_KEY:-}"
+IMPORT_SSH_ACCEPT_NEW="${IMPORT_SSH_ACCEPT_NEW:-}"
+IMPORT_CHOICE="${IMPORT_CHOICE:-}"
+IMPORT_SOURCES_GIVEN=0
+if [ -n "$IMPORT_ARCHIVE" ]; then
+    IMPORT_SOURCE=archive
+    IMPORT_SOURCES_GIVEN=$((IMPORT_SOURCES_GIVEN + 1))
+fi
+if [ -n "$IMPORT_SITE_DIR" ] || [ -n "$IMPORT_DB_DUMP" ]; then
+    if [ -z "$IMPORT_SITE_DIR" ] || [ -z "$IMPORT_DB_DUMP" ]; then
         echo "ERROR: IMPORT_SITE_DIR and IMPORT_DB_DUMP must be set together" >&2
         exit 1
     fi
+    IMPORT_SOURCE=directory
+    IMPORT_SOURCES_GIVEN=$((IMPORT_SOURCES_GIVEN + 1))
+fi
+if [ -n "$IMPORT_REMOTE_HOST" ]; then
+    IMPORT_SOURCE=remote
+    IMPORT_SOURCES_GIVEN=$((IMPORT_SOURCES_GIVEN + 1))
+fi
+if [ "$IMPORT_SOURCES_GIVEN" -gt 1 ]; then
+    echo "ERROR: IMPORT_ARCHIVE, IMPORT_SITE_DIR with IMPORT_DB_DUMP, and IMPORT_REMOTE_HOST are exclusive" >&2
+    exit 1
+fi
+if [ -n "$IMPORT_SOURCE" ]; then
     IMPORT_MODE=true
 fi
 IMPORT_SITE_VERSION=""
 IMPORT_OLD_PATH=""
+IMPORT_DETECTED_DOMAIN=""
 IMPORT_DUMP_TABLES=""
 IMPORT_STAGED_DUMP=""
+IMPORT_RAW_DUMP=""
 IMPORT_TOKEN=""
+IMPORT_VOLUME_TO_DELETE=""
+IMPORT_ARCHIVE_COMMAND=""
+IMPORT_ARCHIVE_ROOT=""
+IMPORT_ARCHIVE_DUMP=""
+IMPORT_ARCHIVE_MANIFEST=""
+IMPORT_ARCHIVE_MB=""
+IMPORT_ARCHIVE_IGNORED=""
+IMPORT_REMOTE_RSYNC=""
+IMPORT_REMOTE_COMPRESSOR=""
+IMPORT_REMOTE_REPORT=""
+# Raw dumps taken out of an archive or received from the old server wait
+# here, outside the webroot, until they are prepared for MariaDB; the
+# marker that binds /var/www/<domain> to its source lives here too.
+IMPORT_STAGING="$(pwd)/import"
+IMPORT_MARKER_DIR="$IMPORT_STAGING"
+IMPORT_EXPORTER="$(dirname "${BASH_SOURCE[0]}")/../kvs-export.sh"
 
-# Validate the import inputs before anything is built or started: the site
-# directory, its version against the archive in kvs-archive/ (nginx rewrites
-# and the PHP version come from the archive), the dump and the disk space
-# for the copy. A completed import recorded in .env turns the run into an
-# ordinary re-run so a repeated headless command line stays safe.
-prepare_import() {
-    local site_info archive archive_version dump_info completed_on
-    local dump_initial_version dump_statements
+# A completed import recorded in .env turns a repeated command line into an
+# ordinary re-run; the database is replaced only on explicit consent.
+import_check_completed() {
+    local completed_on answer
 
     [ "$IMPORT_MODE" = true ] || return 0
-    if completed_on=$(grep '^KVS_IMPORT_COMPLETED=' .env 2>/dev/null | cut -d= -f2-) && [ -n "$completed_on" ]; then
-        # VOLUME_CHOICE=1 is the explicit consent to replace the database:
-        # with it the import runs again, without it the command line is an
-        # ordinary re-run and the imported site stays as it is.
-        if [ "${VOLUME_CHOICE:-}" != "1" ]; then
-            echo ""
-            echo -e "${YELLOW}An import already completed on ${completed_on}; IMPORT_SITE_DIR and IMPORT_DB_DUMP are ignored for this run.${NC}"
-            echo "Run again with VOLUME_CHOICE=1 to replace the database and import again."
-            IMPORT_MODE=false
-            return 0
-        fi
+    completed_on=$(grep '^KVS_IMPORT_COMPLETED=' .env 2>/dev/null | cut -d= -f2-) || completed_on=""
+    [ -n "$completed_on" ] || return 0
+    if [ "${VOLUME_CHOICE:-}" = "1" ]; then
         echo ""
         echo -e "${YELLOW}An import already completed on ${completed_on}; importing again (VOLUME_CHOICE=1 replaces the database).${NC}"
+        return 0
+    fi
+    if [ "${HEADLESS:-}" != "y" ]; then
+        echo ""
+        echo -e "${YELLOW}An import already completed on ${completed_on}.${NC}"
+        echo -n "Import again and replace the database? [y/N]: "
+        read -r answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            VOLUME_CHOICE=1
+            return 0
+        fi
     fi
     echo ""
-    echo -e "${CYAN}Import of an existing KVS site (experimental)${NC}"
+    echo -e "${YELLOW}An import already completed on ${completed_on}; the import source is ignored for this run.${NC}"
+    echo "Run again with VOLUME_CHOICE=1 to replace the database and import again."
+    IMPORT_MODE=false
+    IMPORT_SOURCE=""
+}
+
+# The questionnaire: which source, then what it holds. Headless runs come
+# here with the source already chosen through the environment.
+select_import_source() {
+    local answer
+
+    if [ -z "$IMPORT_SOURCE" ] && [ "${HEADLESS:-}" != "y" ]; then
+        echo ""
+        echo -e "${CYAN}Import an existing KVS site (experimental)?${NC}"
+        echo "  1) No, install a fresh site (default)"
+        echo "  2) Yes, from an archive on this server (zip, 7z, tar)"
+        echo "  3) Yes, from a directory and a database dump on this server"
+        echo "  4) Yes, from the old server over SSH"
+        if [[ ! "$IMPORT_CHOICE" =~ ^[1-4]$ ]]; then
+            echo -n "Select [1-4] (default: 1): "
+            read -r IMPORT_CHOICE
+            IMPORT_CHOICE=${IMPORT_CHOICE:-1}
+        fi
+        case "$IMPORT_CHOICE" in
+            2)
+                IMPORT_SOURCE=archive
+                while [ -z "$IMPORT_ARCHIVE" ]; do
+                    echo -n "Path to the archive: "
+                    read -r IMPORT_ARCHIVE
+                done
+                ;;
+            3)
+                IMPORT_SOURCE=directory
+                while [ -z "$IMPORT_SITE_DIR" ]; do
+                    echo -n "Path to the site directory (the one holding admin/include/setup.php): "
+                    read -r IMPORT_SITE_DIR
+                done
+                while [ -z "$IMPORT_DB_DUMP" ]; do
+                    echo -n "Path to the database dump (.sql, .sql.gz, .sql.xz or .sql.zst): "
+                    read -r IMPORT_DB_DUMP
+                done
+                ;;
+            4)
+                IMPORT_SOURCE=remote
+                while [ -z "$IMPORT_REMOTE_HOST" ]; do
+                    echo -n "Old server host name or IP address: "
+                    read -r IMPORT_REMOTE_HOST
+                done
+                echo -n "SSH port [22]: "
+                read -r answer
+                IMPORT_REMOTE_PORT=${answer:-22}
+                echo -n "SSH user [root]: "
+                read -r answer
+                IMPORT_REMOTE_USER=${answer:-root}
+                echo -n "SSH private key file (empty: your usual keys, or the password ssh asks for): "
+                read -r IMPORT_SSH_KEY
+                echo -n "Site directory on the old server (empty: search for it): "
+                read -r IMPORT_REMOTE_DIR
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+        IMPORT_MODE=true
+    fi
+    [ "$IMPORT_MODE" = true ] || return 0
+    import_check_completed
+    [ "$IMPORT_MODE" = true ] || return 0
     if ! declare -F import_validate_site >/dev/null; then
         echo -e "${RED}ERROR: the import library $IMPORT_LIB is missing; run setup.sh from a full checkout of the repository${NC}"
         exit 1
     fi
+    echo ""
+    echo -e "${CYAN}Import of an existing KVS site (experimental)${NC}"
+    case "$IMPORT_SOURCE" in
+        archive) import_inspect_archive ;;
+        directory) import_inspect_directory ;;
+        remote) import_inspect_remote ;;
+    esac
+    import_check_kvs_archive_version
+    import_check_domain
+    import_confirm
+}
+
+# The site and the dump, once both are on this server: version, prefix,
+# tables, and whether the dump ends where the dump tool left it.
+import_validate_local_materials() {
+    local site_info dump_info dump_initial_version dump_statements dump_completed
+
     site_info=$(import_validate_site "$IMPORT_SITE_DIR") || exit 1
     IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
     IMPORT_OLD_PATH=$(import_field "$site_info" 2)
+    IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$IMPORT_SITE_DIR/admin/include/setup.php" project_url)")
     echo "  Site: $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
+    dump_info=$(import_inspect_dump "$IMPORT_DB_DUMP" ktvs_) || exit 1
+    IMPORT_DUMP_TABLES=$(import_field "$dump_info" 1)
+    dump_initial_version=$(import_field "$dump_info" 2)
+    dump_statements=$(import_field "$dump_info" 3)
+    dump_completed=$(import_field "$dump_info" 4)
+    if [ "${IMPORT_DUMP_TABLES:-0}" -lt 1 ]; then
+        echo -e "${RED}ERROR: $IMPORT_DB_DUMP holds no CREATE TABLE for the ktvs_ tables${NC}"
+        exit 1
+    fi
+    echo "  Database dump: $IMPORT_DB_DUMP ($IMPORT_DUMP_TABLES tables, INITIAL_VERSION ${dump_initial_version:-missing, recorded as $IMPORT_SITE_VERSION})"
+    if [ "$dump_completed" != yes ]; then
+        if [ "$IMPORT_SOURCE" = remote ]; then
+            echo -e "${RED}ERROR: the dump does not end with the completion line of the dump tool; the transfer broke off${NC}"
+            exit 1
+        fi
+        echo -e "  ${YELLOW}The dump does not end with the 'Dump completed' line mariadb-dump writes; make sure it is complete.${NC}"
+    fi
+    if [ "${dump_statements:-0}" -gt 0 ]; then
+        echo "  $dump_statements CREATE DATABASE/USE statements will be dropped (the dump loads into the $DOMAIN database)"
+    fi
+    if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
+        echo "  Server paths: $IMPORT_OLD_PATH -> /var/www/kvs"
+    fi
+}
+
+import_inspect_directory() {
+    import_validate_local_materials
+    if [ "$(readlink -f -- "$IMPORT_SITE_DIR")" = "$(readlink -f -- "/var/www/$DOMAIN" 2>/dev/null)" ]; then
+        echo "  Files: already in /var/www/$DOMAIN"
+    else
+        if ! import_free_space_ok "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
+            echo -e "${RED}ERROR: not enough free space to copy $IMPORT_SITE_DIR to /var/www/$DOMAIN${NC}"
+            exit 1
+        fi
+        import_destination_ready "/var/www/$DOMAIN" "$(readlink -f -- "$IMPORT_SITE_DIR")" || exit 1
+        echo "  Files: copied to /var/www/$DOMAIN"
+    fi
+}
+
+# An archive is listed and analysed before anything is extracted: the site
+# root, the dump, the uncompressed size, and nothing else that would land
+# in the webroot. The configuration files come out alone for the checks.
+import_inspect_archive() {
+    local listing analysis peek site_info
+
+    if [ ! -f "$IMPORT_ARCHIVE" ]; then
+        echo -e "${RED}ERROR: IMPORT_ARCHIVE is not a file: $IMPORT_ARCHIVE${NC}"
+        exit 1
+    fi
+    IMPORT_ARCHIVE=$(readlink -f -- "$IMPORT_ARCHIVE")
+    IMPORT_ARCHIVE_COMMAND=$(import_archive_tools "$IMPORT_ARCHIVE") || exit 1
+    echo "  Reading the archive listing..."
+    listing=$(mktemp) || exit 1
+    if ! import_archive_list "$IMPORT_ARCHIVE" "$IMPORT_ARCHIVE_COMMAND" > "$listing"; then
+        rm -f "$listing"
+        echo -e "${RED}ERROR: could not list $IMPORT_ARCHIVE${NC}"
+        exit 1
+    fi
+    analysis=$(import_archive_analyze "$listing") || { rm -f "$listing"; exit 1; }
+    rm -f "$listing"
+    IMPORT_ARCHIVE_ROOT=$(import_field "$analysis" 1)
+    IMPORT_ARCHIVE_DUMP=$(import_field "$analysis" 2)
+    IMPORT_ARCHIVE_MANIFEST=$(import_field "$analysis" 3)
+    IMPORT_ARCHIVE_MB=$(import_field "$analysis" 4)
+    IMPORT_ARCHIVE_IGNORED=$(import_field "$analysis" 5)
+    peek=$(mktemp -d) || exit 1
+    if ! import_archive_peek "$IMPORT_ARCHIVE" "$IMPORT_ARCHIVE_COMMAND" "$IMPORT_ARCHIVE_ROOT" "$peek"; then
+        rm -rf "$peek"
+        echo -e "${RED}ERROR: could not read admin/include/setup.php, setup_db.php and version.php from the archive${NC}"
+        exit 1
+    fi
+    site_info=$(import_validate_site "$peek") || { rm -rf "$peek"; exit 1; }
+    IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
+    IMPORT_OLD_PATH=$(import_field "$site_info" 2)
+    IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$peek/admin/include/setup.php" project_url)")
+    rm -rf "$peek"
+    echo "  Archive: $IMPORT_ARCHIVE (${IMPORT_ARCHIVE_MB} MB uncompressed)"
+    echo "  Site: ${IMPORT_ARCHIVE_ROOT:-at the top of the archive} (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
+    echo "  Database dump: $IMPORT_ARCHIVE_DUMP"
+    if [ -n "$IMPORT_ARCHIVE_IGNORED" ]; then
+        echo "  Ignored (not part of the site): $IMPORT_ARCHIVE_IGNORED"
+    fi
+    if ! import_free_space_mb_ok "$IMPORT_ARCHIVE_MB" "/var/www/$DOMAIN"; then
+        echo -e "${RED}ERROR: not enough free space to extract ${IMPORT_ARCHIVE_MB} MB into /var/www/$DOMAIN${NC}"
+        exit 1
+    fi
+    import_destination_ready "/var/www/$DOMAIN" "archive:$IMPORT_ARCHIVE" || exit 1
+    echo "  Files: extracted into /var/www/$DOMAIN"
+    if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
+        echo "  Server paths: $IMPORT_OLD_PATH -> /var/www/kvs"
+    fi
+}
+
+# The old server answers through kvs-export.sh, piped over one SSH
+# connection: what it holds, whether its database answers, what tools it
+# has. Nothing is written or installed there.
+import_inspect_remote() {
+    local batch=no accept_new=no attempt=1 prefix db_ok
+
+    if [ ! -f "$IMPORT_EXPORTER" ]; then
+        echo -e "${RED}ERROR: $IMPORT_EXPORTER is missing; run setup.sh from a full checkout of the repository${NC}"
+        exit 1
+    fi
+    if [ "${HEADLESS:-}" = "y" ]; then
+        batch=yes
+    fi
+    import_ensure_tool ssh || exit 1
+    case "${IMPORT_SSH_ACCEPT_NEW,,}" in
+        y|yes|true) accept_new=yes ;;
+        *) accept_new=no ;;
+    esac
+    import_ssh_setup "$IMPORT_REMOTE_HOST" "$IMPORT_REMOTE_PORT" "$IMPORT_REMOTE_USER" "$IMPORT_SSH_KEY" "$batch" "$accept_new" || exit 1
+    IMPORT_REMOTE_REPORT="$LOG_DIR/import-remote.txt"
+    rm -f "$IMPORT_REMOTE_REPORT"
+    while :; do
+        echo "  Connecting to $IMPORT_SSH_TARGET (port $IMPORT_REMOTE_PORT)..."
+        if import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT"; then
+            break
+        fi
+        if grep -q '^site_candidate_1=' "$IMPORT_REMOTE_REPORT" 2>/dev/null; then
+            echo -e "${YELLOW}Several KVS sites were found on the old server:${NC}"
+            sed -n 's/^site_candidate_[0-9]*=/    /p' "$IMPORT_REMOTE_REPORT"
+            if [ "${HEADLESS:-}" = "y" ] || [ "$attempt" -ge 3 ]; then
+                echo -e "${RED}ERROR: set IMPORT_REMOTE_DIR to the one to import${NC}"
+                exit 1
+            fi
+            echo -n "Site directory on the old server: "
+            read -r IMPORT_REMOTE_DIR
+            attempt=$((attempt + 1))
+            continue
+        fi
+        echo -e "${RED}ERROR: the detection on $IMPORT_SSH_TARGET failed (see the messages above)${NC}"
+        exit 1
+    done
+    chmod 600 "$IMPORT_REMOTE_REPORT" 2>/dev/null || true
+    if [ "$(import_kv "$IMPORT_REMOTE_REPORT" kvs_export)" != "1" ]; then
+        echo -e "${RED}ERROR: unexpected answer from the old server (kvs-export.sh did not run)${NC}"
+        exit 1
+    fi
+    IMPORT_REMOTE_DIR=$(import_kv "$IMPORT_REMOTE_REPORT" site_dir)
+    IMPORT_SITE_VERSION=$(import_kv "$IMPORT_REMOTE_REPORT" kvs_version)
+    IMPORT_OLD_PATH=$(import_kv "$IMPORT_REMOTE_REPORT" project_path)
+    IMPORT_DETECTED_DOMAIN=$(import_kv "$IMPORT_REMOTE_REPORT" domain)
+    IMPORT_REMOTE_RSYNC=$(import_kv "$IMPORT_REMOTE_REPORT" rsync)
+    IMPORT_REMOTE_COMPRESSOR=$(import_kv "$IMPORT_REMOTE_REPORT" compressor)
+    prefix=$(import_kv "$IMPORT_REMOTE_REPORT" tables_prefix)
+    db_ok=$(import_kv "$IMPORT_REMOTE_REPORT" db_ok)
+    echo ""
+    echo -e "${GREEN}Installation detected on $IMPORT_REMOTE_HOST${NC}"
+    echo "  KVS version:     ${IMPORT_SITE_VERSION:-unknown}"
+    echo "  Site directory:  $IMPORT_REMOTE_DIR ($(import_kv "$IMPORT_REMOTE_REPORT" site_size_mb) MB)"
+    echo "  Project URL:     $(import_kv "$IMPORT_REMOTE_REPORT" project_url)"
+    echo "  Table prefix:    ${prefix:-unknown}"
+    echo "  Database:        $(import_kv "$IMPORT_REMOTE_REPORT" db_name) on $(import_kv "$IMPORT_REMOTE_REPORT" db_host), user $(import_kv "$IMPORT_REMOTE_REPORT" db_user), password $(import_kv "$IMPORT_REMOTE_REPORT" db_password_hint)"
+    if [ "$db_ok" = yes ]; then
+        echo "  Database access: OK ($(import_kv "$IMPORT_REMOTE_REPORT" db_server_version), $(import_kv "$IMPORT_REMOTE_REPORT" db_tables) tables, $(import_kv "$IMPORT_REMOTE_REPORT" db_size_mb) MB)"
+    else
+        echo -e "  Database access: ${RED}failed${NC} ($(import_kv "$IMPORT_REMOTE_REPORT" db_error))"
+    fi
+    if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
+        echo "  Transfer:        rsync, dump compressed with ${IMPORT_REMOTE_COMPRESSOR:-gzip}"
+    else
+        echo "  Transfer:        tar over ssh (install rsync on the old server for progress and resumable transfers), dump compressed with ${IMPORT_REMOTE_COMPRESSOR:-gzip}"
+    fi
+    if [ -z "$IMPORT_SITE_VERSION" ] || [ -z "$IMPORT_OLD_PATH" ]; then
+        echo -e "${RED}ERROR: the KVS version or the project path could not be read on the old server${NC}"
+        exit 1
+    fi
+    if [ "$prefix" != "ktvs_" ]; then
+        echo -e "${RED}ERROR: the site uses the table prefix '${prefix:-<empty>}'; the Docker init only supports ktvs_${NC}"
+        exit 1
+    fi
+    if [ "$db_ok" != yes ]; then
+        echo -e "${RED}ERROR: the database of the old server does not answer; fix the access there, or dump it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP${NC}"
+        exit 1
+    fi
+    if ! import_free_space_mb_ok "$(( $(import_kv "$IMPORT_REMOTE_REPORT" site_size_mb) + $(import_kv "$IMPORT_REMOTE_REPORT" db_size_mb) ))" "/var/www/$DOMAIN"; then
+        echo -e "${RED}ERROR: not enough free space for the site and its dump under /var/www/$DOMAIN${NC}"
+        exit 1
+    fi
+    import_destination_ready "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
+    if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
+        import_ensure_tool rsync || exit 1
+    fi
+    if [ "$IMPORT_REMOTE_COMPRESSOR" = zstd ]; then
+        import_ensure_tool zstd || exit 1
+    fi
+    if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
+        echo "  Server paths:    $IMPORT_OLD_PATH -> /var/www/kvs"
+    fi
+}
+
+# The nginx rewrites and the PHP version come from the KVS archive, so the
+# archive in kvs-archive/ must be the version of the imported site.
+import_check_kvs_archive_version() {
+    local archive archive_version
+
     archive=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null | head -n 1)
     if [ -z "$archive" ]; then
         echo -e "${RED}ERROR: the KVS archive of version $IMPORT_SITE_VERSION must be in kvs-archive/ (nginx rewrites and PHP version come from it)${NC}"
@@ -204,30 +544,122 @@ prepare_import() {
         echo -e "${RED}ERROR: $(basename "$archive") is KVS ${archive_version:-of unknown version} while the site is KVS $IMPORT_SITE_VERSION; use the archive of the same version${NC}"
         exit 1
     fi
-    dump_info=$(import_inspect_dump "$IMPORT_DB_DUMP" ktvs_) || exit 1
-    IMPORT_DUMP_TABLES=$(import_field "$dump_info" 1)
-    dump_initial_version=$(import_field "$dump_info" 2)
-    dump_statements=$(import_field "$dump_info" 3)
-    if [ "${IMPORT_DUMP_TABLES:-0}" -lt 1 ]; then
-        echo -e "${RED}ERROR: $IMPORT_DB_DUMP holds no CREATE TABLE for the ktvs_ tables${NC}"
+}
+
+# The KVS license is bound to the domain: a site configured for another
+# one is most likely a mistake, and needs a new archive otherwise.
+import_check_domain() {
+    local answer
+
+    [ -n "$IMPORT_DETECTED_DOMAIN" ] || return 0
+    [ "$IMPORT_DETECTED_DOMAIN" != "$DOMAIN" ] || return 0
+    echo ""
+    echo -e "${YELLOW}WARNING: the site is configured for $IMPORT_DETECTED_DOMAIN while this installation is for $DOMAIN.${NC}"
+    echo "The KVS license is bound to the domain; the site keeps working only with an archive issued for $DOMAIN."
+    if [ "${HEADLESS:-}" != "y" ]; then
+        echo -n "Continue anyway? [y/N]: "
+        read -r answer
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            echo "Import cancelled."
+            exit 0
+        fi
+    fi
+}
+
+import_confirm() {
+    local answer
+
+    echo ""
+    echo "The files go to /var/www/$DOMAIN and the database replaces the one of this installation."
+    echo "If the DNS still points at the old server, choose the self-signed certificate now and run the setup again after the switch."
+    [ "${HEADLESS:-}" != "y" ] || return 0
+    echo -n "Continue with this site? [Y/n]: "
+    read -r answer
+    if [[ "$answer" =~ ^[Nn]$ ]]; then
+        echo "Import cancelled."
+        exit 0
+    fi
+}
+
+# The source is materialized before anything is built: a failed transfer
+# or extraction then costs nothing else. The directory source is copied
+# later, while MariaDB replays the dump.
+import_fetch_source() {
+    [ "$IMPORT_MODE" = true ] || return 0
+    case "$IMPORT_SOURCE" in
+        archive) import_fetch_archive ;;
+        remote) import_fetch_remote ;;
+        *) return 0 ;;
+    esac
+    echo ""
+    import_validate_local_materials
+}
+
+# The archive is unpacked in a private directory next to the site, then
+# the site's entries are renamed into place: nothing the archive holds
+# besides the site ever sits in the webroot, and the dump never does.
+import_fetch_archive() {
+    local destination="/var/www/$DOMAIN" stage settled
+
+    echo ""
+    echo -e "${CYAN}Extracting $IMPORT_ARCHIVE into $destination...${NC}"
+    import_destination_ready "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
+    import_mark_destination "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
+    stage=$(import_stage_dir_for "$destination")
+    rm -rf -- "$stage"
+    mkdir -p "$stage" && chmod 700 "$stage" || exit 1
+    if ! import_archive_extract "$IMPORT_ARCHIVE" "$IMPORT_ARCHIVE_COMMAND" "$stage"; then
+        echo -e "${RED}ERROR: the extraction failed${NC}"
         exit 1
     fi
-    echo "  Database dump: $IMPORT_DB_DUMP ($IMPORT_DUMP_TABLES tables, INITIAL_VERSION ${dump_initial_version:-missing, recorded as $IMPORT_SITE_VERSION})"
-    if [ "${dump_statements:-0}" -gt 0 ]; then
-        echo "  $dump_statements CREATE DATABASE/USE statements will be dropped (the dump loads into the $DOMAIN database)"
+    mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
+    settled=$(import_archive_settle "$stage" "$IMPORT_ARCHIVE_ROOT" "$IMPORT_ARCHIVE_DUMP" "$IMPORT_ARCHIVE_MANIFEST" "$IMPORT_STAGING" "$destination") || exit 1
+    IMPORT_DB_DUMP=$(import_field "$settled" 1)
+    IMPORT_RAW_DUMP=$IMPORT_DB_DUMP
+    IMPORT_SITE_DIR=$destination
+    chmod 600 "$IMPORT_DB_DUMP" 2>/dev/null || true
+    echo -e "  ${GREEN}✓${NC} Site files in $destination, dump in $IMPORT_DB_DUMP"
+}
+
+import_fetch_remote() {
+    local destination="/var/www/$DOMAIN" source dump extension pid
+
+    source="ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR"
+    extension=gz
+    if [ "$IMPORT_REMOTE_COMPRESSOR" = zstd ]; then
+        extension=zst
     fi
-    if [ "$(readlink -f -- "$IMPORT_SITE_DIR")" = "$(readlink -f -- "/var/www/$DOMAIN" 2>/dev/null)" ]; then
-        echo "  Files: already in /var/www/$DOMAIN"
-    else
-        if ! import_free_space_ok "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
-            echo -e "${RED}ERROR: not enough free space to copy $IMPORT_SITE_DIR to /var/www/$DOMAIN${NC}"
-            exit 1
-        fi
-        echo "  Files: copied to /var/www/$DOMAIN"
+    mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
+    dump="$IMPORT_STAGING/${DOMAIN}.sql.$extension"
+    # Files first, the dump last: the database then describes the files
+    # that arrived, and a second pass before the switch only carries the
+    # changes made in between.
+    echo ""
+    echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR...${NC}"
+    import_destination_ready "$destination" "$source" || exit 1
+    import_mark_destination "$destination" "$source" || exit 1
+    if ! import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC"; then
+        echo -e "${RED}ERROR: the file transfer failed; run the same command again to resume it${NC}"
+        exit 1
     fi
-    if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
-        echo "  Server paths: $IMPORT_OLD_PATH -> /var/www/kvs"
+    echo -e "  ${GREEN}✓${NC} Site files in $destination"
+    echo -e "${CYAN}Receiving the database dump from $IMPORT_SSH_TARGET...${NC}"
+    rm -f "$dump"
+    import_remote_dump "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$dump" &
+    pid=$!
+    if [ -t 1 ]; then
+        import_watch_file_size "$dump" "$pid" "Received"
     fi
+    if ! wait "$pid"; then
+        echo -e "${RED}ERROR: the dump of the old database failed (see the messages above)${NC}"
+        exit 1
+    fi
+    chmod 600 "$dump"
+    echo -e "  ${GREEN}✓${NC} Dump received: $dump ($(du -h -- "$dump" | cut -f1))"
+    import_ssh_close
+    IMPORT_DB_DUMP=$dump
+    IMPORT_RAW_DUMP=$dump
+    IMPORT_SITE_DIR=$destination
 }
 
 KVS_ADMIN_PASSWORD_PROVIDED=false
@@ -1218,6 +1650,8 @@ fi
 set_env_value DOMAIN "$DOMAIN"
 export DOMAIN EMAIL
 
+select_import_source
+
 # Site prefix for container naming (multi-site support)
 select_site_prefix() {
     local generated_prefix
@@ -1703,7 +2137,6 @@ fi
 echo -e "${GREEN}KVS archive found${NC}"
 
 # Auto-detect IonCube encoding
-prepare_import
 detect_ioncube
 
 # IonCube version selection (only if IonCube detected)
@@ -2157,22 +2590,33 @@ compose_mariadb_volume_name() {
 }
 
 # An import replays the dump when MariaDB initializes an empty volume, so a
-# volume left by an earlier installation must go first, and only on request.
+# volume left by an earlier installation must go, and only on request. The
+# consent is taken here; the deletion waits until the source is verified
+# and MariaDB is about to start.
 import_require_empty_volume() {
-    local volume_name
+    local volume_name answer
 
     [ "$IMPORT_MODE" = true ] || return 0
     volume_name=$(compose_mariadb_volume_name)
     docker volume ls -q | grep -q "^${volume_name}$" || return 0
+    if [ "${VOLUME_CHOICE:-}" != "1" ] && [ "${HEADLESS:-}" != "y" ]; then
+        echo ""
+        echo -e "${YELLOW}The database volume ${volume_name} exists; an import needs an empty one.${NC}"
+        echo -n "Delete it before the import? [y/N]: "
+        read -r answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            VOLUME_CHOICE=1
+        fi
+    fi
     if [ "${VOLUME_CHOICE:-}" != "1" ]; then
         echo ""
         echo -e "${RED}ERROR: the database volume ${volume_name} already exists and an import needs an empty one.${NC}"
         echo "Back it up if it matters, then run again with VOLUME_CHOICE=1 to delete it, or remove it yourself."
         exit 1
     fi
+    IMPORT_VOLUME_TO_DELETE=$volume_name
     echo ""
-    echo -e "${YELLOW}Deleting the database volume ${volume_name} for the import (VOLUME_CHOICE=1)...${NC}"
-    delete_database_volume "$volume_name" || exit 1
+    echo -e "${YELLOW}The database volume ${volume_name} will be deleted right before MariaDB starts (VOLUME_CHOICE=1).${NC}"
 }
 
 ask_existing_volume() {
@@ -2434,7 +2878,11 @@ ask_existing_volume() {
 }
 
 import_require_empty_volume
-ask_existing_volume
+if [ "$IMPORT_MODE" = true ]; then
+    KEEP_EXISTING_DB=false
+else
+    ask_existing_volume
+fi
 
 # A fresh database gets a one-time admin password. An imported database
 # brings its own admin credentials: only the KVS default is rotated, by the
@@ -2623,6 +3071,8 @@ if [ "$MODE" = "multi" ]; then
     prepare_multi_site_proxy
 fi
 
+import_fetch_source
+
 # Show progress header
 progress_header "KVS Docker Setup" "Building and deploying containers"
 
@@ -2683,6 +3133,11 @@ import_stage_dump() {
     local target
 
     [ "$IMPORT_MODE" = true ] || return 0
+    if [ -n "$IMPORT_VOLUME_TO_DELETE" ]; then
+        echo -e "  ${YELLOW}Deleting the database volume $IMPORT_VOLUME_TO_DELETE...${NC}"
+        delete_database_volume "$IMPORT_VOLUME_TO_DELETE" || exit 1
+        IMPORT_VOLUME_TO_DELETE=""
+    fi
     mkdir -p mariadb/init || exit 1
     rm -f mariadb/init/*kvs-import*
     if command -v zstd >/dev/null 2>&1; then
@@ -2885,7 +3340,11 @@ import_finish() {
     }
     set_env_value KVS_IMPORT_COMPLETED "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 1
     [ -n "$IMPORT_STAGED_DUMP" ] && rm -f "$IMPORT_STAGED_DUMP"
-    rm -f "/var/www/$DOMAIN/.kvs-import-source"
+    # The raw dump served its purpose; the old server keeps the original.
+    # The source marker stays: a later pass from the same source is how the
+    # changes made on the old server in the meantime are picked up.
+    [ -n "$IMPORT_RAW_DUMP" ] && rm -f "$IMPORT_RAW_DUMP"
+    rm -f "$IMPORT_STAGING/kvs-export.manifest"
     echo -e "  ${GREEN}✓${NC} Import complete: $(grep -c -v '^#' "$report") tables, row counts in $report"
 }
 
@@ -3179,7 +3638,11 @@ if [ "$MODE" = "multi" ]; then
 fi
 echo ""
 if [ "$IMPORT_MODE" = true ]; then
-    echo -e "${CYAN}Imported site:${NC} $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION), database from $IMPORT_DB_DUMP"
+    case "$IMPORT_SOURCE" in
+        archive) echo -e "${CYAN}Imported site:${NC} $IMPORT_ARCHIVE (KVS $IMPORT_SITE_VERSION)" ;;
+        remote) echo -e "${CYAN}Imported site:${NC} $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR (KVS $IMPORT_SITE_VERSION)" ;;
+        *) echo -e "${CYAN}Imported site:${NC} $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION), database from $IMPORT_DB_DUMP" ;;
+    esac
     echo "  Row counts: $LOG_DIR/import-rows.txt"
     echo ""
 fi
