@@ -777,6 +777,53 @@ test_final_compose_failure_is_fatal() {
     pass "final docker compose up failure terminates setup"
 }
 
+test_preflight_disk_check_measures_the_tightest_filesystem() {
+    local functions_file="$TMP_ROOT/preflight-disk.sh"
+    local stub_docker_root="$TMP_ROOT/docker-root"
+    local output
+
+    awk '
+        $0 == "preflight_free_disk_gb() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    mkdir -p "$stub_docker_root"
+
+    output=$(
+        # shellcheck source=/dev/null
+        source "$functions_file"
+        # shellcheck disable=SC2329  # Stubs consumed by the extracted function.
+        docker() { echo "$stub_docker_root"; }
+        # shellcheck disable=SC2329
+        df() {
+            echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+            case "${*: -1}" in
+                "$stub_docker_root") echo "fs 1 1 $((5 * 1024 * 1024)) 1% /data" ;;
+                *) echo "fs 1 1 $((40 * 1024 * 1024)) 1% /" ;;
+            esac
+        }
+        preflight_free_disk_gb
+    )
+    [ "$output" = "5 $stub_docker_root" ] || fail "the Docker root directory must win when it is the tightest: got '$output'"
+
+    output=$(
+        # shellcheck source=/dev/null
+        source "$functions_file"
+        # shellcheck disable=SC2329
+        docker() { return 1; }
+        # shellcheck disable=SC2329
+        df() {
+            echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+            echo "fs 1 1 $((40 * 1024 * 1024)) 1% /"
+        }
+        preflight_free_disk_gb
+    )
+    [ "${output%% *}" = "40" ] || fail "without Docker the site filesystem must be measured: got '$output'"
+    [ "$output" != "${output#* /}" ] || fail "the measured path must be reported: got '$output'"
+
+    pass "preflight disk check measures the site and Docker root filesystems"
+}
+
 test_optional_gum_install_failure_is_nonfatal() {
     local block_file="$TMP_ROOT/optional-gum.sh"
     local output="$TMP_ROOT/optional-gum-output.log"
@@ -1046,6 +1093,7 @@ test_permission_script_skips_empty_xargs_batches
 test_setup_rebuilds_init_and_optional_manticore_images
 test_final_compose_failure_is_fatal
 test_optional_gum_install_failure_is_nonfatal
+test_preflight_disk_check_measures_the_tightest_filesystem
 test_reconfigure_fails_when_container_inspection_fails
 test_reconfigure_issues_the_exact_requested_sans_and_installs
 test_php_password_escaping
