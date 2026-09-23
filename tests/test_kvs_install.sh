@@ -487,6 +487,30 @@ test_acme_issue_reuses_a_valid_certificate() {
   assert_equal "1" "$status" "a failed issue must stay a failure" || return 1
 }
 
+test_port_check_accepts_the_installer_nginx() {
+  local status
+
+  ss() {
+    case "$MOCK_LISTENER" in
+      nginx) printf 'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=7,fd=6),("nginx",pid=1,fd=6))\nLISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=7,fd=7))\n' ;;
+      apache) printf 'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("apache2",pid=9,fd=4))\n' ;;
+      *) : ;;
+    esac
+  }
+
+  MOCK_LISTENER=none
+  (check_ports </dev/null >/dev/null 2>&1) || fail "free ports must pass" || return 1
+  MOCK_LISTENER=nginx
+  (check_ports </dev/null >/dev/null 2>&1) || fail "nginx from a previous run must not abort a re-run" || return 1
+  MOCK_LISTENER=apache
+  (check_ports </dev/null >/dev/null 2>&1)
+  status=$?
+  assert_equal "1" "$status" "a foreign web server must still abort a headless run" || return 1
+
+  unset -f ss
+  unset MOCK_LISTENER
+}
+
 test_domain_validation_respects_database_limit() {
   local max_label
   local oversized_label
@@ -904,6 +928,7 @@ run_test "KVS system settings select nginx" test_kvs_system_settings_select_ngin
 run_test "archive extraction skips an installed site" test_archive_extraction_skips_an_installed_site || failures=$((failures + 1))
 run_test "database file configuration is anchored" test_database_file_configuration_is_anchored || failures=$((failures + 1))
 run_test "acme issue reuses a valid certificate" test_acme_issue_reuses_a_valid_certificate || failures=$((failures + 1))
+run_test "port check accepts the installer nginx" test_port_check_accepts_the_installer_nginx || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))

@@ -869,19 +869,28 @@ function check_dns_configuration() {
 }
 
 function check_ports() {
+    local listeners
+
     echo "Checking if ports 80 and 443 are available..."
-    if ss -tuln | grep -qE ':80\s' || ss -tuln | grep -qE ':443\s'; then
-        echo "${red}WARNING: Ports 80/443 are already in use${normal}"
-        ss -tuln | grep -E ':(80|443)\s'
-        echo ""
+    listeners=$(ss -tlnp 2>/dev/null | grep -E ':(80|443)\s')
+    if [ -z "$listeners" ]; then
+        echo "Ports 80 and 443 are available."
+        return 0
+    fi
+    # nginx from a previous run of this installer keeps the ports; the step
+    # restarts it with the refreshed configuration.
+    if ! printf '%s\n' "$listeners" | grep -qv 'users:(("nginx"'; then
+        echo "Ports 80/443 are held by nginx from a previous run, continuing."
+        return 0
+    fi
+    echo "${red}WARNING: Ports 80/443 are already in use${normal}"
+    printf '%s\n' "$listeners"
+    echo ""
         read -rp "Continue anyway? [y/N]: " CONTINUE
         if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
             echo "Aborting installation."
             exit 1
         fi
-    else
-        echo "Ports 80 and 443 are available."
-    fi
 }
 
 reset_nginx_configuration_dirs() {
