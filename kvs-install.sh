@@ -604,10 +604,14 @@ function aptinstall() {
 }
 
 function install_yt-dlp() {
-  curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-  chmod a+rx /usr/local/bin/yt-dlp
-  # Create symlink only if it doesn't exist
-  [[ ! -e /usr/local/bin/youtube-dl ]] && ln -s /usr/local/bin/yt-dlp /usr/local/bin/youtube-dl
+  local bin_dir="${YT_DLP_BIN_DIR:-/usr/local/bin}"
+
+  curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$bin_dir/yt-dlp" || return $?
+  chmod a+rx "$bin_dir/yt-dlp" || return $?
+  # Keep the legacy name. A link left by an earlier run is not a failure.
+  if [[ ! -e "$bin_dir/youtube-dl" ]]; then
+    ln -s "$bin_dir/yt-dlp" "$bin_dir/youtube-dl" || return $?
+  fi
 }
 
 validate_kvs_domain() {
