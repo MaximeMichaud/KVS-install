@@ -86,7 +86,7 @@ install_gum() {
     mkdir -p /etc/apt/keyrings
     curl -fsSL https://repo.charm.sh/apt/gpg.key | gpg --dearmor -o /etc/apt/keyrings/charm.gpg 2>/dev/null
     echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | tee /etc/apt/sources.list.d/charm.list > /dev/null
-    apt-get update -qq && apt-get install -y -qq gum
+    apt-get update -qq && apt_install -qq gum
     PROGRESS_GUM_AVAILABLE=true
   fi
 }
@@ -573,6 +573,17 @@ function aptupdate() {
 apt-get update
 }
 
+# Install packages without stopping at a dpkg conffile prompt: headless runs
+# have no terminal, and a package whose shipped file was modified on the box
+# (nginx mime.types on a pre-provisioned server) otherwise dies with "end of
+# file on stdin at conffile prompt". Local changes win, defaults elsewhere.
+apt_install() {
+  apt-get install -y \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    "$@"
+}
+
 function aptinstall() {
     packages=(
       ca-certificates
@@ -600,7 +611,7 @@ function aptinstall() {
 	  gzip
 	  ncurses-bin
     )
-    apt-get -y install "${packages[@]}"
+    apt_install "${packages[@]}"
 }
 
 function install_yt-dlp() {
@@ -862,7 +873,7 @@ function aptinstall_nginx() {
       echo "deb-src [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>"$sources_dir/nginx.list"
       # Stop here when the package cannot be installed: the configuration
       # directory below must not be reset for a web server that is not there.
-      apt-get update && apt-get install nginx -y || return $?
+      apt-get update && apt_install nginx || return $?
       reset_nginx_configuration_dirs || return $?
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -o /etc/nginx/nginx.conf
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/general.conf -o /etc/nginx/globals/general.conf
@@ -894,7 +905,7 @@ function aptinstall_mariadb() {
     # Download GPG key, overwrite if exists
     curl -fsSL https://mariadb.org/mariadb_release_signing_key.asc | gpg --yes --dearmor -o /usr/share/keyrings/mariadb.gpg
     echo "deb [signed-by=/usr/share/keyrings/mariadb.gpg arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >"${APT_SOURCES_DIR:-/etc/apt/sources.list.d}/mariadb.list"
-    apt-get update && apt-get install mariadb-server -y || return $?
+    apt-get update && apt_install mariadb-server || return $?
     systemctl enable mariadb && systemctl start mariadb
 }
 
@@ -915,7 +926,7 @@ function aptinstall_php() {
         add-apt-repository -y ppa:ondrej/php
       fi
     fi
-    apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} -y || return $?
+    apt-get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} || return $?
     sed -i "s|upload_max_filesize = 2M|upload_max_filesize = 2048M|
                 s|post_max_size = 8M|post_max_size = 2048M|
                 s|memory_limit = 128M|memory_limit = 512M|
@@ -942,7 +953,7 @@ function aptinstall_phpmyadmin() {
 	#curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf -o phpmyadmin.conf
     ln -s "${PHPMYADMIN_INSTALL_DIR}" /var/www/phpmyadmin
     if [[ "$webserver" =~ (nginx) ]]; then
-      apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y || return $?
+      apt-get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} || return $?
       service nginx restart
     fi
 }
@@ -1020,7 +1031,7 @@ function install_KVS() {
 
 function aptinstall_memcached() {
     echo "Installing Memcached..."
-    apt-get install -y memcached || return $?
+    apt_install memcached || return $?
     echo "Configuring Memcached to use 256 MB of RAM..."
     sed -i 's/-m 64/-m 256/' /etc/memcached.conf
     systemctl restart memcached
@@ -1347,7 +1358,7 @@ function install_ioncube() {
 
 function autoUpdate() {
   if [[ "$AUTOPACKAGEUPDATE" =~ (YES) ]]; then
-    apt-get install -y unattended-upgrades || return $?
+    apt_install unattended-upgrades || return $?
     sed -i 's|APT::Periodic::Update-Package-Lists "0";|APT::Periodic::Update-Package-Lists "1";|' /etc/apt/apt.conf.d/20auto-upgrades
     sed -i 's|APT::Periodic::Unattended-Upgrade "0";|APT::Periodic::Unattended-Upgrade "1";|' /etc/apt/apt.conf.d/20auto-upgrades
   fi
