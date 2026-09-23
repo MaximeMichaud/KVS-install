@@ -314,6 +314,8 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'if ! import_remote_privileges; then' "$setup" || fail "the SSH user privileges must be probed on the first connection"
     grep -Fq 'passwordless sudo, used for the dump and the files' "$setup" || fail "the use of sudo on the old server must be displayed"
     grep -Eq '^    import_check_site_links$' "$setup" || fail "links leaving the site must be checked once the files are here"
+    grep -Eq '^    import_note_external_search$' "$setup" || fail "a site using the External Search plugin must be announced"
+    grep -Fq 'its configuration is removed and KVS falls back to its MySQL search' "$setup" || fail "the fate of the plugin without Manticore must be spelled out"
     grep -Fq 'remove the dangling ones' "$setup" || fail "dangling links must be refused with the fix spelled out"
     grep -Eq '^import_check_leftover_dump$' "$setup" || fail "a staged dump left by an unfinished import must stop an ordinary run"
     grep -A4 -F 'import_stage_dump() {' "$setup" | grep -q '\[ "$IMPORT_MODE" = true \] || return 0' || fail "the staging must stay an import-only step"

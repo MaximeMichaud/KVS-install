@@ -541,6 +541,20 @@ main "$@"; exit $?
 EOF
 }
 
+test_external_search_plugin_is_recognized() {
+    local site="$TMP_ROOT/search-site" plugin
+
+    make_site "$site" /home/old/www
+    import_external_search_host "$site" 2>/dev/null && fail "a site without the plugin has no external search"
+    plugin="$site/admin/data/plugins/external_search"
+    mkdir -p "$plugin"
+    printf 'a:4:{s:22:"enable_external_search";i:0;s:15:"display_results";i:1;s:8:"api_call";s:66:"http://search.old.example.com:8080/kvs_sphinx.php?query=%%QUERY%%&from=%%FROM%%";s:12:"outgoing_url";s:23:"https://old.example.com";}' > "$plugin/data.dat"
+    import_external_search_host "$site" 2>/dev/null && fail "a disabled plugin must not count"
+    printf 'a:4:{s:22:"enable_external_search";i:1;s:15:"display_results";i:1;s:8:"api_call";s:66:"http://search.old.example.com:8080/kvs_sphinx.php?query=%%QUERY%%&from=%%FROM%%";s:12:"outgoing_url";s:23:"https://old.example.com";}' > "$plugin/data.dat"
+    [ "$(import_external_search_host "$site")" = search.old.example.com ] || fail "the host of the search API must be reported (got: $(import_external_search_host "$site"))"
+    pass "the external search plugin of a site is recognized with its API host"
+}
+
 test_ssh_setup_validates_and_builds_the_options() {
     local rsh
 
@@ -743,6 +757,7 @@ test_extraction_settles_the_site_and_takes_the_dump_out
 test_stage_directory_follows_the_destination_filesystem
 test_destination_marker_allows_a_repeat_of_the_same_source_only
 test_url_domain_and_key_value_helpers
+test_external_search_plugin_is_recognized
 test_ssh_setup_validates_and_builds_the_options
 test_remote_detect_dump_and_files_go_through_one_ssh
 test_a_user_with_sudo_runs_the_remote_side_through_it

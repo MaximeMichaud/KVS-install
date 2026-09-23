@@ -314,6 +314,21 @@ import_mark_destination() {
     printf '%s\n' "$source" > "$marker"
 }
 
+# import_external_search_host <site directory>
+# The host the KVS External Search plugin of a site calls when the plugin
+# is enabled (a Sphinx or Manticore API on the old server), nothing when
+# the plugin is absent or disabled. The plugin keeps its settings in a PHP
+# serialized file; only the enable flag and the video API URL matter here.
+import_external_search_host() {
+    local file="$1/admin/data/plugins/external_search/data.dat"
+    local url
+
+    [ -f "$file" ] || return 1
+    tr -d '\000' < "$file" | grep -q 's:22:"enable_external_search";i:1;' || return 1
+    url=$(tr -d '\000' < "$file" | grep -o 's:8:"api_call";s:[0-9]*:"[^"]*"' | head -n 1 | sed 's/.*:"\([^"]*\)"$/\1/')
+    import_url_domain "$url"
+}
+
 # import_place_site <source> <destination>
 # Copy the site into the destination unless the source already is the
 # destination. Ownership is left to the init container, which sets the
