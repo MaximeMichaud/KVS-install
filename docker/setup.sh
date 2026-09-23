@@ -2429,8 +2429,12 @@ ask_existing_volume() {
 import_require_empty_volume
 ask_existing_volume
 
+# A fresh database gets a one-time admin password. An imported database
+# brings its own admin credentials: only the KVS default is rotated, by the
+# check that runs once the database is up.
 if [ "$KVS_ADMIN_PASSWORD_PROVIDED" != true ] &&
-    [ "${KEEP_EXISTING_DB:-false}" != true ]; then
+    [ "${KEEP_EXISTING_DB:-false}" != true ] &&
+    [ "$IMPORT_MODE" != true ]; then
     KVS_ADMIN_PASSWORD=$(openssl rand -base64 30 | tr -d '/+=' | cut -c 1-32)
     KVS_ADMIN_PASSWORD_GENERATED=true
 fi

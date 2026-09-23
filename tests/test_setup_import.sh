@@ -250,6 +250,8 @@ test_setup_and_init_are_wired_for_imports() {
         grep -Eq "^${step}$|^    ${step}$|^${step}\$" "$setup" || grep -Eq "^\s*${step}(\s|$)" "$setup" || fail "setup.sh must call $step"
     done
     grep -Fq 'KVS_IMPORT_COMPLETED' "$setup" || fail "a completed import must be recorded in .env"
+    grep -A2 -F '[ "${KEEP_EXISTING_DB:-false}" != true ] &&' "$setup" | grep -Fq '[ "$IMPORT_MODE" != true ]; then' ||
+        fail "an imported database must keep its admin password instead of getting a one-time one"
     grep -Fq "SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';" "$setup" || fail "the completion marker must be verified before the KVS init"
     grep -Fq 'MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}' "$setup" || fail "an import must wait for the dump replay"
     grep -Fq '{{.RestartCount}} {{.State.Status}}' "$setup" || fail "a restarted MariaDB container must be reported"
