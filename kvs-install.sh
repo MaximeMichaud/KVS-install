@@ -283,6 +283,7 @@ function script() {
   run_install_step "Installing MariaDB" "MariaDB installed" aptinstall_mariadb || return $?
   run_install_step "Installing phpMyAdmin" "phpMyAdmin installed" aptinstall_phpmyadmin || return $?
   run_install_step "Installing KVS" "KVS installed" install_KVS || return $?
+  run_install_step "Configuring KVS system settings" "KVS system settings configured" configure_kvs_system_settings || return $?
   run_install_step "Installing IonCube" "IonCube configured" install_ioncube || return $?
   run_install_step "Setting up cron jobs" "Cron jobs configured" insert_cronjob || return $?
   run_install_step "Installing acme.sh" "SSL certificates configured" install_acme.sh || return $?
@@ -1373,6 +1374,60 @@ insert_cronjob() {
   fi
 
   echo "* Cron jobs installed!"
+}
+
+# KVS decides how local files are served from its own "Server type" system
+# setting. The seeded row says "other", which streams every video through PHP
+# instead of the internal nginx locations of the site configuration, and caps
+# uploads below the limits configured for PHP and nginx above. Mirrors the
+# Docker init step (70-system-settings.sh) for the standalone install.
+configure_kvs_system_settings() {
+  local db="${1:-$DOMAIN}"
+  local server_type
+
+  mariadb "$db" <<'EOSQL' || return $?
+INSERT INTO ktvs_settings (section, satellite_prefix, value, added_date, version_control)
+VALUES (
+    'system',
+    '',
+    JSON_OBJECT(
+        'server_type', 'nginx',
+        'cpu_priority', '0',
+        'timezone', 'UTC',
+        'memory_limit_default', 256,
+        'memory_limit_admin', 512,
+        'memory_limit_background', 1024,
+        'file_upload_disk', 'members',
+        'file_upload_url', 'admins',
+        'default_timeout', 20,
+        'download_timeout', 1800,
+        'geoip_info', '',
+        'geoip_database', '',
+        'file_upload_max_size', 2048,
+        'file_download_speed_limit', 0,
+        'custom_user_agent', '',
+        'custom_ip', '',
+        'enable_debug_get_file', false,
+        'enable_debug_get_image', false
+    ),
+    NOW(),
+    1
+)
+ON DUPLICATE KEY UPDATE
+    value = JSON_SET(
+        value,
+        '$.server_type', 'nginx',
+        '$.memory_limit_default', 256,
+        '$.file_upload_max_size', 2048
+    ),
+    version_control = version_control + 1;
+EOSQL
+  server_type=$(mariadb -N "$db" -e "SELECT JSON_UNQUOTE(JSON_EXTRACT(value, '$.server_type')) FROM ktvs_settings WHERE section='system' AND satellite_prefix=''") || return $?
+  if [ "$server_type" != "nginx" ]; then
+    echo "ERROR: KVS server type reads '${server_type}' after the update, expected nginx" >&2
+    return 1
+  fi
+  echo "KVS server type set to nginx, upload limit 2048 MB, default memory limit 256 MB"
 }
 
 function install_ioncube() {

@@ -56,6 +56,7 @@ test_install_failure_stops_pipeline() {
   aptinstall_mariadb() { :; }
   aptinstall_phpmyadmin() { :; }
   install_KVS() { :; }
+  configure_kvs_system_settings() { :; }
   install_ioncube() { :; }
   insert_cronjob() { :; }
   install_acme.sh() { :; }
@@ -388,6 +389,40 @@ test_auto_updates_follow_upstream_repositories() {
 
   unset -f apt_install
   unset APT_CONF_DIR AUTOPACKAGEUPDATE
+}
+
+test_kvs_system_settings_select_nginx() {
+  local temp_dir
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  DOMAIN=example.com
+  MOCK_SERVER_TYPE=nginx
+  mariadb() {
+    printf '%s\n' "$*" >>"$temp_dir/mariadb-calls"
+    if [[ "$*" == *SELECT* ]]; then
+      printf '%s\n' "$MOCK_SERVER_TYPE"
+    else
+      cat >>"$temp_dir/sql"
+    fi
+  }
+
+  configure_kvs_system_settings >/dev/null 2>&1 ||
+    fail "system settings step failed although the read-back says nginx" || return 1
+  assert_file_contains "$temp_dir/sql" "'\$.server_type', 'nginx'" \
+    "settings update must switch the KVS server type to nginx" || return 1
+  assert_file_contains "$temp_dir/sql" "'\$.file_upload_max_size', 2048" \
+    "settings update must align the KVS upload limit with the PHP and nginx limits" || return 1
+  assert_file_contains "$temp_dir/mariadb-calls" "example.com" \
+    "settings update must target the site database" || return 1
+
+  MOCK_SERVER_TYPE=other
+  configure_kvs_system_settings >/dev/null 2>&1
+  status=$?
+  assert_equal "1" "$status" "a server type still reading other must fail the step" || return 1
+
+  unset -f mariadb
+  unset MOCK_SERVER_TYPE DOMAIN
 }
 
 test_domain_validation_respects_database_limit() {
@@ -803,6 +838,7 @@ run_test "yt-dlp step is repeatable" test_yt_dlp_step_is_repeatable || failures=
 run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fails || failures=$((failures + 1))
 run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
 run_test "auto-updates follow upstream repositories" test_auto_updates_follow_upstream_repositories || failures=$((failures + 1))
+run_test "KVS system settings select nginx" test_kvs_system_settings_select_nginx || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))
