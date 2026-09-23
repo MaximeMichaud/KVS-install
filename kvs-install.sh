@@ -991,34 +991,69 @@ function aptinstall_phpmyadmin() {
     fi
 }
 
+# The archive is extracted once. A later run over an installed site must not
+# overwrite admin/data (page configuration, login fingerprints), the theme or
+# the language files with the stock copies: KVS updates itself from its panel.
+extract_kvs_archive() {
+  local kvs_path="$1"
+  local archive_dir="${2:-/root}"
+
+  if [ -f "$kvs_path/admin/include/setup_db.php" ]; then
+    echo "Existing KVS installation found in $kvs_path, the archive in $archive_dir is left untouched"
+    return 0
+  fi
+  mkdir -p "$kvs_path" || return $?
+  mv "$archive_dir"/KVS_* "$kvs_path" || return $?
+  unzip -o "$kvs_path"/KVS_* -d "$kvs_path" || return $?
+  rm -r "$kvs_path"/KVS_*
+}
+
+# The stock admin/include/setup_db.php carries the placeholders login, pass
+# and base; a configured file keeps the password KVS already connects with.
+read_kvs_database_password() {
+  local file="$1"
+
+  [ -f "$file" ] || return 0
+  grep -q "define('DB_PASS','pass')" "$file" && return 0
+  grep -oP "(?<=define\('DB_PASS',')[^']+" "$file" || true
+}
+
+configure_kvs_database_file() {
+  local file="$1"
+  local domain="$2"
+  local password="$3"
+
+  grep -q "define('DB_LOGIN','login')" "$file" || return 0
+  sed -i "s|'DB_LOGIN','login'|'DB_LOGIN','$domain'|
+          s|'DB_PASS','pass'|'DB_PASS','$password'|
+          s|'DB_DEVICE','base'|'DB_DEVICE','$domain'|" "$file"
+}
+
 function install_KVS() {
     KVS_PATH="/var/www/$DOMAIN"
-    mkdir -p "$KVS_PATH"
-    mv /root/KVS_* "$KVS_PATH"
-    unzip -o "$KVS_PATH"/KVS_* -d "$KVS_PATH"
-    rm -r "$KVS_PATH"/KVS_*
+    extract_kvs_archive "$KVS_PATH" || return $?
     chown -R www-data:www-data "$KVS_PATH"
     chmod -R 755 "$KVS_PATH"
 
-    sed -i '/xargs chmod 666/d' "$KVS_PATH"/_INSTALL/install_permissions.sh
-    "$KVS_PATH"/_INSTALL/install_permissions.sh
-    cat "$KVS_PATH"/_INSTALL/nginx_config.txt > /etc/nginx/globals/kvs.conf
+    # The _INSTALL directory only exists right after the extraction.
+    if [ -f "$KVS_PATH"/_INSTALL/install_permissions.sh ]; then
+        sed -i '/xargs chmod 666/d' "$KVS_PATH"/_INSTALL/install_permissions.sh
+        "$KVS_PATH"/_INSTALL/install_permissions.sh
+    fi
+    if [ -f "$KVS_PATH"/_INSTALL/nginx_config.txt ]; then
+        cat "$KVS_PATH"/_INSTALL/nginx_config.txt > /etc/nginx/globals/kvs.conf
+    fi
     sed -i "s|/PATH|$KVS_PATH|
              s|/usr/local/bin/|/usr/bin/|
-             s|/usr/bin/php|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
+             s|/usr/bin/php[0-9.]*|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
     sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH"/admin/include/setup.php
     # Set project_url based on USE_WWW setting (format: https://domain or https://www.domain)
     sed -i "/^\\\$config\['project_url'\]=/s|\"https://[^\"]*\"|\"https://$URL\"|" "$KVS_PATH"/admin/include/setup.php
-    # Check if setup_db.php already exists and extract password
-    if [[ -f "$KVS_PATH/admin/include/setup_db.php" ]]; then
-        # Extract existing password from setup_db.php
-        existing_password=$(grep -oP "(?<=pass=')[^']+" "$KVS_PATH/admin/include/setup_db.php" 2>/dev/null || echo "")
-        if [[ -n "$existing_password" ]]; then
-            databasepassword="$existing_password"
-            echo "Using existing database password from setup_db.php"
-        else
-            databasepassword="$(openssl rand -base64 12)"
-        fi
+    # An installed site keeps the password KVS already connects with.
+    existing_password=$(read_kvs_database_password "$KVS_PATH/admin/include/setup_db.php")
+    if [[ -n "$existing_password" ]]; then
+        databasepassword="$existing_password"
+        echo "Using existing database password from setup_db.php"
     else
         databasepassword="$(openssl rand -base64 12)"
     fi
@@ -1057,9 +1092,7 @@ function install_KVS() {
     # Clean up installation files if they exist
     [ -d "$KVS_PATH"/_INSTALL/ ] && rm -rf "$KVS_PATH"/_INSTALL/
 
-    sed -i "s|login|$DOMAIN|
-             s|pass|$databasepassword|
-             s|'DB_DEVICE','base'|'DB_DEVICE','$DOMAIN'|" "$KVS_PATH"/admin/include/setup_db.php
+    configure_kvs_database_file "$KVS_PATH/admin/include/setup_db.php" "$DOMAIN" "$databasepassword"
 }
 
 function aptinstall_memcached() {
@@ -1106,6 +1139,21 @@ certificate_domain_names() {
   printf '%s\n' "$names"
 }
 
+# acme.sh exits 2 when the certificate is still valid and needs no renewal.
+# That is a success for the installer: the existing certificate is installed
+# again as is instead of being replaced by a self-signed one.
+acme_issue_or_reuse() {
+  local status
+
+  "$@"
+  status=$?
+  if [ "$status" -eq 2 ]; then
+    echo "Certificate still valid, reusing it"
+    return 0
+  fi
+  return "$status"
+}
+
 function install_acme.sh() {
     mkdir -p /etc/nginx/ssl/"$DOMAIN"
 
@@ -1125,7 +1173,7 @@ function install_acme.sh() {
     fi
 
     cd /root || exit
-    git clone https://github.com/acmesh-official/acme.sh.git
+    [ -d /root/acme.sh ] || git clone https://github.com/acmesh-official/acme.sh.git
     cd ./acme.sh || exit
     ./acme.sh --install -m "$EMAIL"
     mkdir -p /var/www/_letsencrypt && chown www-data /var/www/_letsencrypt
@@ -1139,7 +1187,7 @@ function install_acme.sh() {
 
     # Try to issue certificate
     # shellcheck disable=SC2086  # Intentional word splitting for multiple flags
-    if /root/.acme.sh/acme.sh $ACME_ARGS; then
+    if acme_issue_or_reuse /root/.acme.sh/acme.sh $ACME_ARGS; then
         echo "SSL certificate issued successfully"
         /root/.acme.sh/acme.sh --install-cert --ecc -d "$DOMAIN" \
           --key-file /etc/nginx/ssl/"$DOMAIN"/key.pem \
