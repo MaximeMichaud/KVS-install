@@ -315,6 +315,9 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'passwordless sudo, used for the dump and the files' "$setup" || fail "the use of sudo on the old server must be displayed"
     grep -Eq '^    import_check_site_links$' "$setup" || fail "links leaving the site must be checked once the files are here"
     grep -Fq 'remove the dangling ones' "$setup" || fail "dangling links must be refused with the fix spelled out"
+    grep -Eq '^import_check_leftover_dump$' "$setup" || fail "a staged dump left by an unfinished import must stop an ordinary run"
+    grep -A4 -F 'import_stage_dump() {' "$setup" | grep -q '\[ "$IMPORT_MODE" = true \] || return 0' || fail "the staging must stay an import-only step"
+    grep -B2 -F 'if [ -n "$IMPORT_VOLUME_TO_DELETE" ]; then' "$setup" | grep -Fq 'remove_env_value KVS_IMPORT_COMPLETED' || fail "a new import must clear the completion of an earlier one before touching the database"
 
     grep -Fq "'^https?://(www[.])?\${DOMAIN_PATTERN}(:[0-9]+)?/contents/'" "$configure" || fail "http storage URLs must be adopted too"
     grep -Fq 'Storage servers use external hosts' "$configure" || fail "external storage hosts must be tolerated"
