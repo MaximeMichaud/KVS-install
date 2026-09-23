@@ -354,6 +354,7 @@ import_validate_local_materials() {
     IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$IMPORT_SITE_DIR/admin/include/setup.php" project_url)")
     echo "  Site: $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
     import_check_site_links
+    import_note_external_search
     dump_info=$(import_inspect_dump "$IMPORT_DB_DUMP" ktvs_) || exit 1
     IMPORT_DUMP_TABLES=$(import_field "$dump_info" 1)
     dump_initial_version=$(import_field "$dump_info" 2)
@@ -376,6 +377,22 @@ import_validate_local_materials() {
     fi
     if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
         echo "  Server paths: $IMPORT_OLD_PATH -> /var/www/kvs"
+    fi
+}
+
+# A site whose search ran through the External Search plugin (Sphinx or
+# Manticore on the old server) changes behaviour here: with Manticore
+# enabled the init points the plugin at the stack's own Manticore, which
+# indexes the imported database at start and hourly; without it the init
+# removes the plugin configuration and KVS falls back to its MySQL search.
+import_note_external_search() {
+    local host
+
+    host=$(import_external_search_host "$IMPORT_SITE_DIR") || return 0
+    if [ "${MANTICORE_CHOICE:-}" = "1" ]; then
+        echo "  Search: the site uses the External Search plugin (${host:-unknown host}); Manticore is enabled here and takes it over"
+    else
+        echo -e "  ${YELLOW}Search: the site uses the External Search plugin (${host:-unknown host}); without Manticore (MANTICORE_CHOICE=1) its configuration is removed and KVS falls back to its MySQL search.${NC}"
     fi
 }
 
