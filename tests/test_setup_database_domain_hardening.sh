@@ -30,11 +30,8 @@ extract_function verify_existing_database_domain > "$functions_file"
 # shellcheck source=/dev/null
 source "$functions_file"
 
-RED=''
-GREEN=''
-YELLOW=''
-NC=''
-DOMAIN=mysite.test
+# shellcheck disable=SC2034  # Read by the sourced functions.
+RED='' GREEN='' YELLOW='' NC='' DOMAIN=mysite.test
 
 # The query is always the last argument of run_root_mariadb.
 run_root_mariadb() {

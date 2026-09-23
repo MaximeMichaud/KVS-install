@@ -26,7 +26,7 @@ pass() {
     echo "ok $TESTS_RUN - $1"
 }
 
-# shellcheck source=../docker/lib/import.sh
+# shellcheck source=/dev/null
 source "$REPO_ROOT/docker/lib/import.sh"
 
 SEVEN_ZIP=""
@@ -444,6 +444,7 @@ test_destination_marker_allows_a_repeat_of_the_same_source_only() {
     rm "$destination/.kvs-import-source"
     import_destination_ready "$destination" "archive:/root/site.zip" 2>/dev/null && fail "a used directory without marker must be refused"
     (
+        # shellcheck disable=SC2034  # Read by import_marker_file.
         IMPORT_MARKER_DIR="$TMP_ROOT/markers"
         import_mark_destination "$destination" "ssh://root@old:22/var/www/site" || exit 1
         [ "$(cat "$TMP_ROOT/markers/marker-dest.source")" = "ssh://root@old:22/var/www/site" ] || exit 2

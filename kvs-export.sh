@@ -210,10 +210,12 @@ kvs_hostname() {
 kvs_config_value() {
     local file="$1"
     local key="$2"
+    local pattern
     local value
 
     [ -f "$file" ] || return 1
-    value=$(sed -n -E "s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p" "$file" 2> /dev/null)
+    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
+    value=$(sed -n -E "$pattern" "$file" 2> /dev/null)
     printf '%s' "${value%%$'\n'*}"
 }
 
@@ -554,9 +556,6 @@ kvs_available_mb() {
     local probe
     local out
     local line
-    local fs
-    local blocks
-    local used
     local avail
     local rest
 
@@ -573,7 +572,7 @@ kvs_available_mb() {
     line=${out#*$'\n'}
     line=${line%%$'\n'*}
     [ -n "$line" ] || return 1
-    read -r fs blocks used avail rest <<< "$line"
+    read -r _ _ _ avail _ <<< "$line"
     kvs_is_number "$avail" || return 1
     printf '%s' "$avail"
 }
