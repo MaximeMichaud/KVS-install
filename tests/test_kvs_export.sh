@@ -144,7 +144,17 @@ if [ "\${STUB_DF_FULL:-no}" = yes ]; then
 fi
 exec "$(command -v df)" "\$@"
 EOF
-    chmod +x "$STUB_BIN/mariadb" "$STUB_BIN/mariadb-dump" "$STUB_BIN/df"
+    # du logs how the site is measured and answers a fixed size.
+    cat > "$STUB_BIN/du" <<'EOF'
+#!/bin/bash
+{
+    printf 'du argv:'
+    printf ' [%s]' "$@"
+    printf '\n'
+} >> "${STUB_LOG:-/dev/null}"
+printf '77\t%s\n' "${*: -1}"
+EOF
+    chmod +x "$STUB_BIN/mariadb" "$STUB_BIN/mariadb-dump" "$STUB_BIN/df" "$STUB_BIN/du"
 }
 
 # A PATH without zstd and without pigz cannot be built by pruning the real
@@ -235,7 +245,7 @@ test_detect_reports_the_installation_as_key_value_lines() {
     local site="$TMP_ROOT/detect-site"
     local out="$TMP_ROOT/detect.out"
     local err="$TMP_ROOT/detect.err"
-    local line size
+    local line
 
     make_site "$site"
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
@@ -265,8 +275,8 @@ test_detect_reports_the_installation_as_key_value_lines() {
     assert_key "$out" rsync no
     detect_value "$out" db_error > /dev/null && fail "a reachable database must print no db_error"
     [ -n "$(detect_value "$out" hostname)" ] || fail "the hostname must be reported"
-    size=$(detect_value "$out" site_size_mb)
-    [[ $size =~ ^[0-9]+$ ]] || fail "site_size_mb must be a number, got '$size'"
+    assert_key "$out" site_size_mb 77
+    grep -q '^du argv: \[-sLm\]' "$STUB_LOG" || fail "the site must be measured through its symbolic links (du -sLm)"
     grep -q "Measuring the site size" "$err" || fail "the size measurement must be announced on stderr"
     pass "detect reports the installation as key=value lines"
 }
