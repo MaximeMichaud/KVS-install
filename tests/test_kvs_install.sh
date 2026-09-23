@@ -948,6 +948,7 @@ test_runtime_input_stays_quiet_without_a_terminal() {
 
   # setsid detaches from the controlling terminal the way nohup, cron or a
   # CI runner would: /dev/tty exists but cannot be opened.
+  # shellcheck disable=SC2016  # The inner shell expands $1 and $(cat).
   output=$(setsid bash -c 'source "$1"; initialize_runtime_input; echo "stdin=$(cat)"' _ "$INSTALLER" <<< "piped" 2>&1)
   assert_equal "stdin=piped" "$output" "a detached run must keep its piped stdin without complaining"
 }

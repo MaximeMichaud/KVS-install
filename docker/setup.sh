@@ -280,11 +280,12 @@ detect_cloudflare() {
 }
 
 # Print "<free GB> <path>" for the tightest of the paths the installation
-# writes to: the site directory under /var/www and the Docker root directory
-# (images, build cache, volumes). Both may live on a different filesystem
-# than /, as on hosts with a small system disk and a large data disk.
+# writes to: the site directory under /var/www, the Docker root directory
+# (volumes, build cache) and the containerd root (images on Docker 29). Each
+# may live on a different filesystem than /, as on hosts with a small system
+# disk and a large data disk. CONTAINERD_CONFIG_FILE exists for the tests.
 preflight_free_disk_gb() {
-    local path docker_root free_gb min_gb="" min_path=""
+    local path docker_root driver_type containerd_root free_gb min_gb="" min_path=""
     local -a paths=()
     for path in "/var/www/${DOMAIN:-}" /var/www /; do
         if [ -d "$path" ]; then
@@ -295,6 +296,18 @@ preflight_free_disk_gb() {
     docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
     if [ -n "$docker_root" ] && [ -d "$docker_root" ]; then
         paths+=("$docker_root")
+    fi
+    # Docker 29 stores images through the containerd snapshotter, under the
+    # containerd root and not under the Docker root directory. Moving only
+    # data-root leaves the image store on the system disk.
+    driver_type=$(docker info --format '{{range .DriverStatus}}{{if eq (index . 0) "driver-type"}}{{index . 1}}{{end}}{{end}}' 2>/dev/null)
+    if [[ "$driver_type" == io.containerd.snapshotter.* ]]; then
+        containerd_root=$(sed -n 's/^root[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' \
+            "${CONTAINERD_CONFIG_FILE:-/etc/containerd/config.toml}" 2>/dev/null | head -n 1)
+        containerd_root=${containerd_root:-/var/lib/containerd}
+        if [ -d "$containerd_root" ]; then
+            paths+=("$containerd_root")
+        fi
     fi
     for path in "${paths[@]}"; do
         free_gb=$(df -P "$path" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
