@@ -293,8 +293,8 @@ test_package_steps_stop_when_apt_fails() {
   status=$?
   assert_equal "100" "$status" "nginx step must report the apt failure" || return 1
   assert_file_contains "$temp_dir/apt-calls" \
-    "install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold nginx" \
-    "nginx install must answer dpkg conffile prompts" || return 1
+    "install -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confmiss nginx" \
+    "nginx install must take the packaged configuration files" || return 1
   [[ ! -e "$temp_dir/nginx-reset" ]] || fail "nginx configuration was reset although the package failed to install" || return 1
   [[ ! -e "$temp_dir/service" ]] || fail "nginx was restarted although the package failed to install" || return 1
 
@@ -314,6 +314,59 @@ test_package_steps_stop_when_apt_fails() {
 
   unset -f check_ports curl gpg lsb_release apt-get reset_nginx_configuration_dirs openssl service systemctl sed
   unset APT_SOURCES_DIR
+}
+
+test_nginx_step_needs_a_usable_mime_types() {
+  local temp_dir
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  NGINX_MIME_TYPES="$temp_dir/mime.types"
+
+  # A types map trimmed by a previous provisioning and no packaged copy: stop.
+  printf 'types {\n    video/mp4 mp4;\n}\n' >"$NGINX_MIME_TYPES"
+  ensure_nginx_mime_types >/dev/null 2>&1
+  status=$?
+  assert_equal "1" "$status" "a types map without CSS or JavaScript must fail the check" || return 1
+
+  # The copy dpkg kept aside is restored.
+  printf 'types {\n    text/css css;\n    application/javascript js;\n}\n' >"$NGINX_MIME_TYPES.dpkg-dist"
+  ensure_nginx_mime_types >/dev/null 2>&1 ||
+    fail "the packaged types map was not restored" || return 1
+  assert_file_contains "$NGINX_MIME_TYPES" "application/javascript" \
+    "restored types map must map JavaScript" || return 1
+
+  # A complete map is left alone.
+  printf 'types {\n    text/css css;\n    application/javascript js;\n    text/html html;\n}\n' >"$NGINX_MIME_TYPES"
+  rm -f "$NGINX_MIME_TYPES.dpkg-dist"
+  ensure_nginx_mime_types >/dev/null 2>&1 ||
+    fail "a complete types map was rejected" || return 1
+  assert_file_contains "$NGINX_MIME_TYPES" "text/html" \
+    "a complete types map must not be rewritten" || return 1
+
+  # In the step, the check runs before the configuration is replaced.
+  printf 'types {\n    video/mp4 mp4;\n}\n' >"$NGINX_MIME_TYPES"
+  APT_SOURCES_DIR="$temp_dir"
+  VERSION_ID=13
+  OS=debian
+  check_ports() { :; }
+  curl() { :; }
+  gpg() { :; }
+  lsb_release() { echo trixie; }
+  apt-get() { return 0; }
+  reset_nginx_configuration_dirs() { : >"$temp_dir/nginx-reset"; }
+  openssl() { :; }
+  service() { : >"$temp_dir/service"; }
+  sed() { :; }
+
+  aptinstall_nginx >/dev/null 2>&1
+  status=$?
+  assert_equal "1" "$status" "nginx step must stop on an unusable types map" || return 1
+  [[ ! -e "$temp_dir/nginx-reset" ]] || fail "nginx configuration was reset although the types map is unusable" || return 1
+  [[ ! -e "$temp_dir/service" ]] || fail "nginx was restarted although the types map is unusable" || return 1
+
+  unset -f check_ports curl gpg lsb_release apt-get reset_nginx_configuration_dirs openssl service sed
+  unset APT_SOURCES_DIR NGINX_MIME_TYPES
 }
 
 test_domain_validation_respects_database_limit() {
@@ -727,6 +780,7 @@ run_test "PHP choice for unencoded archives" test_php_version_choice_for_unencod
 run_test "certificate names follow the www record" test_certificate_names_follow_the_www_record || failures=$((failures + 1))
 run_test "yt-dlp step is repeatable" test_yt_dlp_step_is_repeatable || failures=$((failures + 1))
 run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fails || failures=$((failures + 1))
+run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))
