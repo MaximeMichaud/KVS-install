@@ -1817,8 +1817,9 @@ select_mariadb_version() {
     echo ""
     echo -e "${CYAN}Fetching MariaDB LTS versions from endoflife.date...${NC}"
 
-    # Fetch data from API
-    MARIADB_DATA=$(curl -s --connect-timeout 5 "https://endoflife.date/api/mariadb.json" 2>/dev/null)
+    # Fetch data from API. A lookup that times out must not end the setup
+    # (set -e would exit on the failed assignment): the defaults apply.
+    MARIADB_DATA=$(curl -s --connect-timeout 5 "https://endoflife.date/api/mariadb.json" 2>/dev/null) || MARIADB_DATA=""
 
     if [ -z "$MARIADB_DATA" ]; then
         echo -e "${YELLOW}Could not fetch version data. Using defaults.${NC}"
@@ -3004,7 +3005,7 @@ fi
 check_dns() {
     echo ""
     echo -e "${CYAN}Checking DNS configuration...${NC}"
-    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org)
+    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org) || SERVER_IP=""
     # Use getent instead of dig (more portable)
     DOMAIN_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
     WWW_IP=""
