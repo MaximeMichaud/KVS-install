@@ -231,6 +231,33 @@ test_certificate_names_follow_the_www_record() {
   USE_WWW=false
 }
 
+test_yt_dlp_step_is_repeatable() {
+  local temp_dir
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  YT_DLP_BIN_DIR="$temp_dir"
+
+  curl() {
+    local output=""
+    while (($# > 0)); do
+      [[ "$1" == -o ]] && output="$2"
+      shift
+    done
+    printf 'binary\n' >"$output"
+  }
+
+  install_yt-dlp >/dev/null 2>&1 || fail "first yt-dlp installation failed" || return 1
+  [[ -L "$temp_dir/youtube-dl" ]] || fail "youtube-dl link was not created" || return 1
+  install_yt-dlp >/dev/null 2>&1
+  status=$?
+  assert_equal "0" "$status" "a second yt-dlp installation must succeed with the link present" || return 1
+  [[ -x "$temp_dir/yt-dlp" ]] || fail "yt-dlp is not executable after the second run" || return 1
+
+  unset -f curl
+  unset YT_DLP_BIN_DIR
+}
+
 test_domain_validation_respects_database_limit() {
   local max_label
   local oversized_label
@@ -640,6 +667,7 @@ run_test "visual progress failures are non-fatal" test_visual_progress_failure_i
 run_test "headless PHP detection" test_headless_php_detection || failures=$((failures + 1))
 run_test "PHP choice for unencoded archives" test_php_version_choice_for_unencoded_archive || failures=$((failures + 1))
 run_test "certificate names follow the www record" test_certificate_names_follow_the_www_record || failures=$((failures + 1))
+run_test "yt-dlp step is repeatable" test_yt_dlp_step_is_repeatable || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))
