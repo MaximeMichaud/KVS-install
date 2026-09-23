@@ -102,7 +102,9 @@ services:
     container_name: ${SITE_PREFIX:-kvs}-dragonfly
     hostname: cache
     restart: unless-stopped
-    command: dragonfly --memcached_port=11211 --maxmemory=${CACHE_MEMORY:-256}mb --proactor_threads=2 --logtostderr
+    # Dragonfly needs 256 MB of maxmemory per proactor thread; setup.sh keeps
+    # CACHE_MEMORY and CACHE_THREADS consistent with the host.
+    command: dragonfly --memcached_port=11211 --maxmemory=${CACHE_MEMORY:-512}mb --proactor_threads=${CACHE_THREADS:-2} --logtostderr
     ports:
       # Localhost only - for kvs-cli access
       - "127.0.0.1:${CACHE_HOST_PORT:-11211}:11211"

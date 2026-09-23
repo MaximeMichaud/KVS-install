@@ -1641,6 +1641,34 @@ EOF
     fi
 fi
 
+# Dragonfly and memcached take CACHE_MEMORY as a hard ceiling. The value in
+# .env.example suits hosts with 2 GB of RAM or more; below that, keep the
+# cache at a quarter of the RAM so PHP-FPM and MariaDB keep theirs, and run
+# Dragonfly on one thread: it refuses to start with less than 256 MB per
+# proactor thread, so the ceiling never goes under that floor either.
+# Prints "<memory MB> <threads>".
+cache_settings_for_host() {
+    local total_ram_mb="$1"
+    local memory="$2"
+    local threads="$3"
+    local backend="$4"
+    local cap floor
+
+    [[ "$memory" =~ ^[0-9]+$ ]] || memory=512
+    [[ "$threads" =~ ^[1-9][0-9]*$ ]] || threads=2
+    if (( total_ram_mb < 2048 )); then
+        cap=$(( total_ram_mb / 4 ))
+        (( cap < 64 )) && cap=64
+        (( memory > cap )) && memory=$cap
+        [ "$backend" = dragonfly ] && threads=1
+    fi
+    if [ "$backend" = dragonfly ]; then
+        floor=$(( threads * 256 ))
+        (( memory < floor )) && memory=$floor
+    fi
+    echo "$memory $threads"
+}
+
 # Cache selection (dragonfly/memcached)
 select_cache() {
     echo ""
@@ -1671,6 +1699,19 @@ select_cache() {
             docker rm "${SITE_PREFIX}-memcached" 2>/dev/null || true
             ;;
     esac
+
+    local total_ram_mb backend cache_memory cache_threads
+    total_ram_mb=$(free -m | awk 'NR==2 {print $2}')
+    backend=dragonfly
+    [ "$CACHE_CHOICE" = 2 ] && backend=memcached
+    read -r cache_memory cache_threads < <(cache_settings_for_host "$total_ram_mb" "${CACHE_MEMORY:-512}" "${CACHE_THREADS:-2}" "$backend")
+    if [ "$cache_memory" != "${CACHE_MEMORY:-512}" ] || [ "$cache_threads" != "${CACHE_THREADS:-2}" ]; then
+        set_env_value CACHE_MEMORY "$cache_memory" || return $?
+        set_env_value CACHE_THREADS "$cache_threads" || return $?
+        CACHE_MEMORY=$cache_memory
+        CACHE_THREADS=$cache_threads
+        echo -e "${YELLOW}Cache sized for ${total_ram_mb} MB of RAM: ${cache_memory} MB, ${cache_threads} thread(s) (CACHE_MEMORY and CACHE_THREADS in .env)${NC}"
+    fi
 }
 
 select_cache
