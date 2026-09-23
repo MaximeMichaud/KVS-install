@@ -233,27 +233,37 @@ import_prepare_dump() {
 
 # import_place_site <source> <destination>
 # Copy the site into the destination unless the source already is the
-# destination. The destination must be absent or empty. Ownership is left
-# to the init container, which sets the whole tree to the PHP user.
+# destination. The destination must be absent, empty, or hold an earlier
+# copy of the same source: the marker .kvs-import-source names the source
+# from the first copy on, so a run that failed later can be repeated
+# without deleting the copy by hand, while another site is never
+# overwritten. Ownership is left to the init container, which sets the
+# whole tree to the PHP user.
 import_place_site() {
     local source="$1"
     local destination="$2"
-    local resolved_source resolved_destination
+    local marker resolved_source resolved_destination
 
     resolved_source=$(readlink -f -- "$source") || return 1
     resolved_destination=$(readlink -f -- "$destination" 2>/dev/null) || resolved_destination=$destination
     if [ "$resolved_source" = "$resolved_destination" ]; then
         echo "Site files already in place at $destination"
     else
+        marker="$destination/.kvs-import-source"
         if [ -e "$destination" ] && [ ! -d "$destination" ]; then
             echo "ERROR: $destination exists and is not a directory" >&2
             return 1
         fi
         if [ -d "$destination" ] && find "$destination" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
-            echo "ERROR: $destination is not empty; import into an empty site directory, or point IMPORT_SITE_DIR at it when the files are already there" >&2
-            return 1
+            if [ -f "$marker" ] && [ "$(cat "$marker")" = "$resolved_source" ]; then
+                echo "Resuming the copy of $source into $destination"
+            else
+                echo "ERROR: $destination is not empty; import into an empty site directory, or point IMPORT_SITE_DIR at it when the files are already there" >&2
+                return 1
+            fi
         fi
         mkdir -p "$destination" || return 1
+        printf '%s\n' "$resolved_source" > "$marker" || return 1
         if command -v rsync >/dev/null 2>&1; then
             rsync -a -- "$resolved_source/" "$destination/" || return 1
         else
