@@ -1169,7 +1169,23 @@ EOF
     pass "PHP password escaping preserves ampersands, backslashes, apostrophes and separators"
 }
 
+# A network lookup that times out returned its status through the plain
+# assignment and set -e ended the setup with a bare exit code: seen on a
+# one CPU VM when endoflife.date did not answer within five seconds.
+test_network_lookups_may_fail_without_ending_the_setup() {
+    local setup="$REPO_ROOT/docker/setup.sh"
+
+    # shellcheck disable=SC2016  # The patterns are literal lines of the setup.
+    grep -Fq 'MARIADB_DATA=$(curl -s --connect-timeout 5 "https://endoflife.date/api/mariadb.json" 2>/dev/null) || MARIADB_DATA=""' "$setup" ||
+        fail "the MariaDB version lookup must fall back to the defaults when it fails"
+    # shellcheck disable=SC2016
+    grep -Fq 'SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org) || SERVER_IP=""' "$setup" ||
+        fail "the public IP lookup must leave the DNS check to report a mismatch instead of ending the setup"
+    pass "network lookups may fail without ending the setup"
+}
+
 test_help_is_side_effect_free_without_root
+test_network_lookups_may_fail_without_ending_the_setup
 test_root_guard_precedes_logs_and_preflight
 test_secure_logs_env_and_headless_overrides
 test_headless_override_validation
