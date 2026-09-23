@@ -258,6 +258,57 @@ test_yt_dlp_step_is_repeatable() {
   unset YT_DLP_BIN_DIR
 }
 
+test_package_steps_stop_when_apt_fails() {
+  local temp_dir
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  APT_SOURCES_DIR="$temp_dir"
+  VERSION_ID=13
+  OS=debian
+  ID=debian
+  DOMAIN=example.com
+  URL=example.com
+  REDIRECT_SERVER_NAME='*.example.com'
+  PHP=8.1
+  webserver=nginx
+  database_ver=11.8
+
+  check_ports() { :; }
+  curl() { :; }
+  gpg() { :; }
+  lsb_release() { echo trixie; }
+  apt-get() { [[ "$1" == install ]] && return 100; return 0; }
+  reset_nginx_configuration_dirs() { : >"$temp_dir/nginx-reset"; }
+  openssl() { : >"$temp_dir/dhparam"; }
+  service() { : >"$temp_dir/service"; }
+  systemctl() { : >"$temp_dir/systemctl"; }
+  sed() { : >"$temp_dir/sed"; }
+
+  aptinstall_nginx >/dev/null 2>&1
+  status=$?
+  assert_equal "100" "$status" "nginx step must report the apt failure" || return 1
+  [[ ! -e "$temp_dir/nginx-reset" ]] || fail "nginx configuration was reset although the package failed to install" || return 1
+  [[ ! -e "$temp_dir/service" ]] || fail "nginx was restarted although the package failed to install" || return 1
+
+  aptinstall_php >/dev/null 2>&1
+  status=$?
+  assert_equal "100" "$status" "PHP step must report the apt failure" || return 1
+  [[ ! -e "$temp_dir/sed" ]] || fail "php.ini was edited although the packages failed to install" || return 1
+
+  aptinstall_mariadb >/dev/null 2>&1
+  status=$?
+  assert_equal "100" "$status" "MariaDB step must report the apt failure" || return 1
+  [[ ! -e "$temp_dir/systemctl" ]] || fail "MariaDB was enabled although the package failed to install" || return 1
+
+  aptinstall_memcached >/dev/null 2>&1
+  status=$?
+  assert_equal "100" "$status" "Memcached step must report the apt failure" || return 1
+
+  unset -f check_ports curl gpg lsb_release apt-get reset_nginx_configuration_dirs openssl service systemctl sed
+  unset APT_SOURCES_DIR
+}
+
 test_domain_validation_respects_database_limit() {
   local max_label
   local oversized_label
@@ -668,6 +719,7 @@ run_test "headless PHP detection" test_headless_php_detection || failures=$((fai
 run_test "PHP choice for unencoded archives" test_php_version_choice_for_unencoded_archive || failures=$((failures + 1))
 run_test "certificate names follow the www record" test_certificate_names_follow_the_www_record || failures=$((failures + 1))
 run_test "yt-dlp step is repeatable" test_yt_dlp_step_is_repeatable || failures=$((failures + 1))
+run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fails || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))
