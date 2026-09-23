@@ -891,6 +891,29 @@ test_failed_step_shows_its_last_lines_and_a_full_disk() {
     pass "failed step reports its last lines and a full disk"
 }
 
+test_cache_settings_follow_small_hosts() {
+    local functions_file="$TMP_ROOT/cache-settings.sh"
+
+    awk '
+        $0 == "cache_settings_for_host() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    # shellcheck source=/dev/null
+    source "$functions_file"
+
+    [ "$(cache_settings_for_host 4096 512 2 dragonfly)" = "512 2" ] || fail "hosts with 2 GB or more keep the configured cache"
+    [ "$(cache_settings_for_host 2048 1024 2 dragonfly)" = "1024 2" ] || fail "the cap starts below 2 GB"
+    [ "$(cache_settings_for_host 967 512 2 memcached)" = "241 2" ] || fail "memcached on a 967 MB host gets a quarter of the RAM"
+    [ "$(cache_settings_for_host 967 128 2 memcached)" = "128 2" ] || fail "a value below the cap is kept"
+    [ "$(cache_settings_for_host 200 512 2 memcached)" = "64 2" ] || fail "the cap never drops below 64 MB"
+    [ "$(cache_settings_for_host 967 512 2 dragonfly)" = "256 1" ] || fail "Dragonfly on a 967 MB host runs one thread with its 256 MB floor"
+    [ "$(cache_settings_for_host 4096 100 2 dragonfly)" = "512 2" ] || fail "Dragonfly never starts under 256 MB per thread, the value must be raised"
+    [ "$(cache_settings_for_host 967 abc x dragonfly)" = "256 1" ] || fail "malformed values fall back to the defaults before sizing"
+
+    pass "cache settings follow small hosts and the Dragonfly floor"
+}
+
 test_optional_gum_install_failure_is_nonfatal() {
     local block_file="$TMP_ROOT/optional-gum.sh"
     local output="$TMP_ROOT/optional-gum-output.log"
@@ -1162,6 +1185,7 @@ test_final_compose_failure_is_fatal
 test_optional_gum_install_failure_is_nonfatal
 test_preflight_disk_check_measures_the_tightest_filesystem
 test_failed_step_shows_its_last_lines_and_a_full_disk
+test_cache_settings_follow_small_hosts
 test_reconfigure_fails_when_container_inspection_fails
 test_reconfigure_issues_the_exact_requested_sans_and_installs
 test_php_password_escaping
