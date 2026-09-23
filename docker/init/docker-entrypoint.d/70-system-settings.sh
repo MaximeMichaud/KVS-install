@@ -25,11 +25,9 @@ log_info "Configuring system settings..."
 
 # Only update $.geoip_database on existing rows when a GeoIP file is present,
 # otherwise a missing file at restart would wipe a previously configured path.
-if [ -n "$GEOIP_DB" ]; then
-	GEOIP_UPDATE_CLAUSE=", '\$.geoip_database', '$GEOIP_DB'"
-else
-	GEOIP_UPDATE_CLAUSE=""
-fi
+# Always written: a path carried over from another server does not exist
+# in the container, and an absent database must read as absent.
+GEOIP_UPDATE_CLAUSE=", '\$.geoip_database', '$GEOIP_DB'"
 
 if SQL_OUTPUT=$(MYSQL_PWD="$MARIADB_PASSWORD" \
     mariadb -h mariadb -u "$DOMAIN" "$DOMAIN" 2>&1 <<-EOSQL
