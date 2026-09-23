@@ -501,6 +501,9 @@ import_inspect_remote() {
     else
         echo "  Transfer:        tar over ssh (install rsync on the old server for progress and resumable transfers), dump compressed with ${IMPORT_REMOTE_COMPRESSOR:-gzip}"
     fi
+    if [ "$(import_kv "$IMPORT_REMOTE_REPORT" db_non_transactional)" -gt 0 ] 2>/dev/null; then
+        echo -e "  ${YELLOW}$(import_kv "$IMPORT_REMOTE_REPORT" db_non_transactional) tables use MyISAM or Aria: the dump locks the tables while it runs, writes on the old site wait.${NC}"
+    fi
     if [ -z "$IMPORT_SITE_VERSION" ] || [ -z "$IMPORT_OLD_PATH" ]; then
         echo -e "${RED}ERROR: the KVS version or the project path could not be read on the old server${NC}"
         exit 1
@@ -631,18 +634,11 @@ import_fetch_remote() {
     fi
     mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
     dump="$IMPORT_STAGING/${DOMAIN}.sql.$extension"
-    # Files first, the dump last: the database then describes the files
-    # that arrived, and a second pass before the switch only carries the
-    # changes made in between.
+    # The dump first, the files after: whatever the site creates during a
+    # long transfer then exists as files the database does not know yet,
+    # which is harmless, instead of rows whose files never came. A second
+    # pass, once the old site is frozen, carries the changes made since.
     echo ""
-    echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR...${NC}"
-    import_destination_ready "$destination" "$source" || exit 1
-    import_mark_destination "$destination" "$source" || exit 1
-    if ! import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC"; then
-        echo -e "${RED}ERROR: the file transfer failed; run the same command again to resume it${NC}"
-        exit 1
-    fi
-    echo -e "  ${GREEN}✓${NC} Site files in $destination"
     echo -e "${CYAN}Receiving the database dump from $IMPORT_SSH_TARGET...${NC}"
     rm -f "$dump"
     import_remote_dump "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$dump" &
@@ -656,6 +652,14 @@ import_fetch_remote() {
     fi
     chmod 600 "$dump"
     echo -e "  ${GREEN}✓${NC} Dump received: $dump ($(du -h -- "$dump" | cut -f1))"
+    echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR...${NC}"
+    import_destination_ready "$destination" "$source" || exit 1
+    import_mark_destination "$destination" "$source" || exit 1
+    if ! import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC"; then
+        echo -e "${RED}ERROR: the file transfer failed; run the same command again to resume it${NC}"
+        exit 1
+    fi
+    echo -e "  ${GREEN}✓${NC} Site files in $destination"
     import_ssh_close
     IMPORT_DB_DUMP=$dump
     IMPORT_RAW_DUMP=$dump

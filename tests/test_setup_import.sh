@@ -177,6 +177,9 @@ test_prepared_dump_loads_into_the_container_database() {
     echo "-- nothing here" > "$TMP_ROOT/dump-empty.sql"
     import_prepare_dump "$TMP_ROOT/dump-empty.sql" ktvs_ 7.0.2 /a /b "$TMP_ROOT/empty.sql" t 2>/dev/null &&
         fail "a dump without ktvs_ tables must be refused"
+    { cat "$dump"; echo "SET @@SESSION.SQL_LOG_BIN= 0;"; echo "SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5';"; } > "$TMP_ROOT/mysql8.sql"
+    import_prepare_dump "$TMP_ROOT/mysql8.sql" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/prepared-mysql8.sql" token >/dev/null || fail "a MySQL 8 dump must be prepared"
+    grep -q 'GTID_PURGED\|SQL_LOG_BIN' "$TMP_ROOT/prepared-mysql8.sql" && fail "the GTID and binary log settings of a MySQL 8 dump must be dropped"
     pass "prepared dump loads into the container database"
 }
 
@@ -276,7 +279,8 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'IMPORT_EXPORTER="$(dirname "${BASH_SOURCE[0]}")/../kvs-export.sh"' "$setup" || fail "the exporter travels from the repository root"
     grep -Fq 'stage=$(import_stage_dir_for "$destination")' "$setup" || fail "an archive must be unpacked in a private stage, not in the webroot"
     grep -Fq 'IMPORT_SSH_ACCEPT_NEW' "$setup" || fail "accepting unknown host keys must be an opt-in"
-    grep -B3 -F 'Receiving the database dump from $IMPORT_SSH_TARGET' "$setup" | grep -Fq 'Site files in $destination' || fail "the files must travel before the dump"
+    grep -B4 -F 'Transferring the site files from $IMPORT_SSH_TARGET' "$setup" | grep -Fq 'Dump received:' || fail "the dump must be taken before the files travel"
+    grep -Fq 'tables use MyISAM or Aria' "$setup" || fail "non transactional tables must be announced before the remote dump"
     grep -Fq 'the transfer broke off' "$setup" || fail "a remote dump without the completion line must stop the import"
     grep -Fq 'The KVS license is bound to the domain' "$setup" || fail "a domain mismatch must be explained"
     grep -Fq '[ -n "$IMPORT_RAW_DUMP" ] && rm -f "$IMPORT_RAW_DUMP"' "$setup" || fail "the raw dump must go once the import completed"

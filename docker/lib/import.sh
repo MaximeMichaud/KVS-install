@@ -110,11 +110,13 @@ import_field() {
 }
 
 # import_kv <file> <key>: the value of a key=value line, the first one.
+# The values come from another server and end up on the terminal, so
+# control characters (terminal escapes among them) are dropped.
 import_kv() {
     local file="$1"
     local key="$2"
 
-    sed -n "s/^${key}=//p" "$file" 2>/dev/null | head -n 1
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | head -n 1 | tr -d '\000-\037\177'
 }
 
 # import_dump_cat <dump>: stream the dump decompressed.
@@ -218,7 +220,9 @@ import_dump_write() {
 # import_prepare_dump <dump> <table prefix> <KVS version> <old project path> <new project path> <output> <token>
 # Write the dump the MariaDB init directory will replay: CREATE DATABASE
 # and USE statements dropped (the init runs inside the database named in
-# .env), INITIAL_VERSION added when the old site never recorded it, server
+# .env), the GTID and binary log session settings a MySQL 8 mysqldump
+# writes dropped (MariaDB knows no GTID_PURGED and would stop the replay
+# there), INITIAL_VERSION added when the old site never recorded it, server
 # paths rewritten to the container path, and a completion marker row
 # KVS_INSTALL_IMPORT=<token> as the very last statement: the MariaDB image
 # restarts on a failed init file and would serve the partial database, so
@@ -242,7 +246,7 @@ import_prepare_dump() {
         return 1
     fi
     {
-        import_dump_cat "$dump" | sed -E '/^(CREATE DATABASE|USE )/d'
+        import_dump_cat "$dump" | sed -E '/^(CREATE DATABASE|USE )/d; /^SET @@(GLOBAL|SESSION)\.(GTID_PURGED|SQL_LOG_BIN)/d'
         echo
         echo "-- kvs-install import"
         if [ -z "$initial" ]; then
@@ -900,8 +904,11 @@ import_remote_dump() {
 }
 
 # import_remote_files <site directory> <destination> <rsync yes|no>
-# Mirror the site files. rsync when both sides have it (resumable, shows
-# progress, a repeat only transfers the changes), a tar stream otherwise.
+# Mirror the site files. rsync when both sides have it (resumable through
+# the partial directory, shows progress, a repeat only transfers the
+# changes), a tar stream otherwise. The incremental recursion stays on: a
+# full scan before the first byte holds the whole file list in memory on
+# both sides, which a small server cannot afford for a large site.
 import_remote_files() {
     local dir="$1"
     local destination="$2"
@@ -910,7 +917,7 @@ import_remote_files() {
     import_remote_path_ok "$dir" || return 1
     mkdir -p "$destination" || return 1
     if [ "$use_rsync" = yes ]; then
-        rsync -a --partial --delete --no-inc-recursive --info=progress2 --human-readable \
+        rsync -a -s --partial-dir=.rsync-partial --delete --info=progress2 --human-readable \
             -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/"
     else
         import_ssh tar -C "$dir" -cf - . | tar -xf - --no-same-owner -C "$destination"
