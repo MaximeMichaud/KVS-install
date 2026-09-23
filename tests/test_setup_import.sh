@@ -23,7 +23,7 @@ pass() {
     echo "ok $TESTS_RUN - $1"
 }
 
-# shellcheck source=../docker/lib/import.sh
+# shellcheck source=/dev/null
 source "$REPO_ROOT/docker/lib/import.sh"
 
 make_site() {

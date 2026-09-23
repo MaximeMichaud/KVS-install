@@ -216,6 +216,7 @@ IMPORT_REMOTE_REPORT=""
 # here, outside the webroot, until they are prepared for MariaDB; the
 # marker that binds /var/www/<domain> to its source lives here too.
 IMPORT_STAGING="$(pwd)/import"
+# shellcheck disable=SC2034  # Read by docker/lib/import.sh.
 IMPORT_MARKER_DIR="$IMPORT_STAGING"
 IMPORT_EXPORTER="$(dirname "${BASH_SOURCE[0]}")/../kvs-export.sh"
 
@@ -911,8 +912,9 @@ preflight_checks() {
 
     # Display in GB if >= 1024MB, otherwise in MB
     if (( total_ram_mb >= 1024 )); then
-        local total_ram_gb=$((total_ram_mb / 1024))
-        local free_ram_gb=$((free_ram_mb / 1024))
+        local total_ram_gb free_ram_gb
+        total_ram_gb=$((total_ram_mb / 1024))
+        free_ram_gb=$((free_ram_mb / 1024))
         if (( total_ram_mb >= 2048 )); then
             echo -e "${GREEN}✓${NC} RAM: ${total_ram_gb} GB total, ${free_ram_gb} GB available"
         else
@@ -1500,14 +1502,15 @@ parse_publish_endpoint() {
         port="${BASH_REMATCH[3]}"
         IFS='.' read -r -a octets <<< "$host"
         for octet in "${octets[@]}"; do
-            ((10#$octet <= 255)) || return 1
+            [ "$((10#$octet))" -le 255 ] || return 1
         done
     else
         return 1
     fi
 
     [ "${#port}" -le 5 ] || return 1
-    ((10#$port >= 1 && 10#$port <= 65535)) || return 1
+    [ "$((10#$port))" -ge 1 ] || return 1
+    [ "$((10#$port))" -le 65535 ] || return 1
     PUBLISH_HOST="$host"
     PUBLISH_PORT=$((10#$port))
 }
@@ -1862,7 +1865,7 @@ select_mariadb_version() {
 
         echo -e "  $i) MariaDB $version $STATUS"
         VERSIONS+=("$version")
-        ((i++))
+        i=$((i + 1))
     done
 
     # Skip prompt if already set (headless mode)
@@ -2198,13 +2201,19 @@ cache_settings_for_host() {
     [[ "$threads" =~ ^[1-9][0-9]*$ ]] || threads=2
     if (( total_ram_mb < 2048 )); then
         cap=$(( total_ram_mb / 4 ))
-        (( cap < 64 )) && cap=64
-        (( memory > cap )) && memory=$cap
+        if (( cap < 64 )); then
+            cap=64
+        fi
+        if (( memory > cap )); then
+            memory=$cap
+        fi
         [ "$backend" = dragonfly ] && threads=1
     fi
     if [ "$backend" = dragonfly ]; then
         floor=$(( threads * 256 ))
-        (( memory < floor )) && memory=$floor
+        if (( memory < floor )); then
+            memory=$floor
+        fi
     fi
     echo "$memory $threads"
 }

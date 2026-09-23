@@ -1410,7 +1410,7 @@ insert_cronjob() {
   # previous www-data snapshot so the migration is not left half-applied.
   printf '%s\n' "$new_www_data_crontab" | crontab -u www-data -
   status=$?
-  ((status == 0)) || return "$status"
+  [ "$status" -eq 0 ] || return "$status"
 
   {
     [[ -n "$new_root_crontab" ]] && printf '%s\n' "$new_root_crontab"

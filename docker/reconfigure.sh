@@ -200,7 +200,7 @@ parse_publish_endpoint_port() {
         port="${BASH_REMATCH[3]}"
         IFS='.' read -r -a octets <<< "$host"
         for octet in "${octets[@]}"; do
-            ((10#$octet <= 255)) || return 1
+            [ "$((10#$octet))" -le 255 ] || return 1
         done
     else
         return 1
