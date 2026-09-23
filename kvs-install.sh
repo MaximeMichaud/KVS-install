@@ -284,6 +284,7 @@ function script() {
   run_install_step "Installing phpMyAdmin" "phpMyAdmin installed" aptinstall_phpmyadmin || return $?
   run_install_step "Installing KVS" "KVS installed" install_KVS || return $?
   run_install_step "Configuring KVS system settings" "KVS system settings configured" configure_kvs_system_settings || return $?
+  run_install_step "Configuring KVS servers" "KVS servers configured" configure_kvs_servers || return $?
   run_install_step "Installing IonCube" "IonCube configured" install_ioncube || return $?
   run_install_step "Setting up cron jobs" "Cron jobs configured" insert_cronjob || return $?
   run_install_step "Installing acme.sh" "SSL certificates configured" install_acme.sh || return $?
@@ -1482,6 +1483,41 @@ EOSQL
     return 1
   fi
   echo "KVS server type set to nginx, upload limit 2048 MB, default memory limit 256 MB"
+}
+
+# The seeded storage servers point at https://www.<domain>/contents/... and
+# trust every certificate. Both must follow the installed site: the URL the
+# installer chose (with or without www) and the certificate mode, exactly as
+# the Docker init step 40-configure-database.sh does.
+configure_kvs_servers() {
+  local db="${1:-$DOMAIN}"
+  local kvs_path="${KVS_PATH:-/var/www/$DOMAIN}"
+  local project_url="https://$URL"
+  local domain_pattern="${DOMAIN//./[.]}"
+  local ssl_skip=0
+  local matching stale mismatch
+
+  [ "$SSL_PROVIDER" = "selfsigned" ] && ssl_skip=1
+  mariadb "$db" <<EOSQL || return $?
+UPDATE ktvs_admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
+UPDATE ktvs_admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
+UPDATE ktvs_admin_servers
+    SET urls = REGEXP_REPLACE(urls, '^https://(www[.])?${domain_pattern}(:[0-9]+)?/contents/', '${project_url}/contents/')
+    WHERE urls REGEXP '^https://(www[.])?${domain_pattern}(:[0-9]+)?/contents/';
+UPDATE ktvs_admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
+EOSQL
+  matching=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls LIKE '${project_url}/contents/%'") || return $?
+  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls REGEXP '^https://(www[.])?${domain_pattern}(:[0-9]+)?/contents/' AND urls NOT LIKE '${project_url}/contents/%'") || return $?
+  mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
+  if [ "$matching" -lt 1 ] || [ "$stale" -ne 0 ] 2>/dev/null; then
+    echo "ERROR: KVS storage server URLs do not match ${project_url}/contents/ (matching=${matching}, stale=${stale})" >&2
+    return 1
+  fi
+  if [ "$mismatch" -ne 0 ] 2>/dev/null; then
+    echo "ERROR: KVS storage servers do not follow the certificate mode (streaming_skip_ssl_check=${ssl_skip})" >&2
+    return 1
+  fi
+  echo "KVS storage servers use ${project_url}/contents/..., TLS verification $([ "$ssl_skip" -eq 1 ] && echo "disabled for the self-signed certificate" || echo "enabled")"
 }
 
 function install_ioncube() {
