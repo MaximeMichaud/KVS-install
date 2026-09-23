@@ -851,14 +851,18 @@ reset_nginx_configuration_dirs() {
 }
 
 function aptinstall_nginx() {
+    local sources_dir="${APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
+
     check_ports
     echo "NGINX Installation"
     # Download GPG key, overwrite if exists
     curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --yes --dearmor -o /usr/share/keyrings/nginx.gpg
     if [[ "$VERSION_ID" =~ (11|12|13|22.04|24.04) ]]; then
-      echo "deb [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >/etc/apt/sources.list.d/nginx.list
-      echo "deb-src [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>/etc/apt/sources.list.d/nginx.list
-      apt-get update && apt-get install nginx -y
+      echo "deb [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >"$sources_dir/nginx.list"
+      echo "deb-src [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/$OS/ $(lsb_release -sc) nginx" >>"$sources_dir/nginx.list"
+      # Stop here when the package cannot be installed: the configuration
+      # directory below must not be reset for a web server that is not there.
+      apt-get update && apt-get install nginx -y || return $?
       reset_nginx_configuration_dirs || return $?
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -o /etc/nginx/nginx.conf
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/general.conf -o /etc/nginx/globals/general.conf
@@ -889,12 +893,14 @@ function aptinstall_mariadb() {
   echo "MariaDB Installation"
     # Download GPG key, overwrite if exists
     curl -fsSL https://mariadb.org/mariadb_release_signing_key.asc | gpg --yes --dearmor -o /usr/share/keyrings/mariadb.gpg
-    echo "deb [signed-by=/usr/share/keyrings/mariadb.gpg arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >/etc/apt/sources.list.d/mariadb.list
-    apt-get update && apt-get install mariadb-server -y
+    echo "deb [signed-by=/usr/share/keyrings/mariadb.gpg arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >"${APT_SOURCES_DIR:-/etc/apt/sources.list.d}/mariadb.list"
+    apt-get update && apt-get install mariadb-server -y || return $?
     systemctl enable mariadb && systemctl start mariadb
 }
 
 function aptinstall_php() {
+    local sources_dir="${APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
+
     echo "PHP Installation"
     # Download GPG key, overwrite if exists
     curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --yes --dearmor -o /usr/share/keyrings/php.sury.org.gpg
@@ -902,14 +908,14 @@ function aptinstall_php() {
       # A box provisioned with the Sury repository already (deb822 or list
       # file) must not get a second entry, which apt reports on every run.
       if [[ "$VERSION_ID" =~ (11|12|13) ]] &&
-         ! grep -rqs 'packages.sury.org/php' /etc/apt/sources.list /etc/apt/sources.list.d/; then
-        echo "deb [signed-by=/usr/share/keyrings/php.sury.org.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
+         ! grep -rqs 'packages.sury.org/php' /etc/apt/sources.list "$sources_dir/"; then
+        echo "deb [signed-by=/usr/share/keyrings/php.sury.org.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" | tee "$sources_dir/php.list"
       fi
       if [[ "$VERSION_ID" =~ (22.04|24.04) ]]; then
         add-apt-repository -y ppa:ondrej/php
       fi
     fi
-    apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} -y
+    apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} -y || return $?
     sed -i "s|upload_max_filesize = 2M|upload_max_filesize = 2048M|
                 s|post_max_size = 8M|post_max_size = 2048M|
                 s|memory_limit = 128M|memory_limit = 512M|
@@ -936,7 +942,7 @@ function aptinstall_phpmyadmin() {
 	#curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/phpmyadmin.conf -o phpmyadmin.conf
     ln -s "${PHPMYADMIN_INSTALL_DIR}" /var/www/phpmyadmin
     if [[ "$webserver" =~ (nginx) ]]; then
-      apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y
+      apt-get update && apt-get install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} -y || return $?
       service nginx restart
     fi
 }
@@ -1014,7 +1020,7 @@ function install_KVS() {
 
 function aptinstall_memcached() {
     echo "Installing Memcached..."
-    apt-get install -y memcached
+    apt-get install -y memcached || return $?
     echo "Configuring Memcached to use 256 MB of RAM..."
     sed -i 's/-m 64/-m 256/' /etc/memcached.conf
     systemctl restart memcached
@@ -1341,7 +1347,7 @@ function install_ioncube() {
 
 function autoUpdate() {
   if [[ "$AUTOPACKAGEUPDATE" =~ (YES) ]]; then
-    apt-get install -y unattended-upgrades
+    apt-get install -y unattended-upgrades || return $?
     sed -i 's|APT::Periodic::Update-Package-Lists "0";|APT::Periodic::Update-Package-Lists "1";|' /etc/apt/apt.conf.d/20auto-upgrades
     sed -i 's|APT::Periodic::Unattended-Upgrade "0";|APT::Periodic::Unattended-Upgrade "1";|' /etc/apt/apt.conf.d/20auto-upgrades
   fi
