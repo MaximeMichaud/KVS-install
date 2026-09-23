@@ -278,7 +278,11 @@ test_package_steps_stop_when_apt_fails() {
   curl() { :; }
   gpg() { :; }
   lsb_release() { echo trixie; }
-  apt-get() { [[ "$1" == install ]] && return 100; return 0; }
+  apt-get() {
+    printf '%s\n' "$*" >>"$temp_dir/apt-calls"
+    [[ "$1" == install ]] && return 100
+    return 0
+  }
   reset_nginx_configuration_dirs() { : >"$temp_dir/nginx-reset"; }
   openssl() { : >"$temp_dir/dhparam"; }
   service() { : >"$temp_dir/service"; }
@@ -288,6 +292,9 @@ test_package_steps_stop_when_apt_fails() {
   aptinstall_nginx >/dev/null 2>&1
   status=$?
   assert_equal "100" "$status" "nginx step must report the apt failure" || return 1
+  assert_file_contains "$temp_dir/apt-calls" \
+    "install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold nginx" \
+    "nginx install must answer dpkg conffile prompts" || return 1
   [[ ! -e "$temp_dir/nginx-reset" ]] || fail "nginx configuration was reset although the package failed to install" || return 1
   [[ ! -e "$temp_dir/service" ]] || fail "nginx was restarted although the package failed to install" || return 1
 
