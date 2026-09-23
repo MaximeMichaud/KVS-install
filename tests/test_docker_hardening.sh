@@ -821,7 +821,35 @@ test_preflight_disk_check_measures_the_tightest_filesystem() {
     [ "${output%% *}" = "40" ] || fail "without Docker the site filesystem must be measured: got '$output'"
     [ "$output" != "${output#* /}" ] || fail "the measured path must be reported: got '$output'"
 
-    pass "preflight disk check measures the site and Docker root filesystems"
+    # Docker 29: images live under the containerd root, not under data-root.
+    local stub_containerd_root="$TMP_ROOT/containerd-root"
+    mkdir -p "$stub_containerd_root"
+    printf 'disabled_plugins = ["cri"]\nroot = "%s"\n' "$stub_containerd_root" > "$TMP_ROOT/containerd.toml"
+    output=$(
+        # shellcheck source=/dev/null
+        source "$functions_file"
+        # shellcheck disable=SC2034  # Read by the extracted production function.
+        CONTAINERD_CONFIG_FILE="$TMP_ROOT/containerd.toml"
+        # shellcheck disable=SC2329
+        docker() {
+            case "$*" in
+                *DockerRootDir*) echo "$stub_docker_root" ;;
+                *driver-type*) echo "io.containerd.snapshotter.v1" ;;
+            esac
+        }
+        # shellcheck disable=SC2329
+        df() {
+            echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+            case "${*: -1}" in
+                "$stub_containerd_root") echo "fs 1 1 $((3 * 1024 * 1024)) 1% /" ;;
+                *) echo "fs 1 1 $((40 * 1024 * 1024)) 1% /data" ;;
+            esac
+        }
+        preflight_free_disk_gb
+    )
+    [ "$output" = "3 $stub_containerd_root" ] || fail "the containerd root must be measured with the containerd snapshotter: got '$output'"
+
+    pass "preflight disk check measures the site, Docker root and containerd root filesystems"
 }
 
 test_optional_gum_install_failure_is_nonfatal() {
