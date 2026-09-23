@@ -32,7 +32,10 @@ repos:
     hooks:
       - id: bashate
         name: "Bashate - Bash code style enforcement"
-        args: ["-i", "E001,E002,E003,E005,E006,E020"]  # Ignore: trailing whitespace (other hook), tabs, indent style, line length, function format
+        # Ignore: trailing whitespace (other hook), tabs, indent style, line
+        # length, function format; E010 and E011 (do and then placement)
+        # misfire on conditions continued over several lines.
+        args: ["-i", "E001,E002,E003,E005,E006,E010,E011,E020"]
         files: \.(sh|bash)$
 
   # Markdown linting
