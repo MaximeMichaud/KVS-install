@@ -473,4 +473,9 @@ assert_invalid_public_port 65536
 assert_invalid_public_port invalid
 test_certificate_monitor
 
+# The standalone site config denies the server-side include directory with a
+# prefix location, which wins over the PHP handler whatever the block order.
+grep -Fq 'location ^~ /admin/include/ {' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
+    fail "standalone site config does not deny /admin/include/"
+
 echo "PASS: Nginx hardening"
