@@ -250,6 +250,21 @@ import_check_completed() {
     IMPORT_SOURCE=""
 }
 
+# A dump staged for MariaDB and never removed means an import started and
+# did not complete: the database volume may hold part of it, and a run
+# that is not an import must not adopt that database.
+import_check_leftover_dump() {
+    local leftover
+
+    [ "$IMPORT_MODE" != true ] || return 0
+    [ -d mariadb/init ] || return 0
+    leftover=$(find mariadb/init -maxdepth 1 -name '*kvs-import*' -print -quit 2>/dev/null) || leftover=""
+    [ -n "$leftover" ] || return 0
+    echo -e "${RED}ERROR: an earlier import did not complete ($leftover is still staged) and the database may be partial.${NC}"
+    echo "Run the import again with VOLUME_CHOICE=1 to replace the database, or remove the staged dump to keep the database as it is."
+    exit 1
+}
+
 # The questionnaire: which source, then what it holds. Headless runs come
 # here with the source already chosen through the environment.
 select_import_source() {
@@ -1696,6 +1711,7 @@ set_env_value DOMAIN "$DOMAIN"
 export DOMAIN EMAIL
 
 select_import_source
+import_check_leftover_dump
 
 # Site prefix for container naming (multi-site support)
 select_site_prefix() {
@@ -3185,6 +3201,10 @@ import_stage_dump() {
     local target
 
     [ "$IMPORT_MODE" = true ] || return 0
+    # From here on the database is the one of this import: whatever an
+    # earlier import completed no longer stands, so a run interrupted
+    # before the end is never mistaken for a finished one.
+    remove_env_value KVS_IMPORT_COMPLETED
     if [ -n "$IMPORT_VOLUME_TO_DELETE" ]; then
         echo -e "  ${YELLOW}Deleting the database volume $IMPORT_VOLUME_TO_DELETE...${NC}"
         delete_database_volume "$IMPORT_VOLUME_TO_DELETE" || exit 1
