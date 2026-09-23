@@ -943,6 +943,15 @@ test_nginx_cleanup_uses_scoped_paths() {
   fi
 }
 
+test_runtime_input_stays_quiet_without_a_terminal() {
+  local output
+
+  # setsid detaches from the controlling terminal the way nohup, cron or a
+  # CI runner would: /dev/tty exists but cannot be opened.
+  output=$(setsid bash -c 'source "$1"; initialize_runtime_input; echo "stdin=$(cat)"' _ "$INSTALLER" <<< "piped" 2>&1)
+  assert_equal "stdin=piped" "$output" "a detached run must keep its piped stdin without complaining"
+}
+
 run_test() {
   local name="$1"
   local function_name="$2"
@@ -978,6 +987,7 @@ run_test "backup survives failed clone" test_failed_clone_keeps_user_backup || f
 run_test "phpMyAdmin failure is non-destructive" test_phpmyadmin_failure_preserves_installation || failures=$((failures + 1))
 run_test "phpMyAdmin staged update succeeds" test_phpmyadmin_success_swaps_staged_installation || failures=$((failures + 1))
 run_test "NGINX cleanup is scoped" test_nginx_cleanup_uses_scoped_paths || failures=$((failures + 1))
+run_test "runtime input stays quiet without a terminal" test_runtime_input_stays_quiet_without_a_terminal || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2

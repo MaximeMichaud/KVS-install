@@ -64,8 +64,11 @@ initialize_runtime_output() {
 }
 
 initialize_runtime_input() {
-  # Use the controlling terminal for interactive input when run through a pipe.
-  if [[ ! -t 0 ]] && [[ -e /dev/tty ]]; then
+  # Use the controlling terminal for interactive input when run through a
+  # pipe. A detached run (nohup, cron, CI) has no controlling terminal: the
+  # /dev/tty node exists but cannot be opened, so probe it before redirecting
+  # stdin instead of printing "No such device or address".
+  if [[ ! -t 0 ]] && { : < /dev/tty; } 2>/dev/null; then
     exec < /dev/tty
   fi
 }
