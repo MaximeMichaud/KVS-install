@@ -533,7 +533,7 @@ test_kvs_servers_follow_the_site_url() {
 
   configure_kvs_servers >/dev/null 2>&1 || fail "server configuration failed" || return 1
   assert_file_contains "$temp_dir/sql" "'https://example.com/contents/'" "server URLs must follow the site URL" || return 1
-  assert_file_contains "$temp_dir/sql" "'^https://(www[.])?example[.]com(:[0-9]+)?/contents/'" "seeded www URLs must be matched" || return 1
+  assert_file_contains "$temp_dir/sql" "'^https?://(www[.])?example[.]com(:[0-9]+)?/contents/'" "seeded www and plain http URLs must be matched" || return 1
   assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = 0" "a public certificate must be verified" || return 1
 
   SSL_PROVIDER=selfsigned

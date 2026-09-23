@@ -1505,12 +1505,12 @@ configure_kvs_servers() {
 UPDATE ktvs_admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
 UPDATE ktvs_admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
 UPDATE ktvs_admin_servers
-    SET urls = REGEXP_REPLACE(urls, '^https://(www[.])?${domain_pattern}(:[0-9]+)?/contents/', '${project_url}/contents/')
-    WHERE urls REGEXP '^https://(www[.])?${domain_pattern}(:[0-9]+)?/contents/';
+    SET urls = REGEXP_REPLACE(urls, '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/', '${project_url}/contents/')
+    WHERE urls REGEXP '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/';
 UPDATE ktvs_admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
 EOSQL
   matching=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls LIKE '${project_url}/contents/%'") || return $?
-  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls REGEXP '^https://(www[.])?${domain_pattern}(:[0-9]+)?/contents/' AND urls NOT LIKE '${project_url}/contents/%'") || return $?
+  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls REGEXP '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/' AND urls NOT LIKE '${project_url}/contents/%'") || return $?
   mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
   if [ "$matching" -lt 1 ] || [ "$stale" -ne 0 ] 2>/dev/null; then
     echo "ERROR: KVS storage server URLs do not match ${project_url}/contents/ (matching=${matching}, stale=${stale})" >&2
