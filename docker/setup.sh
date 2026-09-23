@@ -506,6 +506,21 @@ log_command() {
 }
 
 # Run a command with spinner, showing title and result
+# A failed step used to show its first ten lines, which for a Docker build
+# is the BuildKit preamble while the cause sits at the end. Show the end,
+# point at the debug log and name a full filesystem, the usual build killer.
+report_step_failure() {
+    local logfile="$1"
+
+    [ -s "$logfile" ] || return 0
+    echo "    Error (last lines, full output in ${DEBUG_LOG:-the debug log}):"
+    tail -n 20 "$logfile" | sed 's/^/    /'
+    if grep -q 'No space left on device' "$logfile"; then
+        echo "    The filesystem is full: free space on the Docker image store (docker system df,"
+        echo "    docker builder prune) or move it to a larger disk (README, Disk layout)."
+    fi
+}
+
 run_step() {
     local title="$1"
     shift
@@ -521,7 +536,7 @@ run_step() {
             result=0
         else
             echo -e "  ${RED}✗${NC} $title"
-            [ -s "$logfile" ] && echo "    Error:" && head -10 "$logfile" | sed 's/^/    /'
+            report_step_failure "$logfile"
             result=1
         fi
     else
@@ -532,7 +547,7 @@ run_step() {
             result=0
         else
             echo -e " ${RED}✗${NC}"
-            [ -s "$logfile" ] && head -10 "$logfile" | sed 's/^/    /'
+            report_step_failure "$logfile"
             result=1
         fi
     fi
