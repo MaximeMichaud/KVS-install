@@ -63,12 +63,12 @@ ENVIRONMENT VARIABLES:
     IMPORT_DB_DUMP=FILE   ... with the database dump (.sql, .sql.gz, .sql.xz
                           or .sql.zst). Both go together.
     IMPORT_REMOTE_HOST=H  The old server, reached over SSH; optional
-                          IMPORT_REMOTE_PORT (22), IMPORT_REMOTE_USER (root),
-                          IMPORT_REMOTE_DIR (site directory, searched for
-                          when empty) and IMPORT_SSH_KEY (identity file).
-                          Headless runs need key authentication, and
-                          IMPORT_SSH_ACCEPT_NEW=y to trust a host key that
-                          is not in known_hosts yet.
+                          IMPORT_REMOTE_PORT (22), IMPORT_REMOTE_USER (root,
+                          or a user with passwordless sudo), IMPORT_REMOTE_DIR
+                          (site directory, searched for when empty) and
+                          IMPORT_SSH_KEY (identity file). Headless runs need
+                          key authentication, and IMPORT_SSH_ACCEPT_NEW=y to
+                          trust a host key that is not in known_hosts yet.
 
 EXAMPLES:
     # Production installation
