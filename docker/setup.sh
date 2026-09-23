@@ -279,6 +279,34 @@ detect_cloudflare() {
     return 2  # Cannot reach domain
 }
 
+# Print "<free GB> <path>" for the tightest of the paths the installation
+# writes to: the site directory under /var/www and the Docker root directory
+# (images, build cache, volumes). Both may live on a different filesystem
+# than /, as on hosts with a small system disk and a large data disk.
+preflight_free_disk_gb() {
+    local path docker_root free_gb min_gb="" min_path=""
+    local -a paths=()
+    for path in "/var/www/${DOMAIN:-}" /var/www /; do
+        if [ -d "$path" ]; then
+            paths+=("$path")
+            break
+        fi
+    done
+    docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+    if [ -n "$docker_root" ] && [ -d "$docker_root" ]; then
+        paths+=("$docker_root")
+    fi
+    for path in "${paths[@]}"; do
+        free_gb=$(df -P "$path" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
+        [ -n "$free_gb" ] || continue
+        if [ -z "$min_gb" ] || (( free_gb < min_gb )); then
+            min_gb=$free_gb
+            min_path=$path
+        fi
+    done
+    echo "${min_gb:-0} ${min_path:-/}"
+}
+
 # Pre-flight checks before installation
 preflight_checks() {
     echo ""
@@ -312,15 +340,17 @@ preflight_checks() {
         critical_failed=$((critical_failed + 1))
     fi
 
-    # 3. Disk space check (can be bypassed)
-    local free_gb
-    free_gb=$(df / | awk 'NR==2 {print int($4/1024/1024)}')
+    # 3. Disk space check (can be bypassed). The site files live under
+    # /var/www and the images and volumes under the Docker root directory;
+    # either may sit on another filesystem than /, so measure the tightest.
+    local free_gb disk_path
+    read -r free_gb disk_path < <(preflight_free_disk_gb)
     if (( free_gb >= 20 )); then
-        echo -e "${GREEN}✓${NC} Disk space: ${free_gb} GB available"
+        echo -e "${GREEN}✓${NC} Disk space: ${free_gb} GB available on ${disk_path}"
     elif (( free_gb >= 10 )); then
-        echo -e "${YELLOW}⚠${NC} Disk space: ${free_gb} GB available (minimum 10 GB, recommended 20 GB)"
+        echo -e "${YELLOW}⚠${NC} Disk space: ${free_gb} GB available on ${disk_path} (minimum 10 GB, recommended 20 GB)"
     else
-        echo -e "${RED}✗${NC} Disk space: ${free_gb} GB available (need at least 10 GB)"
+        echo -e "${RED}✗${NC} Disk space: ${free_gb} GB available on ${disk_path} (need at least 10 GB)"
         warnings=$((warnings + 1))
     fi
 
