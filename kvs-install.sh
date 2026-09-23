@@ -1389,10 +1389,26 @@ function install_ioncube() {
 }
 
 function autoUpdate() {
+  local apt_conf_dir="${APT_CONF_DIR:-/etc/apt/apt.conf.d}"
+
   if [[ "$AUTOPACKAGEUPDATE" =~ (YES) ]]; then
     apt_install unattended-upgrades || return $?
-    sed -i 's|APT::Periodic::Update-Package-Lists "0";|APT::Periodic::Update-Package-Lists "1";|' /etc/apt/apt.conf.d/20auto-upgrades
-    sed -i 's|APT::Periodic::Unattended-Upgrade "0";|APT::Periodic::Unattended-Upgrade "1";|' /etc/apt/apt.conf.d/20auto-upgrades
+    sed -i 's|APT::Periodic::Update-Package-Lists "0";|APT::Periodic::Update-Package-Lists "1";|' "$apt_conf_dir/20auto-upgrades"
+    sed -i 's|APT::Periodic::Unattended-Upgrade "0";|APT::Periodic::Unattended-Upgrade "1";|' "$apt_conf_dir/20auto-upgrades"
+    # The stock policy only follows the distribution security suite. nginx,
+    # PHP and MariaDB come from their upstream repositories, so their
+    # security releases have to be allowed too or they never apply.
+    cat >"$apt_conf_dir/52kvs-upstream-origins" <<'EOF'
+// Written by kvs-install. The web server, PHP and MariaDB come from their
+// upstream repositories; without these patterns unattended-upgrades only
+// applies the distribution security suite and leaves them unpatched.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=nginx,codename=${distro_codename}";
+        "origin=deb.sury.org,codename=${distro_codename}";
+        "origin=LP-PPA-ondrej-php,codename=${distro_codename}";
+        "origin=MariaDB,codename=${distro_codename}";
+};
+EOF
   fi
 }
 

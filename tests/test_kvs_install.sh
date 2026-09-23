@@ -369,6 +369,27 @@ test_nginx_step_needs_a_usable_mime_types() {
   unset APT_SOURCES_DIR NGINX_MIME_TYPES
 }
 
+test_auto_updates_follow_upstream_repositories() {
+  local temp_dir
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  APT_CONF_DIR="$temp_dir"
+  AUTOPACKAGEUPDATE=YES
+  printf 'APT::Periodic::Update-Package-Lists "0";\nAPT::Periodic::Unattended-Upgrade "0";\n' >"$temp_dir/20auto-upgrades"
+  apt_install() { :; }
+
+  autoUpdate >/dev/null 2>&1 || fail "auto-update step failed" || return 1
+  assert_file_contains "$temp_dir/20auto-upgrades" 'APT::Periodic::Unattended-Upgrade "1";' \
+    "periodic upgrades must be switched on" || return 1
+  for origin in nginx deb.sury.org MariaDB; do
+    assert_file_contains "$temp_dir/52kvs-upstream-origins" "origin=$origin,codename=\${distro_codename}" \
+      "auto-updates must follow the $origin repository" || return 1
+  done
+
+  unset -f apt_install
+  unset APT_CONF_DIR AUTOPACKAGEUPDATE
+}
+
 test_domain_validation_respects_database_limit() {
   local max_label
   local oversized_label
@@ -781,6 +802,7 @@ run_test "certificate names follow the www record" test_certificate_names_follow
 run_test "yt-dlp step is repeatable" test_yt_dlp_step_is_repeatable || failures=$((failures + 1))
 run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fails || failures=$((failures + 1))
 run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
+run_test "auto-updates follow upstream repositories" test_auto_updates_follow_upstream_repositories || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))
