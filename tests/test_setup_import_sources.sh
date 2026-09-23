@@ -207,6 +207,10 @@ test_listings_are_normalized_for_every_archive_kind() {
     local layout archive listing
 
     layout=$(make_layout list www/ database.sql.gz)
+    echo "spaced" > "$layout/www/contents/a b  c.txt"
+    ln -s contents/videos/1.mp4 "$layout/www/link.mp4"
+    echo "hard" > "$layout/www/contents/hardsrc.txt"
+    ln "$layout/www/contents/hardsrc.txt" "$layout/www/contents/hard.txt"
     for archive in "$TMP_ROOT/list.zip" "$TMP_ROOT/list.tar" "$TMP_ROOT/list.tar.gz" "$TMP_ROOT/list.tar.zst" "$TMP_ROOT/list.7z"; do
         case "$archive" in
             *.7z) [ -n "$SEVEN_ZIP" ] || continue ;;
@@ -218,6 +222,11 @@ test_listings_are_normalized_for_every_archive_kind() {
         grep -q $'^f\t[1-9][0-9]*\tdatabase.sql.gz$' <<< "$listing" || fail "$archive: the dump must be listed with its size"
         grep -q $'^f\t6\twww/contents/videos/1.mp4$' <<< "$listing" || fail "$archive: sizes must be the uncompressed bytes"
         grep -q '^\./\|/$' <<< "$listing" && fail "$archive: names must lose the leading ./ and trailing /"
+        grep -q $'\twww/contents/a b  c.txt$' <<< "$listing" || fail "$archive: a name with spaces must survive: $(grep 'a b' <<< "$listing")"
+        grep -q $'\twww/contents/hard.txt$' <<< "$listing" || fail "$archive: a hard link is listed by its own name: $(grep hard <<< "$listing")"
+        case "$archive" in
+            *.tar*) grep -q $'^l\t0\twww/link.mp4$' <<< "$listing" || fail "$archive: a symlink is listed as such without its target: $(grep link <<< "$listing")" ;;
+        esac
     done
     pass "listings are normalized for every archive kind"
 }
@@ -453,6 +462,8 @@ test_url_domain_and_key_value_helpers() {
     printf 'kvs_version=7.0.2\ndomain=example.com\nproject_url=https://a=b\n' > "$TMP_ROOT/kv.txt"
     [ "$(import_kv "$TMP_ROOT/kv.txt" kvs_version)" = 7.0.2 ] || fail "key read"
     [ "$(import_kv "$TMP_ROOT/kv.txt" project_url)" = "https://a=b" ] || fail "values keep their equal signs"
+    printf 'hostname=old\033[31mred\033[0m\tend\n' > "$TMP_ROOT/kv-escape.txt"
+    [ "$(import_kv "$TMP_ROOT/kv-escape.txt" hostname)" = 'old[31mred[0mend' ] || fail "control characters from the old server must be dropped: got '$(import_kv "$TMP_ROOT/kv-escape.txt" hostname)'"
     [ -z "$(import_kv "$TMP_ROOT/kv.txt" missing)" ] || fail "a missing key is empty"
     pass "url domain and key=value helpers"
 }
@@ -571,6 +582,7 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         [ -f "$destination/admin/include/setup.php" ] || exit 13
         [ -f "$destination/contents/videos/1.mp4" ] || exit 14
         grep -q '^command rsync --server' "$bin/ssh.log" || exit 15
+        [ ! -e "$destination/.rsync-partial" ] || exit 23
         cp "$TMP_ROOT/stale.txt" "$destination/stale.txt"
         import_remote_files "$site" "$destination" yes >/dev/null 2>&1 || exit 16
         [ ! -e "$destination/stale.txt" ] || exit 17
