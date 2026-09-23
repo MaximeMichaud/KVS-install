@@ -5,3 +5,6 @@
 # KVS archives (proprietary, never commit)
 KVS_*.zip
 **/KVS_*.zip
+
+# Database dumps staged for an import (never commit)
+docker/mariadb/init/*kvs-import*

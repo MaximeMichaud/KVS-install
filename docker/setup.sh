@@ -8,6 +8,15 @@ set -e
 readonly LOG_DIR="/opt/kvs/logs"
 readonly DEBUG_LOG="${LOG_DIR}/setup-debug.log"
 
+# Import of an existing site (IMPORT_SITE_DIR + IMPORT_DB_DUMP, experimental),
+# shared with the standalone installer. Only an import needs the library, so
+# a copy of this script running alone still installs a fresh site.
+IMPORT_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/import.sh"
+if [ -f "$IMPORT_LIB" ]; then
+    # shellcheck source=lib/import.sh
+    source "$IMPORT_LIB"
+fi
+
 #################################################################
 # Dev mode flag parsing
 # Usage: ./setup.sh --dev
@@ -42,6 +51,13 @@ OPTIONS:
 ENVIRONMENT VARIABLES:
     PREFLIGHT_BYPASS=y    Bypass pre-flight warnings (disk space, internet)
                           Note: Critical checks (Docker, commands) cannot be bypassed
+    IMPORT_SITE_DIR=DIR   Import an existing KVS site (experimental): DIR holds
+                          its files (admin/include/setup.php), copied to
+                          /var/www/<domain> unless it already is that directory
+    IMPORT_DB_DUMP=FILE   ... and FILE its database dump (.sql, .sql.gz,
+                          .sql.xz or .sql.zst). Both go together; the KVS
+                          archive of the same version must be in kvs-archive/.
+                          See README, "Importing an existing site".
 
 EXAMPLES:
     # Production installation
@@ -128,6 +144,84 @@ if [[ "$HEADLESS" == "y" ]]; then
     SKIP_PRESS_ENTER=1                      # Skip "press enter" prompts
     # Note: PREFLIGHT_BYPASS can be set as environment variable (no default)
 fi
+
+# Import of an existing site: both inputs go together (lib/import.sh).
+IMPORT_MODE=false
+if [ -n "${IMPORT_SITE_DIR:-}" ] || [ -n "${IMPORT_DB_DUMP:-}" ]; then
+    if [ -z "${IMPORT_SITE_DIR:-}" ] || [ -z "${IMPORT_DB_DUMP:-}" ]; then
+        echo "ERROR: IMPORT_SITE_DIR and IMPORT_DB_DUMP must be set together" >&2
+        exit 1
+    fi
+    IMPORT_MODE=true
+fi
+IMPORT_SITE_VERSION=""
+IMPORT_OLD_PATH=""
+IMPORT_DUMP_TABLES=""
+IMPORT_STAGED_DUMP=""
+IMPORT_TOKEN=""
+
+# Validate the import inputs before anything is built or started: the site
+# directory, its version against the archive in kvs-archive/ (nginx rewrites
+# and the PHP version come from the archive), the dump and the disk space
+# for the copy. A completed import recorded in .env turns the run into an
+# ordinary re-run so a repeated headless command line stays safe.
+prepare_import() {
+    local site_info archive archive_version dump_info completed_on
+    local dump_initial_version dump_statements
+
+    [ "$IMPORT_MODE" = true ] || return 0
+    if completed_on=$(grep '^KVS_IMPORT_COMPLETED=' .env 2>/dev/null | cut -d= -f2-) && [ -n "$completed_on" ]; then
+        echo ""
+        echo -e "${YELLOW}An import already completed on ${completed_on}; IMPORT_SITE_DIR and IMPORT_DB_DUMP are ignored for this run.${NC}"
+        echo "Remove KVS_IMPORT_COMPLETED from .env and delete the database volume to import again."
+        IMPORT_MODE=false
+        return 0
+    fi
+    echo ""
+    echo -e "${CYAN}Import of an existing KVS site (experimental)${NC}"
+    if ! declare -F import_validate_site >/dev/null; then
+        echo -e "${RED}ERROR: the import library $IMPORT_LIB is missing; run setup.sh from a full checkout of the repository${NC}"
+        exit 1
+    fi
+    site_info=$(import_validate_site "$IMPORT_SITE_DIR") || exit 1
+    IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
+    IMPORT_OLD_PATH=$(import_field "$site_info" 2)
+    echo "  Site: $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
+    archive=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null | head -n 1)
+    if [ -z "$archive" ]; then
+        echo -e "${RED}ERROR: the KVS archive of version $IMPORT_SITE_VERSION must be in kvs-archive/ (nginx rewrites and PHP version come from it)${NC}"
+        exit 1
+    fi
+    archive_version=$(import_archive_version "$archive")
+    if [ "$archive_version" != "$IMPORT_SITE_VERSION" ]; then
+        echo -e "${RED}ERROR: $(basename "$archive") is KVS ${archive_version:-of unknown version} while the site is KVS $IMPORT_SITE_VERSION; use the archive of the same version${NC}"
+        exit 1
+    fi
+    dump_info=$(import_inspect_dump "$IMPORT_DB_DUMP" ktvs_) || exit 1
+    IMPORT_DUMP_TABLES=$(import_field "$dump_info" 1)
+    dump_initial_version=$(import_field "$dump_info" 2)
+    dump_statements=$(import_field "$dump_info" 3)
+    if [ "${IMPORT_DUMP_TABLES:-0}" -lt 1 ]; then
+        echo -e "${RED}ERROR: $IMPORT_DB_DUMP holds no CREATE TABLE for the ktvs_ tables${NC}"
+        exit 1
+    fi
+    echo "  Database dump: $IMPORT_DB_DUMP ($IMPORT_DUMP_TABLES tables, INITIAL_VERSION ${dump_initial_version:-missing, recorded as $IMPORT_SITE_VERSION})"
+    if [ "${dump_statements:-0}" -gt 0 ]; then
+        echo "  $dump_statements CREATE DATABASE/USE statements will be dropped (the dump loads into the $DOMAIN database)"
+    fi
+    if [ "$(readlink -f -- "$IMPORT_SITE_DIR")" = "$(readlink -f -- "/var/www/$DOMAIN" 2>/dev/null)" ]; then
+        echo "  Files: already in /var/www/$DOMAIN"
+    else
+        if ! import_free_space_ok "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
+            echo -e "${RED}ERROR: not enough free space to copy $IMPORT_SITE_DIR to /var/www/$DOMAIN${NC}"
+            exit 1
+        fi
+        echo "  Files: copied to /var/www/$DOMAIN"
+    fi
+    if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
+        echo "  Server paths: $IMPORT_OLD_PATH -> /var/www/kvs"
+    fi
+}
 
 KVS_ADMIN_PASSWORD_PROVIDED=false
 if [ -n "${KVS_ADMIN_PASSWORD:-}" ]; then
@@ -1602,6 +1696,7 @@ fi
 echo -e "${GREEN}KVS archive found${NC}"
 
 # Auto-detect IonCube encoding
+prepare_import
 detect_ioncube
 
 # IonCube version selection (only if IonCube detected)
@@ -2041,6 +2136,38 @@ delete_database_volume() {
     fi
 }
 
+# The MariaDB data volume of this Compose project, from the compose
+# configuration, or computed from the directory name like Compose does.
+compose_mariadb_volume_name() {
+    local volume_name project_name
+
+    volume_name=$(docker compose config 2>/dev/null | grep -A1 'mariadb-data:' | grep 'name:' | awk '{print $2}')
+    if [ -z "$volume_name" ]; then
+        project_name=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
+        volume_name="${project_name}_mariadb-data"
+    fi
+    printf '%s\n' "$volume_name"
+}
+
+# An import replays the dump when MariaDB initializes an empty volume, so a
+# volume left by an earlier installation must go first, and only on request.
+import_require_empty_volume() {
+    local volume_name
+
+    [ "$IMPORT_MODE" = true ] || return 0
+    volume_name=$(compose_mariadb_volume_name)
+    docker volume ls -q | grep -q "^${volume_name}$" || return 0
+    if [ "${VOLUME_CHOICE:-}" != "1" ]; then
+        echo ""
+        echo -e "${RED}ERROR: the database volume ${volume_name} already exists and an import needs an empty one.${NC}"
+        echo "Back it up if it matters, then run again with VOLUME_CHOICE=1 to delete it, or remove it yourself."
+        exit 1
+    fi
+    echo ""
+    echo -e "${YELLOW}Deleting the database volume ${volume_name} for the import (VOLUME_CHOICE=1)...${NC}"
+    delete_database_volume "$volume_name" || exit 1
+}
+
 ask_existing_volume() {
     echo ""
     echo -e "${CYAN}Checking for existing database...${NC}"
@@ -2299,6 +2426,7 @@ ask_existing_volume() {
     fi
 }
 
+import_require_empty_volume
 ask_existing_volume
 
 if [ "$KVS_ADMIN_PASSWORD_PROVIDED" != true ] &&
@@ -2536,24 +2664,100 @@ mkdir -p /var/www/"$DOMAIN"
 chown 1000:1000 /var/www/"$DOMAIN"
 
 # Step 2: Start infrastructure services
-progress_bar "Starting MariaDB"
-run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
+# The MariaDB image replays the *.sql, *.sql.gz, *.sql.xz and *.sql.zst
+# files of mariadb/init when it initializes an empty volume, inside the
+# database named in .env: an imported dump goes there, prepared for the
+# container and readable by the database user of the image.
+import_stage_dump() {
+    local target
 
-# Wait for MariaDB (max 3 minutes)
+    [ "$IMPORT_MODE" = true ] || return 0
+    mkdir -p mariadb/init || exit 1
+    rm -f mariadb/init/*kvs-import*
+    if command -v zstd >/dev/null 2>&1; then
+        target=mariadb/init/10-kvs-import.sql.zst
+    else
+        target=mariadb/init/10-kvs-import.sql
+    fi
+    IMPORT_TOKEN="$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+    echo "  Preparing the database dump for MariaDB..."
+    if ! import_prepare_dump "$IMPORT_DB_DUMP" ktvs_ "$IMPORT_SITE_VERSION" "$IMPORT_OLD_PATH" /var/www/kvs "$target" "$IMPORT_TOKEN" >/dev/null; then
+        echo -e "${RED}ERROR: could not prepare $IMPORT_DB_DUMP${NC}"
+        exit 1
+    fi
+    chmod 644 "$target"
+    IMPORT_STAGED_DUMP=$target
+    echo -e "  ${GREEN}✓${NC} Dump staged in $target"
+}
+
+# Copy the imported site into the bind-mounted directory while MariaDB
+# replays the dump. Not a run_step: with gum, run_step executes its command
+# in a separate shell where functions do not exist.
+import_place_site_files() {
+    [ "$IMPORT_MODE" = true ] || return 0
+    echo "  Placing the imported site files..."
+    if ! import_place_site "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
+        echo -e "${RED}ERROR: could not place the site files${NC}"
+        exit 1
+    fi
+}
+
+# The dump ends with a marker row; without it MariaDB initialized from a
+# dump that failed part way (the image restarts and serves what it has).
+import_verify_database() {
+    local marker
+
+    [ "$IMPORT_MODE" = true ] || return 0
+    marker=$(run_root_mariadb -u root "$DOMAIN" -N -e \
+        "SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';" 2>/dev/null | tr -d '\r')
+    if [ "$marker" != "$IMPORT_TOKEN" ]; then
+        echo -e "${RED}ERROR: the database import did not complete (completion marker ${marker:-missing}).${NC}"
+        echo "Check: docker compose logs mariadb"
+        echo "Then run the import again with VOLUME_CHOICE=1 so the partial volume is replaced."
+        exit 1
+    fi
+    if ! run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';"; then
+        echo -e "${RED}ERROR: could not remove the import completion marker${NC}"
+        exit 1
+    fi
+    echo -e "  ${GREEN}✓${NC} Database imported ($IMPORT_DUMP_TABLES tables in the dump)"
+}
+
+progress_bar "Starting MariaDB"
+import_stage_dump
+run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
+import_place_site_files
+
+# Wait for MariaDB: 3 minutes, or MARIADB_WAIT_SECONDS. An import replays
+# the dump during this time and waits up to an hour by default. A container
+# that restarted or stopped failed its initialization: report it at once.
 echo -n "  Waiting for MariaDB..."
-TRIES=0
-MAX_TRIES=90
+if [ "$IMPORT_MODE" = true ]; then
+    MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}
+else
+    MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-180}
+fi
+WAITED=0
 while ! run_root_mariadb -u root -e "SELECT 1" > /dev/null 2>&1; do
-    TRIES=$((TRIES + 1))
-    if [ $TRIES -ge $MAX_TRIES ]; then
+    MARIADB_CONTAINER=$(docker compose ps -q mariadb 2>/dev/null | head -n 1)
+    MARIADB_STATE=$(docker inspect --format '{{.RestartCount}} {{.State.Status}}' "$MARIADB_CONTAINER" 2>/dev/null || echo "0 unknown")
+    if [ "${MARIADB_STATE%% *}" != "0" ] || [ "${MARIADB_STATE#* }" = "exited" ]; then
         echo -e " ${RED}✗${NC}"
-        echo -e "${RED}ERROR: MariaDB not ready after 3 minutes${NC}"
+        echo -e "${RED}ERROR: the MariaDB container stopped during its initialization${NC}"
+        docker compose logs --tail 20 mariadb 2>/dev/null | sed 's/^/    /'
+        exit 1
+    fi
+    WAITED=$((WAITED + 2))
+    if [ "$WAITED" -ge "$MARIADB_WAIT_SECONDS" ]; then
+        echo -e " ${RED}✗${NC}"
+        echo -e "${RED}ERROR: MariaDB not ready after ${MARIADB_WAIT_SECONDS} seconds${NC}"
         echo "Check logs: docker compose logs mariadb"
         exit 1
     fi
     sleep 2
 done
 echo -e " ${GREEN}✓${NC}"
+import_verify_database
 
 # Older installations may still contain the archive's default admin account.
 # Rotate it during this run without changing an already-hardened credential.
@@ -2640,9 +2844,40 @@ if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
     echo -e "${YELLOW}Note: Keeping existing database - KVS settings will be updated but data preserved${NC}"
 fi
 
+# Record the import in .env, drop the staged dump and write the row counts
+# of every table so they can be compared with the old server.
+import_finish() {
+    local report table_list table_name query
+
+    [ "$IMPORT_MODE" = true ] || return 0
+    report="$LOG_DIR/import-rows.txt"
+    if ! table_list=$(run_root_mariadb -u root -N -e \
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='$DOMAIN' ORDER BY table_name;" | tr -d '\r'); then
+        echo -e "${RED}ERROR: could not list the imported tables${NC}"
+        exit 1
+    fi
+    query=""
+    while IFS= read -r table_name; do
+        [ -n "$table_name" ] || continue
+        query="${query:+$query UNION ALL }SELECT '${table_name}', COUNT(*) FROM \`${table_name}\`"
+    done <<< "$table_list"
+    {
+        echo "# Rows per table after the import of $IMPORT_SITE_DIR with $IMPORT_DB_DUMP, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "# Run the same SELECT COUNT(*) per table on the old server to compare."
+        run_root_mariadb -u root -N "$DOMAIN" -e "${query};" | tr -d '\r'
+    } > "$report" || {
+        echo -e "${RED}ERROR: could not count the imported rows${NC}"
+        exit 1
+    }
+    set_env_value KVS_IMPORT_COMPLETED "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 1
+    [ -n "$IMPORT_STAGED_DUMP" ] && rm -f "$IMPORT_STAGED_DUMP"
+    echo -e "  ${GREEN}✓${NC} Import complete: $(grep -c -v '^#' "$report") tables, row counts in $report"
+}
+
 progress_bar "Initializing KVS"
 run_step "Initializing KVS" \
     docker compose --profile setup run --rm --no-deps kvs-init
+import_finish
 if [ "$KVS_ADMIN_PASSWORD_GENERATED" = true ]; then
     echo -e "  ${CYAN}Admin login:${NC} admin"
     echo -e "  ${CYAN}One-time admin password:${NC} $KVS_ADMIN_PASSWORD"
@@ -2928,6 +3163,11 @@ if [ "$MODE" = "multi" ]; then
     echo "Add a site: ./multi-site/site-manager.sh add <domain>"
 fi
 echo ""
+if [ "$IMPORT_MODE" = true ]; then
+    echo -e "${CYAN}Imported site:${NC} $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION), database from $IMPORT_DB_DUMP"
+    echo "  Row counts: $LOG_DIR/import-rows.txt"
+    echo ""
+fi
 echo -e "${CYAN}Debug logs:${NC}"
 echo "  Setup:  $DEBUG_LOG"
 echo ""
