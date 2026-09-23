@@ -223,7 +223,8 @@ import_dump_write() {
 # .env), the GTID and binary log session settings a MySQL 8 mysqldump
 # writes dropped (MariaDB knows no GTID_PURGED and would stop the replay
 # there), INITIAL_VERSION added when the old site never recorded it, server
-# paths rewritten to the container path, and a completion marker row
+# paths rewritten to the container path, DEFINER clauses of views and
+# triggers dropped (their user does not exist here), and a completion marker row
 # KVS_INSTALL_IMPORT=<token> as the very last statement: the MariaDB image
 # restarts on a failed init file and would serve the partial database, so
 # the caller checks the marker before touching anything.
@@ -246,7 +247,8 @@ import_prepare_dump() {
         return 1
     fi
     {
-        import_dump_cat "$dump" | sed -E '/^(CREATE DATABASE|USE )/d; /^SET @@(GLOBAL|SESSION)\.(GTID_PURGED|SQL_LOG_BIN)/d'
+        # shellcheck disable=SC2016  # The backticks are SQL quoting inside the sed program.
+        import_dump_cat "$dump" | sed -E '/^(CREATE DATABASE|USE )/d; /^SET @@(GLOBAL|SESSION)\.(GTID_PURGED|SQL_LOG_BIN)/d; /^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g'
         echo
         echo "-- kvs-install import"
         if [ -z "$initial" ]; then
@@ -316,6 +318,26 @@ import_mark_destination() {
 # Copy the site into the destination unless the source already is the
 # destination. Ownership is left to the init container, which sets the
 # whole tree to the PHP user.
+# import_external_links <directory>
+# The symbolic links of a site that lead outside it or nowhere, one per
+# line as "<link> -> <target>". The container mounts the site directory
+# alone, so such a link resolves there only once its target is copied in
+# its place (what rsync does with --copy-unsafe-links) or mounted too.
+import_external_links() {
+    local dir="$1"
+    local resolved link target
+
+    resolved=$(readlink -f -- "$dir") || return 1
+    find "$dir" -type l -print0 2>/dev/null | while IFS= read -r -d '' link; do
+        target=$(readlink -e -- "$link" 2>/dev/null) || target=""
+        case "$target" in
+            "$resolved"/*) ;;
+            "") printf '%s -> %s (dangling)\n' "${link#"$dir"/}" "$(readlink -- "$link")" ;;
+            *) printf '%s -> %s\n' "${link#"$dir"/}" "$(readlink -- "$link")" ;;
+        esac
+    done
+}
+
 import_place_site() {
     local source="$1"
     local destination="$2"
@@ -331,8 +353,13 @@ import_place_site() {
             echo "Resuming the copy of $source into $destination"
         fi
         import_mark_destination "$destination" "$resolved_source" || return 1
+        # Links leaving the site are copied with their targets, which only
+        # rsync does.
+        if [ -n "$(import_external_links "$resolved_source" | head -n 1)" ]; then
+            import_ensure_tool rsync || return 1
+        fi
         if command -v rsync >/dev/null 2>&1; then
-            rsync -a -- "$resolved_source/" "$destination/" || return 1
+            rsync -a --copy-unsafe-links -- "$resolved_source/" "$destination/" || return 1
         else
             cp -a -- "$resolved_source/." "$destination/" || return 1
         fi
@@ -364,7 +391,7 @@ import_free_space_ok() {
     local destination="$2"
     local needed
 
-    needed=$(du -sm -- "$source" 2>/dev/null | awk '{print $1}')
+    needed=$(du -sLm -- "$source" 2>/dev/null | awk '{print $1}')
     [ -n "$needed" ] || return 1
     import_free_space_mb_ok "$needed" "$destination"
 }
@@ -505,6 +532,21 @@ import_archive_tools() {
     esac
 }
 
+# import_archive_report_failure <archive> <tool output file>
+# Why an archive tool failed: a password, which the setup never asks for
+# (the archive tools would wait on a prompt nobody sees, so their stdin is
+# closed and 7-Zip gets an empty password), or the tool's own last lines.
+import_archive_report_failure() {
+    local file="$1"
+    local output="$2"
+
+    if grep -qiE 'password|encrypted' "$output"; then
+        echo "ERROR: $file is password protected; the setup never asks for a password, extract it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP" >&2
+    else
+        tail -n 5 "$output" >&2
+    fi
+}
+
 # import_archive_list <file> <command>
 # One line per member: "<type><TAB><size><TAB><name>", type f, d or l (zip
 # and 7z listings do not tell symlinks apart from files, tar does). Names
@@ -512,6 +554,7 @@ import_archive_tools() {
 import_archive_list() {
     local file="$1"
     local command="$2"
+    local raw
 
     case "$command" in
         unzip)
@@ -529,7 +572,13 @@ import_archive_list() {
                 }'
             ;;
         7zz|7z|7za)
-            LC_ALL=C "$command" l -slt "$file" | awk '
+            raw=$(mktemp) || return 1
+            if ! LC_ALL=C "$command" l -slt -p "$file" > "$raw" 2>&1 < /dev/null; then
+                import_archive_report_failure "$file" "$raw"
+                rm -f "$raw"
+                return 1
+            fi
+            awk '
                 function emit() {
                     if (path == "") return
                     sub(/^\.\//, "", path)
@@ -544,7 +593,8 @@ import_archive_list() {
                 /^Size = / { size = substr($0, 8); next }
                 /^Folder = / { folder = substr($0, 10); next }
                 /^Attributes = / { attributes = substr($0, 14); next }
-                END { emit() }'
+                END { emit() }' "$raw"
+            rm -f "$raw"
             ;;
         tar)
             LC_ALL=C tar -tvf "$file" | awk '
@@ -685,17 +735,26 @@ import_archive_extract() {
         unzip)
             # unzip reports an exclusion that matched nothing as a caution;
             # its output only matters when the extraction failed.
-            output=$(unzip -q -o "$file" -x '__MACOSX/*' -d "$destination" 2>&1) || status=$?
+            output=$(mktemp) || return 1
+            unzip -q -o "$file" -x '__MACOSX/*' -d "$destination" > "$output" 2>&1 < /dev/null || status=$?
             if [ "$status" -gt 1 ]; then
-                printf '%s\n' "$output" | tail -n 5 >&2
+                import_archive_report_failure "$file" "$output"
+                rm -f "$output"
                 return "$status"
             fi
+            rm -f "$output"
             ;;
         7zz|7z|7za)
-            "$command" x -y -bd -bso0 -o"$destination" "$file" >/dev/null || return 1
+            output=$(mktemp) || return 1
+            if ! "$command" x -y -bd -bso0 -p -o"$destination" "$file" > "$output" 2>&1 < /dev/null; then
+                import_archive_report_failure "$file" "$output"
+                rm -f "$output"
+                return 1
+            fi
+            rm -f "$output"
             ;;
         tar)
-            tar -xf "$file" --no-same-owner -C "$destination" || return 1
+            tar -xf "$file" --no-same-owner -C "$destination" < /dev/null || return 1
             ;;
         *)
             echo "ERROR: unknown extraction command $command" >&2
@@ -750,29 +809,39 @@ import_archive_peek() {
     local command="$2"
     local root="$3"
     local output="$4"
-    local member
+    local member target errors status
 
     mkdir -p "$output/admin/include" || return 1
+    errors=$(mktemp) || return 1
     for member in setup.php setup_db.php version.php; do
+        target="$output/admin/include/$member"
+        status=0
         case "$command" in
             unzip)
-                unzip -p "$file" "${root}admin/include/$member" > "$output/admin/include/$member" 2>/dev/null || return 1
+                unzip -p "$file" "${root}admin/include/$member" > "$target" 2> "$errors" < /dev/null || status=$?
                 ;;
             7zz|7z|7za)
-                "$command" e -so "$file" "${root}admin/include/$member" > "$output/admin/include/$member" 2>/dev/null || return 1
+                "$command" e -so -p "$file" "${root}admin/include/$member" > "$target" 2> "$errors" < /dev/null || status=$?
                 ;;
             tar)
                 # tar matches the stored name; an archive made from inside
                 # its directory stores "./" in front of every member.
-                tar -xOf "$file" --occurrence=1 "${root}admin/include/$member" > "$output/admin/include/$member" 2>/dev/null ||
-                    tar -xOf "$file" --occurrence=1 "./${root}admin/include/$member" > "$output/admin/include/$member" 2>/dev/null || return 1
+                tar -xOf "$file" --occurrence=1 "${root}admin/include/$member" > "$target" 2> "$errors" < /dev/null ||
+                    tar -xOf "$file" --occurrence=1 "./${root}admin/include/$member" > "$target" 2> "$errors" < /dev/null || status=$?
                 ;;
             *)
-                return 1
+                status=1
                 ;;
         esac
-        [ -s "$output/admin/include/$member" ] || return 1
+        if [ "$status" -ne 0 ] || [ ! -s "$target" ]; then
+            if grep -qiE 'password|encrypted' "$errors"; then
+                import_archive_report_failure "$file" "$errors"
+            fi
+            rm -f "$errors"
+            return 1
+        fi
     done
+    rm -f "$errors"
 }
 
 #################################################################
@@ -781,6 +850,11 @@ import_archive_peek() {
 
 IMPORT_SSH_TARGET=""
 IMPORT_SSH_OPTS=()
+# shellcheck disable=SC2034  # Read by docker/setup.sh.
+IMPORT_REMOTE_PRIVILEGES=none
+IMPORT_REMOTE_SUDO_ERROR=""
+IMPORT_REMOTE_SUDO=no
+IMPORT_REMOTE_PREFIX=()
 
 # import_remote_path_ok <path>: paths travel through the remote shell and
 # through rsync, so they are limited to characters no shell interprets.
@@ -857,6 +931,36 @@ import_ssh_close() {
     ssh "${IMPORT_SSH_OPTS[@]}" -O exit "$IMPORT_SSH_TARGET" >/dev/null 2>&1 || true
 }
 
+# import_remote_privileges: what the SSH user may do on the old server.
+# Sets IMPORT_REMOTE_PRIVILEGES to root, sudo (passwordless) or none (with
+# sudo's last word in IMPORT_REMOTE_SUDO_ERROR: a password required, a tty
+# required), and the prefix the remote commands and rsync run with. This
+# is the first command on the connection: with a password, ssh asks for it
+# here and the multiplexed connection keeps it for the rest of the import.
+# shellcheck disable=SC2034  # The privilege variables are read by docker/setup.sh.
+import_remote_privileges() {
+    local uid
+
+    IMPORT_REMOTE_PRIVILEGES=none
+    IMPORT_REMOTE_SUDO_ERROR=""
+    IMPORT_REMOTE_SUDO=no
+    IMPORT_REMOTE_PREFIX=()
+    uid=$(import_ssh id -u < /dev/null) || return 1
+    uid=${uid//[!0-9]/}
+    if [ "$uid" = 0 ]; then
+        IMPORT_REMOTE_PRIVILEGES=root
+        return 0
+    fi
+    if IMPORT_REMOTE_SUDO_ERROR=$(import_ssh sudo -n true < /dev/null 2>&1 >/dev/null); then
+        IMPORT_REMOTE_PRIVILEGES=sudo
+        IMPORT_REMOTE_SUDO=yes
+        IMPORT_REMOTE_PREFIX=(sudo -n)
+        IMPORT_REMOTE_SUDO_ERROR=""
+    else
+        IMPORT_REMOTE_SUDO_ERROR=$(printf '%s' "$IMPORT_REMOTE_SUDO_ERROR" | tr -d '\000-\037\177' | tail -c 120)
+    fi
+}
+
 # import_ssh_rsh: the remote shell command for rsync, one string. rsync
 # splits it on spaces and honours quotes, so an option holding a space
 # (a key path) is single-quoted.
@@ -886,9 +990,9 @@ import_remote_detect() {
         return 1
     fi
     if [ -n "$dir" ]; then
-        import_ssh bash -s -- detect "$dir" < "$exporter" > "$output"
+        import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- detect "$dir" < "$exporter" > "$output"
     else
-        import_ssh bash -s -- detect < "$exporter" > "$output"
+        import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- detect < "$exporter" > "$output"
     fi
 }
 
@@ -900,7 +1004,7 @@ import_remote_dump() {
     local output="$3"
 
     import_remote_path_ok "$dir" || return 1
-    import_ssh bash -s -- dump "$dir" < "$exporter" > "$output"
+    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- dump "$dir" < "$exporter" > "$output"
 }
 
 # import_remote_files <site directory> <destination> <rsync yes|no>
@@ -909,19 +1013,38 @@ import_remote_dump() {
 # changes), a tar stream otherwise. The incremental recursion stays on: a
 # full scan before the first byte holds the whole file list in memory on
 # both sides, which a small server cannot afford for a large site.
+# Symbolic links that leave the site (a contents directory on another
+# disk) come as their targets, since the container only mounts the site;
+# links inside it stay links. Files that vanish during the transfer are
+# what a live site does and not a failure; files rsync could not read or
+# links pointing nowhere are.
 import_remote_files() {
     local dir="$1"
     local destination="$2"
     local use_rsync="$3"
+    local status=0
+    local -a rsync_path=()
 
     import_remote_path_ok "$dir" || return 1
     mkdir -p "$destination" || return 1
     if [ "$use_rsync" = yes ]; then
-        rsync -a -s --partial-dir=.rsync-partial --delete --info=progress2 --human-readable \
-            -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/"
-    else
-        import_ssh tar -C "$dir" -cf - . | tar -xf - --no-same-owner -C "$destination"
+        if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
+            rsync_path=(--rsync-path="sudo -n rsync")
+        fi
+        rsync -a -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --info=progress2 --human-readable \
+            "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/" || status=$?
+        case "$status" in
+            24)
+                echo "  Some files vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
+                status=0
+                ;;
+            23)
+                echo "ERROR: rsync could not transfer some files (listed above): unreadable by $IMPORT_SSH_TARGET, or symbolic links pointing nowhere; fix them on the old server and run the same command again" >&2
+                ;;
+        esac
+        return "$status"
     fi
+    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" tar -C "$dir" -chf - . | tar -xf - --no-same-owner -C "$destination"
 }
 
 # import_watch_file_size <file> <pid> <label>

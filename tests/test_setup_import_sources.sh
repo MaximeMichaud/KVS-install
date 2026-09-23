@@ -492,9 +492,32 @@ done
 echo "target \$1" >> "\$log"
 shift
 echo "command \$*" >> "\$log"
-exec "\$@"
+# A real sshd hands the command line to the login shell, which splits it.
+exec bash -c "\$*"
 EOF
     chmod +x "$bin/ssh"
+    # The remote commands run locally through the fake ssh: id answers
+    # with a chosen uid, sudo drops its -n and runs the command, or fails
+    # when FAKE_SUDO_FAIL is set.
+    cat > "$bin/id" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = -u ]; then
+    echo "${FAKE_UID:-1000}"
+else
+    echo "${FAKE_UID:-1000}"
+fi
+EOF
+    cat > "$bin/sudo" <<EOF
+#!/bin/bash
+echo "sudo \$*" >> "$bin/sudo.log"
+if [ -n "\${FAKE_SUDO_FAIL:-}" ]; then
+    echo "sudo: a password is required" >&2
+    exit 1
+fi
+[ "\$1" != -n ] || shift
+exec "\$@"
+EOF
+    chmod +x "$bin/id" "$bin/sudo"
 }
 
 make_fake_exporter() {
@@ -561,11 +584,18 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
     make_fake_exporter "$exporter"
     site="$TMP_ROOT/remote-site"
     make_site "$site" "$site"
+    mkdir -p "$TMP_ROOT/remote-store"
+    echo "stored" > "$TMP_ROOT/remote-store/big.mp4"
+    ln -s "$TMP_ROOT/remote-store" "$site/contents/store"
+    ln -s videos "$site/contents/inside"
     echo "stale" > "$TMP_ROOT/stale.txt"
     destination="$TMP_ROOT/remote-dest"
     (
         PATH="$bin:$PATH"
         IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/ctl2" import_ssh_setup old.example.com 22 root "" yes
+        FAKE_UID=0 import_remote_privileges || exit 30
+        [ "$IMPORT_REMOTE_PRIVILEGES" = root ] || exit 31
+        [ "${#IMPORT_REMOTE_PREFIX[@]}" -eq 0 ] || exit 32
         import_remote_detect "$exporter" "" "$TMP_ROOT/detect.txt" || exit 1
         [ "$(import_kv "$TMP_ROOT/detect.txt" kvs_version)" = 7.0.2 ] || exit 2
         [ "$(import_kv "$TMP_ROOT/detect.txt" site_dir)" = /detected/site ] || exit 3
@@ -584,6 +614,9 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         [ -f "$destination/contents/videos/1.mp4" ] || exit 14
         grep -q '^command rsync --server' "$bin/ssh.log" || exit 15
         [ ! -e "$destination/.rsync-partial" ] || exit 23
+        [ -d "$destination/contents/store" ] && [ ! -L "$destination/contents/store" ] || exit 33
+        [ "$(cat "$destination/contents/store/big.mp4")" = stored ] || exit 34
+        [ -L "$destination/contents/inside" ] || exit 35
         cp "$TMP_ROOT/stale.txt" "$destination/stale.txt"
         import_remote_files "$site" "$destination" yes >/dev/null 2>&1 || exit 16
         [ ! -e "$destination/stale.txt" ] || exit 17
@@ -592,12 +625,112 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         import_remote_files "$site" "$destination" no || exit 19
         [ -f "$destination/admin/include/setup.php" ] || exit 20
         grep -q '^command tar -C ' "$bin/ssh.log" || exit 21
+        [ -f "$destination/contents/store/big.mp4" ] && [ ! -L "$destination/contents/store" ] || exit 36
 
         import_ssh_close
         grep -q '^control exit$' "$bin/ssh.log" || exit 22
         exit 0
     ) || fail "remote detect, dump and files must go through the ssh plumbing (case $?)"
     pass "remote detect, dump and files go through one ssh connection"
+}
+
+test_a_user_with_sudo_runs_the_remote_side_through_it() {
+    local bin="$TMP_ROOT/ssh-bin-sudo" exporter="$TMP_ROOT/fake-export-sudo.sh" site destination
+
+    make_fake_ssh "$bin"
+    make_fake_exporter "$exporter"
+    site="$TMP_ROOT/remote-site-sudo"
+    make_site "$site" "$site"
+    destination="$TMP_ROOT/remote-dest-sudo"
+    (
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/ctl3" import_ssh_setup old.example.com 22 deploy "" yes
+        FAKE_UID=1000 import_remote_privileges || exit 1
+        [ "$IMPORT_REMOTE_PRIVILEGES" = sudo ] || exit 2
+        [ "$IMPORT_REMOTE_SUDO" = yes ] || exit 3
+        grep -q '^sudo -n true$' "$bin/sudo.log" || exit 4
+        import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect-sudo.txt" || exit 5
+        grep -q "^command sudo -n bash -s -- detect $site\$" "$bin/ssh.log" || exit 6
+        [ "$(import_kv "$TMP_ROOT/detect-sudo.txt" kvs_version)" = 7.0.2 ] || exit 7
+        import_remote_dump "$exporter" "$site" "$TMP_ROOT/remote-sudo.sql.gz" || exit 8
+        grep -q "^command sudo -n bash -s -- dump $site\$" "$bin/ssh.log" || exit 9
+        import_remote_files "$site" "$destination" yes >/dev/null 2>&1 || exit 10
+        grep -q '^sudo -n rsync --server' "$bin/sudo.log" || exit 11
+        [ -f "$destination/contents/videos/1.mp4" ] || exit 12
+        rm -rf "$destination"
+        import_remote_files "$site" "$destination" no || exit 13
+        grep -q '^command sudo -n tar -C ' "$bin/ssh.log" || exit 14
+        [ -f "$destination/contents/videos/1.mp4" ] || exit 15
+
+        FAKE_UID=1000 FAKE_SUDO_FAIL=1 import_remote_privileges || exit 16
+        [ "$IMPORT_REMOTE_PRIVILEGES" = none ] || exit 17
+        [ "${#IMPORT_REMOTE_PREFIX[@]}" -eq 0 ] || exit 18
+        [ "$IMPORT_REMOTE_SUDO_ERROR" = "sudo: a password is required" ] || exit 21
+        import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect-none.txt" || exit 19
+        grep -q "^command bash -s -- detect $site\$" "$bin/ssh.log" || exit 20
+        exit 0
+    ) || fail "a user with passwordless sudo must run the remote side through it, one without runs plain (case $?)"
+    pass "a user with passwordless sudo runs the remote side through it"
+}
+
+test_password_protected_archives_are_refused_with_a_reason() {
+    local layout stage out
+
+    command -v zip >/dev/null 2>&1 || fail "zip is needed to build the fixtures"
+    [ -n "$SEVEN_ZIP" ] || fail "a 7-Zip command is needed to build the fixtures"
+    layout=$(make_layout locked www/ database.sql)
+    (cd "$layout" && zip -q -r -y -P secret "$TMP_ROOT/locked.zip" .)
+    (cd "$layout" && "$SEVEN_ZIP" a -bd -bso0 -psecret "$TMP_ROOT/locked.7z" . >/dev/null)
+    (cd "$layout" && "$SEVEN_ZIP" a -bd -bso0 -psecret -mhe=on "$TMP_ROOT/locked-header.7z" . >/dev/null)
+
+    # Listings still work without the password, except with an encrypted header.
+    import_archive_list "$TMP_ROOT/locked.zip" unzip | grep -q 'admin/include/setup.php$' || fail "an encrypted zip still lists"
+    import_archive_list "$TMP_ROOT/locked.7z" "$SEVEN_ZIP" | grep -q 'admin/include/setup.php$' || fail "an encrypted 7z still lists"
+    out=$(import_archive_list "$TMP_ROOT/locked-header.7z" "$SEVEN_ZIP" 2>&1 >/dev/null) && fail "an encrypted 7z header cannot be listed without the password"
+    echo "$out" | grep -q 'password protected' || fail "the listing failure must name the password (got: $out)"
+
+    # The configuration cannot come out, the extraction neither, and nothing waits for a prompt.
+    out=$(import_archive_peek "$TMP_ROOT/locked.zip" unzip www/ "$TMP_ROOT/peek-locked-zip" 2>&1 >/dev/null) && fail "an encrypted zip must not peek"
+    echo "$out" | grep -q 'password protected' || fail "the zip peek failure must name the password (got: $out)"
+    out=$(import_archive_peek "$TMP_ROOT/locked.7z" "$SEVEN_ZIP" www/ "$TMP_ROOT/peek-locked-7z" 2>&1 >/dev/null) && fail "an encrypted 7z must not peek"
+    echo "$out" | grep -q 'password protected' || fail "the 7z peek failure must name the password (got: $out)"
+    stage="$TMP_ROOT/stage-locked"
+    out=$(import_archive_extract "$TMP_ROOT/locked.zip" unzip "$stage" 2>&1 >/dev/null) && fail "an encrypted zip must not extract"
+    echo "$out" | grep -q 'password protected' || fail "the zip extraction failure must name the password (got: $out)"
+    rm -rf "$stage"
+    out=$(import_archive_extract "$TMP_ROOT/locked.7z" "$SEVEN_ZIP" "$stage" 2>&1 >/dev/null) && fail "an encrypted 7z must not extract"
+    echo "$out" | grep -q 'password protected' || fail "the 7z extraction failure must name the password (got: $out)"
+    rm -rf "$stage"
+    pass "password protected archives are refused with a reason, without waiting on a prompt"
+}
+
+test_links_leaving_the_site_are_listed_and_the_copy_follows_them() {
+    local site="$TMP_ROOT/linked-site" store="$TMP_ROOT/linked-store" destination="$TMP_ROOT/linked-dest" listed
+
+    make_site "$site" /home/old/www
+    mkdir -p "$store"
+    echo "stored" > "$store/big.mp4"
+    ln -s "$store" "$site/contents/store"
+    ln -s 1.mp4 "$site/contents/videos/2.mp4"
+    ln -s videos "$site/contents/inside"
+    ln -s /nowhere/at/all "$site/contents/gone"
+    listed=$(import_external_links "$site" | sort)
+    [ "$listed" = "$(printf 'contents/gone -> /nowhere/at/all (dangling)\ncontents/store -> %s' "$store")" ] ||
+        fail "the links leaving the site and the dangling ones must be listed, not the ones inside (got: $listed)"
+    [ -z "$(import_external_links "$TMP_ROOT/layout-locked" 2>/dev/null)" ] || fail "a site without links lists nothing"
+
+    rm -f "$site/contents/gone"
+    (
+        # shellcheck disable=SC2034  # Read by import_marker_file.
+        IMPORT_MARKER_DIR="$TMP_ROOT/linked-markers"
+        import_place_site "$site" "$destination" >/dev/null || exit 1
+        [ -d "$destination/contents/store" ] && [ ! -L "$destination/contents/store" ] || exit 2
+        [ "$(cat "$destination/contents/store/big.mp4")" = stored ] || exit 3
+        [ -L "$destination/contents/inside" ] || exit 4
+        [ -L "$destination/contents/videos/2.mp4" ] || exit 5
+        exit 0
+    ) || fail "the copy of a directory must bring the targets of the links leaving the site and keep the inside ones (case $?)"
+    pass "links leaving the site are listed and the copy follows them"
 }
 
 test_archive_names_map_to_kinds_tools_and_packages
@@ -612,5 +745,8 @@ test_destination_marker_allows_a_repeat_of_the_same_source_only
 test_url_domain_and_key_value_helpers
 test_ssh_setup_validates_and_builds_the_options
 test_remote_detect_dump_and_files_go_through_one_ssh
+test_a_user_with_sudo_runs_the_remote_side_through_it
+test_password_protected_archives_are_refused_with_a_reason
+test_links_leaving_the_site_are_listed_and_the_copy_follows_them
 
 echo "All $TESTS_RUN import source tests passed."
