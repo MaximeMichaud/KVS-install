@@ -57,6 +57,7 @@ test_install_failure_stops_pipeline() {
   aptinstall_phpmyadmin() { :; }
   install_KVS() { :; }
   configure_kvs_system_settings() { :; }
+  configure_kvs_servers() { :; }
   install_ioncube() { :; }
   insert_cronjob() { :; }
   install_acme.sh() { :; }
@@ -511,6 +512,46 @@ test_port_check_accepts_the_installer_nginx() {
   unset MOCK_LISTENER
 }
 
+test_kvs_servers_follow_the_site_url() {
+  local temp_dir
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  DOMAIN=example.com
+  URL=example.com
+  KVS_PATH=/var/www/example.com
+  SSL_PROVIDER=letsencrypt
+  MOCK_STALE=0
+  mariadb() {
+    case "$*" in
+      *"NOT LIKE"*) printf '%s\n' "$MOCK_STALE" ;;
+      *COALESCE*) printf '0\n' ;;
+      *"COUNT(*)"*) printf '2\n' ;;
+      *) cat >>"$temp_dir/sql" ;;
+    esac
+  }
+
+  configure_kvs_servers >/dev/null 2>&1 || fail "server configuration failed" || return 1
+  assert_file_contains "$temp_dir/sql" "'https://example.com/contents/'" "server URLs must follow the site URL" || return 1
+  assert_file_contains "$temp_dir/sql" "'^https://(www[.])?example[.]com(:[0-9]+)?/contents/'" "seeded www URLs must be matched" || return 1
+  assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = 0" "a public certificate must be verified" || return 1
+
+  SSL_PROVIDER=selfsigned
+  URL=www.example.com
+  : >"$temp_dir/sql"
+  configure_kvs_servers >/dev/null 2>&1 || fail "self-signed server configuration failed" || return 1
+  assert_file_contains "$temp_dir/sql" "'https://www.example.com/contents/'" "the www choice must reach the server URLs" || return 1
+  assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = 1" "a self-signed certificate must not be verified" || return 1
+
+  MOCK_STALE=1
+  configure_kvs_servers >/dev/null 2>&1
+  status=$?
+  assert_equal "1" "$status" "a stale server URL must fail the step" || return 1
+
+  unset -f mariadb
+  unset MOCK_STALE DOMAIN URL KVS_PATH SSL_PROVIDER
+}
+
 test_domain_validation_respects_database_limit() {
   local max_label
   local oversized_label
@@ -929,6 +970,7 @@ run_test "archive extraction skips an installed site" test_archive_extraction_sk
 run_test "database file configuration is anchored" test_database_file_configuration_is_anchored || failures=$((failures + 1))
 run_test "acme issue reuses a valid certificate" test_acme_issue_reuses_a_valid_certificate || failures=$((failures + 1))
 run_test "port check accepts the installer nginx" test_port_check_accepts_the_installer_nginx || failures=$((failures + 1))
+run_test "KVS servers follow the site URL" test_kvs_servers_follow_the_site_url || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
 run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))
