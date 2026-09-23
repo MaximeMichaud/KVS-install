@@ -106,6 +106,23 @@ AUTOPACKAGEUPDATE=YES \
 
 With `IONCUBE=NO` the archive is treated as unencoded and `KVS_PHP_VERSION` picks the PHP release to install (7.4, 8.1, 8.2, 8.3 or 8.4); interactive runs ask instead. An IonCube encoded archive keeps the release KVS documents for it.
 
+### Importing an existing site (Docker, experimental)
+
+An existing KVS site moves into the Docker stack from two inputs: its files and a dump of its database. KVS keeps everything else (videos, members, categories, settings) in that database, so the files alone cannot rebuild a site.
+
+1. On the old server, dump the database (`mariadb-dump --single-transaction --routines --triggers <database>`, optionally compressed with gzip, xz or zstd) and copy the site directory, the one holding `admin/include/setup.php`, to the new host, for example under `/var/www/<domain>` on the disk meant for the site.
+2. Put the KVS archive of the same version as the site in `docker/kvs-archive/`. The nginx rewrites and the PHP version come from it.
+3. Run the setup with `IMPORT_SITE_DIR` pointing at the copied files and `IMPORT_DB_DUMP` at the dump. The files are copied to `/var/www/<domain>` unless they already are there. The MariaDB container replays the dump when it initializes its empty volume, so an earlier database volume of the project must be deleted first (`VOLUME_CHOICE=1` does it). Start with a self-signed certificate when the DNS still points at the old server, then run the setup again with Let's Encrypt after the switch.
+
+```bash
+IMPORT_SITE_DIR=/var/www/example.com IMPORT_DB_DUMP=/root/example.sql.zst \
+  HEADLESS=y DOMAIN=example.com EMAIL=admin@example.com SSL_CHOICE=2 VOLUME_CHOICE=1 ./setup.sh
+```
+
+The setup checks the site (table prefix `ktvs_`, version against the archive), prepares the dump for the container (database statements dropped, `INITIAL_VERSION` recorded when the old site never did, storage and conversion server paths moved from the old project path to `/var/www/kvs`, completion marker at the end) and refuses to continue if the replay stopped part way. The init then adopts the site as it does for a fresh one: connection settings, project URL, server URLs on the site domain (URLs on other hosts, such as a CDN, stay), permissions, server type nginx. The admin password is kept unless it is still the KVS default. After the run, `logs/import-rows.txt` lists the rows of every table for a comparison with the old server, and `KVS_IMPORT_COMPLETED` in `.env` turns later runs of the same command into ordinary re-runs.
+
+Not covered: sites with another table prefix, a domain change (the KVS license is bound to the domain, request a new archive), Sphinx or Manticore indexes (rebuild them) and custom web server rules from the old vhost.
+
 ## Compatibility
 
 The latest versions are more stable and we recommend using Debian 13 for the best support.
