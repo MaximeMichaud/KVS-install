@@ -45,6 +45,8 @@ OPT_OUTPUT=""
 OPT_DUMP_ONLY="no"
 OPT_FORCE_GZIP="no"
 OPT_ASSUME_YES="no"
+OPT_SIZE_TIMEOUT="${KVS_EXPORT_SIZE_TIMEOUT:-0}"
+OPT_MEASURE_SIZE="yes"
 
 # Detection results, all filled by kvs_collect
 SITE_DIR=""
@@ -68,6 +70,11 @@ DB_TABLES="0"
 DB_SIZE_MB="0"
 DB_NON_TRANSACTIONAL="0"
 SITE_SIZE_MB="0"
+SITE_SIZE_STATUS="skipped"
+SITE_SIZE_SECONDS="0"
+SITE_SIZE_ENTRIES="0"
+SITE_SIZE_ENTRIES_TOTAL="0"
+SITE_FS_USED_MB=""
 COMPRESSOR=""
 HAS_RSYNC="no"
 HOST_NAME=""
@@ -79,6 +86,11 @@ COMPRESS_CMD=()
 # Removed by the exit trap
 STAGING_DIR=""
 TEMP_ERR_FILE=""
+UNITS_FILE=""
+# The size walk in progress: its lines arrive on descriptor 3.
+MEASURE_PID=""
+MEASURE_KB=0
+MEASURE_COUNT=0
 
 kvs_usage() {
     cat <<'EOF'
@@ -98,12 +110,20 @@ Options
       --dump-only     Write only the database dump
       --gzip          Compress the dump with gzip (default: zstd when
                       installed, else pigz, else gzip)
+      --size-timeout SECONDS
+                      Stop measuring the site size after that long and go
+                      on with what was counted as a lower bound (0, the
+                      default: measure it all)
+      --no-size       Do not measure the site size
   -y, --yes           Do not ask for confirmation
   -h, --help          Show this help
 
 Environment
   KVS_SITE_DIR              Site directory, same as the argument
   KVS_EXPORT_SEARCH_ROOTS   Colon separated roots to search for the site
+  KVS_EXPORT_SIZE_TIMEOUT   Same as --size-timeout
+  KVS_EXPORT_SIZE_JOBS      How many du measure the site at once (default:
+                            the CPU count, at most 4)
   TMPDIR                    Where the dump is staged while the archive is
                             written (needs room for the compressed dump)
 
@@ -131,6 +151,10 @@ kvs_warn() {
 
 # shellcheck disable=SC2329  # Runs from the EXIT trap set at the bottom.
 kvs_cleanup() {
+    kvs_stop_measure
+    if [ -n "$UNITS_FILE" ]; then
+        rm -f -- "$UNITS_FILE"
+    fi
     if [ -n "$TEMP_ERR_FILE" ]; then
         rm -f -- "$TEMP_ERR_FILE"
     fi
@@ -172,6 +196,19 @@ kvs_human_mb() {
         printf '%s MB' "$mb"
     else
         printf '%s.%s GB' "$((mb / 1024))" "$(((mb * 10 / 1024) % 10))"
+    fi
+}
+
+kvs_elapsed() {
+    local seconds="${1:-0}"
+
+    kvs_is_number "$seconds" || seconds=0
+    if [ "$seconds" -ge 3600 ]; then
+        printf '%sh%02dm' "$((seconds / 3600))" "$(((seconds % 3600) / 60))"
+    elif [ "$seconds" -ge 60 ]; then
+        printf '%sm%02ds' "$((seconds / 60))" "$((seconds % 60))"
+    else
+        printf '%ss' "$seconds"
     fi
 }
 
@@ -544,23 +581,229 @@ kvs_probe_database() {
 # Sizes and free space
 #################################################################
 
-# du follows the symbolic links, as the archive and the transfer do: a
-# contents directory living on another disk counts with what it holds. The
-# free space check keeps a tenth of margin on top.
-kvs_measure_site() {
-    local raw
+# Megabytes used on the filesystems holding the site: the one under the
+# site directory, plus the one under contents when that is a link or a
+# mount to another disk. df answers at once and the site cannot be bigger
+# than that, so it is the figure shown before the walk starts and the one
+# left when the walk is cut short.
+kvs_site_filesystem_used() {
+    local path
+    local line
+    local device
+    local used
+    local mount
+    local seen=""
+    local total=0
 
-    kvs_say "Measuring the site size, this can take a while on a large installation..."
-    # shellcheck disable=SC2217  # stdin is the script itself under bash -s.
-    raw=$(du -sLm -- "$SITE_DIR" 2> /dev/null < /dev/null || true)
-    raw=${raw%%$'\n'*}
-    raw=${raw%%[[:space:]]*}
-    if kvs_is_number "$raw"; then
-        SITE_SIZE_MB=$raw
-    else
-        SITE_SIZE_MB="0"
-        kvs_warn "could not measure the size of $SITE_DIR"
+    SITE_FS_USED_MB=""
+    for path in "$SITE_DIR" "$SITE_DIR/contents"; do
+        [ -d "$path" ] || continue
+        # shellcheck disable=SC2217  # stdin is the script itself under bash -s.
+        line=$(df -Pm -- "$path" 2> /dev/null < /dev/null | sed -n '2p') || line=""
+        [ -n "$line" ] || continue
+        read -r device _ used _ _ mount <<< "$line"
+        kvs_is_number "$used" || continue
+        case $seen in
+            *"|$device $mount|"*) continue ;;
+        esac
+        seen="$seen|$device $mount|"
+        total=$((total + used))
+    done
+    if [ -n "$seen" ]; then
+        SITE_FS_USED_MB=$total
     fi
+}
+
+# How many du walk the site at once: the CPU count, at most 4 so a live
+# server keeps serving; KVS_EXPORT_SIZE_JOBS overrides (an SSD takes more).
+kvs_measure_jobs() {
+    local jobs="${KVS_EXPORT_SIZE_JOBS:-}"
+
+    if kvs_is_number "$jobs" && [ "$jobs" -ge 1 ]; then
+        printf '%s' "$jobs"
+        return 0
+    fi
+    jobs=$(nproc 2> /dev/null < /dev/null) || jobs=""
+    if ! kvs_is_number "$jobs"; then
+        jobs=$(getconf _NPROCESSORS_ONLN 2> /dev/null) || jobs=""
+    fi
+    kvs_is_number "$jobs" || jobs=1
+    [ "$jobs" -ge 1 ] || jobs=1
+    [ "$jobs" -le 4 ] || jobs=4
+    printf '%s' "$jobs"
+}
+
+# The entries the walk measures one by one: everything three levels down
+# (the id buckets of contents/, admin/*/*, static/*/*) and the files above
+# that level. Together they hold the whole site but the directory inodes
+# above them, a few kilobytes. Three levels down is thousands of entries
+# at most, which find lists in a moment even under contents/.
+kvs_list_measure_units() {
+    local file="$1"
+    local depth="$2"
+
+    {
+        find -L "$SITE_DIR" -mindepth 1 -maxdepth "$((depth - 1))" ! -type d -print0 2> /dev/null
+        find -L "$SITE_DIR" -mindepth "$depth" -maxdepth "$depth" -print0 2> /dev/null
+    } > "$file" < /dev/null
+}
+
+# Start the du processes over the listed entries, their lines arriving on
+# descriptor 3. False when xargs cannot take a NUL separated list.
+kvs_start_measure() {
+    local file="$1"
+    local jobs="$2"
+
+    # The probes run du on an empty list: the options are checked, nothing
+    # is measured.
+    if xargs -r -0 -n 1 -P "$jobs" du < /dev/null > /dev/null 2>&1; then
+        exec 3< <(exec xargs -0 -n 1 -P "$jobs" du -sLk -- < "$file" 2> /dev/null)
+    elif xargs -r -0 -n 1 du < /dev/null > /dev/null 2>&1; then
+        exec 3< <(exec xargs -0 -n 1 du -sLk -- < "$file" 2> /dev/null)
+    else
+        return 1
+    fi
+    MEASURE_PID=$!
+    return 0
+}
+
+# Stop the walk. xargs is held first so it starts no further du while the
+# ones at work are killed, then it is released with its own signal.
+kvs_stop_measure() {
+    if [ -n "$MEASURE_PID" ]; then
+        kill -STOP "$MEASURE_PID" 2> /dev/null
+        pkill -TERM -P "$MEASURE_PID" 2> /dev/null
+        kill -TERM "$MEASURE_PID" 2> /dev/null
+        kill -CONT "$MEASURE_PID" 2> /dev/null
+        MEASURE_PID=""
+    fi
+}
+
+# One line of du -sk: kilobytes, a tab, the path.
+kvs_add_measure_line() {
+    local size="${1%%$'\t'*}"
+
+    kvs_is_number "$size" || return 1
+    MEASURE_KB=$((MEASURE_KB + size))
+    MEASURE_COUNT=$((MEASURE_COUNT + 1))
+    return 0
+}
+
+# The site size, the way the archive and the transfer will read it (links
+# followed). One du over a large site stats millions of inodes with no
+# sign of life for as long as that takes, so the tree is split into the
+# entries three levels down, a few du measure them at once and a line
+# every ten seconds tells how far the walk is. A time budget cuts it
+# short: the report then carries what was counted as a lower bound and
+# the filesystem usage as the upper one, and the caller decides.
+kvs_measure_site() {
+    local depth=3
+    local jobs
+    local total=0
+    local line
+    local status
+    local start
+    local last
+    local elapsed=0
+    local timed_out="no"
+
+    SITE_SIZE_MB="0"
+    SITE_SIZE_STATUS="skipped"
+    SITE_SIZE_SECONDS="0"
+    SITE_SIZE_ENTRIES="0"
+    SITE_SIZE_ENTRIES_TOTAL="0"
+    MEASURE_KB=0
+    MEASURE_COUNT=0
+    kvs_site_filesystem_used
+    if [ "$OPT_MEASURE_SIZE" != "yes" ]; then
+        kvs_say "Site size: not measured (--no-size); the filesystem holding the site uses $(kvs_human_mb "$SITE_FS_USED_MB")"
+        return 0
+    fi
+    jobs=$(kvs_measure_jobs)
+    UNITS_FILE=$(mktemp 2> /dev/null) || UNITS_FILE=""
+    if [ -n "$UNITS_FILE" ]; then
+        kvs_list_measure_units "$UNITS_FILE" "$depth"
+        while IFS= read -r -d '' _; do
+            total=$((total + 1))
+        done < "$UNITS_FILE"
+    fi
+    if [ -n "$SITE_FS_USED_MB" ]; then
+        kvs_say "The filesystem holding the site uses $(kvs_human_mb "$SITE_FS_USED_MB"); the site is at most that."
+    fi
+    if [ "$OPT_SIZE_TIMEOUT" -gt 0 ]; then
+        kvs_say "Measuring the site size for at most $(kvs_elapsed "$OPT_SIZE_TIMEOUT") ($total entries, $jobs at a time)..."
+    else
+        kvs_say "Measuring the site size, this can take a while on a large installation ($total entries, $jobs at a time; --size-timeout bounds it, --no-size skips it)..."
+    fi
+    if [ "$total" -eq 0 ] || ! kvs_start_measure "$UNITS_FILE" "$jobs"; then
+        # Nothing listed or no usable xargs: one du over the site, with
+        # the timer only.
+        total=1
+        exec 3< <(exec du -sLk -- "$SITE_DIR" 2> /dev/null)
+        MEASURE_PID=$!
+    fi
+    start=$SECONDS
+    last=$start
+    while :; do
+        line=""
+        if IFS= read -r -t 1 line <&3; then
+            kvs_add_measure_line "$line"
+        else
+            status=$?
+            if [ "$status" -le 128 ]; then
+                # End of the stream; a last line without newline counts.
+                [ -z "$line" ] || kvs_add_measure_line "$line"
+                break
+            fi
+        fi
+        elapsed=$((SECONDS - start))
+        if [ "$timed_out" = "no" ] && [ "$OPT_SIZE_TIMEOUT" -gt 0 ] && [ "$elapsed" -ge "$OPT_SIZE_TIMEOUT" ]; then
+            timed_out="yes"
+            kvs_stop_measure
+        fi
+        if [ $((SECONDS - last)) -ge 10 ]; then
+            kvs_say "  $MEASURE_COUNT of $total entries, $(kvs_human_mb "$((MEASURE_KB / 1024))") so far, $(kvs_elapsed "$elapsed")"
+            last=$SECONDS
+        fi
+    done
+    exec 3<&-
+    MEASURE_PID=""
+    rm -f -- "$UNITS_FILE"
+    UNITS_FILE=""
+    SITE_SIZE_SECONDS=$((SECONDS - start))
+    SITE_SIZE_MB=$((MEASURE_KB / 1024))
+    SITE_SIZE_ENTRIES=$MEASURE_COUNT
+    SITE_SIZE_ENTRIES_TOTAL=$total
+    if [ "$timed_out" = "yes" ]; then
+        SITE_SIZE_STATUS="incomplete"
+        kvs_warn "site size measurement cut short after $(kvs_elapsed "$SITE_SIZE_SECONDS"): at least $(kvs_human_mb "$SITE_SIZE_MB") in $MEASURE_COUNT of $total entries, at most $(kvs_human_mb "$SITE_FS_USED_MB") (the filesystem usage); --size-timeout 0 measures it all"
+        return 0
+    fi
+    if [ "$MEASURE_COUNT" -eq 0 ]; then
+        SITE_SIZE_STATUS="failed"
+        kvs_warn "could not measure the size of $SITE_DIR"
+        return 0
+    fi
+    SITE_SIZE_STATUS="exact"
+    if [ "$MEASURE_COUNT" -lt "$total" ]; then
+        kvs_warn "$((total - MEASURE_COUNT)) of $total entries could not be measured (removed meanwhile, or unreadable)"
+    fi
+    kvs_say "Site size: $(kvs_human_mb "$SITE_SIZE_MB") ($total entries, $(kvs_elapsed "$SITE_SIZE_SECONDS"))"
+}
+
+# What the summary shows for the site size.
+kvs_site_size_text() {
+    case $SITE_SIZE_STATUS in
+        exact)
+            kvs_human_mb "$SITE_SIZE_MB"
+            ;;
+        incomplete)
+            printf 'at least %s, at most %s, measurement cut short' "$(kvs_human_mb "$SITE_SIZE_MB")" "$(kvs_human_mb "$SITE_FS_USED_MB")"
+            ;;
+        *)
+            printf 'not measured, at most %s' "$(kvs_human_mb "$SITE_FS_USED_MB")"
+            ;;
+    esac
 }
 
 # Free megabytes on the filesystem holding the path, or its nearest existing
@@ -736,6 +979,11 @@ kvs_print_detect() {
     printf 'db_size_mb=%s\n' "$DB_SIZE_MB"
     printf 'db_non_transactional=%s\n' "$DB_NON_TRANSACTIONAL"
     printf 'site_size_mb=%s\n' "$SITE_SIZE_MB"
+    printf 'site_size_status=%s\n' "$SITE_SIZE_STATUS"
+    printf 'site_size_seconds=%s\n' "$SITE_SIZE_SECONDS"
+    printf 'site_size_entries=%s\n' "$SITE_SIZE_ENTRIES"
+    printf 'site_size_entries_total=%s\n' "$SITE_SIZE_ENTRIES_TOTAL"
+    printf 'site_fs_used_mb=%s\n' "$SITE_FS_USED_MB"
     printf 'compressor=%s\n' "$COMPRESSOR"
     printf 'rsync=%s\n' "$HAS_RSYNC"
     printf 'hostname=%s\n' "$HOST_NAME"
@@ -755,7 +1003,7 @@ kvs_print_summary() {
     kvs_say ""
     kvs_say "Installation detected on ${HOST_NAME:-this server}"
     kvs_say "  KVS version:     ${KVS_VERSION:-unknown}"
-    kvs_say "  Site directory:  $SITE_DIR ($(kvs_human_mb "$SITE_SIZE_MB"))"
+    kvs_say "  Site directory:  $SITE_DIR ($(kvs_site_size_text))"
     kvs_say "  Project URL:     ${PROJECT_URL:-unknown}"
     kvs_say "  Table prefix:    ${TABLES_PREFIX:-unknown}"
     kvs_say "  Database:        ${DB_NAME:-unknown} on ${DB_HOST_RAW:-localhost}, user ${DB_USER:-unknown}, password ${DB_PASSWORD_HINT:-<empty>}"
@@ -960,6 +1208,11 @@ kvs_command_archive() {
             needed=$DB_SIZE_MB
         else
             needed=$((SITE_SIZE_MB + DB_SIZE_MB))
+            case $SITE_SIZE_STATUS in
+                exact) ;;
+                incomplete) kvs_warn "the site size is a lower bound, the free space check can pass on a disk that is too small" ;;
+                *) kvs_warn "the site size is unknown, the free space is only checked for the dump" ;;
+            esac
         fi
         kvs_check_free_space "$needed" "$output" || return 1
     fi
@@ -1051,6 +1304,22 @@ kvs_parse_arguments() {
                 OPT_FORCE_GZIP="yes"
                 shift
                 ;;
+            --size-timeout)
+                if [ $# -lt 2 ]; then
+                    kvs_error "$1 needs a number of seconds"
+                    return 1
+                fi
+                OPT_SIZE_TIMEOUT=$2
+                shift 2
+                ;;
+            --size-timeout=*)
+                OPT_SIZE_TIMEOUT=${1#--size-timeout=}
+                shift
+                ;;
+            --no-size)
+                OPT_MEASURE_SIZE="no"
+                shift
+                ;;
             -y | --yes)
                 OPT_ASSUME_YES="yes"
                 shift
@@ -1093,6 +1362,10 @@ kvs_parse_arguments() {
                 ;;
         esac
     done
+    if ! kvs_is_number "$OPT_SIZE_TIMEOUT"; then
+        kvs_error "--size-timeout needs a number of seconds, got '$OPT_SIZE_TIMEOUT'"
+        return 1
+    fi
     case $first in
         archive | detect | dump)
             OPT_COMMAND=$first

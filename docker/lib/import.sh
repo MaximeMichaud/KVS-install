@@ -1009,22 +1009,29 @@ import_ssh_rsh() {
     printf '%s' "$result"
 }
 
-# import_remote_detect <exporter script> <site directory or empty> <output file>
+# import_remote_detect <exporter script> <site directory or empty> <output file> [size budget]
 # Run the exporter's detection on the old server; the script travels on
 # stdin, nothing is written there. The key=value report lands in the
-# output file.
+# output file. The budget is how many seconds the exporter may spend
+# measuring the site size (0: all of it); past it the report carries a
+# lower bound and the filesystem usage.
 import_remote_detect() {
     local exporter="$1"
     local dir="$2"
     local output="$3"
+    local budget="${4:-}"
+    local -a options=()
 
     if [ -n "$dir" ]; then
         import_remote_path_check "$dir" || return 1
     fi
+    if [ -n "$budget" ]; then
+        options=(--size-timeout "$budget")
+    fi
     if [ -n "$dir" ]; then
-        import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- detect "$dir" < "$exporter" > "$output"
+        import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- "${options[@]}" detect "$dir" < "$exporter" > "$output"
     else
-        import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- detect < "$exporter" > "$output"
+        import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- "${options[@]}" detect < "$exporter" > "$output"
     fi
 }
 
