@@ -3134,11 +3134,31 @@ if public_port_conflicts_exist; then
     fi
 fi
 
-# DNS Check Function
+# The public IPv4 address of this server, from the first lookup service
+# that answers with one. Empty when none does (no internet, every service
+# down or slow): the DNS check then says so instead of calling every record
+# a mismatch against nothing, which exited headless runs (DNS_CHOICE=3).
+public_ipv4() {
+    local service
+    local ip
+
+    for service in https://api.ipify.org https://1.1.1.1/cdn-cgi/trace https://icanhazip.com; do
+        ip=$(curl -fsS --connect-timeout 5 --max-time 10 "$service" 2>/dev/null |
+            sed -n -E 's/^(ip=)?(([0-9]{1,3}\.){3}[0-9]{1,3})[[:space:]]*$/\2/p' | head -n 1)
+        if [ -n "$ip" ]; then
+            printf '%s\n' "$ip"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# DNS Check Function: 0 when every record points here, 1 on a mismatch,
+# 2 when the public IP is unknown and nothing could be compared.
 check_dns() {
     echo ""
     echo -e "${CYAN}Checking DNS configuration...${NC}"
-    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org) || SERVER_IP=""
+    SERVER_IP=$(public_ipv4) || SERVER_IP=""
     # Use getent instead of dig (more portable)
     DOMAIN_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
     WWW_IP=""
@@ -3147,6 +3167,14 @@ check_dns() {
     fi
 
     dns_ok=true
+    if [ -z "$SERVER_IP" ]; then
+        echo -e "  ${YELLOW}Could not determine the public IP of this server (no lookup service answered), the records are not compared${NC}"
+        echo "  $DOMAIN -> ${DOMAIN_IP:-unresolved}"
+        if include_www_for_domain; then
+            echo "  www.$DOMAIN -> ${WWW_IP:-unresolved}"
+        fi
+        return 2
+    fi
     echo "Server IP: $SERVER_IP"
     if [ "$DOMAIN_IP" = "$SERVER_IP" ]; then
         echo -e "  $DOMAIN: ${GREEN}OK${NC} -> $DOMAIN_IP"
@@ -3171,8 +3199,13 @@ check_dns() {
 
 # DNS Check with retry loop
 while true; do
-    if check_dns; then
+    check_dns
+    dns_status=$?
+    if [ "$dns_status" -eq 0 ]; then
         echo -e "${GREEN}DNS configuration OK${NC}"
+        break
+    elif [ "$dns_status" -eq 2 ]; then
+        echo -e "${YELLOW}DNS check skipped: the certificate step will show whether the records point here${NC}"
         break
     else
         echo ""
