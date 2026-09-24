@@ -146,7 +146,9 @@ The setup extracts an archive in a private directory next to `/var/www/<domain>`
 
 A site whose search ran through the KVS External Search plugin (Sphinx or Manticore on the old server) is announced: with Manticore enabled (`MANTICORE_CHOICE=1`) the init points the plugin at the stack's own Manticore, which indexes the imported database when its container starts and every hour; without it the init removes the plugin configuration and KVS falls back to its MySQL search.
 
-Not covered: sites with another table prefix, a domain change (the KVS license is bound to the domain, request a new archive), custom web server rules from the old vhost, and the standalone installer.
+The table prefix comes from the site's `setup.php` (`ktvs_` for every archive KVS ships, whatever the old server used for an imported site) and reaches every script that names a table, the Manticore indexer included, through `TABLES_PREFIX` in `.env`.
+
+Not covered: a domain change (the KVS license is bound to a domain and its aliases; a site imported under a domain the license does not cover needs a new archive from KVS), custom web server rules from the old vhost, and the standalone installer.
 
 ## Compatibility
 
