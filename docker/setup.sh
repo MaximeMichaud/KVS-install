@@ -629,7 +629,7 @@ import_check_domain() {
     [ "$IMPORT_DETECTED_DOMAIN" != "$DOMAIN" ] || return 0
     echo ""
     echo -e "${YELLOW}WARNING: the site is configured for $IMPORT_DETECTED_DOMAIN while this installation is for $DOMAIN.${NC}"
-    echo "The KVS license is bound to the domain; the site keeps working only with an archive issued for $DOMAIN."
+    echo "The KVS license is bound to a domain and its aliases; the site keeps working only if the license covers $DOMAIN, otherwise request a new archive from KVS."
     if [ "${HEADLESS:-}" != "y" ]; then
         echo -n "Continue anyway? [y/N]: "
         read -r answer
