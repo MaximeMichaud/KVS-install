@@ -166,7 +166,7 @@ initialize_runtime_defaults() {
   if [[ $HEADLESS == "y" ]]; then
     INSTALL_TYPE=${INSTALL_TYPE:-1}  # 1=Docker (default), 2=Standalone
     MENU_OPTION=${MENU_OPTION:-1}    # 1=Restart install, 2=Add site, 3=Update PMA, 4=Update script, 5=Quit
-    database_ver=${database_ver:-${DATABASE_VER:-11.8}}
+    database_ver=${database_ver:-${DATABASE_VER:-12.3}}
     IONCUBE=${IONCUBE:-YES}
     AUTOPACKAGEUPDATE=${AUTOPACKAGEUPDATE:-YES}
     SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}  # letsencrypt, zerossl, or selfsigned
@@ -445,31 +445,27 @@ function installQuestions() {
     #      ;;
     #    esac
     echo "Which version of MariaDB ? https://endoflife.date/mariadb"
-    echo "${green}   1) MariaDB 11.8 (Stable) (LTS) (Default)${normal}"
-    echo "${green}   2) MariaDB 11.4 (Stable) (LTS)${normal}"
-    echo "${green}   3) MariaDB 10.11 (Old Stable) (LTS)${normal}"
-    echo "${green}   4) MariaDB 10.6 (Old Stable) (LTS)${normal}"
+    echo "${green}   1) MariaDB 12.3 (Stable) (LTS) (Default)${normal}"
+    echo "${green}   2) MariaDB 11.8 (Stable) (LTS)${normal}"
+    echo "${green}   3) MariaDB 11.4 (Stable) (LTS)${normal}"
     echo "Please note: We only recommend LTS versions, despite other versions being available."
     echo "Regardless of the version, KVS has a specific way of storing MYSQL data."
     echo "As long as the MYISAM engine is not removed from MariaDB, you should always choose the latest LTS version recommended by the script."
     echo "Even if this was the case, tables can be migrated from MYISAM to InnoDB."
     echo "Some have done so, but the end result was never studied thoroughly."
     echo "The risk taken is probably not worth the performance difference if the case."
-    until [[ "$DATABASE_VER" =~ ^[1-4]$ ]]; do
-      read -rp "Version [1-4]: " -e -i 1 DATABASE_VER
+    until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
+      read -rp "Version [1-3]: " -e -i 1 DATABASE_VER
     done
     case $DATABASE_VER in
     1)
-      database_ver="11.8"
+      database_ver="12.3"
       ;;
     2)
-      database_ver="11.4"
+      database_ver="11.8"
       ;;
     3)
-      database_ver="10.11"
-      ;;
-    4)
-      database_ver="10.6"
+      database_ver="11.4"
       ;;
     esac
 
