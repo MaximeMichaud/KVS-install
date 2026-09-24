@@ -145,4 +145,20 @@ cron_file="${ROOT_DIR}/docker/manticore/manticore-indexer.cron"
 grep -Fq "0 * * * * manticore find /var/lib/manticore -name '*.new.*' -delete; /usr/bin/indexer --rotate --all" "$cron_file" ||
     fail "the hourly rotation must clear stale rotation files and run as the manticore user"
 
+# The plugin configuration follows the hints KVS gives for Manticore: the
+# external search is used always and completely replaces the internal
+# search, otherwise every hit is listed twice (Manticore's and MySQL's).
+plugin_script="${ROOT_DIR}/docker/init/docker-entrypoint.d/80-manticore.sh"
+for key in enable_external_search enable_external_search_albums enable_external_search_searches; do
+    grep -Fq "'${key}' => 1," "$plugin_script" ||
+        fail "the plugin must use the external search always (${key})"
+done
+for key in display_results display_results_albums display_results_searches; do
+    grep -Fq "'${key}' => 0," "$plugin_script" ||
+        fail "the external search must completely replace the internal search (${key})"
+done
+if grep -Fq "'disable_internal_fallback'" "$plugin_script"; then
+    fail "the internal fallback must keep its default so KVS still answers while Manticore is down"
+fi
+
 echo "PASS: Manticore entrypoint hardening"
