@@ -137,7 +137,7 @@ server {
 server {
     listen      8080;
     server_name manticore-api;
-    root        ${KVS_ROOT};
+    root        /var/www/manticore-api;
     access_log  off;
 
     location ~ ^/kvs_manticore_search_(videos|albums|searches)\.php$ {

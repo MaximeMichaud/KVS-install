@@ -6,14 +6,35 @@ set -e
 source /init/lib/common.sh
 
 PLUGIN_DATA_DIR="$KVS_PATH/admin/data/plugins/external_search"
+# The search scripts only talk to searchd, so they live outside the KVS
+# tree, in the manticore-api volume that nginx, php-fpm and this container
+# share: the KVS audit plugin reports every file or directory it does not
+# know inside the site as suspicious.
+SCRIPT_DIR="${MANTICORE_API_DIR:-/var/www/manticore-api}"
+
+# Copies that earlier versions of this script left inside the site.
+remove_legacy_scripts() {
+    local kind legacy
+
+    for kind in videos albums searches; do
+        for legacy in "$KVS_PATH/kvs_manticore_search_${kind}.php" "$KVS_PATH/admin/manticore/kvs_manticore_search_${kind}.php"; do
+            if [ -e "$legacy" ]; then
+                rm -f "$legacy"
+                log_info "Removed ${legacy#"$KVS_PATH/"} from the site (the scripts live in $SCRIPT_DIR)"
+            fi
+        done
+    done
+    rmdir "$KVS_PATH/admin/manticore" 2>/dev/null || true
+}
 
 # Skip if Manticore is not enabled
 if [ "${ENABLE_MANTICORE:-false}" != "true" ]; then
     rm -f \
-        "$KVS_PATH/kvs_manticore_search_videos.php" \
-        "$KVS_PATH/kvs_manticore_search_albums.php" \
-        "$KVS_PATH/kvs_manticore_search_searches.php" \
+        "$SCRIPT_DIR/kvs_manticore_search_videos.php" \
+        "$SCRIPT_DIR/kvs_manticore_search_albums.php" \
+        "$SCRIPT_DIR/kvs_manticore_search_searches.php" \
         "$PLUGIN_DATA_DIR/data.dat"
+    remove_legacy_scripts
     log_info "Manticore disabled; removed generated API scripts and plugin configuration"
     exit 0
 fi
@@ -52,10 +73,12 @@ for file in /tmp/kvs_manticore_search_*.php; do
     sed -i "s/http_response_code(503);/\/\/ Return empty XML on error/" "$file"
     sed -E -i "s|^[[:space:]]*die\\(.*FATAL.*$|    die('<search_feed total_count=\"0\" from=\"0\" query=\"\"></search_feed>');|" "$file"
 
-    cp "$file" "$KVS_PATH/"
+    mkdir -p "$SCRIPT_DIR"
+    cp "$file" "$SCRIPT_DIR/"
 done
+remove_legacy_scripts
 
-log_info "Manticore PHP scripts installed"
+log_info "Manticore PHP scripts installed in $SCRIPT_DIR"
 
 # Configure External Search plugin automatically
 log_info "Configuring External Search plugin..."

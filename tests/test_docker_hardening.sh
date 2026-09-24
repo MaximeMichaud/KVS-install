@@ -618,9 +618,14 @@ PHP
 done
 EOF
     chmod +x "$mock_bin/curl" "$mock_bin/unzip"
+    # Copies left inside the site by earlier versions of the script.
+    mkdir -p "$site_dir/admin/manticore" "$case_dir/api"
+    echo '<?php // stale' > "$site_dir/kvs_manticore_search_videos.php"
+    echo '<?php // stale' > "$site_dir/admin/manticore/kvs_manticore_search_albums.php"
 
     if ! PATH="$mock_bin:/usr/bin:/bin" \
         TEST_KVS_PATH="$site_dir" \
+        MANTICORE_API_DIR="$case_dir/api" \
         DOMAIN=7.0.2.target.example \
         PROJECT_HTTPS_PORT=18443 \
         ENABLE_MANTICORE=true \
@@ -629,9 +634,13 @@ EOF
         fail "Manticore script configuration failed"
     fi
 
+    [ ! -e "$site_dir/kvs_manticore_search_videos.php" ] ||
+        fail "a stale Manticore script at the webroot was not removed"
+    [ ! -d "$site_dir/admin/manticore" ] ||
+        fail "a stale admin/manticore/ directory was not removed from the site"
     for kind in videos albums searches; do
-        installed_file="$site_dir/kvs_manticore_search_${kind}.php"
-        [ -f "$installed_file" ] || fail "Manticore $kind script was not installed"
+        installed_file="$case_dir/api/kvs_manticore_search_${kind}.php"
+        [ -f "$installed_file" ] || fail "Manticore $kind script was not installed in the manticore-api volume"
         grep -Fq "\$manticore_index = '7_0_2_target_example_${kind}';" "$installed_file" ||
             fail "Manticore $kind index name was not configured"
         # shellcheck disable=SC2016
@@ -647,7 +656,7 @@ EOF
     # shellcheck disable=SC2016
     php -r '
         $data = unserialize(file_get_contents($argv[1]));
-        $expected = "http://manticore-api:8080/";
+        $expected = "http://manticore-api:8080/kvs_manticore_search_";
         foreach (["api_call", "api_call_albums", "api_call_searches"] as $key) {
             if (!isset($data[$key]) || !str_starts_with($data[$key], $expected)) exit(1);
         }
@@ -661,15 +670,27 @@ EOF
         fail "single-site Nginx lacks the internal Manticore listener"
     grep -Fq 'listen      8080;' "$REPO_ROOT/docker/multi-site/nginx/kvs-caddy.conf.template" ||
         fail "multi-site Nginx lacks the internal Manticore listener"
+    for template in "$REPO_ROOT/conf/nginx/templates/kvs.conf.tpl" "$REPO_ROOT/docker/multi-site/nginx/kvs-caddy.conf.template"; do
+        grep -Fq 'root        /var/www/manticore-api;' "$template" ||
+            fail "$template does not serve the Manticore scripts from the manticore-api volume"
+        grep -Fq 'location ~ ^/kvs_manticore_search_(videos|albums|searches)\.php$ {' "$template" ||
+            fail "$template does not route the Manticore scripts"
+    done
+    for compose in "$REPO_ROOT/docker/docker-compose.yml" "$REPO_ROOT/docker/multi-site/docker-compose.site.yml.template"; do
+        [ "$(grep -c 'manticore-api:/var/www/manticore-api' "$compose")" -eq 3 ] ||
+            fail "$compose must mount the manticore-api volume in nginx, php-fpm and kvs-init"
+        grep -Eq '^  manticore-api:$' "$compose" || fail "$compose does not declare the manticore-api volume"
+    done
 
     TEST_KVS_PATH="$site_dir" \
+        MANTICORE_API_DIR="$case_dir/api" \
         DOMAIN=7.0.2.target.example \
         ENABLE_MANTICORE=false \
         bash "$script_copy" > "$case_dir/disabled-output.log" 2>&1
     [ ! -e "$site_dir/admin/data/plugins/external_search/data.dat" ] ||
         fail "disabling Manticore left the external-search plugin enabled"
     for kind in videos albums searches; do
-        [ ! -e "$site_dir/kvs_manticore_search_${kind}.php" ] ||
+        [ ! -e "$case_dir/api/kvs_manticore_search_${kind}.php" ] ||
             fail "disabling Manticore left the $kind API script installed"
     done
 
