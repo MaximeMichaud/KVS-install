@@ -1,0 +1,63 @@
+# git-cliff configuration.
+#
+# The release workflow runs `git cliff --latest --strip header` and puts the
+# result in the body of the GitHub release. The manifest kvsctl fetches on
+# every status check never carries this text: it holds one line of notes and
+# a notes_url pointing at the release page, so the list of releases does not
+# grow without bound.
+#
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """
+# Changelog
+"""
+body = """
+{% if version %}\
+## {{ version | trim_start_matches(pat="v") }} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}{{ commit.scope }}: {% endif %}{{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+topo_order = false
+sort_commits = "oldest"
+
+# The types this repository uses, in the order a reader wants them.
+commit_parsers = [
+  { message = "^[a-z]+(\\(.+\\))?!:", group = "Breaking changes" },
+  { body = ".*BREAKING CHANGE", group = "Breaking changes" },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Tests" },
+  { message = "^build", group = "Build" },
+  { message = "^ci", group = "CI" },
+  { message = "^style", group = "Style" },
+  { message = "^chore", group = "Chores" },
+  { message = "^revert", group = "Reverts" },
+]
+
+# Tags are the stack version, calendar versioning YY.M.PATCH with no prefix.
+# A pre-release carries a suffix, 26.11.0-rc1, and still belongs to its
+# release for changelog purposes.
+tag_pattern = "[0-9][0-9]\\.[0-9]+\\.[0-9]+"
+skip_tags = ""
+ignore_tags = ""

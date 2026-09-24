@@ -1,0 +1,321 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "[0-9][0-9].[0-9]*.[0-9]*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      tag: ${{ steps.version.outputs.tag }}
+      namespace: ${{ steps.namespace.outputs.value }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: validate the tag
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./.github/scripts/release-version.sh "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+      # GHCR refuses an image name with an uppercase letter, and this
+      # repository has two of them.
+      - name: image namespace
+        id: namespace
+        run: |
+          lower=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "value=ghcr.io/${lower}" >> "$GITHUB_OUTPUT"
+
+      - name: release notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+
+  images:
+    name: ${{ matrix.service }}${{ matrix.php && format(' php{0}', matrix.php) || '' }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { service: nginx, compose: nginx, context: docker/nginx, base: "", php: "" }
+          - { service: init, compose: kvs-init, context: docker/init, base: "", php: "" }
+          - { service: manticore, compose: manticore, context: docker/manticore, base: "", php: "" }
+          - { service: php, compose: php-fpm, context: docker/php, base: php-fpm, php: "8.1" }
+          - { service: php, compose: php-fpm, context: docker/php, base: php-fpm, php: "8.2" }
+          - { service: php, compose: php-fpm, context: docker/php, base: php-fpm, php: "8.3" }
+          - { service: php, compose: php-fpm, context: docker/php, base: php-fpm, php: "8.4" }
+          - { service: cron, compose: cron, context: docker/cron, base: php-cli, php: "8.1" }
+          - { service: cron, compose: cron, context: docker/cron, base: php-cli, php: "8.2" }
+          - { service: cron, compose: cron, context: docker/cron, base: php-cli, php: "8.3" }
+          - { service: cron, compose: cron, context: docker/cron, base: php-cli, php: "8.4" }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build arguments
+        id: args
+        env:
+          PHP_SERIES: ${{ matrix.php }}
+          BASE_NAME: ${{ matrix.base }}
+        run: |
+          {
+            echo 'value<<ARGS_EOF'
+            if [ -n "$PHP_SERIES" ]; then
+              echo "PHP_VERSION=${PHP_SERIES}"
+              echo "PHP_BASE=$(./docker/bin/resolve-bases.sh --get "$BASE_NAME" "$PHP_SERIES")"
+            fi
+            echo 'ARGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ needs.prepare.outputs.namespace }}/${{ matrix.service }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}${{ matrix.php && format('-php{0}', matrix.php) || '' }}
+
+      # provenance and sbom stay off. Buildx turns them on by default inside
+      # Actions, which makes even a single platform push an OCI index with an
+      # extra unknown/unknown manifest: the digest recorded below would then
+      # be the index digest while the size is the amd64 one. A plain image
+      # manifest keeps the two consistent.
+      #
+      # linux/amd64 only: the ionCube tarball the Dockerfiles fetch is
+      # lin_x86-64. arm64 needs the lin_aarch64 tarball and is its own change.
+      - name: build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: ${{ steps.args.outputs.value }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}${{ matrix.php }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}${{ matrix.php }}
+
+      # outputs.digest is the registry digest, the one a pull can be checked
+      # against; outputs.imageid is the local config digest and is not
+      # pullable.
+      - name: record the digest
+        env:
+          SERVICE: ${{ matrix.compose }}
+          PHP_SERIES: ${{ matrix.php }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          key=$SERVICE
+          if [ -n "$PHP_SERIES" ]; then
+            key="${SERVICE}@${PHP_SERIES}"
+          fi
+          mkdir -p digests
+          printf '%s=%s\n' "$key" "$DIGEST" > "digests/${SERVICE}${PHP_SERIES}.txt"
+
+      # One artifact per matrix entry: upload-artifact refuses several
+      # uploads under one name. The publish job merges them back.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.service }}${{ matrix.php }}
+          path: digests/*.txt
+          if-no-files-found: error
+
+  cli:
+    name: kvsctl
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+
+      - name: build the binaries
+        working-directory: cli
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p ../dist
+          for arch in amd64 arm64; do
+            for command in kvsctl kvsctl-release; do
+              CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+                -ldflags "-s -w -X main.Version=${VERSION}" \
+                -o "../dist/${command}-linux-${arch}" "./cmd/${command}"
+            done
+          done
+
+      - name: checksums
+        working-directory: dist
+        run: sha256sum kvsctl-* > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [prepare, images, cli]
+    runs-on: ubuntu-latest
+    # Protected: it is the only job that can read the signing key, so a pull
+    # request build can never reach it.
+    environment: release
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+          path: .
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: digests
+
+      # A 404 here is the first release and not an error; a manifest that
+      # does not verify is.
+      - name: the previous manifest
+        run: |
+          ./.github/scripts/verify-manifest.sh \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" \
+            previous.json
+
+      - name: the arguments kvsctl-release takes
+        env:
+          NAMESPACE: ${{ needs.prepare.outputs.namespace }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release-images.sh "$NAMESPACE" "$VERSION" digests spec
+
+      - name: the signing key
+        env:
+          KVSCTL_RELEASE_KEY: ${{ secrets.KVSCTL_RELEASE_KEY }}
+        run: |
+          umask 077
+          printf '%s' "$KVSCTL_RELEASE_KEY" > "${RUNNER_TEMP}/release.key"
+          test -s "${RUNNER_TEMP}/release.key"
+
+      - name: the bundle and the manifest
+        working-directory: cli
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -a
+          . ../.github/release.env
+          set +a
+
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          bundle="../dist/kvs-stack-${VERSION}.tar.gz"
+          images=$(cat ../spec/images.spec)
+
+          go run ./cmd/kvsctl-release bundle \
+            --repo .. --ref "$TAG" --version "$VERSION" \
+            --images "$images" --out "$bundle"
+
+          arguments=(
+            --key "${RUNNER_TEMP}/release.key"
+            --out ../dist/
+            --version "$VERSION"
+            --bundle "$bundle"
+            --bundle-url "${base}/kvs-stack-${VERSION}.tar.gz"
+            --images "$images"
+            --digests "$(cat ../spec/digests.spec)"
+            --notes-file ../RELEASE_NOTES.md
+            --notes-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+            --php-series "$(cat ../spec/php-series.spec)"
+            --php "$(cut -d, -f1 ../spec/php-series.spec)"
+            --kvs-min "$KVS_MIN"
+            --mariadb-from "$(cat ../spec/mariadb-from.spec)"
+            --compose-min "$COMPOSE_MIN"
+            --database "$DATABASE"
+            --cli "linux-amd64=${base}/kvsctl-linux-amd64,linux-arm64=${base}/kvsctl-linux-arm64"
+            --assets ../dist/
+          )
+          if [ -n "$MIN_FROM" ]; then
+            arguments+=(--min-from "$MIN_FROM")
+          fi
+          if [ "$ONE_WAY" = "true" ]; then
+            arguments+=(--one-way)
+          fi
+          if [ -f ../previous.json ]; then
+            arguments+=(--previous ../previous.json)
+          fi
+
+          go run ./cmd/kvsctl-release manifest "${arguments[@]}"
+
+      - name: forget the key
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/release.key"
+
+      # A pre-release is excluded from the latest flag, so
+      # releases/latest/download/manifest.json keeps naming the newest stable
+      # release and the stable channel never sees a candidate.
+      - name: the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          make_latest: ${{ needs.prepare.outputs.prerelease == 'false' }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/manifest.json
+            dist/manifest.json.sig
+            dist/kvs-stack-*.tar.gz
+            dist/kvsctl-linux-*
+            dist/kvsctl-release-linux-*
+            dist/SHA256SUMS

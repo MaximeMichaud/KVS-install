@@ -1,0 +1,82 @@
+name: docker images
+
+on:
+  push:
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  hadolint:
+    name: hadolint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: lint every Dockerfile
+        run: |
+          files=$(find docker -name Dockerfile | sort)
+          echo "$files"
+          # Word splitting is what passes one argument per Dockerfile.
+          # shellcheck disable=SC2086
+          docker run --rm -v "$PWD:/repo:ro" -w /repo \
+            hadolint/hadolint:v2.14.0 hadolint $files
+
+  build:
+    name: build ${{ matrix.service }}${{ matrix.php && format(' php{0}', matrix.php) || '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { service: nginx, context: docker/nginx, base: "", php: "" }
+          - { service: init, context: docker/init, base: "", php: "" }
+          - { service: manticore, context: docker/manticore, base: "", php: "" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.1" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.2" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.3" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.4" }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.1" }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.2" }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.3" }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.4" }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: build arguments
+        id: args
+        env:
+          PHP_SERIES: ${{ matrix.php }}
+          BASE_NAME: ${{ matrix.base }}
+        run: |
+          {
+            echo 'value<<ARGS_EOF'
+            if [ -n "$PHP_SERIES" ]; then
+              echo "PHP_VERSION=${PHP_SERIES}"
+              echo "PHP_BASE=$(./docker/bin/resolve-bases.sh --get "$BASE_NAME" "$PHP_SERIES")"
+            fi
+            echo 'ARGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+      - name: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64
+          push: false
+          load: false
+          provenance: false
+          sbom: false
+          build-args: ${{ steps.args.outputs.value }}
+          tags: kvs-install/${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}${{ matrix.php }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}${{ matrix.php }}

@@ -1,0 +1,43 @@
+name: kvsctl
+
+on:
+  push:
+    paths:
+      - "cli/**"
+      - ".github/workflows/go.yml"
+  pull_request:
+    paths:
+      - "cli/**"
+      - ".github/workflows/go.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+      - name: build
+        run: CGO_ENABLED=0 go build -trimpath ./...
+      # The release workflow cross compiles both commands for linux amd64 and
+      # arm64. Doing it here too means a build that only fails on another
+      # architecture fails on the pull request and not on the tag.
+      - name: build the commands for every published platform
+        run: |
+          for arch in amd64 arm64; do
+            for command in kvsctl kvsctl-release; do
+              CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+                -ldflags "-s -w -X main.Version=ci" \
+                -o "/tmp/${command}-linux-${arch}" "./cmd/${command}"
+            done
+          done
