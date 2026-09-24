@@ -197,6 +197,7 @@ if [ -n "$IMPORT_SOURCE" ]; then
 fi
 IMPORT_SITE_VERSION=""
 IMPORT_OLD_PATH=""
+IMPORT_TABLES_PREFIX=""
 IMPORT_DETECTED_DOMAIN=""
 IMPORT_DUMP_TABLES=""
 IMPORT_STAGED_DUMP=""
@@ -248,6 +249,37 @@ import_check_completed() {
     echo "Run again with VOLUME_CHOICE=1 to replace the database and import again."
     IMPORT_MODE=false
     IMPORT_SOURCE=""
+}
+
+# setup_php_config_value <key>: the value of $config['<key>'] in a KVS PHP
+# configuration file read on stdin, as KVS writes it.
+setup_php_config_value() {
+    local pattern
+
+    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]$1['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
+    sed -n -E "$pattern" | head -n 1
+}
+
+# The table prefix the site runs with: the imported site's, the one of a
+# site already in place, or the one of the KVS archive (ktvs_ for every
+# archive KVS ships). The init reads setup.php itself inside the
+# container; .env carries the value for the Manticore container and
+# reconfigure.sh. Only identifier characters pass, since it lands in SQL.
+kvs_tables_prefix() {
+    local prefix="" archive
+
+    if [ "$IMPORT_MODE" = true ] && [ -n "$IMPORT_TABLES_PREFIX" ]; then
+        prefix=$IMPORT_TABLES_PREFIX
+    elif [ -f "/var/www/$DOMAIN/admin/include/setup.php" ]; then
+        prefix=$(setup_php_config_value tables_prefix < "/var/www/$DOMAIN/admin/include/setup.php")
+    else
+        archive=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null | head -n 1)
+        if [ -n "$archive" ] && command -v unzip >/dev/null 2>&1; then
+            prefix=$(unzip -p "$archive" admin/include/setup.php 2>/dev/null | setup_php_config_value tables_prefix)
+        fi
+    fi
+    [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
+    printf '%s\n' "$prefix"
 }
 
 # A dump staged for MariaDB and never removed means an import started and
@@ -351,17 +383,18 @@ import_validate_local_materials() {
     site_info=$(import_validate_site "$IMPORT_SITE_DIR") || exit 1
     IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
     IMPORT_OLD_PATH=$(import_field "$site_info" 2)
+    IMPORT_TABLES_PREFIX=$(import_field "$site_info" 3)
     IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$IMPORT_SITE_DIR/admin/include/setup.php" project_url)")
     echo "  Site: $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
     import_check_site_links
     import_note_external_search
-    dump_info=$(import_inspect_dump "$IMPORT_DB_DUMP" ktvs_) || exit 1
+    dump_info=$(import_inspect_dump "$IMPORT_DB_DUMP" "$IMPORT_TABLES_PREFIX") || exit 1
     IMPORT_DUMP_TABLES=$(import_field "$dump_info" 1)
     dump_initial_version=$(import_field "$dump_info" 2)
     dump_statements=$(import_field "$dump_info" 3)
     dump_completed=$(import_field "$dump_info" 4)
     if [ "${IMPORT_DUMP_TABLES:-0}" -lt 1 ]; then
-        echo -e "${RED}ERROR: $IMPORT_DB_DUMP holds no CREATE TABLE for the ktvs_ tables${NC}"
+        echo -e "${RED}ERROR: $IMPORT_DB_DUMP holds no CREATE TABLE for the ${IMPORT_TABLES_PREFIX} tables${NC}"
         exit 1
     fi
     echo "  Database dump: $IMPORT_DB_DUMP ($IMPORT_DUMP_TABLES tables, INITIAL_VERSION ${dump_initial_version:-missing, recorded as $IMPORT_SITE_VERSION})"
@@ -471,6 +504,7 @@ import_inspect_archive() {
     site_info=$(import_validate_site "$peek") || { rm -rf "$peek"; exit 1; }
     IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
     IMPORT_OLD_PATH=$(import_field "$site_info" 2)
+    IMPORT_TABLES_PREFIX=$(import_field "$site_info" 3)
     IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$peek/admin/include/setup.php" project_url)")
     rm -rf "$peek"
     echo "  Archive: $IMPORT_ARCHIVE (${IMPORT_ARCHIVE_MB} MB uncompressed)"
@@ -579,10 +613,16 @@ import_inspect_remote() {
         echo -e "${RED}ERROR: the KVS version or the project path could not be read on the old server${NC}"
         exit 1
     fi
-    if [ "$prefix" != "ktvs_" ]; then
-        echo -e "${RED}ERROR: the site uses the table prefix '${prefix:-<empty>}'; the Docker init only supports ktvs_${NC}"
+    if [[ ! "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+        echo -e "${RED}ERROR: the table prefix read on the old server ('${prefix:-<empty>}') is not a usable identifier${NC}"
         exit 1
     fi
+    multi=$(import_kv "$IMPORT_REMOTE_REPORT" tables_prefix_multi)
+    if [ -n "$multi" ] && [ "$multi" != "$prefix" ]; then
+        echo -e "${RED}ERROR: the site is a clone sharing the database of another site (tables_prefix_multi '$multi' differs from tables_prefix '$prefix'); import the site that owns the database${NC}"
+        exit 1
+    fi
+    IMPORT_TABLES_PREFIX=$prefix
     if [ "$db_ok" != yes ]; then
         echo -e "${RED}ERROR: the database of the old server does not answer; fix the access there, or dump it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP${NC}"
         exit 1
@@ -2215,6 +2255,9 @@ fi
 
 echo -e "${GREEN}KVS archive found${NC}"
 
+# The table prefix reaches .env once the archive it may come from is here.
+set_env_value TABLES_PREFIX "$(kvs_tables_prefix)" || exit 1
+
 # Auto-detect IonCube encoding
 detect_ioncube
 
@@ -3236,7 +3279,7 @@ import_stage_dump() {
     fi
     IMPORT_TOKEN="$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
     echo "  Preparing the database dump for MariaDB..."
-    if ! import_prepare_dump "$IMPORT_DB_DUMP" ktvs_ "$IMPORT_SITE_VERSION" "$IMPORT_OLD_PATH" /var/www/kvs "$target" "$IMPORT_TOKEN" >/dev/null; then
+    if ! import_prepare_dump "$IMPORT_DB_DUMP" "$IMPORT_TABLES_PREFIX" "$IMPORT_SITE_VERSION" "$IMPORT_OLD_PATH" /var/www/kvs "$target" "$IMPORT_TOKEN" >/dev/null; then
         echo -e "${RED}ERROR: could not prepare $IMPORT_DB_DUMP${NC}"
         exit 1
     fi
@@ -3264,14 +3307,14 @@ import_verify_database() {
 
     [ "$IMPORT_MODE" = true ] || return 0
     marker=$(run_root_mariadb -u root "$DOMAIN" -N -e \
-        "SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';" 2>/dev/null | tr -d '\r')
+        "SELECT value FROM ${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';" 2>/dev/null | tr -d '\r')
     if [ "$marker" != "$IMPORT_TOKEN" ]; then
         echo -e "${RED}ERROR: the database import did not complete (completion marker ${marker:-missing}).${NC}"
         echo "Check: docker compose logs mariadb"
         echo "Then run the import again with VOLUME_CHOICE=1 so the partial volume is replaced."
         exit 1
     fi
-    if ! run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';"; then
+    if ! run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';"; then
         echo -e "${RED}ERROR: could not remove the import completion marker${NC}"
         exit 1
     fi
@@ -3322,7 +3365,7 @@ import_verify_database
 if [ -z "${KVS_ADMIN_PASSWORD:-}" ]; then
     DEFAULT_ADMIN_COUNT=$(
         run_root_mariadb -u root "$DOMAIN" -N -e \
-            "SELECT COUNT(*) FROM ktvs_admin_users WHERE user_id=1 AND login='admin' AND pass=MD5(CONCAT('pass:',MD5('123')));" \
+            "SELECT COUNT(*) FROM ${TABLES_PREFIX:-ktvs_}admin_users WHERE user_id=1 AND login='admin' AND pass=MD5(CONCAT('pass:',MD5('123')));" \
             2>/dev/null || echo 0
     )
     if [ "$DEFAULT_ADMIN_COUNT" -gt 0 ]; then

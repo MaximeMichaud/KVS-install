@@ -54,11 +54,13 @@ import_url_domain() {
 }
 
 # import_validate_site <site directory>
-# Prints "<KVS version><TAB><project_path>" for a directory that holds a
-# KVS site the Docker init can adopt; explains the refusal on stderr.
+# Prints "<KVS version><TAB><project_path><TAB><table prefix>" for a
+# directory that holds a KVS site the Docker init can adopt; explains the
+# refusal on stderr. The prefix is whatever the site was installed with,
+# limited to identifier characters since it lands inside SQL.
 import_validate_site() {
     local dir="$1"
-    local setup prefix path version
+    local setup prefix multi path version
 
     if [ ! -d "$dir" ]; then
         echo "ERROR: IMPORT_SITE_DIR is not a directory: $dir" >&2
@@ -74,8 +76,15 @@ import_validate_site() {
         return 1
     fi
     prefix=$(import_read_php_config_value "$setup" tables_prefix)
-    if [ "$prefix" != "ktvs_" ]; then
-        echo "ERROR: the site uses the table prefix '${prefix:-<empty>}'; the Docker init only supports ktvs_" >&2
+    if [[ ! "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+        echo "ERROR: the site's table prefix '${prefix:-<empty>}' (tables_prefix in $setup) is not a usable identifier" >&2
+        return 1
+    fi
+    # A clone shares its database with another site under a second prefix
+    # (KVS is_clone_db); the stack hosts one site per database.
+    multi=$(import_read_php_config_value "$setup" tables_prefix_multi)
+    if [ -n "$multi" ] && [ "$multi" != "$prefix" ]; then
+        echo "ERROR: the site is a clone sharing the database of another site (tables_prefix_multi '$multi' differs from tables_prefix '$prefix'); import the site that owns the database" >&2
         return 1
     fi
     path=$(import_read_php_config_value "$setup" project_path)
@@ -88,7 +97,7 @@ import_validate_site() {
         echo "ERROR: the KVS version was not found in $dir/admin/include/version.php" >&2
         return 1
     fi
-    printf '%s\t%s\n' "$version" "$path"
+    printf '%s\t%s\t%s\n' "$version" "$path" "$prefix"
 }
 
 # import_field <tab separated line> <index from 1>

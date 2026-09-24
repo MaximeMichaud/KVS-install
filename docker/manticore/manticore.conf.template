@@ -34,18 +34,18 @@ source ${DOMAIN_SAFE}_videos
     sql_query_pre = SET CHARACTER SET utf8
 
     sql_query =  SELECT video_id, video_id AS video_id_, title, description, duration, comments_count, favourites_count, video_viewed, rating/rating_amount as rating, resolution_type, format_video_group_id, UNIX_TIMESTAMP(post_date) as post_date, \
-                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_tags.tag)) FROM ktvs_tags \
-                    JOIN ktvs_tags_videos ON (ktvs_tags_videos.tag_id = ktvs_tags.tag_id) \
-                    WHERE ktvs_tags_videos.tag_id = ktvs_tags.tag_id AND ktvs_tags_videos.video_id=ktvs_videos.video_id) AS `tags`, \
-                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_categories.title,ktvs_categories.synonyms)) FROM ktvs_categories \
-                    JOIN ktvs_categories_videos ON (ktvs_categories_videos.category_id = ktvs_categories.category_id) \
-                    WHERE ktvs_categories_videos.category_id = ktvs_categories.category_id AND ktvs_categories_videos.video_id=ktvs_videos.video_id) AS `categories`, \
-                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_models.title)) FROM ktvs_models \
-                    JOIN ktvs_models_videos ON (ktvs_models_videos.model_id = ktvs_models.model_id) \
-                    WHERE ktvs_models_videos.model_id = ktvs_models.model_id AND ktvs_models_videos.video_id=ktvs_videos.video_id) AS `models`, \
-                    (SELECT CONCAT_WS(',',title) FROM ktvs_content_sources WHERE content_source_id=ktvs_videos.content_source_id) AS content_source_title, \
-                    (SELECT CONCAT_WS(',',title) FROM ktvs_dvds WHERE dvd_id=ktvs_videos.dvd_id) AS dvd_title \
-                FROM ktvs_videos \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',${TABLES_PREFIX}tags.tag)) FROM ${TABLES_PREFIX}tags \
+                    JOIN ${TABLES_PREFIX}tags_videos ON (${TABLES_PREFIX}tags_videos.tag_id = ${TABLES_PREFIX}tags.tag_id) \
+                    WHERE ${TABLES_PREFIX}tags_videos.tag_id = ${TABLES_PREFIX}tags.tag_id AND ${TABLES_PREFIX}tags_videos.video_id=${TABLES_PREFIX}videos.video_id) AS `tags`, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',${TABLES_PREFIX}categories.title,${TABLES_PREFIX}categories.synonyms)) FROM ${TABLES_PREFIX}categories \
+                    JOIN ${TABLES_PREFIX}categories_videos ON (${TABLES_PREFIX}categories_videos.category_id = ${TABLES_PREFIX}categories.category_id) \
+                    WHERE ${TABLES_PREFIX}categories_videos.category_id = ${TABLES_PREFIX}categories.category_id AND ${TABLES_PREFIX}categories_videos.video_id=${TABLES_PREFIX}videos.video_id) AS `categories`, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',${TABLES_PREFIX}models.title)) FROM ${TABLES_PREFIX}models \
+                    JOIN ${TABLES_PREFIX}models_videos ON (${TABLES_PREFIX}models_videos.model_id = ${TABLES_PREFIX}models.model_id) \
+                    WHERE ${TABLES_PREFIX}models_videos.model_id = ${TABLES_PREFIX}models.model_id AND ${TABLES_PREFIX}models_videos.video_id=${TABLES_PREFIX}videos.video_id) AS `models`, \
+                    (SELECT CONCAT_WS(',',title) FROM ${TABLES_PREFIX}content_sources WHERE content_source_id=${TABLES_PREFIX}videos.content_source_id) AS content_source_title, \
+                    (SELECT CONCAT_WS(',',title) FROM ${TABLES_PREFIX}dvds WHERE dvd_id=${TABLES_PREFIX}videos.dvd_id) AS dvd_title \
+                FROM ${TABLES_PREFIX}videos \
                 WHERE status_id=1 AND relative_post_date<10000 AND post_date<=now() AND video_id BETWEEN $start AND $end
 
     sql_attr_timestamp = post_date
@@ -60,9 +60,9 @@ source ${DOMAIN_SAFE}_videos
 
     sql_attr_multi = uint category_id_general FROM query; \
                      SELECT video_id, category_id \
-                     FROM ktvs_categories_videos
+                     FROM ${TABLES_PREFIX}categories_videos
 
-    sql_query_range = SELECT MIN(video_id),MAX(video_id) FROM ktvs_videos
+    sql_query_range = SELECT MIN(video_id),MAX(video_id) FROM ${TABLES_PREFIX}videos
     sql_range_step = 50000
 }
 
@@ -92,17 +92,17 @@ source ${DOMAIN_SAFE}_albums
     sql_query_pre = SET CHARACTER SET utf8
 
     sql_query = SELECT album_id, album_id AS album_id_, title, description, photos_amount, comments_count, favourites_count, album_viewed, rating/rating_amount as rating, UNIX_TIMESTAMP(post_date) as post_date, \
-                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_tags.tag)) FROM ktvs_tags \
-                    JOIN ktvs_tags_albums ON (ktvs_tags_albums.tag_id = ktvs_tags.tag_id) \
-                    WHERE ktvs_tags_albums.tag_id = ktvs_tags.tag_id AND ktvs_tags_albums.album_id=ktvs_albums.album_id) AS `tags`, \
-                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_categories.title,ktvs_categories.synonyms)) FROM ktvs_categories \
-                    JOIN ktvs_categories_albums ON (ktvs_categories_albums.category_id = ktvs_categories.category_id) \
-                    WHERE ktvs_categories_albums.category_id = ktvs_categories.category_id AND ktvs_categories_albums.album_id=ktvs_albums.album_id) AS `categories`, \
-                    (SELECT GROUP_CONCAT(CONCAT_WS(',',ktvs_models.title)) FROM ktvs_models \
-                    JOIN ktvs_models_albums ON (ktvs_models_albums.model_id = ktvs_models.model_id) \
-                    WHERE ktvs_models_albums.model_id = ktvs_models.model_id AND ktvs_models_albums.album_id=ktvs_albums.album_id) AS `models`, \
-                    (SELECT CONCAT_WS(',',title) FROM ktvs_content_sources WHERE content_source_id=ktvs_albums.content_source_id) AS content_source_title \
-                FROM ktvs_albums \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',${TABLES_PREFIX}tags.tag)) FROM ${TABLES_PREFIX}tags \
+                    JOIN ${TABLES_PREFIX}tags_albums ON (${TABLES_PREFIX}tags_albums.tag_id = ${TABLES_PREFIX}tags.tag_id) \
+                    WHERE ${TABLES_PREFIX}tags_albums.tag_id = ${TABLES_PREFIX}tags.tag_id AND ${TABLES_PREFIX}tags_albums.album_id=${TABLES_PREFIX}albums.album_id) AS `tags`, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',${TABLES_PREFIX}categories.title,${TABLES_PREFIX}categories.synonyms)) FROM ${TABLES_PREFIX}categories \
+                    JOIN ${TABLES_PREFIX}categories_albums ON (${TABLES_PREFIX}categories_albums.category_id = ${TABLES_PREFIX}categories.category_id) \
+                    WHERE ${TABLES_PREFIX}categories_albums.category_id = ${TABLES_PREFIX}categories.category_id AND ${TABLES_PREFIX}categories_albums.album_id=${TABLES_PREFIX}albums.album_id) AS `categories`, \
+                    (SELECT GROUP_CONCAT(CONCAT_WS(',',${TABLES_PREFIX}models.title)) FROM ${TABLES_PREFIX}models \
+                    JOIN ${TABLES_PREFIX}models_albums ON (${TABLES_PREFIX}models_albums.model_id = ${TABLES_PREFIX}models.model_id) \
+                    WHERE ${TABLES_PREFIX}models_albums.model_id = ${TABLES_PREFIX}models.model_id AND ${TABLES_PREFIX}models_albums.album_id=${TABLES_PREFIX}albums.album_id) AS `models`, \
+                    (SELECT CONCAT_WS(',',title) FROM ${TABLES_PREFIX}content_sources WHERE content_source_id=${TABLES_PREFIX}albums.content_source_id) AS content_source_title \
+                FROM ${TABLES_PREFIX}albums \
                 WHERE status_id=1 AND relative_post_date<10000 AND post_date<=now() AND album_id BETWEEN $start AND $end
 
     sql_attr_timestamp = post_date
@@ -115,9 +115,9 @@ source ${DOMAIN_SAFE}_albums
 
     sql_attr_multi = uint category_id_general FROM query; \
                      SELECT album_id, category_id \
-                     FROM ktvs_categories_albums
+                     FROM ${TABLES_PREFIX}categories_albums
 
-    sql_query_range = SELECT MIN(album_id),MAX(album_id) FROM ktvs_albums
+    sql_query_range = SELECT MIN(album_id),MAX(album_id) FROM ${TABLES_PREFIX}albums
     sql_range_step = 50000
 }
 
@@ -147,7 +147,7 @@ source ${DOMAIN_SAFE}_searches
     sql_query_pre = SET CHARACTER SET utf8
 
     sql_query = SELECT search_id, query, query_length, query_results_videos, query_results_albums, query_results_total, amount, added_date \
-                FROM ktvs_stats_search where status_id=1
+                FROM ${TABLES_PREFIX}stats_search where status_id=1
 
     sql_attr_timestamp = added_date
     sql_attr_bigint = query_length

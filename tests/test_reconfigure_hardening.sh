@@ -479,9 +479,9 @@ case "${1:-}" in
             printf ' %q' "$@" >> "$MOCK_STATE/mariadb.argv"
             printf '\n' >> "$MOCK_STATE/mariadb.argv"
 
-            if [[ "$sql" == *'LOCK TABLES ktvs_admin_servers WRITE'* &&
+            if [[ "$sql" == *"LOCK TABLES ${MOCK_TABLES_PREFIX:-ktvs_}admin_servers WRITE"* &&
                 "$sql" == *'@kvs_guard_ok'* ]]; then
-                if [[ "$sql" == *'SET UPDATE ktvs_admin_servers'* ||
+                if [[ "$sql" == *"SET UPDATE ${MOCK_TABLES_PREFIX:-ktvs_}admin_servers"* ||
                     "$sql" == *'WHERE ;'* ]]; then
                     exit 89
                 fi
@@ -526,7 +526,7 @@ case "${1:-}" in
                 cat "${MOCK_STATE:?}/db-current"
                 exit "${MOCK_SNAPSHOT_STATUS:-0}"
             fi
-            if [[ "$sql" == *'UPDATE ktvs_admin_servers AS target'* &&
+            if [[ "$sql" == *"UPDATE ${MOCK_TABLES_PREFIX:-ktvs_}admin_servers AS target"* &&
                 "$sql" == *'guard.total_count='* ]]; then
                 if [ -n "${MOCK_REQUIRE_ROLLBACK_QUERY_BYTES:-}" ] &&
                     [ "$query_bytes" -le "$MOCK_REQUIRE_ROLLBACK_QUERY_BYTES" ]; then
@@ -816,6 +816,32 @@ assert_not_contains "$LAST_DIR/state/mariadb.argv" \
     "an UPDATE statement appeared in MariaDB process arguments"
 assert_not_contains "$LAST_DIR/docker.calls" 'test-password' \
     "the database password was written to the mock call log"
+
+# The table prefix of the site comes from .env: with another prefix the
+# same statements run against that prefix (the mock only recognizes the
+# prefix it is told), and a prefix that is not an identifier stops the run
+# before anything is touched.
+create_fixture prefix-kvs7
+set_env_value "$TEST_ROOT/prefix-kvs7" COMPOSE_PROFILES \
+    'dragonfly,direct-tls,dragonfly'
+set_env_value "$TEST_ROOT/prefix-kvs7" HTTPS_PORT '127.0.0.1:18443'
+printf 'TABLES_PREFIX=kvs7_\n' >> "$TEST_ROOT/prefix-kvs7/.env"
+run_case prefix-kvs7 MOCK_TABLES_PREFIX=kvs7_
+assert_success "reconfiguration of a site with the kvs7_ table prefix"
+prefixed_queries=$(grep -c '^mariadb-query' "$LAST_DIR/docker.calls" || true)
+default_queries=$(grep -c '^mariadb-query' "$TEST_ROOT/public-success/docker.calls" || true)
+assert_gt 0 "$prefixed_queries" "no statement reached the database with the kvs7_ prefix"
+assert_eq "$default_queries" "$prefixed_queries" \
+    "the kvs7_ prefix changed the statements sent to the database"
+create_fixture prefix-invalid
+printf 'TABLES_PREFIX=kt-vs\n' >> "$TEST_ROOT/prefix-invalid/.env"
+run_case prefix-invalid
+assert_failure "reconfiguration with a table prefix that is not an identifier"
+assert_contains "$LAST_DIR/output.log" \
+    'TABLES_PREFIX in .env must be 1 to 32 identifier characters' \
+    "the invalid prefix was not explained"
+assert_not_contains "$LAST_DIR/docker.calls" 'mariadb-query' \
+    "an invalid prefix still reached the database"
 
 # Atomic .env replacement must not depend on append permission on the old
 # inode. This reproduces the former partial-write path with a mode-0444 file.

@@ -4,6 +4,7 @@ set -e
 # Configure KVS system settings (GeoIP, nginx, memory limits)
 # shellcheck disable=SC1091
 source /init/lib/common.sh
+TABLES_PREFIX=$(get_tables_prefix)
 
 # Configure GeoIP database if available
 GEOIP_DB=""
@@ -31,7 +32,7 @@ GEOIP_UPDATE_CLAUSE=", '\$.geoip_database', '$GEOIP_DB'"
 
 if SQL_OUTPUT=$(MYSQL_PWD="$MARIADB_PASSWORD" \
     mariadb -h mariadb -u "$DOMAIN" "$DOMAIN" 2>&1 <<-EOSQL
-	INSERT INTO ktvs_settings (section, satellite_prefix, value, added_date, version_control)
+	INSERT INTO ${TABLES_PREFIX}settings (section, satellite_prefix, value, added_date, version_control)
 	VALUES (
 		'system',
 		'',

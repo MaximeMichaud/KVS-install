@@ -359,6 +359,7 @@ KVS_ARCHIVE_DIR=${TEST_ARCHIVE_DIR:-}
 log_info() { printf '[INFO] %s\n' "$1"; }
 log_warn() { printf '[WARN] %s\n' "$1"; }
 log_error() { printf '[ERROR] %s\n' "$1"; }
+get_tables_prefix() { printf '%s\n' "${TEST_TABLES_PREFIX:-ktvs_}"; }
 db_query() {
     if [[ "$1" == *"INITIAL_VERSION"* ]]; then
         printf '%s\n' "${TEST_INITIAL_VERSION:-7.0.2}"

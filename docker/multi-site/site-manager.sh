@@ -140,6 +140,31 @@ domain_to_safe() {
     printf '%s\n' "$safe"
 }
 
+# The table prefix a site runs with, for the scripts outside the container:
+# the value the site's .env carries, ktvs_ until one is written.
+site_tables_prefix() {
+    local prefix
+
+    prefix=$(sed -n 's/^TABLES_PREFIX=//p' .env 2>/dev/null | head -n 1)
+    [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
+    printf '%s\n' "$prefix"
+}
+
+# The table prefix written in the setup.php of the KVS archive a new site
+# starts from (ktvs_ for every archive KVS ships).
+archive_tables_prefix() {
+    local archive pattern prefix
+
+    archive=$(compgen -G "${KVS_ARCHIVE_DIR}/KVS_*.zip" | head -n 1)
+    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
+    prefix=""
+    if [ -n "$archive" ] && command -v unzip >/dev/null 2>&1; then
+        prefix=$(unzip -p "$archive" admin/include/setup.php 2>/dev/null | sed -n -E "$pattern" | head -n 1)
+    fi
+    [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
+    printf '%s\n' "$prefix"
+}
+
 ensure_site_prefix_available() {
     local requested_domain="$1"
     local requested_prefix="$2"
@@ -469,7 +494,11 @@ add_site() {
     chown 1000:1000 "${webroot}"
     log_success "Created webroot: ${webroot}"
 
-    # Generate .env file
+    # Generate .env file. The table prefix is the one of the archive's
+    # setup.php (ktvs_ for every archive KVS ships); the init reads it from
+    # the site itself, .env carries it for the scripts outside the container.
+    local tables_prefix
+    tables_prefix=$(archive_tables_prefix)
     (
         umask 077
         cat > "${site_dir}/.env" << EOF
@@ -478,6 +507,7 @@ DOMAIN=${domain}
 SITE_PREFIX=${site_prefix}
 COMPOSE_PROJECT_NAME=${site_prefix}
 USE_WWW=false
+TABLES_PREFIX=${tables_prefix}
 
 # Database
 MARIADB_VERSION=11.8
@@ -565,9 +595,9 @@ start_site() {
     fi
     docker compose --profile setup run --rm --no-deps phpmyadmin-init
     if [ -z "$admin_password" ]; then
-        if ! admin_table_count=$(docker compose exec -T mariadb sh -c '
+        if ! admin_table_count=$(docker compose exec -T -e "TABLES_PREFIX=$(site_tables_prefix)" mariadb sh -c '
             MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N -e \
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"$MARIADB_DATABASE\" AND table_name=\"ktvs_admin_users\";"
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"$MARIADB_DATABASE\" AND table_name=\"${TABLES_PREFIX}admin_users\";"
         ' 2>/dev/null); then
             log_error "Could not inspect the KVS admin account before initialization"
             return 1
@@ -581,9 +611,9 @@ start_site() {
         if [ "$admin_table_count" -eq 0 ]; then
             generated_admin_password=true
         else
-            if ! default_admin_count=$(docker compose exec -T mariadb sh -c '
+            if ! default_admin_count=$(docker compose exec -T -e "TABLES_PREFIX=$(site_tables_prefix)" mariadb sh -c '
                 MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N "$MARIADB_DATABASE" -e \
-                    "SELECT COUNT(*) FROM ktvs_admin_users WHERE user_id=1 AND login=\"admin\" AND pass=MD5(CONCAT(\"pass:\",MD5(\"123\")));"
+                    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_users WHERE user_id=1 AND login=\"admin\" AND pass=MD5(CONCAT(\"pass:\",MD5(\"123\")));"
             ' 2>/dev/null); then
                 log_error "Could not verify the KVS admin account before initialization"
                 return 1

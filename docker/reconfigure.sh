@@ -66,6 +66,12 @@ fi
 # shellcheck source=/dev/null
 source .env
 DOMAIN="${DOMAIN:-}"
+# The table prefix of the site, as the setup wrote it from setup.php.
+TABLES_PREFIX="${TABLES_PREFIX:-ktvs_}"
+if [[ ! "$TABLES_PREFIX" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+    echo "ERROR: TABLES_PREFIX in .env must be 1 to 32 identifier characters, got '$TABLES_PREFIX'" >&2
+    exit 1
+fi
 
 set_env_value() {
     local key="$1"
@@ -407,7 +413,7 @@ capture_server_state() {
             IF(streaming_skip_ssl_check IS NULL, 1, 0), '|',
             COALESCE(CAST(streaming_skip_ssl_check AS CHAR), '')
         )
-        FROM ktvs_admin_servers
+        FROM ${TABLES_PREFIX}admin_servers
         ORDER BY server_id;"
 }
 
@@ -745,11 +751,11 @@ restore_server_state() {
         unset 'expected_rows[$server_id]'
     done <<< "$target_snapshot"
     [ "$count" -gt 0 ] && [ "${#expected_rows[@]}" -eq 0 ] || return 1
-    sql="UPDATE ktvs_admin_servers AS target
+    sql="UPDATE ${TABLES_PREFIX}admin_servers AS target
         JOIN (
             SELECT COUNT(*) AS total_count,
                 COALESCE(SUM(CASE WHEN (${expected_conditions}) THEN 1 ELSE 0 END), 0) AS matching_count
-            FROM ktvs_admin_servers
+            FROM ${TABLES_PREFIX}admin_servers
         ) AS guard
             ON guard.total_count=${count} AND guard.matching_count=${count}
         SET target.urls = CASE target.server_id${url_cases} ELSE target.urls END,
@@ -923,7 +929,7 @@ run_application_update_query() {
     local update_result
 
     if [ "$MODE" != multi ]; then
-        run_query "UPDATE ktvs_admin_servers SET ${set_clause} WHERE ${where_clause};"
+        run_query "UPDATE ${TABLES_PREFIX}admin_servers SET ${set_clause} WHERE ${where_clause};"
         return $?
     fi
     if ! current_state=$(capture_server_state) ||
@@ -936,7 +942,7 @@ run_application_update_query() {
         return 1
     fi
     update_result=$(run_scalar_query "
-        LOCK TABLES ktvs_admin_servers WRITE;
+        LOCK TABLES ${TABLES_PREFIX}admin_servers WRITE;
         SET @kvs_guard_ok = (
             SELECT IF(
                 COUNT(*)=${SERVER_STATE_ROWS} AND
@@ -944,9 +950,9 @@ run_application_update_query() {
                 1,
                 0
             )
-            FROM ktvs_admin_servers
+            FROM ${TABLES_PREFIX}admin_servers
         );
-        UPDATE ktvs_admin_servers
+        UPDATE ${TABLES_PREFIX}admin_servers
         SET ${set_clause}
         WHERE (${where_clause}) AND @kvs_guard_ok=1;
         SELECT @kvs_guard_ok;
@@ -957,7 +963,7 @@ run_application_update_query() {
             IF(streaming_skip_ssl_check IS NULL, 1, 0), '|',
             COALESCE(CAST(streaming_skip_ssl_check AS CHAR), '')
         )
-        FROM ktvs_admin_servers
+        FROM ${TABLES_PREFIX}admin_servers
         ORDER BY server_id;
         UNLOCK TABLES;
     ") || return 1
@@ -1375,7 +1381,7 @@ elif [ "$SSL_PROVIDER" = "selfsigned" ]; then
         echo -e "${RED}ERROR: Nginx could not load the self-signed certificate${NC}"
         exit 1
     fi
-    run_query "UPDATE ktvs_admin_servers SET streaming_skip_ssl_check = 1;"
+    run_query "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = 1;"
     echo -e "${GREEN}Self-signed TLS configured and SSL verification disabled${NC}"
 else
     if ! docker compose up -d --force-recreate nginx acme >/dev/null; then
@@ -1383,7 +1389,7 @@ else
         exit 1
     fi
     issue_and_install_public_certificate || exit 1
-    run_query "UPDATE ktvs_admin_servers SET streaming_skip_ssl_check = 0;"
+    run_query "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = 0;"
     echo -e "${GREEN}Public certificate installed and SSL verification enabled${NC}"
 fi
 
@@ -1481,11 +1487,11 @@ fi
 echo ""
 echo "Current settings:"
 if ! MATCHING_URL_COUNT=$(run_scalar_query \
-    "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls LIKE '${SERVER_URL}/contents/%';") ||
+    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls LIKE '${SERVER_URL}/contents/%';") ||
     ! STALE_PROJECT_URL_COUNT=$(run_scalar_query \
-        "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls REGEXP '^https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/' AND urls NOT LIKE '${SERVER_URL}/contents/%';") ||
+        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '^https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/' AND urls NOT LIKE '${SERVER_URL}/contents/%';") ||
     ! SSL_MISMATCH_COUNT=$(run_scalar_query \
-        "SELECT COUNT(*) FROM ktvs_admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${EXPECTED_SSL_SKIP};"); then
+        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${EXPECTED_SSL_SKIP};"); then
     echo -e "${RED}ERROR: Could not verify the reconfigured database state${NC}"
     exit 1
 fi
@@ -1501,7 +1507,7 @@ if [ "$MATCHING_URL_COUNT" -lt 1 ] || [ "$STALE_PROJECT_URL_COUNT" -ne 0 ] ||
     exit 1
 fi
 if ! run_query \
-    "SELECT server_id, urls, streaming_skip_ssl_check FROM ktvs_admin_servers;"; then
+    "SELECT server_id, urls, streaming_skip_ssl_check FROM ${TABLES_PREFIX}admin_servers;"; then
     echo -e "${RED}ERROR: Could not verify the reconfigured server state${NC}"
     exit 1
 fi

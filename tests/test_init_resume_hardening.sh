@@ -46,6 +46,7 @@ KVS_ARCHIVE_DIR=${TEST_ARCHIVE_DIR:-}
 log_info() { printf '[INFO] %s\n' "$1"; }
 log_warn() { printf '[WARN] %s\n' "$1"; }
 log_error() { printf '[ERROR] %s\n' "$1"; }
+get_tables_prefix() { printf '%s\n' "${TEST_TABLES_PREFIX:-ktvs_}"; }
 
 kvs_is_installed() {
     [ -f "$KVS_PATH/admin/include/setup.php" ]
@@ -79,6 +80,7 @@ CONFIG_STATE=${TEST_CONFIG_STATE:?}
 log_info() { printf '[INFO] %s\n' "$1"; }
 log_warn() { printf '[WARN] %s\n' "$1"; }
 log_error() { printf '[ERROR] %s\n' "$1"; }
+get_tables_prefix() { printf '%s\n' "${TEST_TABLES_PREFIX:-ktvs_}"; }
 
 get_project_url() {
     local host="$DOMAIN"

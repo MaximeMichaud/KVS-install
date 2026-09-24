@@ -529,7 +529,7 @@ main() {
     local dir="${2:-/detected/site}"
     case "$command" in
         detect)
-            printf 'kvs_export=1\nsite_dir=%s\nkvs_version=7.0.2\ndomain=old.example.com\nproject_path=%s\ncompressor=gzip\nrsync=yes\n' "$dir" "$dir"
+            printf 'kvs_export=1\nsite_dir=%s\nkvs_version=7.0.2\ndomain=old.example.com\nproject_path=%s\ntables_prefix=ktvs_\ncompressor=gzip\nrsync=yes\n' "$dir" "$dir"
             ;;
         dump)
             printf 'CREATE TABLE `ktvs_options` (id int);\n-- Dump completed on now\n' | gzip -c
