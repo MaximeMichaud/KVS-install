@@ -1206,8 +1206,54 @@ test_network_lookups_may_fail_without_ending_the_setup() {
     pass "network lookups may fail without ending the setup"
 }
 
+test_remote_site_size_bounds_warn_instead_of_blocking() {
+    local setup="$REPO_ROOT/docker/setup.sh"
+    local lib="$TMP_ROOT/size-functions.sh"
+    local report="$TMP_ROOT/size-report.txt"
+    local avail
+
+    # shellcheck disable=SC2016  # Literal setup.sh lines.
+    grep -Fq 'import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$IMPORT_SIZE_TIMEOUT"' "$setup" ||
+        fail "setup.sh must hand IMPORT_SIZE_TIMEOUT to the remote detection"
+    # shellcheck disable=SC2016  # Literal setup.sh line.
+    grep -Fq 'IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"' "$setup" || fail "the size budget must default to 300 s"
+    # The two helpers of setup.sh, on fake reports, against the real free
+    # space of the test directory.
+    awk '/^import_remote_size_text\(\) \{/,/^\}/; /^import_remote_free_space_check\(\) \{/,/^\}/' "$setup" > "$lib"
+    avail=$(df -Pm "$TMP_ROOT" | awk 'NR==2 {print $4}')
+    [[ "$avail" =~ ^[0-9]+$ ]] || fail "the free space of $TMP_ROOT must be readable"
+    (
+        # shellcheck disable=SC2034  # Read by the sourced helpers.
+        RED="" YELLOW="" NC=""
+        # shellcheck source=/dev/null
+        source "$REPO_ROOT/docker/lib/import.sh"
+        # shellcheck source=/dev/null
+        source "$lib"
+        printf 'site_size_status=exact\nsite_size_mb=1\ndb_size_mb=1\nsite_fs_used_mb=%s\n' "$((avail * 3))" > "$report"
+        [ "$(import_remote_size_text "$report")" = "1 MB" ] || exit 1
+        import_remote_free_space_check "$report" "$TMP_ROOT" > /dev/null || exit 2
+        # An exact size that does not fit stops the import.
+        printf 'site_size_status=exact\nsite_size_mb=%s\ndb_size_mb=1\nsite_fs_used_mb=%s\n' "$((avail * 3))" "$((avail * 3))" > "$report"
+        out=$(import_remote_free_space_check "$report" "$TMP_ROOT") && exit 3
+        [[ "$out" == *"not enough free space"* ]] || exit 4
+        # Cut short, the upper bound does not fit: a warning, not a stop.
+        printf 'site_size_status=incomplete\nsite_size_mb=1\nsite_size_entries=3\nsite_size_entries_total=9\nsite_size_seconds=300\ndb_size_mb=1\nsite_fs_used_mb=%s\n' "$((avail * 3))" > "$report"
+        out=$(import_remote_free_space_check "$report" "$TMP_ROOT") || exit 5
+        [[ "$out" == *"not known exactly"* ]] || exit 6
+        [ "$(import_remote_size_text "$report")" = "at least 1 MB (3 of 9 entries measured in 300 s), at most $((avail * 3)) MB (the filesystem usage)" ] || exit 7
+        # Skipped, with an upper bound that fits: nothing to say.
+        printf 'site_size_status=skipped\nsite_size_mb=0\ndb_size_mb=1\nsite_fs_used_mb=1\n' > "$report"
+        out=$(import_remote_free_space_check "$report" "$TMP_ROOT") || exit 8
+        [ -z "$out" ] || exit 9
+        [ "$(import_remote_size_text "$report")" = "not measured, at most 1 MB (the filesystem usage)" ] || exit 10
+        exit 0
+    ) || fail "the remote site size bounds must warn instead of blocking (case $?)"
+    pass "remote site size bounds warn instead of blocking the import"
+}
+
 test_help_is_side_effect_free_without_root
 test_network_lookups_may_fail_without_ending_the_setup
+test_remote_site_size_bounds_warn_instead_of_blocking
 test_root_guard_precedes_logs_and_preflight
 test_secure_logs_env_and_headless_overrides
 test_headless_override_validation

@@ -69,6 +69,10 @@ ENVIRONMENT VARIABLES:
                           IMPORT_SSH_KEY (identity file). Headless runs need
                           key authentication, and IMPORT_SSH_ACCEPT_NEW=y to
                           trust a host key that is not in known_hosts yet.
+    IMPORT_SIZE_TIMEOUT=S Seconds the old server spends measuring the site
+                          size (300); past that the import goes on with what
+                          was counted and the space used on the old server's
+                          filesystem as the upper bound. 0 measures it all.
 
 EXAMPLES:
     # Production installation
@@ -170,6 +174,7 @@ IMPORT_REMOTE_USER="${IMPORT_REMOTE_USER:-root}"
 IMPORT_REMOTE_DIR="${IMPORT_REMOTE_DIR:-}"
 IMPORT_SSH_KEY="${IMPORT_SSH_KEY:-}"
 IMPORT_SSH_ACCEPT_NEW="${IMPORT_SSH_ACCEPT_NEW:-}"
+IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
 IMPORT_CHOICE="${IMPORT_CHOICE:-}"
 IMPORT_SOURCES_GIVEN=0
 if [ -n "$IMPORT_ARCHIVE" ]; then
@@ -524,6 +529,64 @@ import_inspect_archive() {
     fi
 }
 
+# import_remote_size_text <report>: the site size for the summary. The
+# exporter measures it within IMPORT_SIZE_TIMEOUT seconds; past that the
+# report carries what was counted and the usage of the filesystem holding
+# the site, the bounds shown here.
+import_remote_size_text() {
+    local report="$1"
+    local status size used
+
+    status=$(import_kv "$report" site_size_status)
+    size=$(import_kv "$report" site_size_mb)
+    used=$(import_kv "$report" site_fs_used_mb)
+    case "$status" in
+        exact|"")
+            echo "${size:-?} MB"
+            ;;
+        incomplete)
+            echo "at least ${size:-0} MB ($(import_kv "$report" site_size_entries) of $(import_kv "$report" site_size_entries_total) entries measured in $(import_kv "$report" site_size_seconds) s), at most ${used:-?} MB (the filesystem usage)"
+            ;;
+        *)
+            echo "not measured, at most ${used:-?} MB (the filesystem usage)"
+            ;;
+    esac
+}
+
+# import_remote_free_space_check <report> <destination>
+# The site and its dump must fit under the destination. An exact size that
+# does not fit stops the import. A size cut short or skipped is checked
+# through its upper bound, the usage of the old server's filesystem: when
+# even that fits, fine; otherwise nothing is known, so the import goes on
+# with a warning rather than refusing a site that may well fit.
+import_remote_free_space_check() {
+    local report="$1"
+    local destination="$2"
+    local status size db used
+
+    status=$(import_kv "$report" site_size_status)
+    size=$(import_kv "$report" site_size_mb)
+    db=$(import_kv "$report" db_size_mb)
+    used=$(import_kv "$report" site_fs_used_mb)
+    [[ "$size" =~ ^[0-9]+$ ]] || size=0
+    [[ "$db" =~ ^[0-9]+$ ]] || db=0
+    case "$status" in
+        exact|"")
+            if ! import_free_space_mb_ok "$((size + db))" "$destination"; then
+                echo -e "${RED}ERROR: not enough free space for the site and its dump under $destination${NC}"
+                return 1
+            fi
+            ;;
+        *)
+            if [[ "$used" =~ ^[0-9]+$ ]] && import_free_space_mb_ok "$((used + db))" "$destination"; then
+                return 0
+            fi
+            echo -e "${YELLOW}The site size is not known exactly ($(import_remote_size_text "$report")), so the free space under $destination is not checked against it. IMPORT_SIZE_TIMEOUT=0 measures the whole site.${NC}"
+            ;;
+    esac
+    return 0
+}
+
 # The old server answers through kvs-export.sh, piped over one SSH
 # connection: what it holds, whether its database answers, what tools it
 # has. Nothing is written or installed there.
@@ -538,6 +601,10 @@ import_inspect_remote() {
         batch=yes
     fi
     import_ensure_tool ssh || exit 1
+    if [[ ! "$IMPORT_SIZE_TIMEOUT" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}ERROR: IMPORT_SIZE_TIMEOUT must be a number of seconds (0 measures the whole site), got '$IMPORT_SIZE_TIMEOUT'${NC}"
+        exit 1
+    fi
     case "${IMPORT_SSH_ACCEPT_NEW,,}" in
         y|yes|true) accept_new=yes ;;
         *) accept_new=no ;;
@@ -552,8 +619,12 @@ import_inspect_remote() {
     IMPORT_REMOTE_REPORT="$LOG_DIR/import-remote.txt"
     rm -f "$IMPORT_REMOTE_REPORT"
     while :; do
-        echo "  Looking for the site on $IMPORT_SSH_TARGET..."
-        if import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT"; then
+        if [ "$IMPORT_SIZE_TIMEOUT" -gt 0 ]; then
+            echo "  Looking for the site on $IMPORT_SSH_TARGET (its size is measured for at most $IMPORT_SIZE_TIMEOUT s; IMPORT_SIZE_TIMEOUT=0 measures all of it)..."
+        else
+            echo "  Looking for the site on $IMPORT_SSH_TARGET (its whole size is measured, IMPORT_SIZE_TIMEOUT bounds that)..."
+        fi
+        if import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$IMPORT_SIZE_TIMEOUT"; then
             break
         fi
         if grep -q '^site_candidate_1=' "$IMPORT_REMOTE_REPORT" 2>/dev/null; then
@@ -592,7 +663,7 @@ import_inspect_remote() {
         *) echo -e "  SSH user:        $IMPORT_REMOTE_USER ${YELLOW}(neither root nor passwordless sudo${IMPORT_REMOTE_SUDO_ERROR:+: $IMPORT_REMOTE_SUDO_ERROR}; files it cannot read stay behind)${NC}" ;;
     esac
     echo "  KVS version:     ${IMPORT_SITE_VERSION:-unknown}"
-    echo "  Site directory:  $IMPORT_REMOTE_DIR ($(import_kv "$IMPORT_REMOTE_REPORT" site_size_mb) MB)"
+    echo "  Site directory:  $IMPORT_REMOTE_DIR ($(import_remote_size_text "$IMPORT_REMOTE_REPORT"))"
     echo "  Project URL:     $(import_kv "$IMPORT_REMOTE_REPORT" project_url)"
     echo "  Table prefix:    ${prefix:-unknown}"
     echo "  Database:        $(import_kv "$IMPORT_REMOTE_REPORT" db_name) on $(import_kv "$IMPORT_REMOTE_REPORT" db_host), user $(import_kv "$IMPORT_REMOTE_REPORT" db_user), password $(import_kv "$IMPORT_REMOTE_REPORT" db_password_hint)"
@@ -627,10 +698,7 @@ import_inspect_remote() {
         echo -e "${RED}ERROR: the database of the old server does not answer; fix the access there, or dump it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP${NC}"
         exit 1
     fi
-    if ! import_free_space_mb_ok "$(( $(import_kv "$IMPORT_REMOTE_REPORT" site_size_mb) + $(import_kv "$IMPORT_REMOTE_REPORT" db_size_mb) ))" "/var/www/$DOMAIN"; then
-        echo -e "${RED}ERROR: not enough free space for the site and its dump under /var/www/$DOMAIN${NC}"
-        exit 1
-    fi
+    import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" || exit 1
     import_destination_ready "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
     if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
         import_ensure_tool rsync || exit 1

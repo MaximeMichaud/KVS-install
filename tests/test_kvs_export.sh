@@ -146,7 +146,8 @@ if [ "\${STUB_DF_FULL:-no}" = yes ]; then
 fi
 exec "$(command -v df)" "\$@"
 EOF
-    # du logs how the site is measured and answers a fixed size.
+    # du logs how each entry is measured and answers a fixed size for it;
+    # STUB_DU_SLEEP makes every call slow, for the time budget test.
     cat > "$STUB_BIN/du" <<'EOF'
 #!/bin/bash
 {
@@ -154,7 +155,15 @@ EOF
     printf ' [%s]' "$@"
     printf '\n'
 } >> "${STUB_LOG:-/dev/null}"
-printf '77\t%s\n' "${*: -1}"
+if [ -n "${STUB_DU_SLEEP:-}" ]; then
+    # Die on TERM at once, as the real du does, without leaving a sleep
+    # behind that would keep the pipe open.
+    sleep "$STUB_DU_SLEEP" &
+    trap 'kill $! 2> /dev/null; exit 143' TERM
+    wait $!
+fi
+printf '%s\t%s\n' "${STUB_DU_KB:-1024}" "${*: -1}"
+echo "du done: ${*: -1}" >> "${STUB_LOG:-/dev/null}"
 EOF
     chmod +x "$STUB_BIN/mariadb" "$STUB_BIN/mariadb-dump" "$STUB_BIN/df" "$STUB_BIN/du"
 }
@@ -165,7 +174,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -277,10 +286,68 @@ test_detect_reports_the_installation_as_key_value_lines() {
     assert_key "$out" rsync no
     detect_value "$out" db_error > /dev/null && fail "a reachable database must print no db_error"
     [ -n "$(detect_value "$out" hostname)" ] || fail "the hostname must be reported"
-    assert_key "$out" site_size_mb 77
-    grep -q '^du argv: \[-sLm\]' "$STUB_LOG" || fail "the site must be measured through its symbolic links (du -sLm)"
+    # Four entries three levels down (the three config files and the video),
+    # 1 MB each from the stub.
+    assert_key "$out" site_size_mb 4
+    assert_key "$out" site_size_status exact
+    assert_key "$out" site_size_entries 4
+    assert_key "$out" site_size_entries_total 4
+    [[ "$(detect_value "$out" site_fs_used_mb)" =~ ^[0-9]+$ ]] || fail "the usage of the filesystem holding the site must be reported"
+    [[ "$(detect_value "$out" site_size_seconds)" =~ ^[0-9]+$ ]] || fail "the measurement time must be reported"
+    grep -q '^du argv: \[-sLk\] \[--\] ' "$STUB_LOG" || fail "each entry must be measured through its symbolic links (du -sLk -- entry)"
+    [ "$(grep -c '^du argv:' "$STUB_LOG")" -eq 4 ] || fail "one du per entry three levels down, got $(grep -c '^du argv:' "$STUB_LOG")"
+    grep -q "^du argv: .*/admin/include/setup_db.php\]" "$STUB_LOG" || fail "the entries are the files three levels down"
     grep -q "Measuring the site size" "$err" || fail "the size measurement must be announced on stderr"
+    grep -q "^Site size: 4 MB (4 entries, " "$err" || fail "the measured size must be reported with the time it took: $(cat "$err")"
+    grep -q "The filesystem holding the site uses" "$err" || fail "the filesystem usage must be shown before the walk: $(cat "$err")"
     pass "detect reports the installation as key=value lines"
+}
+
+test_the_size_walk_stops_at_its_time_budget() {
+    local site="$TMP_ROOT/budget-site"
+    local out="$TMP_ROOT/budget.out"
+    local err="$TMP_ROOT/budget.err"
+    local started
+
+    make_site "$site"
+    started=$SECONDS
+    STUB_DU_SLEEP=20 run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --size-timeout 1 detect "$site" ||
+        fail "a walk cut short is not a failure: $(cat "$err")"
+    [ $((SECONDS - started)) -lt 10 ] || fail "the walk must be killed at the budget, the run took $((SECONDS - started)) s"
+    assert_key "$out" site_size_status incomplete
+    assert_key "$out" site_size_mb 0
+    assert_key "$out" site_size_entries 0
+    assert_key "$out" site_size_entries_total 4
+    assert_key "$out" db_ok yes
+    grep -q "cut short after" "$err" || fail "the report must say the measurement was cut short: $(cat "$err")"
+    grep -q "^du argv:" "$STUB_LOG" || fail "the walk must have started"
+    grep -q "^du done:" "$STUB_LOG" && fail "the du at work must be killed with the walk"
+    grep -q "Measuring the site size for at most 1s" "$err" || fail "the budget must be announced: $(cat "$err")"
+
+    # The same budget from the environment, for a run by hand.
+    KVS_EXPORT_SIZE_TIMEOUT=1 STUB_DU_SLEEP=20 run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+        fail "the budget from the environment must work: $(cat "$err")"
+    assert_key "$out" site_size_status incomplete
+    pass "the size walk stops at its time budget"
+}
+
+test_the_size_walk_can_be_skipped() {
+    local site="$TMP_ROOT/nosize-site"
+    local out="$TMP_ROOT/nosize.out"
+    local err="$TMP_ROOT/nosize.err"
+
+    make_site "$site"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --no-size detect "$site" ||
+        fail "detect without the size must succeed: $(cat "$err")"
+    assert_key "$out" site_size_status skipped
+    assert_key "$out" site_size_mb 0
+    [[ "$(detect_value "$out" site_fs_used_mb)" =~ ^[0-9]+$ ]] || fail "the filesystem usage stands in for the size"
+    grep -q "^du argv:" "$STUB_LOG" && fail "no du may run with --no-size"
+    grep -q "not measured" "$err" || fail "skipping the size must be said: $(cat "$err")"
+
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --size-timeout abc detect "$site" && fail "a budget that is not a number must be refused"
+    grep -q "size-timeout needs a number" "$err" || fail "the refusal must name the option: $(cat "$err")"
+    pass "the size walk can be skipped"
 }
 
 test_the_password_reaches_the_client_only_through_the_environment() {
@@ -755,6 +822,8 @@ make_min_bin
 make_extra_bin
 
 test_detect_reports_the_installation_as_key_value_lines
+test_the_size_walk_stops_at_its_time_budget
+test_the_size_walk_can_be_skipped
 test_the_password_reaches_the_client_only_through_the_environment
 test_the_connection_follows_the_host_written_in_setup_db
 test_an_unreachable_database_is_reported_without_stopping_detect

@@ -525,6 +525,9 @@ make_fake_exporter() {
     cat > "$file" <<'EOF'
 #!/bin/bash
 main() {
+    if [ "${1:-}" = --size-timeout ]; then
+        shift 2
+    fi
     local command="$1"
     local dir="${2:-/detected/site}"
     case "$command" in
@@ -616,6 +619,9 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         grep -q '^command bash -s -- detect$' "$bin/ssh.log" || exit 4
         import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect2.txt" || exit 5
         [ "$(import_kv "$TMP_ROOT/detect2.txt" site_dir)" = "$site" ] || exit 6
+        import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect-budget.txt" 300 || exit 41
+        grep -q "^command bash -s -- --size-timeout 300 detect $site\$" "$bin/ssh.log" || exit 42
+        [ "$(import_kv "$TMP_ROOT/detect-budget.txt" site_dir)" = "$site" ] || exit 43
         import_remote_detect "$exporter" "/var/www/my site" "$TMP_ROOT/detect3.txt" 2>/dev/null && exit 7
         # A site directory the search found can hold a character the
         # transfer refuses; the refusal must say so, not fail in silence.
