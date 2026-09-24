@@ -43,9 +43,33 @@ DOMAIN_SAFE=$(get_safe_domain)
 log_info "Configuring Manticore Search..."
 log_info "Index prefix: ${DOMAIN_SAFE}"
 
-# Download and configure Manticore PHP files
+# Download and configure Manticore PHP files.
+#
+# The vendor serves one file with no version in its name, so two installs of
+# the same stack release can get different plugin code. MANTICORE_PLUGIN_SHA256
+# pins it: left empty the download is accepted and its sha256 is logged, which
+# is how a release learns the value to record; set, a mismatch stops the init
+# rather than installing code nobody reviewed.
+MANTICORE_PLUGIN_URL="${MANTICORE_PLUGIN_URL:-https://kernel-scripts.com/files/manticore.zip}"
 log_info "Downloading Manticore search scripts..."
-curl -fsSL https://kernel-scripts.com/files/manticore.zip -o /tmp/manticore.zip
+curl -fsSL "$MANTICORE_PLUGIN_URL" -o /tmp/manticore.zip
+
+PLUGIN_SHA256=$(sha256sum /tmp/manticore.zip | cut -d' ' -f1)
+if [ -n "${MANTICORE_PLUGIN_SHA256:-}" ]; then
+    if [ "$PLUGIN_SHA256" != "$MANTICORE_PLUGIN_SHA256" ]; then
+        log_error "Manticore plugin checksum mismatch"
+        log_error "  expected: $MANTICORE_PLUGIN_SHA256"
+        log_error "  received: $PLUGIN_SHA256"
+        log_error "  from:     $MANTICORE_PLUGIN_URL"
+        rm -f /tmp/manticore.zip
+        exit 1
+    fi
+    log_info "Manticore plugin checksum verified ($PLUGIN_SHA256)"
+else
+    log_info "Manticore plugin sha256: $PLUGIN_SHA256"
+    log_info "Set MANTICORE_PLUGIN_SHA256 to refuse anything else."
+fi
+
 unzip -q -o /tmp/manticore.zip -d /tmp/
 
 # Update host and index names in PHP files

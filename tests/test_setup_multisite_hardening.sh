@@ -33,6 +33,7 @@ mode_function="$TEST_DIR/configure-mode.sh"
 extract_function add_compose_profile "$mode_function"
 extract_function remove_compose_profile "$mode_function"
 extract_function require_multi_compose_version "$mode_function"
+extract_function set_compose_file "$mode_function"
 extract_function select_mode "$mode_function"
 extract_function configure_direct_tls_profile "$mode_function"
 extract_function configure_mode "$mode_function"
@@ -213,6 +214,80 @@ EOF
     configure_mode >/dev/null
     [ "$MODE" = multi ] || fail "headless re-run changed a persisted multi mode"
     [ "$PROGRESS_TOTAL" = 12 ] || fail "headless multi re-run used the wrong progress total"
+)
+
+# kvsctl pins the images of the installed release in
+# docker-compose.release.yml and records the file in COMPOSE_FILE. Re-running
+# the setup rebuilds that key, and dropping the entry would silently rebuild
+# every service from the Dockerfiles under an installed release.
+release_pins_work="$TEST_DIR/release-pins"
+mkdir -p "$release_pins_work"
+(
+    cd "$release_pins_work"
+    cat > .env <<'EOF'
+MODE=single
+DOMAIN=pinned.example.com
+SITE_PREFIX=kvs-pinned
+SSL_PROVIDER=letsencrypt
+COMPOSE_PROFILES=dragonfly
+COMPOSE_FILE=docker-compose.yml:docker-compose.release.yml
+EOF
+    : > docker-compose.release.yml
+    mkdir -p multi-site
+    cat > multi-site/site-manager.sh <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod 0755 multi-site/site-manager.sh
+    DOMAIN=pinned.example.com
+    SITE_PREFIX=kvs-pinned
+    SSL_PROVIDER=letsencrypt
+    COMPOSE_PROFILES=dragonfly
+    MODE=single
+    MODE_CHOICE=1
+    configure_mode > kept.log
+    grep -Fxq 'COMPOSE_FILE=docker-compose.yml:docker-compose.release.yml' .env ||
+        fail "single mode deleted the kvsctl release image pins"
+    grep -Fq 'Kept the kvsctl release image pins' kept.log ||
+        fail "single mode did not report that the release pins were kept"
+
+    cat > docker-compose.override.yml <<'EOF'
+services:
+  nginx:
+    environment:
+      - EXAMPLE=1
+EOF
+    MODE_CHOICE=1
+    configure_mode >/dev/null
+    grep -Fxq 'COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.release.yml' .env ||
+        fail "the user Compose override was not kept ahead of the release pins"
+
+    MODE_CHOICE=2
+    configure_mode >/dev/null
+    grep -Fxq 'COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.release.yml:docker-compose.multi.yml' .env ||
+        fail "multi mode did not keep the release pins ahead of the multi-site hardening"
+
+    MODE_CHOICE=1
+    configure_mode >/dev/null
+    grep -Fxq 'COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.release.yml' .env ||
+        fail "the multi-to-single transition lost the release pins"
+
+    rm -f docker-compose.release.yml
+    MODE_CHOICE=1
+    configure_mode > removed.log
+    if grep -q '^COMPOSE_FILE=' .env; then
+        fail "single mode kept a COMPOSE_FILE pointing at a missing release override"
+    fi
+    if grep -Fq 'Kept the kvsctl release image pins' removed.log; then
+        fail "single mode reported release pins it did not keep"
+    fi
+
+    : > docker-compose.release.yml
+    MODE_CHOICE=1
+    configure_mode >/dev/null
+    if grep -q '^COMPOSE_FILE=' .env; then
+        fail "single mode adopted a release override that COMPOSE_FILE never named"
+    fi
 )
 unset -f docker
 

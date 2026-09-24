@@ -1191,6 +1191,88 @@ EOF
     pass "PHP password escaping preserves ampersands, backslashes, apostrophes and separators"
 }
 
+# Compose and kvsctl both tell a container that is up from a service that
+# answers through the health checks, so every probe has to be a liveness test
+# and has to use a command the built image really carries.
+test_services_declare_health_checks() {
+    local case_dir="$TMP_ROOT/health-checks"
+    local env_file="$case_dir/env"
+    local single_json="$case_dir/single.json"
+    local site_json="$case_dir/site.json"
+    local service
+
+    command -v docker >/dev/null 2>&1 || fail "docker compose is required"
+    command -v jq >/dev/null 2>&1 || fail "jq is required"
+
+    mkdir -p "$case_dir/site"
+    sed -e 's/^MARIADB_ROOT_PASSWORD=.*/MARIADB_ROOT_PASSWORD=root-password/' \
+        -e 's/^MARIADB_PASSWORD=.*/MARIADB_PASSWORD=kvs-password/' \
+        "$REPO_ROOT/docker/.env.example" > "$env_file"
+    docker compose --env-file "$env_file" \
+        --profile dragonfly --profile direct-tls --profile manticore \
+        -f "$REPO_ROOT/docker/docker-compose.yml" \
+        config --format json > "$single_json" ||
+        fail "docker compose rejected the single-site stack"
+    cp "$REPO_ROOT/docker/multi-site/docker-compose.site.yml.template" \
+        "$case_dir/site/docker-compose.yml"
+    docker compose --env-file "$env_file" \
+        -f "$case_dir/site/docker-compose.yml" \
+        config --format json > "$site_json" ||
+        fail "docker compose rejected the multi-site site template"
+
+    for service in nginx php-fpm cron mariadb manticore; do
+        jq -e --arg service "$service" '
+            .services[$service].healthcheck |
+            (.test | length > 0) and .interval != null and .timeout != null and
+            .retries != null' "$single_json" >/dev/null ||
+            fail "$service declares no complete health check in docker-compose.yml"
+    done
+    for service in nginx php-fpm cron mariadb; do
+        jq -e --arg service "$service" '.services[$service].healthcheck.test | length > 0' \
+            "$site_json" >/dev/null ||
+            fail "$service declares no health check in the multi-site site template"
+    done
+
+    # Every probe below has to exist in the image that runs it.
+    jq -e '.services.nginx.healthcheck.test ==
+        ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1/"]' \
+        "$single_json" >/dev/null ||
+        fail "Nginx must be probed over HTTP, which it answers without PHP-FPM"
+    grep -Eq '^(FROM nginx:|ARG NGINX_BASE=nginx:)' "$REPO_ROOT/docker/nginx/Dockerfile" ||
+        fail "the Nginx image no longer builds on the base that ships curl"
+    jq -e '.services["php-fpm"].healthcheck.test ==
+        ["CMD", "socat", "-u", "/dev/null", "TCP:127.0.0.1:9000"]' \
+        "$single_json" >/dev/null ||
+        fail "PHP-FPM must be probed by connecting to its FastCGI socket"
+    grep -Fq 'socat' "$REPO_ROOT/docker/php/Dockerfile" ||
+        fail "the PHP image no longer installs socat, its health check would fail"
+    jq -e '.services.cron.healthcheck.test == ["CMD", "pgrep", "-x", "cron"]' \
+        "$single_json" >/dev/null ||
+        fail "cron must be probed through its daemon, the container listens on nothing"
+    grep -Fq 'procps' "$REPO_ROOT/docker/cron/Dockerfile" ||
+        fail "the cron image no longer installs procps, pgrep would be missing"
+    jq -e '.services.manticore.healthcheck.test ==
+        ["CMD-SHELL", "mariadb -h 127.0.0.1 -P 9306 -e '\''SHOW STATUS'\'' > /dev/null"]' \
+        "$single_json" >/dev/null ||
+        fail "Manticore must be probed with a query on its MySQL port"
+    grep -Fq 'mariadb-client' "$REPO_ROOT/docker/manticore/Dockerfile" ||
+        fail "the Manticore image no longer installs the MariaDB client"
+
+    # The first Manticore run builds every index before searchd starts, so the
+    # probe has to stay in its start period for far longer than a web server.
+    jq -e '.services.manticore.healthcheck.start_period == "5m0s"' "$single_json" \
+        >/dev/null || fail "Manticore lost the start period its initial indexing needs"
+    # cron runs PHP itself; waiting for a healthy PHP-FPM would only delay it.
+    jq -e '.services.cron.depends_on["php-fpm"].condition == "service_started"' \
+        "$single_json" >/dev/null ||
+        fail "cron must wait for PHP-FPM to start, never for it to be healthy"
+    jq -e '.services["php-fpm"].depends_on.mariadb.condition == "service_healthy"' \
+        "$single_json" >/dev/null ||
+        fail "PHP-FPM no longer waits for a healthy MariaDB"
+
+    pass "every long-running service declares a liveness health check"
+}
+
 # A network lookup that times out returned its status through the plain
 # assignment and set -e ended the setup with a bare exit code: seen on a
 # one CPU VM when endoflife.date did not answer within five seconds.
@@ -1208,6 +1290,7 @@ test_network_lookups_may_fail_without_ending_the_setup() {
 
 test_help_is_side_effect_free_without_root
 test_network_lookups_may_fail_without_ending_the_setup
+test_services_declare_health_checks
 test_root_guard_precedes_logs_and_preflight
 test_secure_logs_env_and_headless_overrides
 test_headless_override_validation

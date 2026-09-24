@@ -54,7 +54,7 @@ services:
       context: ../../../php
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
-        IONCUBE: ${IONCUBE:-YES}
+        PHP_BASE: ${PHP_FPM_BASE:-php:${PHP_VERSION:-8.1}-fpm}
     container_name: ${SITE_PREFIX}-php
     restart: unless-stopped
     volumes:
@@ -67,9 +67,19 @@ services:
       - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
       - PHP_POST_MAX_SIZE=${PHP_POST_MAX_SIZE:-2048M}
       - PHP_MAX_EXECUTION_TIME=${PHP_MAX_EXECUTION_TIME:-300}
+      - IONCUBE=${IONCUBE:-YES}
     depends_on:
       mariadb:
         condition: service_healthy
+    healthcheck:
+      # socat is installed in the image (php/Dockerfile) and a TCP connect
+      # proves the FastCGI master accepts requests, which "php-fpm -t" only
+      # tells about the configuration file.
+      test: ["CMD", "socat", "-u", "/dev/null", "TCP:127.0.0.1:9000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - site-internal
 
@@ -86,6 +96,7 @@ services:
       MARIADB_USER: ${DOMAIN}
       MARIADB_PASSWORD: ${MARIADB_PASSWORD:?error}
       MARIADB_MYSQL_LOCALHOST_USER: 1
+      MARIADB_AUTO_UPGRADE: 1
     volumes:
       - mariadb-data:/var/lib/mysql
       - ../../../mariadb/init:/docker-entrypoint-initdb.d:ro
@@ -138,12 +149,26 @@ services:
       context: ../../../cron
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
+        PHP_BASE: ${PHP_CLI_BASE:-php:${PHP_VERSION:-8.1}-cli}
     container_name: ${SITE_PREFIX}-cron
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
+    environment:
+      - IONCUBE=${IONCUBE:-YES}
     depends_on:
-      - php-fpm
+      # Started, never healthy: the KVS tasks run PHP in this container and
+      # waiting for the PHP-FPM socket would only delay the first tick.
+      php-fpm:
+        condition: service_started
+    healthcheck:
+      # The container listens on nothing, so the daemon itself is the signal.
+      # procps is installed (cron/Dockerfile) and cron runs as PID 1.
+      test: ["CMD", "pgrep", "-x", "cron"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - site-internal
 

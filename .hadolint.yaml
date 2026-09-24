@@ -1,0 +1,20 @@
+# hadolint configuration.
+# See https://github.com/hadolint/hadolint#configure
+#
+# style is stricter than hadolint's default (info): the Dockerfiles here pass
+# it today, so let the CI say something the day one of them stops.
+failure-threshold: style
+
+# No rule is ignored globally. DL3008 (pin apt package versions) is muted
+# inside each Dockerfile with a comment explaining why: pinning a Debian
+# package version pins it to one snapshot of the suite, and Debian removes
+# the old binaries as soon as a security update lands, so a pinned apt line
+# stops building a few days later. Reproducibility comes from the base image
+# digest instead.
+ignored: []
+
+# Every FROM is pinned by digest through a build argument whose default is in
+# docker/images.lock, so no registry is trusted implicitly beyond these two.
+trustedRegistries:
+  - docker.io
+  - ghcr.io

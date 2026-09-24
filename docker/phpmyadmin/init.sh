@@ -1,12 +1,21 @@
 #!/bin/sh
 set -eu
 
+# The release phpMyAdmin is pinned to, and the sha256 phpMyAdmin publishes
+# beside it at
+# https://files.phpmyadmin.net/phpMyAdmin/5.2.3/phpMyAdmin-5.2.3-all-languages.tar.gz.sha256
+# Overriding PHPMYADMIN_VERSION without PHPMYADMIN_SHA256 fetches that file
+# for the requested version, so the archive is always checked against a
+# published checksum and never against the page that advertises it.
+PMA_DEFAULT_VERSION=5.2.3
+PMA_DEFAULT_SHA256=12ba1c425fa4071abbd4e7668c9ebdeac0b0755a467a6d6d5026122bb47c102b
+
 TARGET_DIR=${PHPMYADMIN_TARGET_DIR:-/usr/share/phpmyadmin}
 COMPLETION_MARKER="${TARGET_DIR}/.kvs-install-complete"
 TEMP_ROOT=${TMPDIR:-/tmp}
 STAGING_DIR=
 DOWNLOAD_FILE=
-DOWNLOAD_PAGE=
+CHECKSUM_FILE=
 PROMOTION_DIR=
 BACKUP_DIR=
 MARKER_TMP=
@@ -86,7 +95,7 @@ cleanup() {
     fi
     [ -n "$STAGING_DIR" ] && rm -rf -- "$STAGING_DIR"
     [ -n "$DOWNLOAD_FILE" ] && rm -f -- "$DOWNLOAD_FILE"
-    [ -n "$DOWNLOAD_PAGE" ] && rm -f -- "$DOWNLOAD_PAGE"
+    [ -n "$CHECKSUM_FILE" ] && rm -f -- "$CHECKSUM_FILE"
 
     exit "$status"
 }
@@ -104,22 +113,46 @@ umask 077
 
 STAGING_DIR=$(mktemp -d "${TEMP_ROOT%/}/phpmyadmin-staging.XXXXXX")
 DOWNLOAD_FILE=$(mktemp "${TEMP_ROOT%/}/phpmyadmin-archive.XXXXXX")
-DOWNLOAD_PAGE=$(mktemp "${TEMP_ROOT%/}/phpmyadmin-download-page.XXXXXX")
 
-curl -fsSL https://www.phpmyadmin.net/downloads/ -o "$DOWNLOAD_PAGE"
-PMA_URL=$(
-    grep -oE 'https://files[.]phpmyadmin[.]net/phpMyAdmin/[^" ]+all-languages[.]tar[.]gz' \
-        "$DOWNLOAD_PAGE" | sed -n '1p'
-)
-case "$PMA_URL" in
-    https://files.phpmyadmin.net/phpMyAdmin/*/phpMyAdmin-*-all-languages.tar.gz) ;;
-    *)
-        echo "ERROR: Could not determine a trusted phpMyAdmin download URL" >&2
+PMA_VERSION=${PHPMYADMIN_VERSION:-$PMA_DEFAULT_VERSION}
+case "$PMA_VERSION" in
+    ''|*[!0-9A-Za-z.-]*|*..*|.*)
+        echo "ERROR: PHPMYADMIN_VERSION is not a release number" >&2
         exit 1
         ;;
 esac
 
+PMA_BASE_URL=${PHPMYADMIN_BASE_URL:-https://files.phpmyadmin.net/phpMyAdmin}
+PMA_URL="${PMA_BASE_URL}/${PMA_VERSION}/phpMyAdmin-${PMA_VERSION}-all-languages.tar.gz"
+
+PMA_SHA256=${PHPMYADMIN_SHA256:-}
+if [ -z "$PMA_SHA256" ] && [ "$PMA_VERSION" = "$PMA_DEFAULT_VERSION" ]; then
+    PMA_SHA256=$PMA_DEFAULT_SHA256
+fi
+if [ -z "$PMA_SHA256" ]; then
+    CHECKSUM_FILE=$(mktemp "${TEMP_ROOT%/}/phpmyadmin-checksum.XXXXXX")
+    curl -fsSL "${PMA_URL}.sha256" -o "$CHECKSUM_FILE"
+    PMA_SHA256=$(cut -d' ' -f1 <"$CHECKSUM_FILE")
+fi
+case "$PMA_SHA256" in
+    ''|*[!0-9a-f]*)
+        echo "ERROR: phpMyAdmin checksum is not a sha256 digest" >&2
+        exit 1
+        ;;
+esac
+[ "${#PMA_SHA256}" -eq 64 ] || {
+    echo "ERROR: phpMyAdmin checksum is not a sha256 digest" >&2
+    exit 1
+}
+
 curl -fsSL "$PMA_URL" -o "$DOWNLOAD_FILE"
+DOWNLOAD_SHA256=$(sha256sum "$DOWNLOAD_FILE" | cut -d' ' -f1)
+[ "$DOWNLOAD_SHA256" = "$PMA_SHA256" ] || {
+    echo "ERROR: phpMyAdmin ${PMA_VERSION} checksum mismatch" >&2
+    echo "  expected: ${PMA_SHA256}" >&2
+    echo "  received: ${DOWNLOAD_SHA256}" >&2
+    exit 1
+}
 tar -tzf "$DOWNLOAD_FILE" >/dev/null
 tar -xzf "$DOWNLOAD_FILE" --strip-components=1 -C "$STAGING_DIR"
 [ -s "${STAGING_DIR}/index.php" ] || {

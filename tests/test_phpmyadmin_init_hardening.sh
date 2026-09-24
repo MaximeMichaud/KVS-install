@@ -70,11 +70,6 @@ done
 [ -n "$output" ] || exit 64
 
 case "$url" in
-    https://www.phpmyadmin.net/downloads/)
-        printf '%s\n' \
-            '<a href="https://files.phpmyadmin.net/phpMyAdmin/9.9.9/phpMyAdmin-9.9.9-all-languages.tar.gz">Download</a>' \
-            > "$output"
-        ;;
     https://files.phpmyadmin.net/phpMyAdmin/9.9.9/phpMyAdmin-9.9.9-all-languages.tar.gz)
         case "${MOCK_CURL_MODE:?}" in
             download-failure)
@@ -83,7 +78,7 @@ case "$url" in
             incomplete)
                 cp "$MOCK_INCOMPLETE_ARCHIVE" "$output"
                 ;;
-            valid)
+            valid|checksum-mismatch)
                 cp "$MOCK_VALID_ARCHIVE" "$output"
                 ;;
             *)
@@ -173,6 +168,14 @@ assert_no_transients() {
     fi
 }
 
+archive_sha256() {
+    case "$1" in
+        incomplete) sha256sum "$INCOMPLETE_ARCHIVE" | cut -d' ' -f1 ;;
+        checksum-mismatch) printf '%064d\n' 0 ;;
+        *) sha256sum "$VALID_ARCHIVE" | cut -d' ' -f1 ;;
+    esac
+}
+
 run_init() {
     local mode="$1"
     local target="$2"
@@ -191,6 +194,8 @@ run_init() {
     MOCK_MV_FAIL_AT="$mv_fail_at" \
     MOCK_MV_STATE="${output}.mv-state" \
     PHPMYADMIN_TARGET_DIR="$target" \
+    PHPMYADMIN_VERSION=9.9.9 \
+    PHPMYADMIN_SHA256="$(archive_sha256 "$mode")" \
     TMPDIR="$temp_root" \
     PATH="${MOCK_BIN}:$PATH" \
         "$INIT_SCRIPT" > "$output" 2>&1
@@ -223,6 +228,7 @@ assert_failure_preserves_installation() {
 }
 
 assert_failure_preserves_installation download-failure
+assert_failure_preserves_installation checksum-mismatch
 assert_failure_preserves_installation incomplete
 
 promotion_failure_dir="${TEST_DIR}/promotion-failure"
@@ -304,6 +310,8 @@ if docker image inspect alpine:latest >/dev/null 2>&1; then
     docker volume create "$RUNTIME_VOLUME" >/dev/null
     docker run --rm --network none \
         -e MOCK_CURL_MODE=valid \
+        -e PHPMYADMIN_VERSION=9.9.9 \
+        -e PHPMYADMIN_SHA256="$(archive_sha256 valid)" \
         -e MOCK_VALID_ARCHIVE=/archives/phpMyAdmin-valid.tar.gz \
         -e MOCK_INCOMPLETE_ARCHIVE=/archives/phpMyAdmin-incomplete.tar.gz \
         -e MOCK_CURL_LOG=/tmp/curl.log \

@@ -26,6 +26,14 @@ services:
       - nginx-includes:/etc/nginx/includes:ro
     depends_on:
       - php-fpm
+    healthcheck:
+      # Port 80 answers the HTTPS redirect from Nginx alone, so the probe
+      # stays green while PHP-FPM restarts. curl ships with the nginx image.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       kvs-network:
         aliases:
@@ -38,7 +46,10 @@ services:
       context: ./php
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
-        IONCUBE: ${IONCUBE:-YES}
+        # The base of the series, pinned by digest in docker/images.lock and
+        # written to .env by setup.sh. The fallback keeps a bare .env
+        # building: an empty build arg would erase the Dockerfile default.
+        PHP_BASE: ${PHP_FPM_BASE:-php:${PHP_VERSION:-8.1}-fpm}
     container_name: ${SITE_PREFIX:-kvs}-php
     restart: unless-stopped
     volumes:
@@ -52,9 +63,21 @@ services:
       - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
       - PHP_POST_MAX_SIZE=${PHP_POST_MAX_SIZE:-2048M}
       - PHP_MAX_EXECUTION_TIME=${PHP_MAX_EXECUTION_TIME:-300}
+      # Read when the container starts: the loader ships in every image and
+      # the entrypoint disables it, so switching is a restart, not a rebuild.
+      - IONCUBE=${IONCUBE:-YES}
     depends_on:
       mariadb:
         condition: service_healthy
+    healthcheck:
+      # socat is installed in the image (php/Dockerfile) and a TCP connect
+      # proves the FastCGI master accepts requests, which "php-fpm -t" only
+      # tells about the configuration file.
+      test: ["CMD", "socat", "-u", "/dev/null", "TCP:127.0.0.1:9000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - kvs-network
 
@@ -72,6 +95,9 @@ services:
       MARIADB_PASSWORD: ${MARIADB_PASSWORD:?error}
       # Create mysql@localhost user for healthcheck (doesn't need password)
       MARIADB_MYSQL_LOCALHOST_USER: 1
+      # A release that moves the MariaDB series needs the system tables
+      # upgraded at the first start; the entrypoint does it with this set.
+      MARIADB_AUTO_UPGRADE: 1
     volumes:
       - mariadb-data:/var/lib/mysql
       - ./mariadb/init:/docker-entrypoint-initdb.d:ro
@@ -144,6 +170,17 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
+    healthcheck:
+      # searchd answers SHOW STATUS on the MySQL port, and the image carries
+      # the MariaDB client for the indexer. The entrypoint builds every index
+      # before it starts searchd, so the first answer can be minutes away on a
+      # large site: the start period keeps the container reported as starting
+      # instead of unhealthy until then.
+      test: ["CMD-SHELL", "mariadb -h 127.0.0.1 -P 9306 -e 'SHOW STATUS' > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
     networks:
       kvs-network:
         aliases:
@@ -170,15 +207,29 @@ services:
       context: ./cron
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
-        IONCUBE: ${IONCUBE:-YES}
+        PHP_BASE: ${PHP_CLI_BASE:-php:${PHP_VERSION:-8.1}-cli}
     container_name: ${SITE_PREFIX:-kvs}-cron
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - ./geoip:/usr/share/geoip:ro
+    environment:
+      - IONCUBE=${IONCUBE:-YES}
     depends_on:
-      - php-fpm
-      - mariadb
+      # Started, never healthy: the KVS tasks run PHP in this container and
+      # waiting for the PHP-FPM socket would only delay the first tick.
+      php-fpm:
+        condition: service_started
+      mariadb:
+        condition: service_started
+    healthcheck:
+      # The container listens on nothing, so the daemon itself is the signal.
+      # procps is installed (cron/Dockerfile) and cron runs as PID 1.
+      test: ["CMD", "pgrep", "-x", "cron"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - kvs-network
 

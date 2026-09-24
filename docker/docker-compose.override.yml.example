@@ -7,6 +7,11 @@
 # 3. Copy this file: cp docker-compose.override.yml.example docker-compose.override.yml
 # 4. Run: docker compose --profile setup up kvs-init
 # 5. Then: docker compose up -d
+#
+# This file is also where local changes belong: an upgrade replaces the
+# release files under docker/ and conf/, while setup.sh and kvsctl keep
+# docker-compose.override.yml in COMPOSE_FILE whenever it exists. Anything
+# that is not a Compose setting goes to .env.
 
 services:
   nginx:

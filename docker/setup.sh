@@ -994,7 +994,15 @@ preflight_checks() {
     if docker compose version >/dev/null 2>&1; then
         local compose_version
         compose_version=$(docker compose version | grep -oP '\d+\.\d+\.\d+' | head -1)
-        echo -e "${GREEN}✓${NC} Docker Compose installed: ${compose_version}"
+        # 2.24.0 reads "build: !reset null", which the release override
+        # kvsctl installs relies on to stop the build of a pinned service.
+        if [ "$(printf '%s\n' 2.24.0 "${compose_version:-0}" | sort -V | head -n 1)" = "2.24.0" ]; then
+            echo -e "${GREEN}✓${NC} Docker Compose installed: ${compose_version}"
+        else
+            echo -e "${RED}✗${NC} Docker Compose ${compose_version:-unknown} is too old"
+            echo "  Docker Compose 2.24.0 or newer is required"
+            critical_failed=$((critical_failed + 1))
+        fi
     else
         echo -e "${RED}✗${NC} Docker Compose not installed"
         echo "  Docker Compose v2 is required (plugin, not standalone)"
@@ -2187,6 +2195,21 @@ select_php_version() {
     echo -e "${GREEN}Set PHP $choice${NC}"
 }
 
+# The build bases of the chosen PHP series, pinned by digest in images.lock,
+# so the images setup.sh builds are the bytes the release CI builds from.
+set_php_bases() {
+    local series fpm cli resolver
+    resolver="$(dirname "${BASH_SOURCE[0]}")/bin/resolve-bases.sh"
+    series=$(grep -E '^PHP_VERSION=' .env | tail -n 1 | cut -d= -f2)
+    if ! fpm=$("$resolver" --get php-fpm "$series") ||
+        ! cli=$("$resolver" --get php-cli "$series"); then
+        echo -e "${RED}ERROR: PHP $series has no pinned base in docker/images.lock${NC}"
+        exit 1
+    fi
+    set_env_value PHP_FPM_BASE "$fpm" || exit 1
+    set_env_value PHP_CLI_BASE "$cli" || exit 1
+}
+
 # IonCube selection
 select_ioncube() {
     echo ""
@@ -2271,6 +2294,7 @@ source .env
 
 # Select PHP last: the IonCube decision above constrains which versions run.
 select_php_version
+set_php_bases
 
 # Configure JIT if IonCube is disabled (PHP 8.0+ only, incompatible with IonCube)
 if [ "$IONCUBE" = "NO" ]; then
@@ -2390,9 +2414,47 @@ require_multi_compose_version() {
     fi
 }
 
-select_mode() {
-    local compose_files
+# COMPOSE_FILE is rebuilt from scratch every time the mode is configured.
+# kvsctl pins the images of the installed release in
+# docker-compose.release.yml and records that file in COMPOSE_FILE, so the
+# rebuild has to keep the entry: without it Compose rebuilds every service
+# from the Dockerfiles while kvsctl still reports the release as installed.
+# In multi mode docker-compose.multi.yml stays last so nothing can publish
+# Nginx on Caddy's ports again.
+set_compose_file() {
+    local mode="$1"
+    local compose_files="docker-compose.yml"
+    local release_pins=""
+    local current
 
+    if [ -f docker-compose.override.yml ]; then
+        compose_files="${compose_files}:docker-compose.override.yml"
+    fi
+    if [ -f docker-compose.release.yml ]; then
+        current=$(sed -n 's/^COMPOSE_FILE=//p' .env | tail -n 1)
+        case ":${current}:" in
+            *":docker-compose.release.yml:"*) release_pins="docker-compose.release.yml" ;;
+        esac
+    fi
+    if [ -n "$release_pins" ]; then
+        compose_files="${compose_files}:${release_pins}"
+    fi
+    if [ "$mode" = "multi" ]; then
+        compose_files="${compose_files}:docker-compose.multi.yml"
+    elif [ -z "$release_pins" ]; then
+        remove_env_value COMPOSE_FILE || return 1
+        unset COMPOSE_FILE
+        return 0
+    fi
+    set_env_value COMPOSE_FILE "$compose_files" || return 1
+    COMPOSE_FILE="$compose_files"
+    export COMPOSE_FILE
+    if [ -n "$release_pins" ]; then
+        echo -e "${GREEN}Kept the kvsctl release image pins (docker-compose.release.yml) in COMPOSE_FILE${NC}"
+    fi
+}
+
+select_mode() {
     echo ""
     echo -e "${CYAN}Installation Mode${NC}"
     # Skip prompt if already set (headless mode)
@@ -2413,17 +2475,9 @@ select_mode() {
 
             echo -e "${YELLOW}Multi-site mode uses Caddy reverse proxy${NC}"
             MODE="multi"
-            compose_files="docker-compose.yml"
-            if [ -f docker-compose.override.yml ]; then
-                compose_files="${compose_files}:docker-compose.override.yml"
-            fi
-            # Keep the hardening override last so a user override cannot
-            # accidentally publish Nginx on Caddy's ports again.
-            compose_files="${compose_files}:docker-compose.multi.yml"
             set_env_value MODE "$MODE"
-            set_env_value COMPOSE_FILE "$compose_files"
-            COMPOSE_FILE="$compose_files"
-            export MODE COMPOSE_FILE
+            set_compose_file multi || return 1
+            export MODE
             echo -e "${GREEN}Multi-site mode configured for the primary site${NC}"
             ;;
         1|'')
@@ -2445,8 +2499,7 @@ select_mode() {
 
             MODE="single"
             set_env_value MODE "$MODE"
-            remove_env_value COMPOSE_FILE
-            unset COMPOSE_FILE
+            set_compose_file single || return 1
             export MODE
             echo -e "${GREEN}Single site mode (direct nginx)${NC}"
             ;;
@@ -2495,13 +2548,8 @@ configure_mode() {
         select_mode || return $?
     elif [ "$MODE" = "multi" ]; then
         require_multi_compose_version || return $?
-        COMPOSE_FILE="docker-compose.yml"
-        if [ -f docker-compose.override.yml ]; then
-            COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.override.yml"
-        fi
-        COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.multi.yml"
-        set_env_value COMPOSE_FILE "$COMPOSE_FILE"
-        export MODE COMPOSE_FILE
+        set_compose_file multi || return 1
+        export MODE
     else
         echo -e "${RED}ERROR: Invalid installation mode in .env: $MODE${NC}"
         return 1

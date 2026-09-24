@@ -34,7 +34,39 @@ start_memcache_loopback() {
     echo "Memcache loopback: 127.0.0.1:${port} -> ${host}:${port}"
 }
 
+# The ionCube loader is installed in every image, because the build does not
+# know whether the site it will serve is encoded. IONCUBE is therefore a
+# runtime setting, not a build argument: NO renames the ini so the loader is
+# never loaded, which is also what makes opcache JIT usable.
+apply_ioncube_setting() {
+    local enabled_ini="/usr/local/etc/php/conf.d/00-ioncube.ini"
+    local disabled_ini="/usr/local/etc/php/conf.d/00-ioncube.ini.disabled"
+    local choice
+
+    choice=$(printf '%s' "${IONCUBE:-YES}" | tr '[:upper:]' '[:lower:]')
+    case "$choice" in
+        no|false|0|off|disabled)
+            if [ -f "$enabled_ini" ]; then
+                mv -f "$enabled_ini" "$disabled_ini" || {
+                    echo "ERROR: cannot disable the IonCube loader: ${enabled_ini} is not writable" >&2
+                    exit 1
+                }
+            fi
+            echo "IonCube loader disabled (IONCUBE=${IONCUBE:-YES})"
+            ;;
+        *)
+            if [ ! -f "$enabled_ini" ] && [ -f "$disabled_ini" ]; then
+                mv -f "$disabled_ini" "$enabled_ini" || {
+                    echo "ERROR: cannot enable the IonCube loader: ${disabled_ini} is not writable" >&2
+                    exit 1
+                }
+            fi
+            ;;
+    esac
+}
+
 start_memcache_loopback
+apply_ioncube_setting
 
 # Apply PHP configuration from environment variables
 # Write to a separate file (zzz- prefix loads last, overrides kvs.ini)
