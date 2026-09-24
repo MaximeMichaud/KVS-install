@@ -6,6 +6,7 @@ set -e
 # support access stays as KVS ships it unless the operator opts out.
 # shellcheck disable=SC1091
 source /init/lib/common.sh
+TABLES_PREFIX=$(get_tables_prefix)
 
 # KVS keeps admin/data/system/ap.dat, a list of substr(md5(login . stored
 # hash), 0, 20) fingerprints. The admin login rejects any account whose
@@ -58,7 +59,7 @@ register_admin_fingerprint() {
     ' -- "$ADMIN_FINGERPRINT_FILE" "$fingerprint"
 }
 
-ADMIN_COUNT=$(db_query "SELECT COUNT(*) FROM ktvs_admin_users WHERE user_id=1 AND login='admin'" || echo 0)
+ADMIN_COUNT=$(db_query "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_users WHERE user_id=1 AND login='admin'" || echo 0)
 if [ "$ADMIN_COUNT" -ne 1 ]; then
     log_error "Expected exactly one primary KVS admin account"
     exit 1
@@ -87,13 +88,13 @@ if [ -n "${KVS_ADMIN_PASSWORD:-}" ]; then
     # the default credential and the next run repeats the whole replacement.
     register_admin_fingerprint "$ADMIN_FINGERPRINT"
     unset ADMIN_FINGERPRINT
-    db_exec "UPDATE ktvs_admin_users SET pass='${ADMIN_HASH}', last_session_id='' WHERE user_id=1 AND login='admin';" \
+    db_exec "UPDATE ${TABLES_PREFIX}admin_users SET pass='${ADMIN_HASH}', last_session_id='' WHERE user_id=1 AND login='admin';" \
         >/dev/null
     unset ADMIN_HASH
     log_info "Primary KVS admin credential replaced and registered for the admin login"
 fi
 
-DEFAULT_ADMIN_COUNT=$(db_query "SELECT COUNT(*) FROM ktvs_admin_users WHERE user_id=1 AND login='admin' AND pass='${DEFAULT_ADMIN_HASH}'" || echo 1)
+DEFAULT_ADMIN_COUNT=$(db_query "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_users WHERE user_id=1 AND login='admin' AND pass='${DEFAULT_ADMIN_HASH}'" || echo 1)
 unset DEFAULT_ADMIN_HASH
 
 if [ "$DEFAULT_ADMIN_COUNT" -ne 0 ]; then
@@ -107,9 +108,9 @@ fi
 # button re-enables it at any time.
 case "${DISABLE_KVS_SUPPORT_ACCESS:-false}" in
     true)
-        db_exec "UPDATE ktvs_options SET value='0' WHERE variable='ENABLE_KVS_SUPPORT_ACCESS';" \
+        db_exec "UPDATE ${TABLES_PREFIX}options SET value='0' WHERE variable='ENABLE_KVS_SUPPORT_ACCESS';" \
             >/dev/null
-        SUPPORT_ACCESS=$(db_query "SELECT value FROM ktvs_options WHERE variable='ENABLE_KVS_SUPPORT_ACCESS'" || echo query-failed)
+        SUPPORT_ACCESS=$(db_query "SELECT value FROM ${TABLES_PREFIX}options WHERE variable='ENABLE_KVS_SUPPORT_ACCESS'" || echo query-failed)
         if [ "$SUPPORT_ACCESS" != "0" ]; then
             log_error "KVS support access could not be disabled (ENABLE_KVS_SUPPORT_ACCESS is '${SUPPORT_ACCESS}')"
             exit 1

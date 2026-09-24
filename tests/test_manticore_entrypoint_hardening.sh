@@ -87,6 +87,11 @@ grep -Fq 'source example_com_videos' "$generated_config" ||
     fail "DOMAIN_SAFE was not substituted"
 grep -Fq 'sql_pass = test-password' "$generated_config" ||
     fail "MARIADB_PASSWORD was not substituted"
+grep -Fq 'FROM ktvs_videos' "$generated_config" ||
+    fail "the default table prefix ktvs_ was not applied"
+if grep -Fq 'TABLES_PREFIX' "$generated_config"; then
+    fail "the table prefix placeholder was left in the configuration"
+fi
 [ "$(stat -c %a "$generated_config")" = 600 ] ||
     fail "the generated Manticore configuration is not mode 600"
 
@@ -110,6 +115,27 @@ grep -Fq 'Initial indexing had warnings' <<< "$output" ||
     fail "an indexer failure was not reported"
 if grep -Fq 'Initial indexes built successfully' <<< "$output"; then
     fail "an indexer failure was reported as successful"
+fi
+
+# The prefix of an imported site reaches every query of the indexer.
+prefixed=$(
+    DOMAIN=example.com \
+    MARIADB_PASSWORD=test-password \
+    TABLES_PREFIX=kvs7_ \
+    bash "${TEST_DIR}/docker-entrypoint.sh" true 2>&1
+)
+grep -Fq 'Table prefix: kvs7_' <<< "$prefixed" ||
+    fail "the table prefix was not announced"
+grep -Fq 'FROM kvs7_videos' "$generated_config" ||
+    fail "a custom table prefix was not applied to the video source"
+grep -Fq 'FROM kvs7_albums' "$generated_config" ||
+    fail "a custom table prefix was not applied to the album source"
+if grep -Fq 'ktvs_' "$generated_config"; then
+    fail "the default prefix survived a custom one"
+fi
+if DOMAIN=example.com MARIADB_PASSWORD=test-password TABLES_PREFIX='kt vs;' \
+    bash "${TEST_DIR}/docker-entrypoint.sh" true >/dev/null 2>&1; then
+    fail "a prefix that is not an identifier must stop the container"
 fi
 
 echo "PASS: Manticore entrypoint hardening"

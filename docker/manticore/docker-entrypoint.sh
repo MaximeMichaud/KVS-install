@@ -8,14 +8,24 @@ echo "=== Manticore Search Init for KVS ==="
 DOMAIN_SAFE="${DOMAIN//[.-]/_}"
 export DOMAIN_SAFE
 
+# The table prefix of the site, written to .env by the setup from the
+# site's setup.php; it lands inside the indexer's SQL.
+TABLES_PREFIX="${TABLES_PREFIX:-ktvs_}"
+if [[ ! "$TABLES_PREFIX" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+    echo "ERROR: TABLES_PREFIX must be 1 to 32 identifier characters, got '$TABLES_PREFIX'" >&2
+    exit 1
+fi
+export TABLES_PREFIX
+
 echo "Domain: $DOMAIN"
 echo "Index prefix: $DOMAIN_SAFE"
+echo "Table prefix: $TABLES_PREFIX"
 
 # Generate manticore.conf from template
 echo "Generating configuration..."
 # Keep the allowlist literal for envsubst.
 # shellcheck disable=SC2016
-envsubst '${DOMAIN_SAFE} ${DOMAIN} ${MARIADB_PASSWORD}' \
+envsubst '${DOMAIN_SAFE} ${DOMAIN} ${MARIADB_PASSWORD} ${TABLES_PREFIX}' \
     < /etc/manticoresearch/manticore.conf.template \
     > /etc/manticoresearch/manticore.conf
 chown -R manticore:manticore /var/lib/manticore /var/log/manticore

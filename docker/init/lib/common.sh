@@ -93,3 +93,19 @@ get_project_url() {
 get_safe_domain() {
     echo "${DOMAIN//[.-]/_}"
 }
+
+# The table prefix of the site, as KVS wrote it in setup.php: ktvs_ for
+# every archive KVS ships, whatever the old server used for an imported
+# site. The value lands inside SQL, so only identifier characters pass;
+# anything else falls back to ktvs_ with a warning on stderr.
+get_tables_prefix() {
+    local pattern prefix
+
+    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
+    prefix=$(sed -n -E "$pattern" "$KVS_PATH/admin/include/setup.php" 2>/dev/null | head -n 1)
+    if [[ ! "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+        log_warn "No usable tables_prefix in setup.php (got '${prefix}'), using ktvs_" >&2
+        prefix=ktvs_
+    fi
+    printf '%s\n' "$prefix"
+}

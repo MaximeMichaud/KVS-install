@@ -4,6 +4,7 @@ set -e
 # Import KVS database if empty
 # shellcheck disable=SC1091
 source /init/lib/common.sh
+TABLES_PREFIX=$(get_tables_prefix)
 
 extract_archive_project_url() {
     local archive="$1"
@@ -42,7 +43,7 @@ read_database_initial_version() {
     local table
     local version
 
-    for table in ktvs_options sys_options; do
+    for table in "${TABLES_PREFIX}options" sys_options; do
         if version=$(db_query \
             "SELECT value FROM \`${table}\` WHERE variable='INITIAL_VERSION' LIMIT 1;"); then
             version=${version%$'\r'}
@@ -78,7 +79,7 @@ extract_dump_initial_version() {
 
     table=${BASH_REMATCH[1]}
     version=${BASH_REMATCH[2]}
-    if [[ "$table" != "ktvs_options" && "$table" != "sys_options" ]] ||
+    if [[ "$table" != "${TABLES_PREFIX}options" && "$table" != "sys_options" ]] ||
         ! is_valid_initial_version "$version"; then
         return 1
     fi

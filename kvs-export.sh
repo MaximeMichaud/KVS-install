@@ -53,6 +53,7 @@ PROJECT_URL=""
 DOMAIN=""
 PROJECT_PATH=""
 TABLES_PREFIX=""
+TABLES_PREFIX_MULTI=""
 DB_HOST_RAW=""
 DB_NAME=""
 DB_USER=""
@@ -705,6 +706,7 @@ kvs_print_detect() {
     printf 'domain=%s\n' "$DOMAIN"
     printf 'project_path=%s\n' "$PROJECT_PATH"
     printf 'tables_prefix=%s\n' "$TABLES_PREFIX"
+    printf 'tables_prefix_multi=%s\n' "$TABLES_PREFIX_MULTI"
     printf 'db_host=%s\n' "$DB_HOST_RAW"
     printf 'db_name=%s\n' "$DB_NAME"
     printf 'db_user=%s\n' "$DB_USER"
@@ -840,6 +842,7 @@ kvs_collect() {
     PROJECT_PATH=$(kvs_config_value "$setup" project_path)
     PROJECT_URL=$(kvs_config_value "$setup" project_url)
     TABLES_PREFIX=$(kvs_config_value "$setup" tables_prefix)
+    TABLES_PREFIX_MULTI=$(kvs_config_value "$setup" tables_prefix_multi)
     DOMAIN=$(kvs_url_domain "$PROJECT_URL")
     if [ -z "$TABLES_PREFIX" ]; then
         kvs_warn "no tables_prefix in $setup"

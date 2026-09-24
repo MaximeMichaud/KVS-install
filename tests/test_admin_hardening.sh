@@ -51,6 +51,7 @@ KVS_PATH="$TEST_STATE/www"
 log_info() { printf '[INFO] %s\n' "$1"; }
 log_warn() { printf '[WARN] %s\n' "$1"; }
 log_error() { printf '[ERROR] %s\n' "$1" >&2; }
+get_tables_prefix() { printf '%s\n' "${TEST_TABLES_PREFIX:-ktvs_}"; }
 
 db_query() {
     local query="$1"

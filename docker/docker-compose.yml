@@ -130,6 +130,7 @@ services:
     environment:
       - DOMAIN=${DOMAIN}
       - MARIADB_PASSWORD=${MARIADB_PASSWORD}
+      - TABLES_PREFIX=${TABLES_PREFIX:-ktvs_}
     ulimits:
       nproc: 65535
       nofile:

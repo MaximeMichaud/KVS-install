@@ -82,7 +82,7 @@ test_site_validation_accepts_a_kvs_site_and_refuses_the_rest() {
     make_site "$site" /home/old/www
 
     output=$(import_validate_site "$site") || fail "a KVS site must validate"
-    [ "$output" = $'7.0.2\t/home/old/www' ] || fail "validation must print the version and the project path: got '$output'"
+    [ "$output" = $'7.0.2\t/home/old/www\tktvs_' ] || fail "validation must print the version, the project path and the prefix: got '$output'"
 
     output=$(import_validate_site "$TMP_ROOT/missing" 2>&1) && fail "a missing directory must be refused"
     grep -q "not a directory" <<< "$output" || fail "a missing directory must be named: $output"
@@ -92,8 +92,19 @@ test_site_validation_accepts_a_kvs_site_and_refuses_the_rest() {
     grep -q "setup.php is missing" <<< "$output" || fail "the missing setup.php must be named: $output"
 
     make_site "$TMP_ROOT/site-prefix" /home/old/www "site_"
-    output=$(import_validate_site "$TMP_ROOT/site-prefix" 2>&1) && fail "another table prefix must be refused"
-    grep -q "table prefix 'site_'" <<< "$output" || fail "the prefix must be named: $output"
+    output=$(import_validate_site "$TMP_ROOT/site-prefix") || fail "a site with another table prefix must validate"
+    [ "$output" = $'7.0.2\t/home/old/www\tsite_' ] || fail "the site's own prefix must be returned: got '$output'"
+    make_site "$TMP_ROOT/site-badprefix" /home/old/www "kt vs;"
+    output=$(import_validate_site "$TMP_ROOT/site-badprefix" 2>&1) && fail "a prefix that is not an identifier must be refused"
+    grep -q "table prefix 'kt vs;'" <<< "$output" || fail "the bad prefix must be named: $output"
+    make_site "$TMP_ROOT/site-clone" /home/old/www "kvs2_"
+    echo "\$config['tables_prefix_multi']=\"ktvs_\";" >> "$TMP_ROOT/site-clone/admin/include/setup.php"
+    output=$(import_validate_site "$TMP_ROOT/site-clone" 2>&1) && fail "a clone sharing another site's database must be refused"
+    grep -q "clone sharing the database" <<< "$output" || fail "the clone must be explained: $output"
+    make_site "$TMP_ROOT/site-same" /home/old/www "kvs2_"
+    echo "\$config['tables_prefix_multi']=\"kvs2_\";" >> "$TMP_ROOT/site-same/admin/include/setup.php"
+    output=$(import_validate_site "$TMP_ROOT/site-same") || fail "equal prefixes are the ordinary site"
+    [ "$output" = $'7.0.2\t/home/old/www\tkvs2_' ] || fail "the ordinary site keeps its prefix: got '$output'"
 
     make_site "$TMP_ROOT/site-nodb" /home/old/www
     rm "$TMP_ROOT/site-nodb/admin/include/setup_db.php"
@@ -303,11 +314,22 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'docker/import/' "$REPO_ROOT/.gitignore" || fail "raw dumps must be ignored by git"
     grep -A2 -F '[ "${KEEP_EXISTING_DB:-false}" != true ] &&' "$setup" | grep -Fq '[ "$IMPORT_MODE" != true ]; then' ||
         fail "an imported database must keep its admin password instead of getting a one-time one"
-    grep -Fq "SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';" "$setup" || fail "the completion marker must be verified before the KVS init"
+    grep -Fq "SELECT value FROM \${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';" "$setup" || fail "the completion marker must be verified before the KVS init"
     grep -Fq 'MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}' "$setup" || fail "an import must wait for the dump replay"
     grep -Fq '{{.RestartCount}} {{.State.Status}}' "$setup" || fail "a restarted MariaDB container must be reported"
     grep -Fq 'run_root_mariadb -u root -h 127.0.0.1 --protocol=tcp -e "SELECT 1"' "$setup" || fail "the readiness probe must use TCP, the socket answers during the init replay"
     grep -Fq 'IMPORT_MARKER_DIR="$IMPORT_STAGING"' "$setup" || fail "the source marker must live outside the webroot"
+    grep -Fq 'set_env_value TABLES_PREFIX "$(kvs_tables_prefix)"' "$setup" || fail "the table prefix must reach .env for the Manticore container and reconfigure.sh"
+    grep -Fq 'import_prepare_dump "$IMPORT_DB_DUMP" "$IMPORT_TABLES_PREFIX"' "$setup" || fail "the dump must be prepared with the site's own prefix"
+    for file in "$setup" "$configure" "$settings" "$REPO_ROOT/docker/init/docker-entrypoint.d/30-import-database.sh" \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/35-harden-admin-users.sh" "$REPO_ROOT/docker/reconfigure.sh" \
+        "$REPO_ROOT/docker/manticore/manticore.conf.template" "$REPO_ROOT/docker/multi-site/site-manager.sh" "$REPO_ROOT/kvs-install.sh"; do
+        if grep -Eq 'ktvs_(options|admin_users|admin_servers|admin_conversion_servers|settings|videos|albums|tags|categories|models|content_sources|dvds|searches)' "$file"; then
+            fail "$file still names a KVS table with the ktvs_ prefix hardcoded"
+        fi
+    done
+    grep -Fq 'TABLES_PREFIX=${TABLES_PREFIX:-ktvs_}' "$REPO_ROOT/docker/docker-compose.yml" || fail "the Manticore container must receive the table prefix"
+    grep -Fq 'TABLES_PREFIX=$(get_tables_prefix)' "$configure" || fail "the init must read the prefix from the site"
     grep -Fq 'rm -f "/var/www/$DOMAIN/.kvs-import-source"' "$setup" && fail "the source marker must stay for a later pass from the same source"
     grep -Fq 'rm -f mariadb/init/*kvs-import*' "$setup" || fail "stale staged dumps must be removed before staging"
     grep -Eq '^    trap import_ssh_close EXIT$' "$setup" || fail "the ssh master must be closed however the setup ends"
