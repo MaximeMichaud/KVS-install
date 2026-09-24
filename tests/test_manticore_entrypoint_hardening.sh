@@ -138,4 +138,11 @@ if DOMAIN=example.com MARIADB_PASSWORD=test-password TABLES_PREFIX='kt vs;' \
     fail "a prefix that is not an identifier must stop the container"
 fi
 
+# The hourly rotation runs as the manticore user and clears the rotation
+# files a manual indexer run as root leaves behind, which searchd cannot
+# read and the next indexer runs cannot replace.
+cron_file="${ROOT_DIR}/docker/manticore/manticore-indexer.cron"
+grep -Fq "0 * * * * manticore find /var/lib/manticore -name '*.new.*' -delete; /usr/bin/indexer --rotate --all" "$cron_file" ||
+    fail "the hourly rotation must clear stale rotation files and run as the manticore user"
+
 echo "PASS: Manticore entrypoint hardening"

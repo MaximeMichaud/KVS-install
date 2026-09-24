@@ -1,5 +1,7 @@
 # /etc/cron.d system crontab for hourly Manticore index rotation.
+# An indexer run by hand as root leaves rotation files searchd cannot read
+# and the next runs cannot replace; they are cleared before each rotation.
 SHELL=/bin/sh
 PATH=/usr/local/bin:/usr/bin:/bin
 
-0 * * * * manticore /usr/bin/indexer --rotate --all >> /var/log/manticore/indexer-cron.log 2>&1
+0 * * * * manticore find /var/lib/manticore -name '*.new.*' -delete; /usr/bin/indexer --rotate --all >> /var/log/manticore/indexer-cron.log 2>&1
