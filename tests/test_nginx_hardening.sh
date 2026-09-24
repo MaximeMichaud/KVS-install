@@ -23,6 +23,9 @@ fail() {
 
 [ -n "$REAL_OPENSSL" ] || fail "OpenSSL is required"
 
+KVS_INTERNAL_DIRECTORIES_REGEX='^/(admin/(include(?!/(uploader|get_upload_status)\.php$)|data|logs|plugins|smarty|stamp|template|tools)|tmp)/'
+KVS_INTERNAL_DIRECTORIES_RULE="location ~ ${KVS_INTERNAL_DIRECTORIES_REGEX} {"
+
 line_number() {
     local file="$1"
     local text="$2"
@@ -46,12 +49,59 @@ assert_protected_locations_precede_php() {
         'location ~* /template/.*\.php$ {' \
         'location ~* /tmp/.*\.php$ {' \
         'location ~ /\. {' \
-        'location ~ ^/(admin/include|tmp)/ {'
+        "$KVS_INTERNAL_DIRECTORIES_RULE"
     do
         protected_line=$(line_number "$file" "$rule")
         [ "$protected_line" -lt "$php_line" ] ||
             fail "protected rule follows the generic PHP handler in ${file}: ${rule}"
     done
+}
+
+# The KVS nginx_config.txt shipped with every release marks admin/data,
+# admin/logs, admin/plugins, admin/smarty, admin/stamp, admin/template and
+# admin/tools internal with plain prefix locations. A prefix location without
+# ^~ loses to the first matching regular expression, so the PHP handler would
+# execute the hundreds of scripts stored there (plugins, conversion helpers,
+# compiled Smarty templates) unless a regular expression denies them first.
+# admin/include is closed the same way, except the two upload scripts the
+# admin panel requests.
+assert_kvs_internal_directories_denied_before_php() {
+    local file="$1"
+    local php_line
+    local deny_line
+    local directory
+
+    php_line=$(line_number "$file" 'location ~ \.php$ {')
+    deny_line=$(line_number "$file" "$KVS_INTERNAL_DIRECTORIES_RULE")
+    [ "$deny_line" -lt "$php_line" ] ||
+        fail "the KVS internal directories are denied after the PHP handler in ${file}"
+    for directory in include data logs plugins smarty stamp template tools; do
+        printf '/admin/%s/index.php\n' "$directory" |
+            grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" ||
+            fail "the deny rule does not cover /admin/${directory}/ in ${file}"
+    done
+    printf '/admin/index.php\n' |
+        grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" &&
+        fail "the deny rule blocks the admin panel itself"
+    printf '/admin/data/plugins/kvs_dedup/index.php\n' |
+        grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" ||
+        fail "the deny rule does not cover plugin scripts stored under /admin/data/"
+    # The admin panel uploads files through these two scripts (admin/js/config.php:
+    # file_upload_form_url and file_upload_status_url); a 403 there breaks every
+    # upload from the admin panel while the rest of admin/include stays closed.
+    for script in uploader get_upload_status; do
+        printf '/admin/include/%s.php\n' "$script" |
+            grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" &&
+            fail "the deny rule blocks the admin uploader script ${script}.php in ${file}"
+    done
+    for script in setup_db cron functions_base; do
+        printf '/admin/include/%s.php\n' "$script" |
+            grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" ||
+            fail "the deny rule leaves /admin/include/${script}.php reachable in ${file}"
+    done
+    grep -q 'location ^~ /admin/include/' "$file" &&
+        fail "a ^~ prefix location hides the admin uploader scripts from the PHP handler in ${file}"
+    return 0
 }
 
 generate_fixture_pair() {
@@ -452,6 +502,15 @@ assert_protected_locations_precede_php \
     "${ROOT_DIR}/conf/nginx/templates/kvs.conf.tpl"
 assert_protected_locations_precede_php \
     "${ROOT_DIR}/docker/multi-site/nginx/kvs-caddy.conf.template"
+# The standalone site config includes the same KVS nginx_config.txt (the
+# installer copies it to globals/kvs.conf), so it needs the same guard.
+for site_config in \
+    conf/nginx/templates/kvs.conf.tpl \
+    docker/multi-site/nginx/kvs-caddy.conf.template \
+    conf/nginx/conf.d/domain.conf
+do
+    assert_kvs_internal_directories_denied_before_php "${ROOT_DIR}/${site_config}"
+done
 
 run_certificate_case neither-present missing
 run_certificate_case certificate-only certificate-only
@@ -473,10 +532,6 @@ assert_invalid_public_port 65536
 assert_invalid_public_port invalid
 test_certificate_monitor
 
-# The standalone site config denies the server-side include directory with a
-# prefix location, which wins over the PHP handler whatever the block order.
-grep -Fq 'location ^~ /admin/include/ {' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
-    fail "standalone site config does not deny /admin/include/"
 
 # phpMyAdmin is installed outside the site root by the standalone installer
 # and needs its own location; its PHP sub-location must carry the socket
