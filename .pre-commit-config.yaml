@@ -70,7 +70,7 @@ repos:
       - id: detect-secrets
         name: "Detect potential secrets"
         args: ['--baseline', '.secrets.baseline']
-        exclude: .*\.lock$
+        exclude: (.*\.lock|cli/go\.sum)$
 
   # Commitizen - Conventional commits
   - repo: https://github.com/commitizen-tools/commitizen

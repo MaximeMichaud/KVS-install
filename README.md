@@ -150,6 +150,20 @@ The table prefix comes from the site's `setup.php` (`ktvs_` for every archive KV
 
 Not covered: a domain change (the KVS license is bound to a domain and its aliases; a site imported under a domain the license does not cover needs a new archive from KVS), custom web server rules from the old vhost, and the standalone installer.
 
+### Upgrading the Docker stack with kvsctl (preview)
+
+`cli/` holds `kvsctl`, a command line tool that upgrades an installed Docker
+stack from a signed list of releases: backup, image pulls with progress,
+release files, restart, verification of the containers and of the site, and
+an automatic rollback when the new version does not come up. It also checks
+what would block an upgrade (a PHP series the release does not publish, a
+MariaDB series change, a locally edited release file, a short disk), keeps
+and restores backups, and cleans what old versions left behind. The images
+it pins are not published yet: [docs/releasing.md](docs/releasing.md)
+describes the pipeline that will publish them. See
+[cli/README.md](cli/README.md) for the commands, the exit codes and the
+results of the lab.
+
 ## Compatibility
 
 The latest versions are more stable and we recommend using Debian 13 for the best support.
