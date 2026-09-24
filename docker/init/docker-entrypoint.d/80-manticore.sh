@@ -62,22 +62,27 @@ log_info "Configuring External Search plugin..."
 PROJECT_URL=$(get_project_url)
 mkdir -p "$PLUGIN_DATA_DIR"
 
-# Create plugin configuration using PHP serialized format
+# Create plugin configuration using PHP serialized format. The values follow
+# the hints the plugin form gives for Manticore: use the external search
+# always (1) and let it completely replace the internal search (0); any
+# other display mode adds the internal results and shows every hit twice.
+# The internal fallback stays at its default, so KVS still answers with its
+# own search while Manticore is down.
 cat > /tmp/configure_external_search.php << 'EOPHP'
 <?php
 $plugin_data = array(
     'enable_external_search' => 1,
-    'display_results' => 1,
+    'display_results' => 0,
     'api_call' => 'http://manticore-api:8080/kvs_manticore_search_videos.php?query=%QUERY%&limit=%LIMIT%&from=%FROM%',
     'outgoing_url' => getenv('PROJECT_URL'),
 
     'enable_external_search_albums' => 1,
-    'display_results_albums' => 1,
+    'display_results_albums' => 0,
     'api_call_albums' => 'http://manticore-api:8080/kvs_manticore_search_albums.php?query=%QUERY%&limit=%LIMIT%&from=%FROM%',
     'outgoing_url_albums' => getenv('PROJECT_URL'),
 
     'enable_external_search_searches' => 1,
-    'display_results_searches' => 1,
+    'display_results_searches' => 0,
     'api_call_searches' => 'http://manticore-api:8080/kvs_manticore_search_searches.php?query=%QUERY%&limit=%LIMIT%&from=%FROM%',
     'outgoing_url_searches' => getenv('PROJECT_URL')
 );
