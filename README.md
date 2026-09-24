@@ -84,7 +84,7 @@ MODE_CHOICE=1 \
 | `KVS_EMAIL` | email | - | Email for SSL certificates (required for Let's Encrypt/ZeroSSL) |
 | `PREFIX_CHOICE` | `1-3` | `1` | 1=Auto (kvs-domain), 2=Legacy (kvs), 3=Custom |
 | `SSL_CHOICE` | `1-3` | `1` | 1=Let's Encrypt, 2=ZeroSSL, 3=Self-signed |
-| `DB_CHOICE` | `1-4` | `1` | MariaDB version (1=11.8, 2=11.4, 3=10.11, 4=10.6) |
+| `DB_CHOICE` | `1-3` | `1` | MariaDB version (1=12.3, 2=11.8, 3=11.4) |
 | `IONCUBE_CHOICE` | `1`/`2` | `1` | 1=Yes, 2=No |
 | `CACHE_CHOICE` | `1`/`2` | `1` | 1=Dragonfly, 2=Memcached |
 | `MODE_CHOICE` | `1`/`2` | `1` | 1=Single site, 2=Multi site |
@@ -99,7 +99,7 @@ MODE_CHOICE=1 \
 ```bash
 HEADLESS=y \
 INSTALL_TYPE=2 \
-database_ver=11.8 \
+database_ver=12.3 \
 IONCUBE=YES \
 AUTOPACKAGEUPDATE=YES \
 ./kvs-install.sh
@@ -214,7 +214,7 @@ Your input is valuable— if you believe certain enhancements should be prioriti
 The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them. (For example, PHP 8.3/8.4 is not yet officially supported by KVS and thus not recommended.)
 
 - NGINX 1.29.x mainline
-- MariaDB 10.6 LTS, 10.11 LTS, 11.4 LTS or 11.8 LTS (Default)
+- MariaDB 11.4 LTS, 11.8 LTS or 12.3 LTS (Default)
 - PHP 7.4 or PHP 8.1 (since 6.2.0)
 - phpMyAdmin 5.2.3 (or newer)
 

@@ -144,7 +144,7 @@ fi
 if [[ "$HEADLESS" == "y" ]]; then
     PREFIX_CHOICE=${PREFIX_CHOICE:-1}       # 1=default (kvs-domain), 2=legacy (kvs), 3=custom
     SSL_CHOICE=${SSL_CHOICE:-1}             # 1=letsencrypt, 2=zerossl, 3=selfsigned
-    DB_CHOICE=${DB_CHOICE:-1}               # 1=latest LTS (11.8)
+    DB_CHOICE=${DB_CHOICE:-1}               # 1=the newest LTS (MARIADB_LTS_VERSIONS)
     IONCUBE_CHOICE=${IONCUBE_CHOICE:-1}     # 1=yes, 2=no
     CACHE_CHOICE=${CACHE_CHOICE:-1}         # 1=dragonfly, 2=memcached
     VOLUME_CHOICE=${VOLUME_CHOICE:-2}       # For credential mismatch: 1=delete volume, 2=exit (safe default)
@@ -806,6 +806,12 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 readonly MAX_SITE_PREFIX_LENGTH=235
+
+# The MariaDB LTS series the setup offers, newest first; the first one is
+# the default of a fresh install. docker-compose.yml, .env.example and the
+# multi-site files carry the same default (tests/test_mariadb_versions.sh).
+readonly MARIADB_LTS_VERSIONS=("12.3" "11.8" "11.4")
+readonly MARIADB_DEFAULT_VERSION="${MARIADB_LTS_VERSIONS[0]}"
 
 #################################################################
 # Pre-flight Checks
@@ -1906,14 +1912,14 @@ select_mariadb_version() {
     echo ""
 
     # Parse and display LTS versions with status
-    # LTS versions: 11.8, 11.4, 10.11, 10.6
+    # The LTS series, newest first.
     TODAY=$(date +%Y-%m-%d)
 
     i=1
     declare -a VERSIONS
 
     # Check each LTS version
-    for version in "11.8" "11.4" "10.11" "10.6"; do
+    for version in "${MARIADB_LTS_VERSIONS[@]}"; do
         # Get EOL and support dates for this version
         EOL=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"eol":"[^"]*"' | cut -d'"' -f4)
         SUPPORT=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"support":"[^"]*"' | cut -d'"' -f4)
@@ -2172,7 +2178,7 @@ select_ioncube() {
 # Run version selections
 # Always ask for MariaDB version in interactive mode (allow changing from previous install)
 if [[ -z "$MARIADB_VERSION_CONFIRMED" ]]; then
-    if [ "$MARIADB_VERSION" != "11.8" ]; then
+    if [ "$MARIADB_VERSION" != "$MARIADB_DEFAULT_VERSION" ]; then
         # Skip prompt if KEEP_VERSION already set (headless mode)
         if [[ -z "$KEEP_VERSION" ]]; then
             echo ""

@@ -274,7 +274,7 @@ test_package_steps_stop_when_apt_fails() {
   REDIRECT_SERVER_NAME='*.example.com'
   PHP=8.1
   webserver=nginx
-  database_ver=11.8
+  database_ver=12.3
 
   check_ports() { :; }
   curl() { :; }

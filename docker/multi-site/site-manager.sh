@@ -510,7 +510,7 @@ USE_WWW=false
 TABLES_PREFIX=${tables_prefix}
 
 # Database
-MARIADB_VERSION=11.8
+MARIADB_VERSION=12.3
 MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
 MARIADB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
 

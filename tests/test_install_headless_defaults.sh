@@ -1,8 +1,8 @@
 #!/bin/bash
 # shellcheck disable=SC1091,SC2034,SC2154,SC2329
-# README documents the standalone headless run with database_ver=11.8. The
+# README documents the standalone headless run with database_ver=12.3. The
 # defaults read DATABASE_VER only, so the documented variable was ignored
-# and MariaDB 11.8 was installed whatever the operator asked for.
+# and the default series was installed whatever the operator asked for.
 
 set -o pipefail
 
@@ -34,17 +34,17 @@ selected_database_version() {
 }
 
 test_documented_database_ver_is_honoured() {
-  assert_equal "10.11" "$(selected_database_version database_ver=10.11)" \
+  assert_equal "11.4" "$(selected_database_version database_ver=11.4)" \
     "database_ver from the environment was ignored"
 }
 
 test_uppercase_database_ver_still_works() {
-  assert_equal "10.6" "$(selected_database_version DATABASE_VER=10.6)" \
+  assert_equal "11.8" "$(selected_database_version DATABASE_VER=11.8)" \
     "DATABASE_VER from the environment is no longer honoured"
 }
 
 test_default_is_the_latest_lts() {
-  assert_equal "11.8" "$(selected_database_version)" "the default MariaDB series changed"
+  assert_equal "12.3" "$(selected_database_version)" "the default MariaDB series changed"
 }
 
 run_test() {
