@@ -168,7 +168,7 @@ initialize_runtime_defaults() {
   if [[ $HEADLESS == "y" ]]; then
     INSTALL_TYPE=${INSTALL_TYPE:-1}  # 1=Docker (default), 2=Standalone
     MENU_OPTION=${MENU_OPTION:-1}    # 1=Restart install, 2=Add site, 3=Update PMA, 4=Update script, 5=Quit
-    database_ver=${DATABASE_VER:-11.8}
+    database_ver=${database_ver:-${DATABASE_VER:-11.8}}
     IONCUBE=${IONCUBE:-YES}
     AUTOPACKAGEUPDATE=${AUTOPACKAGEUPDATE:-YES}
     SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}  # letsencrypt, zerossl, or selfsigned
@@ -1632,6 +1632,26 @@ function chooseInstallationType() {
   esac
 }
 
+# Clone the repository next to the installation directory and swap it in
+# only once the clone succeeded. A failed pull followed by a failed clone
+# (GitHub unreachable) must leave the Compose files of a running site in
+# place instead of deleting the directory first.
+clone_kvs_install() {
+  local install_dir="$1"
+  local staging="${install_dir}.clone"
+  local status
+
+  rm -rf "$staging" || return $?
+  git clone https://github.com/MaximeMichaud/KVS-install.git "$staging"
+  status=$?
+  if ((status != 0)); then
+    rm -rf "$staging"
+    return "$status"
+  fi
+  rm -rf "$install_dir" || return $?
+  mv "$staging" "$install_dir"
+}
+
 backup_user_data() {
   local install_dir="$1"
   local backup_dir="$2"
@@ -1673,6 +1693,27 @@ restore_user_data() {
   echo "${green}Restored .env and kvs-archive${normal}"
 }
 
+# A minimal Debian or Ubuntu ships neither git, which the clone below needs,
+# nor unzip, which the setup preflight requires. Install what is missing
+# before the clone instead of stopping on "git: command not found".
+ensure_docker_prerequisites() {
+  local -a missing=()
+  local cmd
+
+  for cmd in git unzip; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+  if ((${#missing[@]} == 0)); then
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "${red}Missing commands: ${missing[*]}. Install them and run the installer again.${normal}" >&2
+    return 1
+  fi
+  echo "Installing ${missing[*]}..."
+  apt-get update -qq && apt_install -qq "${missing[@]}"
+}
+
 function dockerInstall() {
   local INSTALL_DIR
   local BACKUP_DIR
@@ -1699,6 +1740,8 @@ function dockerInstall() {
   fi
   echo "${green}Docker Compose is available${normal}"
 
+  ensure_docker_prerequisites || return $?
+
   # Clone or update KVS-install repo
   INSTALL_DIR="${KVS_INSTALL_DIR:-/opt/kvs}"
   if [[ -n "${KVS_BACKUP_DIR:-}" ]]; then
@@ -1718,11 +1761,11 @@ function dockerInstall() {
       echo "${red}Git pull failed, re-cloning...${normal}"
       backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
       cd "${INSTALL_DIR%/*}" || return $?
-      rm -rf "$INSTALL_DIR" || return $?
-      git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
+      clone_kvs_install "$INSTALL_DIR"
       clone_status=$?
       if ((clone_status != 0)); then
-        [[ -d "$BACKUP_DIR" ]] && echo "${yellow}Clone failed; user data remains in $BACKUP_DIR${normal}" >&2
+        echo "${red}Clone failed; the installed copy in $INSTALL_DIR is left untouched${normal}" >&2
+        [[ -d "$BACKUP_DIR" ]] && echo "${yellow}User data also remains in $BACKUP_DIR${normal}" >&2
         return "$clone_status"
       fi
       restore_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
@@ -1730,9 +1773,8 @@ function dockerInstall() {
   else
     # Directory doesn't exist or is not a git repo
     backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
-    rm -rf "$INSTALL_DIR" 2>/dev/null || return $?
     echo "Cloning KVS-install..."
-    git clone https://github.com/MaximeMichaud/KVS-install.git "$INSTALL_DIR"
+    clone_kvs_install "$INSTALL_DIR"
     clone_status=$?
     if ((clone_status != 0)); then
       [[ -d "$BACKUP_DIR" ]] && echo "${yellow}Clone failed; user data remains in $BACKUP_DIR${normal}" >&2
