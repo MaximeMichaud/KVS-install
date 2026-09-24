@@ -346,7 +346,9 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq "'^https?://(www[.])?\${DOMAIN_PATTERN}(:[0-9]+)?/contents/'" "$configure" || fail "http storage URLs must be adopted too"
     grep -Fq 'Storage servers use external hosts' "$configure" || fail "external storage hosts must be tolerated"
     grep -Fq "GEOIP_UPDATE_CLAUSE=\", '\\\$.geoip_database', '\$GEOIP_DB'\"" "$settings" || fail "the GeoIP path must always follow the container"
-    grep -Fq "ffmpeg path:" "$config_php" || fail "an ffmpeg path from another server must be replaced"
+    grep -Fq "adopt_setup_php_binary ffmpeg_path /usr/bin/ffmpeg" "$config_php" || fail "an ffmpeg path from another server must be replaced"
+    grep -Fq "adopt_setup_php_binary php_path /usr/local/bin/php" "$config_php" || fail "a php path from another server must be replaced"
+    grep -Fq "adopt_setup_php_binary image_magick_path /usr/bin/convert" "$config_php" || fail "an ImageMagick path from another server must be replaced"
     grep -Fq 'docker/mariadb/init/*kvs-import*' "$REPO_ROOT/.gitignore" || fail "staged dumps must be ignored by git"
     pass "setup and init are wired for imports"
 }
