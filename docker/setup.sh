@@ -2651,15 +2651,21 @@ select_manticore() {
     echo "  • Advanced users: review/modify PHP scripts in /var/www/\${DOMAIN}/ if needed"
     echo ""
 
-    # Skip prompt if already set (headless mode)
+    # Skip prompt if already set (headless mode). A headless run takes the
+    # interactive default: read would block on a terminal and end the setup
+    # without one.
     if [[ -z "$MANTICORE_CHOICE" ]]; then
-        echo "Options:"
-        echo "  1) Enable Manticore Search (recommended for large video libraries)"
-        echo "  2) Skip (use default KVS search)"
-        echo ""
-        echo -n "Choice [2]: "
-        read -r MANTICORE_CHOICE
-        MANTICORE_CHOICE=${MANTICORE_CHOICE:-2}
+        if [ "${HEADLESS:-}" = "y" ]; then
+            MANTICORE_CHOICE=2
+        else
+            echo "Options:"
+            echo "  1) Enable Manticore Search (recommended for large video libraries)"
+            echo "  2) Skip (use default KVS search)"
+            echo ""
+            echo -n "Choice [2]: "
+            read -r MANTICORE_CHOICE
+            MANTICORE_CHOICE=${MANTICORE_CHOICE:-2}
+        fi
     fi
 
     if [ "$MANTICORE_CHOICE" = "1" ]; then

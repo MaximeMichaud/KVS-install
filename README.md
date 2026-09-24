@@ -88,6 +88,7 @@ MODE_CHOICE=1 \
 | `IONCUBE_CHOICE` | `1`/`2` | `1` | 1=Yes, 2=No |
 | `CACHE_CHOICE` | `1`/`2` | `1` | 1=Dragonfly, 2=Memcached |
 | `MODE_CHOICE` | `1`/`2` | `1` | 1=Single site, 2=Multi site |
+| `MANTICORE_CHOICE` | `1`/`2` | `2` | 1=Manticore Search (the External Search plugin is pointed at it), 2=KVS search |
 | `STOP_EXISTING` | `Y`/`n` | `Y` | Stop existing KVS containers |
 | `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry, 2=Continue anyway, 3=Exit |
 | `DISABLE_KVS_SUPPORT_ACCESS` | `true`/`false` | `false` | Turn off KVS support access (Kernel Team login with kvs_support); the admin dashboard re-enables it |

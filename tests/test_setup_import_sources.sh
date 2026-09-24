@@ -617,6 +617,12 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect2.txt" || exit 5
         [ "$(import_kv "$TMP_ROOT/detect2.txt" site_dir)" = "$site" ] || exit 6
         import_remote_detect "$exporter" "/var/www/my site" "$TMP_ROOT/detect3.txt" 2>/dev/null && exit 7
+        # A site directory the search found can hold a character the
+        # transfer refuses; the refusal must say so, not fail in silence.
+        import_remote_dump "$exporter" "/var/www/my site" "$TMP_ROOT/refused.sql.gz" 2> "$TMP_ROOT/refused.err" && exit 37
+        grep -q '^ERROR: .*/var/www/my site' "$TMP_ROOT/refused.err" || exit 38
+        import_remote_files "/var/www/my site" "$TMP_ROOT/refused-dest" yes 2> "$TMP_ROOT/refused.err" && exit 39
+        grep -q '^ERROR: .*/var/www/my site' "$TMP_ROOT/refused.err" || exit 40
         grep -q '^target root@old.example.com$' "$bin/ssh.log" || exit 8
         grep -q '^opt BatchMode=yes$' "$bin/ssh.log" || exit 9
 
@@ -747,6 +753,52 @@ test_links_leaving_the_site_are_listed_and_the_copy_follows_them() {
     pass "links leaving the site are listed and the copy follows them"
 }
 
+# The tar stream is a pipeline, and setup.sh runs without pipefail: the
+# status of the remote tar must be read from the pipeline itself, or the
+# files it could not read are silently left behind.
+test_the_tar_stream_reports_what_the_old_server_could_not_read() {
+    local bin="$TMP_ROOT/ssh-bin-tar" site destination real_tar
+
+    make_fake_ssh "$bin"
+    real_tar=$(command -v tar)
+    # The remote tar is the real one ending with the status FAKE_TAR_STATUS
+    # asks for, as tar does after "Cannot open: Permission denied" (2) or
+    # "file changed as we read it" (1); the local tar runs untouched.
+    cat > "$bin/tar" <<EOF
+#!/bin/bash
+case " \$* " in
+    *" -chf "*) "$real_tar" "\$@"; exit "\${FAKE_TAR_STATUS:-0}" ;;
+    *) exec "$real_tar" "\$@" ;;
+esac
+EOF
+    chmod +x "$bin/tar"
+    site="$TMP_ROOT/remote-site-tar"
+    make_site "$site" "$site"
+    destination="$TMP_ROOT/remote-dest-tar"
+    (
+        set +o pipefail
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/ctl4" import_ssh_setup old.example.com 22 root "" yes
+        FAKE_UID=0 import_remote_privileges || exit 1
+        export FAKE_TAR_STATUS=2
+        import_remote_files "$site" "$destination" no > "$TMP_ROOT/tar-out.txt" 2>&1 && exit 2
+        grep -q '^ERROR: .*old.example.com' "$TMP_ROOT/tar-out.txt" || exit 3
+        rm -rf "$destination"
+        export FAKE_TAR_STATUS=1
+        import_remote_files "$site" "$destination" no > "$TMP_ROOT/tar-out.txt" 2>&1 || exit 4
+        grep -q 'vanished' "$TMP_ROOT/tar-out.txt" || exit 5
+        [ -f "$destination/contents/videos/1.mp4" ] || exit 6
+        rm -rf "$destination"
+        export FAKE_TAR_STATUS=0
+        import_remote_files "$site" "$destination" no > "$TMP_ROOT/tar-out.txt" 2>&1 || exit 7
+        [ ! -s "$TMP_ROOT/tar-out.txt" ] || exit 8
+        [ -f "$destination/admin/include/setup.php" ] || exit 9
+        import_ssh_close
+        exit 0
+    ) || fail "the tar stream must fail on what the old server could not read and tolerate a live site (case $?)"
+    pass "the tar stream reports what the old server could not read"
+}
+
 test_archive_names_map_to_kinds_tools_and_packages
 test_only_the_missing_tool_is_installed
 test_listings_are_normalized_for_every_archive_kind
@@ -763,5 +815,6 @@ test_remote_detect_dump_and_files_go_through_one_ssh
 test_a_user_with_sudo_runs_the_remote_side_through_it
 test_password_protected_archives_are_refused_with_a_reason
 test_links_leaving_the_site_are_listed_and_the_copy_follows_them
+test_the_tar_stream_reports_what_the_old_server_could_not_read
 
 echo "All $TESTS_RUN import source tests passed."
