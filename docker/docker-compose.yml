@@ -18,6 +18,7 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d
       - ./nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
       - /var/www/${DOMAIN}:/var/www/kvs
+      - manticore-api:/var/www/manticore-api
       - phpmyadmin-data:/usr/share/phpmyadmin:ro
       - acme-certs:/etc/nginx/ssl
       - letsencrypt-webroot:/var/www/_letsencrypt
@@ -42,6 +43,7 @@ services:
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
+      - manticore-api:/var/www/manticore-api
       - phpmyadmin-data:/usr/share/phpmyadmin
       - ./php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
       - ./geoip:/usr/share/geoip:ro
@@ -187,6 +189,7 @@ services:
     container_name: ${SITE_PREFIX:-kvs}-init
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
+      - manticore-api:/var/www/manticore-api
       - ./kvs-archive:/kvs-archive:ro
       - ./geoip:/usr/share/geoip:ro
       - nginx-includes:/nginx-includes
@@ -237,6 +240,7 @@ networks:
 #       volumes:
 #         - /var/www/${DOMAIN}:/var/www/kvs
 volumes:
+  manticore-api:
   mariadb-data:
   acme-data:
   acme-certs:

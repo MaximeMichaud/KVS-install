@@ -23,6 +23,7 @@ services:
       - ../../nginx/kvs-caddy.conf.template:/etc/nginx/templates/kvs.conf.template:ro
       - ../../../../conf/nginx/globals:/etc/nginx/globals:ro
       - /var/www/${DOMAIN}:/var/www/kvs
+      - manticore-api:/var/www/manticore-api
       - phpmyadmin-data:/usr/share/phpmyadmin:ro
       - nginx-includes:/etc/nginx/includes:ro
     environment:
@@ -58,6 +59,7 @@ services:
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
+      - manticore-api:/var/www/manticore-api
       - phpmyadmin-data:/usr/share/phpmyadmin
       - ../../../php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
     environment:
@@ -154,6 +156,7 @@ services:
     container_name: ${SITE_PREFIX}-init
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
+      - manticore-api:/var/www/manticore-api
       - ../../../kvs-archive:/kvs-archive:ro
       - nginx-includes:/nginx-includes
     environment:
@@ -201,6 +204,7 @@ networks:
 # Volumes
 # =============================================================================
 volumes:
+  manticore-api:
   mariadb-data:
   phpmyadmin-data:
   nginx-includes:
