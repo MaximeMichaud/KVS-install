@@ -110,7 +110,7 @@ if grep -Fq 'cron.php' "$UPDATER_CRON"; then
     fail "the root updater crontab contains the KVS task"
 fi
 
-grep -Fxq '0 * * * * manticore /usr/bin/indexer --rotate --all >> /var/log/manticore/indexer-cron.log 2>&1' \
+grep -Fxq "0 * * * * manticore find /var/lib/manticore -name '*.new.*' -delete; /usr/bin/indexer --rotate --all >> /var/log/manticore/indexer-cron.log 2>&1" \
     "$MANTICORE_CRON" || fail "Manticore index rotation is not assigned to the manticore user"
 if grep -Eq '^[^#].*[[:space:]]root[[:space:]].*indexer' "$MANTICORE_CRON"; then
     fail "Manticore index rotation still runs as root"
