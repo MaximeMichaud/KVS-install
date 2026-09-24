@@ -1439,12 +1439,29 @@ insert_cronjob() {
 # instead of the internal nginx locations of the site configuration, and caps
 # uploads below the limits configured for PHP and nginx above. Mirrors the
 # Docker init step (70-system-settings.sh) for the standalone install.
+# The table prefix of the installed site, as KVS wrote it in setup.php
+# (ktvs_ for every archive KVS ships). It lands inside SQL, so only
+# identifier characters pass; anything else falls back to ktvs_.
+kvs_tables_prefix() {
+  local setup="${KVS_PATH:-/var/www/$DOMAIN}/admin/include/setup.php"
+  local pattern prefix
+
+  pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
+  prefix=$(sed -n -E "$pattern" "$setup" 2>/dev/null | head -n 1)
+  [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
+  printf '%s\n' "$prefix"
+}
+
 configure_kvs_system_settings() {
   local db="${1:-$DOMAIN}"
   local server_type
+  local prefix
 
-  mariadb "$db" <<'EOSQL' || return $?
-INSERT INTO ktvs_settings (section, satellite_prefix, value, added_date, version_control)
+  prefix=$(kvs_tables_prefix)
+  # The heredoc expands the prefix only: a JSON path such as $.server_type
+  # has no variable to expand.
+  mariadb "$db" <<EOSQL || return $?
+INSERT INTO ${prefix}settings (section, satellite_prefix, value, added_date, version_control)
 VALUES (
     'system',
     '',
@@ -1480,7 +1497,7 @@ ON DUPLICATE KEY UPDATE
     ),
     version_control = version_control + 1;
 EOSQL
-  server_type=$(mariadb -N "$db" -e "SELECT JSON_UNQUOTE(JSON_EXTRACT(value, '$.server_type')) FROM ktvs_settings WHERE section='system' AND satellite_prefix=''") || return $?
+  server_type=$(mariadb -N "$db" -e "SELECT JSON_UNQUOTE(JSON_EXTRACT(value, '$.server_type')) FROM ${prefix}settings WHERE section='system' AND satellite_prefix=''") || return $?
   if [ "$server_type" != "nginx" ]; then
     echo "ERROR: KVS server type reads '${server_type}' after the update, expected nginx" >&2
     return 1
@@ -1499,19 +1516,21 @@ configure_kvs_servers() {
   local domain_pattern="${DOMAIN//./[.]}"
   local ssl_skip=0
   local matching stale mismatch
+  local prefix
 
+  prefix=$(kvs_tables_prefix)
   [ "$SSL_PROVIDER" = "selfsigned" ] && ssl_skip=1
   mariadb "$db" <<EOSQL || return $?
-UPDATE ktvs_admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
-UPDATE ktvs_admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
-UPDATE ktvs_admin_servers
+UPDATE ${prefix}admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
+UPDATE ${prefix}admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
+UPDATE ${prefix}admin_servers
     SET urls = REGEXP_REPLACE(urls, '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/', '${project_url}/contents/')
     WHERE urls REGEXP '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/';
-UPDATE ktvs_admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
+UPDATE ${prefix}admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
 EOSQL
-  matching=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls LIKE '${project_url}/contents/%'") || return $?
-  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE urls REGEXP '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/' AND urls NOT LIKE '${project_url}/contents/%'") || return $?
-  mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ktvs_admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
+  matching=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls LIKE '${project_url}/contents/%'") || return $?
+  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls REGEXP '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/' AND urls NOT LIKE '${project_url}/contents/%'") || return $?
+  mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
   if [ "$matching" -lt 1 ] || [ "$stale" -ne 0 ] 2>/dev/null; then
     echo "ERROR: KVS storage server URLs do not match ${project_url}/contents/ (matching=${matching}, stale=${stale})" >&2
     return 1
