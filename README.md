@@ -159,11 +159,8 @@ This script supports the following Linux distributions:
 
 | Operating System | Support |
 | --- | --- |
-| Debian 11 | Deprecated, supported until 2026-08-31 |
 | Debian 12 | ✅ |
 | Debian 13 | ✅ |
-
-Debian 11 follows the lifecycle tracked at [endoflife.date/debian](https://endoflife.date/debian). KVS-install displays a runtime warning on Debian 11 and will stop supporting Debian 11 hosts on 2026-08-31. Upgrade to Debian 12 or Debian 13 before that date.
 
 At present, non-Debian-based distros are not a priority. We recommend using the latest stable version of Debian as it was the development platform for this script. If you wish to use another distro, please open an issue on GitHub with a valid reason for consideration. Your case will be studied, and may provide support through Docker to achieve similar results.
 
@@ -184,7 +181,7 @@ However, in general, you should be fine even with a site experiencing a high amo
 
 **Disk layout (Docker)**: the site files live in `/var/www/<domain>` (bind mount) and the volumes and build cache under the Docker data directory. Docker 29 stores images through containerd, under `/var/lib/containerd` rather than the Docker `data-root`, so moving only `data-root` leaves the images on the system disk. On a host with a small system disk and a large data disk, point `"data-root"` in `/etc/docker/daemon.json` and `root = "..."` in `/etc/containerd/config.toml` at the data disk, and create `/var/www/<domain>` as a symlink or mount on that disk before running the setup. The pre-flight check reports the tightest of these locations.
 
-In a test on Debian 11, a standard installation left 6.3GB free out of 10GB. Watch demo 6 May 2023: [Demo Video](https://www.youtube.com/watch?v=WIa3xobMBR4).
+In a 2023 test, a standard installation left 6.3GB free out of 10GB. Watch demo 6 May 2023: [Demo Video](https://www.youtube.com/watch?v=WIa3xobMBR4).
 
 ## Features
 
