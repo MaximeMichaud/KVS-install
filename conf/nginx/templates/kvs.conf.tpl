@@ -1,3 +1,12 @@
+# The KVS embed player (/embed/<id>/, rewritten to /player/iframe_embed.php by
+# the KVS rewrites) exists to be framed by other sites, so it must not carry
+# the frame restriction the rest of the site sends. Nginx drops a header whose
+# value is empty.
+map $uri $kvs_frame_options {
+    default                      "SAMEORIGIN";
+    ~^/player/iframe_embed\.php$ "";
+}
+
 # Main KVS site
 server {
     listen                  443 ssl;
@@ -11,7 +20,7 @@ server {
     ssl_certificate_key     /etc/nginx/ssl/${DOMAIN}/key.pem;
 
     # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Frame-Options $kvs_frame_options always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -90,7 +99,13 @@ server {
         deny all;
     }
 
-    location ~ ^/(admin/include|tmp)/ {
+    # The KVS rewrites file marks these directories internal with plain prefix
+    # locations, which lose to the PHP handler regular expression below; deny
+    # them with a regular expression that is evaluated first. admin/include
+    # holds the server side code, except the two scripts the admin panel
+    # uploads through (file_upload_form_url and file_upload_status_url in
+    # admin/js/config.php), which the PHP handler must still serve.
+    location ~ ^/(admin/(include(?!/(uploader|get_upload_status)\.php$)|data|logs|plugins|smarty|stamp|template|tools)|tmp)/ {
         deny all;
     }
 
