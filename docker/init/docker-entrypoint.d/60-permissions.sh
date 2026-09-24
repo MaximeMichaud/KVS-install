@@ -58,19 +58,19 @@ fix_dir "$KVS_PATH/contents" "755"
 fix_dir "$KVS_PATH/admin/data" "755"
 
 # --- All subdirs in these paths must be 777 ---
-find "$KVS_PATH/admin/logs" -type d -exec chmod 777 {} \; 2>/dev/null || true
-find "$KVS_PATH/admin/data" -mindepth 1 -type d -exec chmod 777 {} \; 2>/dev/null || true
-find "$KVS_PATH/contents" -mindepth 1 -type d -exec chmod 777 {} \; 2>/dev/null || true
-find "$KVS_PATH/template" -type d -exec chmod 777 {} \; 2>/dev/null || true
-find "$KVS_PATH/static" -type d -exec chmod 777 {} \; 2>/dev/null || true
+find "$KVS_PATH/admin/logs" -type d -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/admin/data" -mindepth 1 -type d -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/contents" -mindepth 1 -type d -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/template" -type d -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/static" -type d -exec chmod 777 {} + 2>/dev/null || true
 
 # --- Files that must be 666 ---
-find "$KVS_PATH/admin/logs" -type f ! -iname ".htaccess" -exec chmod 666 {} \; 2>/dev/null || true
-find "$KVS_PATH/admin/data" -type f \( -iname "*.dat" -o -iname "*.pem" -o -iname "*.tpl" \) -exec chmod 666 {} \; 2>/dev/null || true
-find "$KVS_PATH/contents" -type f ! -iname ".htaccess" -exec chmod 666 {} \; 2>/dev/null || true
-find "$KVS_PATH/template" -type f ! -iname ".htaccess" -exec chmod 666 {} \; 2>/dev/null || true
-find "$KVS_PATH/langs" -type f -iname "*.lang" -exec chmod 666 {} \; 2>/dev/null || true
-find "$KVS_PATH/static" -type f -exec chmod 666 {} \; 2>/dev/null || true
+find "$KVS_PATH/admin/logs" -type f ! -iname ".htaccess" -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/admin/data" -type f \( -iname "*.dat" -o -iname "*.pem" -o -iname "*.tpl" \) -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/contents" -type f ! -iname ".htaccess" -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/template" -type f ! -iname ".htaccess" -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/langs" -type f -iname "*.lang" -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/static" -type f -exec chmod 666 {} + 2>/dev/null || true
 fix_file "$KVS_PATH/robots.txt" "666"
 fix_file "$KVS_PATH/favicon.ico" "666"
 
