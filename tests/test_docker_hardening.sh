@@ -1201,8 +1201,8 @@ test_network_lookups_may_fail_without_ending_the_setup() {
     grep -Fq 'MARIADB_DATA=$(curl -s --connect-timeout 5 "https://endoflife.date/api/mariadb.json" 2>/dev/null) || MARIADB_DATA=""' "$setup" ||
         fail "the MariaDB version lookup must fall back to the defaults when it fails"
     # shellcheck disable=SC2016
-    grep -Fq 'SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org) || SERVER_IP=""' "$setup" ||
-        fail "the public IP lookup must leave the DNS check to report a mismatch instead of ending the setup"
+    grep -Fq 'SERVER_IP=$(public_ipv4) || SERVER_IP=""' "$setup" ||
+        fail "the public IP lookup must leave the DNS check to report an unknown address instead of ending the setup"
     pass "network lookups may fail without ending the setup"
 }
 
