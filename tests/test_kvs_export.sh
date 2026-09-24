@@ -322,6 +322,14 @@ test_the_connection_follows_the_host_written_in_setup_db() {
         fail "host:port must split into -h and -P: $(argv_lines)"
     assert_key "$out" db_host "db.example.com:3307"
 
+    # PHP reaches localhost:3307 over TCP, while the clients take the
+    # host name localhost as the socket and ignore the port unless TCP is
+    # requested: the dump would come from the default instance.
+    make_site "$TMP_ROOT/host-local-port" "https://e.example.com" "localhost:3307"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/host-local-port" || fail "detect must succeed"
+    argv_lines | grep -Fq -- '[--protocol=tcp] [-h] [localhost] [-P] [3307]' ||
+        fail "localhost:port must force TCP on the port: $(argv_lines)"
+
     make_site "$TMP_ROOT/host-socket" "https://c.example.com" "localhost:/run/mysqld/mysqld.sock"
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/host-socket" || fail "detect must succeed"
     argv_lines | grep -Fq -- '[-S] [/run/mysqld/mysqld.sock]' ||

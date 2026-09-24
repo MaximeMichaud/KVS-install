@@ -436,6 +436,8 @@ kvs_detect_tools() {
 # and host:/path names a socket, exactly like the PHP drivers read it. The
 # arguments are shared by the client and the dump tool, so only what both
 # accept goes here: the dump tool refuses the client's connect timeout.
+# A port forces TCP: the clients take the host name localhost as the
+# socket and would ignore the port, where PHP connects to it.
 kvs_build_connection_args() {
     local port
 
@@ -448,7 +450,7 @@ kvs_build_connection_args() {
         *:*)
             port=${DB_HOST_RAW##*:}
             if kvs_is_number "$port"; then
-                DB_CONN_ARGS+=(-h "${DB_HOST_RAW%:*}" -P "$port")
+                DB_CONN_ARGS+=(--protocol=tcp -h "${DB_HOST_RAW%:*}" -P "$port")
             else
                 DB_CONN_ARGS+=(-h "$DB_HOST_RAW")
             fi

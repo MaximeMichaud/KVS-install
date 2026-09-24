@@ -889,6 +889,15 @@ import_remote_path_ok() {
     esac
 }
 
+# import_remote_path_check <path>: the same check, with the refusal
+# explained. The path is not always typed by the operator: the detection
+# on the old server can answer with a directory the transfer refuses.
+import_remote_path_check() {
+    import_remote_path_ok "$1" && return 0
+    echo "ERROR: the remote site directory must be an absolute path without spaces or shell characters: '$1'" >&2
+    return 1
+}
+
 # import_ssh_setup <host> <port> <user> <identity file> <batch yes|no> <accept new host keys yes|no>
 # One multiplexed connection for the whole import: a password is typed
 # once on ssh's own prompt, never read by the setup, and every later
@@ -1009,9 +1018,8 @@ import_remote_detect() {
     local dir="$2"
     local output="$3"
 
-    if [ -n "$dir" ] && ! import_remote_path_ok "$dir"; then
-        echo "ERROR: the remote site directory must be an absolute path without spaces or shell characters: '$dir'" >&2
-        return 1
+    if [ -n "$dir" ]; then
+        import_remote_path_check "$dir" || return 1
     fi
     if [ -n "$dir" ]; then
         import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- detect "$dir" < "$exporter" > "$output"
@@ -1027,7 +1035,7 @@ import_remote_dump() {
     local dir="$2"
     local output="$3"
 
-    import_remote_path_ok "$dir" || return 1
+    import_remote_path_check "$dir" || return 1
     import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- dump "$dir" < "$exporter" > "$output"
 }
 
@@ -1049,7 +1057,7 @@ import_remote_files() {
     local status=0
     local -a rsync_path=()
 
-    import_remote_path_ok "$dir" || return 1
+    import_remote_path_check "$dir" || return 1
     mkdir -p "$destination" || return 1
     if [ "$use_rsync" = yes ]; then
         if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
@@ -1068,7 +1076,28 @@ import_remote_files() {
         esac
         return "$status"
     fi
+    # The pipeline answers for the local tar alone; the status of the tar
+    # on the old server is read from the pipeline itself, since the setup
+    # runs without pipefail. 1 is what a live site does (files changed or
+    # removed while they were read), anything else is a file it could not
+    # read or a connection that broke.
+    local -a pipe_status=()
     import_ssh "${IMPORT_REMOTE_PREFIX[@]}" tar -C "$dir" -chf - . | tar -xf - --no-same-owner -C "$destination"
+    pipe_status=("${PIPESTATUS[@]}")
+    case "${pipe_status[0]}" in
+        0) ;;
+        1)
+            echo "  Some files changed or vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
+            ;;
+        *)
+            echo "ERROR: the tar stream from $IMPORT_SSH_TARGET ended with status ${pipe_status[0]} (see the messages above): files unreadable by $IMPORT_SSH_TARGET, or the connection broke; fix them on the old server and run the same command again" >&2
+            return 1
+            ;;
+    esac
+    if [ "${pipe_status[1]}" -ne 0 ]; then
+        echo "ERROR: the tar stream from $IMPORT_SSH_TARGET could not be unpacked into $destination (see the messages above)" >&2
+        return "${pipe_status[1]}"
+    fi
 }
 
 # import_watch_file_size <file> <pid> <label>
