@@ -32,7 +32,7 @@ Docker installation is the recommended method. It provides:
 
 Requirements:
 
-- Docker and Docker Compose (installed automatically if missing)
+- Docker with the Compose plugin (both installed by the script when Docker is missing; a Docker without the Compose plugin stops the installer)
 - KVS archive file (`KVS_X.X.X_[domain.tld].zip`) in `/root`
 
 The script will:
