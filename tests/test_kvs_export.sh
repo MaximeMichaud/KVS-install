@@ -89,6 +89,7 @@ make_stubs() {
     printf ' [%s]' "$@"
     printf '\n'
     printf 'mariadb env: MYSQL_PWD=[%s]\n' "${MYSQL_PWD-}"
+    printf 'mariadb env: HOME=[%s] MYSQL_HOME=[%s]\n' "${HOME-}" "${MYSQL_HOME-}"
 } >> "${STUB_LOG:-/dev/null}"
 if [ "${STUB_DB_FAIL:-no}" = yes ]; then
     echo "ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)" >&2
@@ -103,6 +104,7 @@ EOF
     printf ' [%s]' "$@"
     printf '\n'
     printf 'mariadb-dump env: MYSQL_PWD=[%s]\n' "${MYSQL_PWD-}"
+    printf 'mariadb-dump env: HOME=[%s] MYSQL_HOME=[%s]\n' "${HOME-}" "${MYSQL_HOME-}"
 } >> "${STUB_LOG:-/dev/null}"
 for arg in "$@"; do
     case "$arg" in
@@ -394,6 +396,12 @@ test_the_dump_uses_the_compressor_that_is_installed() {
     argv_lines | grep -Fq -- '[--routines]' && fail "--routines must not be used"
     argv_lines | grep -Fq -- '[--databases]' && fail "--databases must not be used"
     grep -Fq "env: MYSQL_PWD=[$REAL_PASSWORD]" "$STUB_LOG" || fail "the dump tool must get the password from the environment"
+    # A password in root's .my.cnf beats MYSQL_PWD, so the clients must not
+    # see the caller's home nor MYSQL_HOME (case 1045 on a box with .my.cnf).
+    grep -Fq "mariadb-dump env: HOME=[/nonexistent] MYSQL_HOME=[]" "$STUB_LOG" ||
+        fail "the dump tool must run without the user option files (HOME, MYSQL_HOME)"
+    grep -Fq "mariadb env: HOME=[/nonexistent] MYSQL_HOME=[]" "$STUB_LOG" ||
+        fail "the probe must run without the user option files (HOME, MYSQL_HOME)"
     argv_lines | grep -Fq "$REAL_PASSWORD" && fail "the password must never appear in the dump argv"
 
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed"

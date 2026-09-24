@@ -464,6 +464,16 @@ kvs_build_connection_args() {
     fi
 }
 
+# A [client] password in ~/.my.cnf or in $MYSQL_HOME/my.cnf beats MYSQL_PWD
+# (option files win over the environment), so a root box with its own
+# .my.cnf would log in as the site's user with the wrong password. Point the
+# clients at no home; the system option files, and their socket path, still
+# apply. Called inside the subshell that exports the password.
+kvs_ignore_user_option_files() {
+    export HOME=/nonexistent
+    unset MYSQL_HOME
+}
+
 # One query for the numbers the summary shows: server version, tables of
 # the prefix, size, and the tables on a non-transactional engine (MyISAM,
 # Aria), which decide how the dump keeps the data consistent. A failure is
@@ -503,6 +513,7 @@ kvs_probe_database() {
         # shellcheck disable=SC2030  # The subshell scope is the point: the
         # password must not stay in the environment of this script.
         export MYSQL_PWD="$DB_PASSWORD"
+        kvs_ignore_user_option_files
         "$DB_CLIENT" --connect-timeout=10 "${DB_CONN_ARGS[@]}" -N -B -e "$query" "$DB_NAME" 2> "$TEMP_ERR_FILE" < /dev/null
     )
     status=$?
@@ -680,6 +691,7 @@ kvs_stream_dump() {
     (
         # shellcheck disable=SC2031  # Same deliberate subshell as the probe.
         export MYSQL_PWD="$DB_PASSWORD"
+        kvs_ignore_user_option_files
         "$DB_DUMP_TOOL" "${DUMP_ARGS[@]}" < /dev/null
     ) | "${COMPRESS_CMD[@]}"
 }
