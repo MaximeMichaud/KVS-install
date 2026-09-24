@@ -35,8 +35,6 @@ readonly SCRIPT_VERSION="3.0.0"
 readonly LOG_FILE="/root/kvs-install.log"
 readonly PHPMYADMIN_INSTALL_DIR="/usr/share/phpmyadmin"
 readonly PHPMYADMIN_DOWNLOAD_PAGE="https://www.phpmyadmin.net/downloads/"
-readonly DEBIAN_11_EOL_DATE="2026-08-31"
-readonly DEBIAN_11_EOL_SOURCE="https://endoflife.date/debian"
 #################################################################
 # Runtime output is initialized from main so sourcing this file is side-effect free.
 red=""
@@ -182,33 +180,6 @@ function isRoot() {
   fi
 }
 
-function today_iso() {
-  date +%F
-}
-
-function debian11_support_ended() {
-  [[ "$(today_iso)" > "$DEBIAN_11_EOL_DATE" || "$(today_iso)" == "$DEBIAN_11_EOL_DATE" ]]
-}
-
-function warn_debian11_deprecation() {
-  echo ""
-  echo "⚠️  ${yellow}Debian 11 (bullseye) is nearing end of life.${normal}"
-  echo "${yellow}Debian 11 LTS ends on ${DEBIAN_11_EOL_DATE}: ${DEBIAN_11_EOL_SOURCE}${normal}"
-  echo "${yellow}KVS-install support for Debian 11 will be removed on ${DEBIAN_11_EOL_DATE}.${normal}"
-  echo "${yellow}Please upgrade to Debian 12 (bookworm) or Debian 13 (trixie).${normal}"
-  echo ""
-  export KVS_DEBIAN_11_NOTICE_SHOWN=1
-}
-
-function block_debian11_after_eol() {
-  echo ""
-  echo "⚠️ ${alert}Debian 11 (bullseye) is no longer supported by KVS-install.${normal}"
-  echo "Debian 11 LTS ended on ${DEBIAN_11_EOL_DATE}: ${DEBIAN_11_EOL_SOURCE}"
-  echo "Please upgrade this host to Debian 12 (bookworm) or Debian 13 (trixie)."
-  echo ""
-  exit 1
-}
-
 function initialCheck() {
   echo "${cyan}KVS-install v${SCRIPT_VERSION}${normal}"
   if ! isRoot; then
@@ -225,14 +196,14 @@ function checkOS() {
     IS_DEBIAN=true
     source /etc/os-release
 
-    if [[ ! $VERSION_ID =~ (11|12|13) ]]; then
-      echo "⚠️ ${alert}Your version of Debian is not supported for standalone installation.${normal}"
+    # Only the Debian releases still maintained are supported; an older one
+    # (11 ended on 2026-08-31) stops here instead of failing later in apt.
+    if [[ ! $VERSION_ID =~ ^(12|13)$ ]]; then
       echo ""
-    elif [[ $VERSION_ID == "11" ]]; then
-      if debian11_support_ended; then
-        block_debian11_after_eol
-      fi
-      warn_debian11_deprecation
+      echo "⚠️ ${alert}Debian ${VERSION_ID:-unknown} is not supported by KVS-install.${normal}"
+      echo "Use Debian 12 (bookworm) or Debian 13 (trixie)."
+      echo ""
+      exit 1
     fi
   else
     # Non-Debian: Docker only
