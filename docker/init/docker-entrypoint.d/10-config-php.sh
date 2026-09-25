@@ -108,6 +108,17 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     adopt_setup_php_binary php_path /usr/local/bin/php /usr/bin/php
     adopt_setup_php_binary image_magick_path /usr/bin/convert /usr/local/bin/convert
     adopt_setup_php_binary mysqldump_path /usr/bin/mysqldump /usr/bin/mariadb-dump
+
+    # KVS debug mode ($config['enable_debug'], "for dev debugging" in the
+    # stock file) writes every request and query into admin/logs
+    # (debug_sql_get.txt and friends), files that grow without limit. An
+    # old server may have left it on; the site starts here without it.
+    if [ "$(setup_php_value enable_debug)" = true ]; then
+        # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
+        sed -E -i "s#^([[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]enable_debug['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*)\"true\"#\\1\"false\"#" \
+            "$KVS_PATH/admin/include/setup.php"
+        log_info "KVS debug mode (enable_debug in setup.php) was on: turned off, it logs every query into admin/logs"
+    fi
 else
     log_warn "setup.php not found, skipping PHP configuration"
 fi
