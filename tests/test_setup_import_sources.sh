@@ -525,9 +525,15 @@ make_fake_exporter() {
     cat > "$file" <<'EOF'
 #!/bin/bash
 main() {
-    if [ "${1:-}" = --size-timeout ]; then
-        shift 2
-    fi
+    while :; do
+        case "${1:-}" in
+            --size-timeout | --exclude | --include)
+                echo "option $1 $2" >> "${FAKE_EXPORTER_LOG:-/dev/null}"
+                shift 2
+                ;;
+            *) break ;;
+        esac
+    done
     local command="$1"
     local dir="${2:-/detected/site}"
     case "$command" in
@@ -622,6 +628,11 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect-budget.txt" 300 || exit 41
         grep -q "^command bash -s -- --size-timeout 300 detect $site\$" "$bin/ssh.log" || exit 42
         [ "$(import_kv "$TMP_ROOT/detect-budget.txt" site_dir)" = "$site" ] || exit 43
+        FAKE_EXPORTER_LOG="$TMP_ROOT/exporter.log" import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect-choice.txt" 300 "contents/videos_sources backup" ".well-known" || exit 44
+        grep -q "^command bash -s -- --size-timeout 300 --exclude contents/videos_sources --exclude backup --include .well-known detect $site\$" "$bin/ssh.log" || exit 45
+        import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect-bad.txt" 300 "../etc" 2> "$TMP_ROOT/bad.err" && exit 46
+        grep -q "plain paths" "$TMP_ROOT/bad.err" || exit 47
+        import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect-bad.txt" 300 "" 'a;b' 2> "$TMP_ROOT/bad.err" && exit 48
         import_remote_detect "$exporter" "/var/www/my site" "$TMP_ROOT/detect3.txt" 2>/dev/null && exit 7
         # A site directory the search found can hold a character the
         # transfer refuses; the refusal must say so, not fail in silence.
@@ -652,6 +663,28 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         [ -f "$destination/admin/include/setup.php" ] || exit 20
         grep -q '^command tar -C ' "$bin/ssh.log" || exit 21
         [ -f "$destination/contents/store/big.mp4" ] && [ ! -L "$destination/contents/store" ] || exit 36
+
+        # What the exporter reports as staying behind stays behind: the
+        # temporary files leave their directory empty, an excluded
+        # directory and a hidden one do not arrive, with rsync and with tar.
+        mkdir -p "$site/tmp" "$site/backup" "$site/.well-known" "$site/contents/videos_sources"
+        echo part > "$site/tmp/upload.part"
+        echo old > "$site/backup/old.sql"
+        echo token > "$site/.well-known/token"
+        echo source > "$site/contents/videos_sources/s.mp4"
+        rm -rf "$destination"
+        import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' '/.well-known' '/contents/videos_sources' >/dev/null 2>&1 || exit 49
+        [ -d "$destination/tmp" ] && [ ! -e "$destination/tmp/upload.part" ] || exit 50
+        [ ! -e "$destination/backup" ] && [ ! -e "$destination/.well-known" ] && [ ! -e "$destination/contents/videos_sources" ] || exit 51
+        [ -f "$destination/contents/videos/1.mp4" ] || exit 52
+        rm -rf "$destination"
+        import_remote_files "$site" "$destination" no '/tmp/*' '/backup' '/.well-known' '/contents/videos_sources' || exit 53
+        [ -d "$destination/tmp" ] && [ ! -e "$destination/tmp/upload.part" ] || exit 54
+        [ ! -e "$destination/backup" ] && [ ! -e "$destination/.well-known" ] && [ ! -e "$destination/contents/videos_sources" ] || exit 55
+        [ -f "$destination/contents/videos/1.mp4" ] || exit 56
+        grep -q "^command tar -C $site '--exclude=./tmp/\*' '--exclude=./backup' '--exclude=./.well-known' '--exclude=./contents/videos_sources' -chf - .\$" "$bin/ssh.log" || exit 57
+        import_remote_files "$site" "$destination" no 'backup' 2>/dev/null && exit 58
+        rm -rf "$site/tmp" "$site/backup" "$site/.well-known" "$site/contents/videos_sources"
 
         import_ssh_close
         grep -q '^control exit$' "$bin/ssh.log" || exit 22

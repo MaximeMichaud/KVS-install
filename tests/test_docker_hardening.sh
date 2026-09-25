@@ -1240,7 +1240,7 @@ test_remote_site_size_bounds_warn_instead_of_blocking() {
         printf 'site_size_status=incomplete\nsite_size_mb=1\nsite_size_entries=3\nsite_size_entries_total=9\nsite_size_seconds=300\ndb_size_mb=1\nsite_fs_used_mb=%s\n' "$((avail * 3))" > "$report"
         out=$(import_remote_free_space_check "$report" "$TMP_ROOT") || exit 5
         [[ "$out" == *"not known exactly"* ]] || exit 6
-        [ "$(import_remote_size_text "$report")" = "at least 1 MB (3 of 9 entries measured in 300 s), at most $((avail * 3)) MB (the filesystem usage)" ] || exit 7
+        [ "$(import_remote_size_text "$report")" = "at least 1 MB to transfer (3 of 9 entries measured in 300 s), at most $((avail * 3)) MB (the filesystem usage)" ] || exit 7
         # Skipped, with an upper bound that fits: nothing to say.
         printf 'site_size_status=skipped\nsite_size_mb=0\ndb_size_mb=1\nsite_fs_used_mb=1\n' > "$report"
         out=$(import_remote_free_space_check "$report" "$TMP_ROOT") || exit 8
@@ -1251,9 +1251,65 @@ test_remote_site_size_bounds_warn_instead_of_blocking() {
     pass "remote site size bounds warn instead of blocking the import"
 }
 
+test_remote_entries_are_shown_and_their_patterns_reach_the_transfer() {
+    local setup="$REPO_ROOT/docker/setup.sh"
+    local lib="$TMP_ROOT/entries-functions.sh"
+    local report="$TMP_ROOT/entries-report.txt"
+
+    # shellcheck disable=SC2016  # Literal setup.sh lines.
+    grep -Fq 'import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$IMPORT_SIZE_TIMEOUT" "$IMPORT_EXCLUDE" "$IMPORT_INCLUDE"' "$setup" ||
+        fail "setup.sh must hand IMPORT_EXCLUDE and IMPORT_INCLUDE to the remote detection"
+    # shellcheck disable=SC2016  # Literal setup.sh line.
+    grep -Fq 'import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}"' "$setup" ||
+        fail "the transfer must receive the exclusion patterns of the report"
+    # shellcheck disable=SC2016  # Literal setup.sh line.
+    grep -Fq 'import_remote_load_excludes "$IMPORT_REMOTE_REPORT"' "$setup" || fail "the patterns must be read from the report"
+    # shellcheck disable=SC2016  # Literal setup.sh line.
+    grep -Fq 'set_env_value IMPORT_EXCLUDE "$IMPORT_EXCLUDE"' "$setup" || fail "the choice must be kept in .env for the second pass"
+    # shellcheck disable=SC2016  # Literal setup.sh line.
+    grep -Fq 'IMPORT_EXCLUDE="${IMPORT_EXCLUDE-$(sed -n '"'"'s/^IMPORT_EXCLUDE=//p'"'"' .env 2>/dev/null | tail -n 1)}"' "$setup" ||
+        fail "a re-run must read the choice back from .env"
+    awk '/^import_remote_show_entries\(\) \{/,/^\}/; /^import_remote_show_servers\(\) \{/,/^\}/; /^import_remote_load_excludes\(\) \{/,/^\}/' "$setup" > "$lib"
+    (
+        # shellcheck disable=SC2034  # Read by the sourced helpers.
+        RED="" YELLOW="" NC=""
+        # shellcheck source=/dev/null
+        source "$REPO_ROOT/docker/lib/import.sh"
+        # shellcheck source=/dev/null
+        source "$lib"
+        printf '%s\n' 'entry_1=admin|900|kvs|copied' 'entry_2=contents/videos|2097152|kvs|copied' 'entry_3=tmp|12000|transient|excluded' \
+            'entry_4=.well-known|1|hidden|excluded' 'entry_5=backup|204800|extra|copied' 'entry_6=contents/nfs|800000|network:nfs4|excluded' \
+            'entry_7=lib||extra|copied' 'exclude_1=/tmp/*' 'exclude_2=/.well-known' 'exclude_3=/contents/nfs' \
+            'server_1=Local Videos|/var/www/site/contents/videos|0|inside|https://site/contents/videos' \
+            'server_2=Disk 2|/mnt/disk2/videos|0|outside|https://site/videos2' 'server_3=CDN|/var/storage|1|outside|https://cdn.example.com/' > "$report"
+        out=$(import_remote_show_entries "$report") || exit 1
+        [ "$(printf '%s\n' "$out" | sed -n '2p' | awk '{print $1, $2, $3, $4}')" = "2.0 TB contents/videos copied" ] || exit 2
+        [ "$(printf '%s\n' "$out" | sed -n '3p' | awk '{print $1, $2, $3, $4, $5}')" = "781.2 GB contents/nfs left behind" ] || exit 3
+        printf '%s\n' "$out" | grep -q 'contents/nfs .*left behind (on a network filesystem (nfs4), a storage server most likely)' || exit 4
+        printf '%s\n' "$out" | grep -q '200.0 GB *backup *copied (not part of KVS)' || exit 5
+        printf '%s\n' "$out" | grep -q '11.7 GB *tmp *left behind (temporary files or compiled templates, KVS rebuilds them)' || exit 6
+        printf '%s\n' "$out" | grep -q '^ *? *lib *copied (not part of KVS)' || exit 7
+        [ "$(printf '%s\n' "$out" | tail -n 1 | awk '{print $2}')" = "lib" ] || exit 8
+        out=$(import_remote_show_servers "$report") || exit 9
+        printf '%s\n' "$out" | grep -q '^ *Local Videos: /var/www/site/contents/videos, inside the site, moves with it$' || exit 10
+        printf '%s\n' "$out" | grep -q 'Disk 2: /mnt/disk2/videos, OUTSIDE the site directory: not transferred, and its path is not rewritten' || exit 11
+        printf '%s\n' "$out" | grep -q '^ *CDN: remote (https://cdn.example.com/), stays where it is$' || exit 12
+        import_remote_load_excludes "$report"
+        [ "${#IMPORT_EXCLUDE_PATTERNS[@]}" -eq 3 ] || exit 13
+        [ "${IMPORT_EXCLUDE_PATTERNS[0]}" = '/tmp/*' ] && [ "${IMPORT_EXCLUDE_PATTERNS[2]}" = '/contents/nfs' ] || exit 14
+        import_remote_paths_ok "contents/videos_sources backup .well-known" || exit 15
+        import_remote_paths_ok "a b;c" && exit 16
+        import_remote_paths_ok "../x" && exit 17
+        import_remote_paths_ok "" || exit 18
+        exit 0
+    ) || fail "the entries and servers of the report must be shown and their patterns loaded (case $?)"
+    pass "remote entries are shown and their patterns reach the transfer"
+}
+
 test_help_is_side_effect_free_without_root
 test_network_lookups_may_fail_without_ending_the_setup
 test_remote_site_size_bounds_warn_instead_of_blocking
+test_remote_entries_are_shown_and_their_patterns_reach_the_transfer
 test_root_guard_precedes_logs_and_preflight
 test_secure_logs_env_and_headless_overrides
 test_headless_override_validation

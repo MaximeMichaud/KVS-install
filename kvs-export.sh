@@ -47,6 +47,8 @@ OPT_FORCE_GZIP="no"
 OPT_ASSUME_YES="no"
 OPT_SIZE_TIMEOUT="${KVS_EXPORT_SIZE_TIMEOUT:-0}"
 OPT_MEASURE_SIZE="yes"
+OPT_EXCLUDES=()
+OPT_INCLUDES=()
 
 # Detection results, all filled by kvs_collect
 SITE_DIR=""
@@ -75,6 +77,16 @@ SITE_SIZE_SECONDS="0"
 SITE_SIZE_ENTRIES="0"
 SITE_SIZE_ENTRIES_TOTAL="0"
 SITE_FS_USED_MB=""
+# Everything the walk counted; SITE_SIZE_MB is what travels.
+SITE_TOTAL_MB="0"
+# The report of the directories, parallel arrays, and what stays behind as
+# rsync patterns anchored at the site directory.
+ENTRY_PATHS=()
+ENTRY_MB=()
+ENTRY_KIND=()
+ENTRY_STATE=()
+EXCLUDE_PATTERNS=()
+SERVER_LINES=()
 COMPRESSOR=""
 HAS_RSYNC="no"
 HOST_NAME=""
@@ -82,6 +94,7 @@ SITE_CANDIDATES=()
 DB_CONN_ARGS=()
 DUMP_ARGS=()
 COMPRESS_CMD=()
+TAR_EXCLUDES=()
 
 # Removed by the exit trap
 STAGING_DIR=""
@@ -91,6 +104,9 @@ UNITS_FILE=""
 MEASURE_PID=""
 MEASURE_KB=0
 MEASURE_COUNT=0
+# Kilobytes by directory, one to three levels down, from the walk.
+declare -A MEASURE_ENTRY_KB=()
+MEASURE_PER_ENTRY="no"
 
 kvs_usage() {
     cat <<'EOF'
@@ -115,6 +131,11 @@ Options
                       on with what was counted as a lower bound (0, the
                       default: measure it all)
       --no-size       Do not measure the site size
+      --exclude PATH  Leave a directory behind, relative to the site
+                      directory (contents/videos_sources, backup); repeatable.
+                      Temporary files, compiled templates, hidden entries
+                      and network mounts stay behind on their own
+      --include PATH  Take a hidden entry or a network mount along after all
   -y, --yes           Do not ask for confirmation
   -h, --help          Show this help
 
@@ -194,8 +215,10 @@ kvs_human_mb() {
     fi
     if [ "$mb" -lt 1024 ]; then
         printf '%s MB' "$mb"
-    else
+    elif [ "$mb" -lt 1048576 ]; then
         printf '%s.%s GB' "$((mb / 1024))" "$(((mb * 10 / 1024) % 10))"
+    else
+        printf '%s.%s TB' "$((mb / 1048576))" "$(((mb * 10 / 1048576) % 10))"
     fi
 }
 
@@ -679,13 +702,30 @@ kvs_stop_measure() {
     fi
 }
 
-# One line of du -sk: kilobytes, a tab, the path.
+# One line of du -sk: kilobytes, a tab, the path. The kilobytes also go
+# to the buckets of the directories above the entry, up to three levels
+# down, which is what the report of the entries reads.
 kvs_add_measure_line() {
     local size="${1%%$'\t'*}"
+    local path="${1#*$'\t'}"
+    local rel
+    local key
 
     kvs_is_number "$size" || return 1
     MEASURE_KB=$((MEASURE_KB + size))
     MEASURE_COUNT=$((MEASURE_COUNT + 1))
+    rel=${path#"$SITE_DIR/"}
+    [ "$rel" != "$path" ] || return 0
+    key=${rel%%/*}
+    MEASURE_ENTRY_KB[$key]=$((${MEASURE_ENTRY_KB[$key]:-0} + size))
+    [ "$key" != "$rel" ] || return 0
+    rel=${rel#*/}
+    key="$key/${rel%%/*}"
+    MEASURE_ENTRY_KB[$key]=$((${MEASURE_ENTRY_KB[$key]:-0} + size))
+    [ "${rel%%/*}" != "$rel" ] || return 0
+    rel=${rel#*/}
+    key="$key/${rel%%/*}"
+    MEASURE_ENTRY_KB[$key]=$((${MEASURE_ENTRY_KB[$key]:-0} + size))
     return 0
 }
 
@@ -714,6 +754,8 @@ kvs_measure_site() {
     SITE_SIZE_ENTRIES_TOTAL="0"
     MEASURE_KB=0
     MEASURE_COUNT=0
+    MEASURE_ENTRY_KB=()
+    MEASURE_PER_ENTRY="no"
     kvs_site_filesystem_used
     if [ "$OPT_MEASURE_SIZE" != "yes" ]; then
         kvs_say "Site size: not measured (--no-size); the filesystem holding the site uses $(kvs_human_mb "$SITE_FS_USED_MB")"
@@ -735,7 +777,9 @@ kvs_measure_site() {
     else
         kvs_say "Measuring the site size, this can take a while on a large installation ($total entries, $jobs at a time; --size-timeout bounds it, --no-size skips it)..."
     fi
-    if [ "$total" -eq 0 ] || ! kvs_start_measure "$UNITS_FILE" "$jobs"; then
+    if [ "$total" -gt 0 ] && kvs_start_measure "$UNITS_FILE" "$jobs"; then
+        MEASURE_PER_ENTRY="yes"
+    else
         # Nothing listed or no usable xargs: one du over the site, with
         # the timer only.
         total=1
@@ -791,14 +835,343 @@ kvs_measure_site() {
     kvs_say "Site size: $(kvs_human_mb "$SITE_SIZE_MB") ($total entries, $(kvs_elapsed "$SITE_SIZE_SECONDS"))"
 }
 
+#################################################################
+# What the site holds, and what leaves with it
+#################################################################
+
+# The directories a stock KVS site has at its root. Anything else there is
+# not KVS (an old backup, another site, a tool's scratch space): it is
+# reported with its size and travels unless excluded, except hidden
+# entries, which stay behind unless included.
+KVS_ROOT_DIRS=" _INSTALL admin blocks contents langs player static template tmp "
+# Directories KVS fills by itself, temporary files and compiled templates:
+# their content never travels, the directories do, empty.
+KVS_TRANSIENT_DIRS=" tmp admin/data/tmp admin/smarty/cache admin/smarty/template-c admin/smarty/template-c-site "
+# Directories worth a line of their own in the report when present.
+KVS_REPORTED_DIRS="admin/logs admin/data/backup"
+# Filesystem types that mean the data lives on another machine: a storage
+# server mounted here, most likely, which the new server has no use for.
+KVS_NETWORK_FS=" nfs nfs4 cifs smb2 smb3 smbfs glusterfs ceph fuse.ceph fuse.sshfs fuse.rclone fuse.s3fs fuse.gcsfuse fuse.glusterfs fuse.curlftpfs fuse.davfs2 davfs 9p lustre afs "
+
+kvs_in_word_list() {
+    case " $2 " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# kvs_path_listed <relative path> <paths...>: the path, or a parent of it,
+# is among the arguments.
+kvs_path_listed() {
+    local rel="$1"
+    local item
+
+    shift
+    for item in "$@"; do
+        if [ "$item" = "$rel" ]; then
+            return 0
+        fi
+        case $rel in
+            "$item"/*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+kvs_path_under() {
+    case $1 in
+        "$2" | "$2"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# The filesystem type holding a path, through the symbolic links: findmnt
+# where util-linux is, the stat of the filesystem otherwise.
+kvs_fs_type() {
+    local path="$1"
+    local type=""
+
+    type=$(findmnt -T "$path" -n -o FSTYPE 2> /dev/null < /dev/null) || type=""
+    type=${type%%$'\n'*}
+    if [ -z "$type" ]; then
+        type=$(stat -f -c %T "$path" 2> /dev/null < /dev/null) || type=""
+    fi
+    printf '%s' "$type"
+}
+
+# kvs_entry_kind <relative path>: transient, network:<fs>, hidden, extra
+# or kvs.
+kvs_entry_kind() {
+    local rel="$1"
+    local name="${rel##*/}"
+    local fs
+
+    if kvs_in_word_list "$rel" "$KVS_TRANSIENT_DIRS"; then
+        printf 'transient'
+        return 0
+    fi
+    fs=$(kvs_fs_type "$SITE_DIR/$rel")
+    if [ -n "$fs" ] && kvs_in_word_list "$fs" "$KVS_NETWORK_FS"; then
+        printf 'network:%s' "$fs"
+        return 0
+    fi
+    case $rel in
+        */*)
+            printf 'kvs'
+            return 0
+            ;;
+    esac
+    case $name in
+        .*)
+            printf 'hidden'
+            return 0
+            ;;
+    esac
+    if kvs_in_word_list "$rel" "$KVS_ROOT_DIRS"; then
+        printf 'kvs'
+    else
+        printf 'extra'
+    fi
+}
+
+# The directories the report lists: the ones at the root, the ones under
+# contents/, and the few under admin/ that grow on their own.
+kvs_list_entry_candidates() {
+    local path
+    local rel
+
+    {
+        find -L "$SITE_DIR" -mindepth 1 -maxdepth 1 -type d -print 2> /dev/null | LC_ALL=C sort
+        if [ -d "$SITE_DIR/contents" ]; then
+            find -L "$SITE_DIR/contents" -mindepth 1 -maxdepth 1 -type d -print 2> /dev/null | LC_ALL=C sort
+        fi
+        for rel in $KVS_REPORTED_DIRS $KVS_TRANSIENT_DIRS; do
+            if [ -d "$SITE_DIR/$rel" ]; then
+                printf '%s/%s\n' "$SITE_DIR" "$rel"
+            fi
+        done
+    } < /dev/null | while IFS= read -r path; do
+        rel=${path#"$SITE_DIR/"}
+        if [ -n "$rel" ] && [ "$rel" != "$path" ]; then
+            printf '%s\n' "$rel"
+        fi
+    done | awk '!seen[$0]++'
+}
+
+# kvs_entry_index <relative path>: its position in the entry arrays.
+kvs_entry_index() {
+    local rel="$1"
+    local i=0
+
+    while [ "$i" -lt "${#ENTRY_PATHS[@]}" ]; do
+        if [ "${ENTRY_PATHS[$i]}" = "$rel" ]; then
+            printf '%s' "$i"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# kvs_entry_has_excluded_parent <index>: an excluded entry above it, so it
+# leaves with that one and counts once.
+kvs_entry_has_excluded_parent() {
+    local i="$1"
+    local j=0
+
+    while [ "$j" -lt "${#ENTRY_PATHS[@]}" ]; do
+        if [ "$j" -ne "$i" ] && [ "${ENTRY_STATE[$j]}" = "excluded" ]; then
+            case ${ENTRY_PATHS[$i]} in
+                "${ENTRY_PATHS[$j]}"/*) return 0 ;;
+            esac
+        fi
+        j=$((j + 1))
+    done
+    return 1
+}
+
+# Fill the entry arrays and the exclusion patterns from the walk buckets
+# and the options. What stays behind leaves the site size, once.
+kvs_collect_entries() {
+    local rel
+    local kind
+    local state
+    local mb
+    local i
+    local excluded_mb=0
+
+    ENTRY_PATHS=()
+    ENTRY_MB=()
+    ENTRY_KIND=()
+    ENTRY_STATE=()
+    EXCLUDE_PATTERNS=()
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        kind=$(kvs_entry_kind "$rel")
+        state="copied"
+        case $kind in
+            transient | hidden | network:*) state="excluded" ;;
+        esac
+        if kvs_path_listed "$rel" "${OPT_EXCLUDES[@]}"; then
+            state="excluded"
+        fi
+        if [ "$kind" != "transient" ] && kvs_path_listed "$rel" "${OPT_INCLUDES[@]}"; then
+            state="copied"
+        fi
+        mb=""
+        if [ "$MEASURE_PER_ENTRY" = "yes" ]; then
+            mb=$((${MEASURE_ENTRY_KB[$rel]:-0} / 1024))
+        fi
+        ENTRY_PATHS+=("$rel")
+        ENTRY_MB+=("$mb")
+        ENTRY_KIND+=("$kind")
+        ENTRY_STATE+=("$state")
+    done < <(kvs_list_entry_candidates)
+    # An excluded path that is no listed entry (one bucket of contents/, a
+    # directory deeper down) still leaves, with its size when the walk
+    # counted it apart.
+    for rel in "${OPT_EXCLUDES[@]}"; do
+        if kvs_entry_index "$rel" > /dev/null; then
+            continue
+        fi
+        mb=""
+        if [ "$MEASURE_PER_ENTRY" = "yes" ] && [ -n "${MEASURE_ENTRY_KB[$rel]:-}" ]; then
+            mb=$((MEASURE_ENTRY_KB[$rel] / 1024))
+        fi
+        ENTRY_PATHS+=("$rel")
+        ENTRY_MB+=("$mb")
+        ENTRY_KIND+=("named")
+        ENTRY_STATE+=("excluded")
+    done
+    i=0
+    while [ "$i" -lt "${#ENTRY_PATHS[@]}" ]; do
+        if [ "${ENTRY_STATE[$i]}" = "excluded" ] && ! kvs_entry_has_excluded_parent "$i"; then
+            if [ "${ENTRY_KIND[$i]}" = "transient" ]; then
+                EXCLUDE_PATTERNS+=("/${ENTRY_PATHS[$i]}/*")
+            else
+                EXCLUDE_PATTERNS+=("/${ENTRY_PATHS[$i]}")
+            fi
+            if kvs_is_number "${ENTRY_MB[$i]}"; then
+                excluded_mb=$((excluded_mb + ENTRY_MB[i]))
+            fi
+        fi
+        i=$((i + 1))
+    done
+    SITE_TOTAL_MB=$SITE_SIZE_MB
+    if [ "$SITE_SIZE_MB" -gt "$excluded_mb" ]; then
+        SITE_SIZE_MB=$((SITE_SIZE_MB - excluded_mb))
+    else
+        SITE_SIZE_MB=0
+    fi
+}
+
+# The storage servers of the site, from its database: title, path, whether
+# KVS reaches it remotely, where the path falls, first URL. A local storage
+# server outside the site directory holds content this export does not
+# carry and a path the import does not rewrite; a remote one stays where it
+# is and keeps serving. Older schemas without these columns answer nothing.
+kvs_probe_servers() {
+    local query
+    local out
+    local title
+    local path
+    local remote
+    local urls
+    local placement
+
+    SERVER_LINES=()
+    [ "$DB_OK" = "yes" ] || return 0
+    query="SELECT title, path, is_remote, SUBSTRING_INDEX(urls, '\\n', 1) FROM ${TABLES_PREFIX}admin_servers ORDER BY server_id"
+    out=$(
+        # shellcheck disable=SC2030,SC2031  # Same deliberate subshell as the probe.
+        export MYSQL_PWD="$DB_PASSWORD"
+        kvs_ignore_user_option_files
+        "$DB_CLIENT" --connect-timeout=10 "${DB_CONN_ARGS[@]}" -N -B -e "$query" "$DB_NAME" 2> /dev/null < /dev/null
+    ) || return 0
+    while IFS=$'\t' read -r title path remote urls; do
+        [ -n "$title$path" ] || continue
+        placement="outside"
+        if [ -n "$PROJECT_PATH" ] && kvs_path_under "$path" "$PROJECT_PATH"; then
+            placement="inside"
+        elif kvs_path_under "$path" "$SITE_DIR"; then
+            placement="inside"
+        fi
+        SERVER_LINES+=("$(kvs_one_line "$title")|$(kvs_one_line "$path")|${remote:-0}|$placement|$(kvs_one_line "$urls")")
+    done <<< "$out"
+    return 0
+}
+
+# kvs_entry_line <index>: one line of the report.
+kvs_entry_line() {
+    local i="$1"
+    local size
+    local note=""
+
+    if kvs_is_number "${ENTRY_MB[$i]}"; then
+        size=$(kvs_human_mb "${ENTRY_MB[$i]}")
+    else
+        size="?"
+    fi
+    case ${ENTRY_KIND[$i]} in
+        transient) note="temporary files or compiled templates, KVS rebuilds them" ;;
+        hidden) note="hidden, not part of KVS" ;;
+        extra) note="not part of KVS" ;;
+        network:*) note="on a network filesystem (${ENTRY_KIND[$i]#network:}), a storage server most likely" ;;
+        named) note="named with --exclude" ;;
+    esac
+    printf '%-10s %-34s %s%s' "$size" "${ENTRY_PATHS[$i]}" "${ENTRY_STATE[$i]}" "${note:+ ($note)}"
+}
+
+kvs_print_entries() {
+    local i=0
+    local order=""
+
+    [ "${#ENTRY_PATHS[@]}" -gt 0 ] || return 0
+    kvs_say "  Entries, largest first (--exclude PATH leaves one behind, --include PATH takes one along):"
+    while [ "$i" -lt "${#ENTRY_PATHS[@]}" ]; do
+        order="$order${ENTRY_MB[$i]:-0} $i"$'\n'
+        i=$((i + 1))
+    done
+    while read -r _ i; do
+        [ -n "$i" ] || continue
+        kvs_say "    $(kvs_entry_line "$i")"
+    done < <(printf '%s' "$order" | sort -k1,1nr -k2,2n)
+}
+
+kvs_print_servers() {
+    local line
+    local title
+    local path
+    local remote
+    local placement
+    local urls
+
+    [ "${#SERVER_LINES[@]}" -gt 0 ] || return 0
+    kvs_say "  Storage servers:"
+    for line in "${SERVER_LINES[@]}"; do
+        IFS='|' read -r title path remote placement urls <<< "$line"
+        if [ "$remote" = "1" ]; then
+            kvs_say "    $title: remote (${urls:-no URL}), stays where it is"
+        elif [ "$placement" = "inside" ]; then
+            kvs_say "    $title: $path, inside the site, moves with it"
+        else
+            kvs_say "    $title: $path, OUTSIDE the site directory: not transferred, and its path is not rewritten"
+        fi
+    done
+}
+
 # What the summary shows for the site size.
 kvs_site_size_text() {
     case $SITE_SIZE_STATUS in
         exact)
-            kvs_human_mb "$SITE_SIZE_MB"
+            if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
+                printf '%s to transfer of %s' "$(kvs_human_mb "$SITE_SIZE_MB")" "$(kvs_human_mb "$SITE_TOTAL_MB")"
+            else
+                kvs_human_mb "$SITE_SIZE_MB"
+            fi
             ;;
         incomplete)
-            printf 'at least %s, at most %s, measurement cut short' "$(kvs_human_mb "$SITE_SIZE_MB")" "$(kvs_human_mb "$SITE_FS_USED_MB")"
+            printf 'at least %s to transfer, at most %s, measurement cut short' "$(kvs_human_mb "$SITE_SIZE_MB")" "$(kvs_human_mb "$SITE_FS_USED_MB")"
             ;;
         *)
             printf 'not measured, at most %s' "$(kvs_human_mb "$SITE_FS_USED_MB")"
@@ -984,9 +1357,34 @@ kvs_print_detect() {
     printf 'site_size_entries=%s\n' "$SITE_SIZE_ENTRIES"
     printf 'site_size_entries_total=%s\n' "$SITE_SIZE_ENTRIES_TOTAL"
     printf 'site_fs_used_mb=%s\n' "$SITE_FS_USED_MB"
+    printf 'site_total_mb=%s\n' "$SITE_TOTAL_MB"
     printf 'compressor=%s\n' "$COMPRESSOR"
     printf 'rsync=%s\n' "$HAS_RSYNC"
     printf 'hostname=%s\n' "$HOST_NAME"
+    kvs_print_entry_lines
+}
+
+# The entries, the patterns of what stays behind and the storage servers,
+# numbered: entry_N=path|megabytes|kind|copied or excluded (the megabytes
+# empty when the walk counted nothing apart), exclude_N=pattern,
+# server_N=title|path|remote|inside or outside|url.
+kvs_print_entry_lines() {
+    local i=0
+
+    while [ "$i" -lt "${#ENTRY_PATHS[@]}" ]; do
+        printf 'entry_%s=%s|%s|%s|%s\n' "$((i + 1))" "${ENTRY_PATHS[$i]}" "${ENTRY_MB[$i]}" "${ENTRY_KIND[$i]}" "${ENTRY_STATE[$i]}"
+        i=$((i + 1))
+    done
+    i=0
+    while [ "$i" -lt "${#EXCLUDE_PATTERNS[@]}" ]; do
+        printf 'exclude_%s=%s\n' "$((i + 1))" "${EXCLUDE_PATTERNS[$i]}"
+        i=$((i + 1))
+    done
+    i=0
+    while [ "$i" -lt "${#SERVER_LINES[@]}" ]; do
+        printf 'server_%s=%s\n' "$((i + 1))" "${SERVER_LINES[$i]}"
+        i=$((i + 1))
+    done
 }
 
 kvs_print_candidates() {
@@ -1004,6 +1402,8 @@ kvs_print_summary() {
     kvs_say "Installation detected on ${HOST_NAME:-this server}"
     kvs_say "  KVS version:     ${KVS_VERSION:-unknown}"
     kvs_say "  Site directory:  $SITE_DIR ($(kvs_site_size_text))"
+    kvs_print_entries
+    kvs_print_servers
     kvs_say "  Project URL:     ${PROJECT_URL:-unknown}"
     kvs_say "  Table prefix:    ${TABLES_PREFIX:-unknown}"
     kvs_say "  Database:        ${DB_NAME:-unknown} on ${DB_HOST_RAW:-localhost}, user ${DB_USER:-unknown}, password ${DB_PASSWORD_HINT:-<empty>}"
@@ -1135,8 +1535,10 @@ kvs_collect() {
     kvs_detect_tools
     kvs_build_connection_args
     kvs_probe_database
+    kvs_probe_servers
     if [ "$measure_site" = "yes" ]; then
         kvs_measure_site
+        kvs_collect_entries
     fi
     return 0
 }
@@ -1171,6 +1573,20 @@ kvs_command_dump() {
         return 1
     fi
     return 0
+}
+
+# The tar options that leave the excluded entries out of the archive. The
+# members start with the site directory name, so the patterns are anchored
+# there (GNU tar; a pattern would otherwise match anywhere down the tree).
+kvs_archive_excludes() {
+    local pattern
+
+    TAR_EXCLUDES=()
+    [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] || return 0
+    TAR_EXCLUDES=(--anchored)
+    for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+        TAR_EXCLUDES+=("--exclude=${KVS_ARCHIVE_SITE_DIR}${pattern}")
+    done
 }
 
 kvs_command_archive() {
@@ -1257,14 +1673,15 @@ kvs_command_archive() {
     ln -s -- "$SITE_DIR" "$STAGING_DIR/$KVS_ARCHIVE_SITE_DIR" || return 1
     kvs_write_manifest "$STAGING_DIR/$KVS_MANIFEST_NAME" "$dump_name" "$bytes" || return 1
     kvs_say "Writing the archive, this takes as long as reading the site files..."
+    kvs_archive_excludes
     if [ "$output" = "-" ]; then
-        if ! tar -chf - -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
+        if ! tar -chf - "${TAR_EXCLUDES[@]}" -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
             kvs_error "tar failed, the archive on stdout is incomplete"
             return 1
         fi
         return 0
     fi
-    if ! tar -chf "$output" -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
+    if ! tar -chf "$output" "${TAR_EXCLUDES[@]}" -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
         kvs_error "tar failed"
         rm -f -- "$output"
         return 1
@@ -1276,6 +1693,32 @@ kvs_command_archive() {
 #################################################################
 # Entry point
 #################################################################
+
+# A path for --exclude or --include: relative to the site directory, plain
+# (no .., no wildcard, no space or |, which the report and the transfer
+# could not carry).
+kvs_add_path_option() {
+    local option="$1"
+    local path="$2"
+
+    path=${path#/}
+    path=${path%/}
+    if [ -z "$path" ] || [ "$path" = "." ]; then
+        kvs_error "$option: the whole site cannot be named"
+        return 1
+    fi
+    local forbidden='[]|*?[[:space:]]'
+    if [[ "$path" =~ $forbidden ]] || [[ "$path" == ".." || "$path" == ../* || "$path" == */.. || "$path" == */../* ]]; then
+        kvs_error "$option: '$path' must be a plain path relative to the site directory (no .., wildcard, space or |)"
+        return 1
+    fi
+    if [ "$option" = "--exclude" ]; then
+        OPT_EXCLUDES+=("$path")
+    else
+        OPT_INCLUDES+=("$path")
+    fi
+    return 0
+}
 
 kvs_parse_arguments() {
     local first=""
@@ -1318,6 +1761,22 @@ kvs_parse_arguments() {
                 ;;
             --no-size)
                 OPT_MEASURE_SIZE="no"
+                shift
+                ;;
+            --exclude | --include)
+                if [ $# -lt 2 ]; then
+                    kvs_error "$1 needs a path relative to the site directory"
+                    return 1
+                fi
+                kvs_add_path_option "$1" "$2" || return 1
+                shift 2
+                ;;
+            --exclude=*)
+                kvs_add_path_option --exclude "${1#--exclude=}" || return 1
+                shift
+                ;;
+            --include=*)
+                kvs_add_path_option --include "${1#--include=}" || return 1
                 shift
                 ;;
             -y | --yes)
