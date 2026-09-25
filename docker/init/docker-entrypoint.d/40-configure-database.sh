@@ -27,20 +27,33 @@ log_info "Server paths configured: $KVS_PATH"
 # host selection, or direct/Caddy mode on an existing database.
 PROJECT_URL=$(get_project_url)
 DOMAIN_PATTERN=${DOMAIN//./[.]}
+# An imported site keeps its storage URLs on the domain it was served
+# from; when this installation runs under another one (a development
+# subdomain tried before the real domain), those URLs move to the new
+# host as well. URLs on any other host (a CDN) stay.
+HOST_PATTERN=$DOMAIN_PATTERN
+if [ -n "${IMPORT_SOURCE_DOMAIN:-}" ] && [ "$IMPORT_SOURCE_DOMAIN" != "$DOMAIN" ]; then
+    if [[ "$IMPORT_SOURCE_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        HOST_PATTERN="(${DOMAIN_PATTERN}|${IMPORT_SOURCE_DOMAIN//./[.]})"
+        log_info "Storage URLs on $IMPORT_SOURCE_DOMAIN move to $PROJECT_URL"
+    else
+        log_warn "IMPORT_SOURCE_DOMAIN is not a domain name, ignored: $IMPORT_SOURCE_DOMAIN"
+    fi
+fi
 if ! db_exec "UPDATE ${TABLES_PREFIX}admin_servers
     SET urls = REGEXP_REPLACE(
         urls,
-        '^https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/',
+        '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/contents/',
         '${PROJECT_URL}/contents/'
     )
-    WHERE urls REGEXP '^https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/';"; then
+    WHERE urls REGEXP '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/contents/';"; then
     log_error "Could not synchronize persisted server URLs"
     exit 1
 fi
 if ! MATCHING_URL_COUNT=$(db_query \
     "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls LIKE '${PROJECT_URL}/contents/%';") ||
     ! STALE_URL_COUNT=$(db_query \
-    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '^https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/' AND urls NOT LIKE '${PROJECT_URL}/contents/%';"); then
+    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/contents/' AND urls NOT LIKE '${PROJECT_URL}/contents/%';"); then
     log_error "Could not verify persisted server URLs"
     exit 1
 fi
@@ -53,7 +66,7 @@ fi
 # separate storage server): those URLs stay as they are.
 if [ "$MATCHING_URL_COUNT" -lt 1 ]; then
     if ! EXTERNAL_URL_COUNT=$(db_query \
-        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls NOT REGEXP '^https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/';") ||
+        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls NOT REGEXP '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/';") ||
         [[ ! "$EXTERNAL_URL_COUNT" =~ ^[0-9]+$ ]] || [ "$EXTERNAL_URL_COUNT" -lt 1 ]; then
         log_error "Persisted server URLs do not match $PROJECT_URL"
         exit 1

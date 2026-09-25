@@ -456,6 +456,36 @@ test_destination_marker_allows_a_repeat_of_the_same_source_only() {
     pass "destination marker allows a repeat of the same source only"
 }
 
+test_take_over_moves_the_files_of_an_earlier_import() {
+    local previous="$TMP_ROOT/takeover/dev.example.com" destination="$TMP_ROOT/takeover/example.com"
+    local source="ssh://root@old:22/var/www/site"
+
+    (
+        # shellcheck disable=SC2034  # Read by import_marker_file.
+        IMPORT_MARKER_DIR="$TMP_ROOT/takeover/markers"
+        mkdir -p "$previous/contents/videos"
+        echo video > "$previous/contents/videos/1.mp4"
+        import_take_over_site "$previous" "$destination" "$source" 2>/dev/null && exit 1
+        import_mark_destination "$previous" "$source" || exit 2
+        import_take_over_site "$previous" "$destination" "ssh://root@other:22/var/www/site" 2>/dev/null && exit 3
+        mkdir -p "$destination"
+        echo x > "$destination/file"
+        import_take_over_site "$previous" "$destination" "$source" 2>/dev/null && exit 4
+        rm -rf "$destination"
+        import_take_over_site "$previous" "$destination" "$source" > "$TMP_ROOT/takeover/out.txt" || exit 5
+        grep -q "taken over as $destination" "$TMP_ROOT/takeover/out.txt" || exit 6
+        [ -f "$destination/contents/videos/1.mp4" ] || exit 7
+        [ ! -e "$previous" ] || exit 8
+        [ "$(cat "$TMP_ROOT/takeover/markers/example.com.source")" = "$source" ] || exit 9
+        [ ! -e "$TMP_ROOT/takeover/markers/dev.example.com.source" ] || exit 10
+        import_destination_ready "$destination" "$source" || exit 11
+        import_take_over_site "$destination" "$destination" "$source" || exit 12
+        import_take_over_site "$TMP_ROOT/takeover/absent" "$destination" "$source" 2>/dev/null && exit 13
+        exit 0
+    ) || fail "the files of an earlier import must be taken over (case $?)"
+    pass "the files of an earlier import under another domain are taken over"
+}
+
 test_url_domain_and_key_value_helpers() {
     [ "$(import_url_domain "https://www.Example.com/")" = example.com ] || fail "www and case must go"
     [ "$(import_url_domain "http://example.com:8080/path")" = example.com ] || fail "port and path must go"
@@ -847,6 +877,7 @@ test_peek_reads_the_config_before_extraction
 test_extraction_settles_the_site_and_takes_the_dump_out
 test_stage_directory_follows_the_destination_filesystem
 test_destination_marker_allows_a_repeat_of_the_same_source_only
+test_take_over_moves_the_files_of_an_earlier_import
 test_url_domain_and_key_value_helpers
 test_external_search_plugin_is_recognized
 test_ssh_setup_validates_and_builds_the_options

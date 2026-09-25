@@ -80,6 +80,12 @@ ENVIRONMENT VARIABLES:
                           their own; IMPORT_INCLUDE=PATHS takes a hidden
                           entry or a mount along. Kept in .env for the next
                           pass.
+    IMPORT_REUSE_SITE_DIR=DIR
+                          The site directory of an earlier import of the
+                          same old server under another domain (a
+                          development subdomain tried first): moved to
+                          /var/www/<domain>, the transfer then carries the
+                          changes only. With IMPORT_REMOTE_HOST only.
 
 EXAMPLES:
     # Production installation
@@ -181,6 +187,10 @@ IMPORT_REMOTE_USER="${IMPORT_REMOTE_USER:-root}"
 IMPORT_REMOTE_DIR="${IMPORT_REMOTE_DIR:-}"
 IMPORT_SSH_KEY="${IMPORT_SSH_KEY:-}"
 IMPORT_SSH_ACCEPT_NEW="${IMPORT_SSH_ACCEPT_NEW:-}"
+# The site directory of an earlier import of the same old server under
+# another domain (a development subdomain tried before the real one):
+# taken over instead of transferred again.
+IMPORT_REUSE_SITE_DIR="${IMPORT_REUSE_SITE_DIR:-}"
 IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
 # What the transfer leaves behind and takes along, on top of what the
 # exporter decides on its own; the choice of the first pass is kept in
@@ -208,6 +218,10 @@ if [ -n "$IMPORT_REMOTE_HOST" ]; then
 fi
 if [ "$IMPORT_SOURCES_GIVEN" -gt 1 ]; then
     echo "ERROR: IMPORT_ARCHIVE, IMPORT_SITE_DIR with IMPORT_DB_DUMP, and IMPORT_REMOTE_HOST are exclusive" >&2
+    exit 1
+fi
+if [ -n "$IMPORT_REUSE_SITE_DIR" ] && [ "$IMPORT_SOURCE" != remote ]; then
+    echo "ERROR: IMPORT_REUSE_SITE_DIR goes with IMPORT_REMOTE_HOST: it takes over the files of an earlier import of the same old server" >&2
     exit 1
 fi
 if [ -n "$IMPORT_SOURCE" ]; then
@@ -389,8 +403,22 @@ select_import_source() {
         remote) import_inspect_remote ;;
     esac
     import_check_kvs_archive_version
+    import_record_source_domain
     import_check_domain
     import_confirm
+}
+
+# The domain the imported site was served from reaches the init through
+# .env: the storage URLs on it move to this installation's host, which
+# matters when the site is tried on a development subdomain before the
+# real domain.
+import_record_source_domain() {
+    [ -f .env ] || return 0
+    if [[ "$IMPORT_DETECTED_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        set_env_value IMPORT_SOURCE_DOMAIN "$IMPORT_DETECTED_DOMAIN" || true
+    else
+        remove_env_value IMPORT_SOURCE_DOMAIN
+    fi
 }
 
 # The site and the dump, once both are on this server: version, prefix,
@@ -636,16 +664,19 @@ import_remote_load_excludes() {
     done < <(sed -n 's/^exclude_[0-9]*=//p' "$1")
 }
 
-# import_remote_free_space_check <report> <destination>
+# import_remote_free_space_check <report> <destination> [source]
 # The site and its dump must fit under the destination. An exact size that
 # does not fit stops the import. A size cut short or skipped is checked
 # through its upper bound, the usage of the old server's filesystem: when
 # even that fits, fine; otherwise nothing is known, so the import goes on
-# with a warning rather than refusing a site that may well fit.
+# with a warning rather than refusing a site that may well fit. When the
+# destination already holds the files of an earlier pass from the same
+# source, only the changes travel: the dump alone has to fit.
 import_remote_free_space_check() {
     local report="$1"
     local destination="$2"
-    local status size db used
+    local source="${3:-}"
+    local status size db used marker
 
     status=$(import_kv "$report" site_size_status)
     size=$(import_kv "$report" site_size_mb)
@@ -653,6 +684,15 @@ import_remote_free_space_check() {
     used=$(import_kv "$report" site_fs_used_mb)
     [[ "$size" =~ ^[0-9]+$ ]] || size=0
     [[ "$db" =~ ^[0-9]+$ ]] || db=0
+    marker=$(import_marker_file "$destination")
+    if [ -n "$source" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$source" ]; then
+        if ! import_free_space_mb_ok "$db" "$destination"; then
+            echo -e "${RED}ERROR: not enough free space for the dump under $destination${NC}"
+            return 1
+        fi
+        echo "  Free space:      the files are already under $destination (earlier pass), only the changes and the dump travel"
+        return 0
+    fi
     case "$status" in
         exact|"")
             if ! import_free_space_mb_ok "$((size + db))" "$destination"; then
@@ -822,7 +862,10 @@ import_inspect_remote() {
         echo -e "${RED}ERROR: the database of the old server does not answer; fix the access there, or dump it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP${NC}"
         exit 1
     fi
-    import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" || exit 1
+    if [ -n "$IMPORT_REUSE_SITE_DIR" ]; then
+        import_take_over_site "$IMPORT_REUSE_SITE_DIR" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
+    fi
+    import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
     import_destination_ready "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
     if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
         import_ensure_tool rsync || exit 1
@@ -853,7 +896,9 @@ import_check_kvs_archive_version() {
 }
 
 # The KVS license is bound to the domain: a site configured for another
-# one is most likely a mistake, and needs a new archive otherwise.
+# one runs there only if the license accepts it, which a development
+# subdomain of the licensed domain does. The URLs the site keeps on its
+# old domain follow the installation.
 import_check_domain() {
     local answer
 
@@ -861,7 +906,8 @@ import_check_domain() {
     [ "$IMPORT_DETECTED_DOMAIN" != "$DOMAIN" ] || return 0
     echo ""
     echo -e "${YELLOW}WARNING: the site is configured for $IMPORT_DETECTED_DOMAIN while this installation is for $DOMAIN.${NC}"
-    echo "The KVS license is bound to a domain and its aliases; the site keeps working only if the license covers $DOMAIN, otherwise request a new archive from KVS."
+    echo "The KVS license is bound to the domain: the site runs on $DOMAIN only if the license accepts it (a development subdomain of the licensed domain does), otherwise request a new archive from KVS."
+    echo "The project URL and the storage URLs on $IMPORT_DETECTED_DOMAIN become https://$DOMAIN; URLs on other hosts (a CDN) stay."
     if [ "${HEADLESS:-}" != "y" ]; then
         echo -n "Continue anyway? [y/N]: "
         read -r answer
@@ -1919,11 +1965,38 @@ elif ! validate_domain "$DOMAIN"; then
     exit 1
 fi
 
+# An import completed under another domain (a development subdomain tried
+# before the real one) does not count for this one: the real domain gets
+# its own import, into its own database.
+PREVIOUS_DOMAIN=$(sed -n 's/^DOMAIN=//p' .env 2>/dev/null | tail -n 1)
+if [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] && grep -q '^KVS_IMPORT_COMPLETED=' .env 2>/dev/null; then
+    echo -e "${YELLOW}The domain changes from $PREVIOUS_DOMAIN to $DOMAIN: the import completed under the old one does not count for it.${NC}"
+    remove_env_value KVS_IMPORT_COMPLETED
+fi
 set_env_value DOMAIN "$DOMAIN"
 export DOMAIN EMAIL
 
 select_import_source
 import_check_leftover_dump
+
+# An import under a new domain gets its own stack: the prefix follows the
+# domain, and the containers of the earlier stack (a development subdomain
+# tried first) go, since the two cannot share the ports. Their volumes
+# stay until removed by hand. Multi-site installations manage their sites
+# through site-manager.sh and are left alone here.
+if [ "$IMPORT_MODE" = true ] && [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] &&
+    [ "$PREVIOUS_DOMAIN" != example.com ] && [ "$(sed -n 's/^MODE=//p' .env 2>/dev/null | tail -n 1)" != multi ]; then
+    PREVIOUS_PROJECT=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env 2>/dev/null | tail -n 1)
+    if [ -n "$PREVIOUS_PROJECT" ] && [ "$PREVIOUS_PROJECT" != kvs ] &&
+        docker ps -aq --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | grep -q .; then
+        echo -e "${YELLOW}Removing the containers of ${PREVIOUS_PROJECT} (${PREVIOUS_DOMAIN}); its volumes stay: docker volume ls --filter name=${PREVIOUS_PROJECT}_${NC}"
+        docker ps -q --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | xargs -r docker stop >/dev/null 2>&1 || true
+        docker ps -aq --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | xargs -r docker rm >/dev/null 2>&1 || true
+        docker network rm "${PREVIOUS_PROJECT}_kvs-network" >/dev/null 2>&1 || true
+    fi
+    # The prefix is chosen again, from the new domain by default.
+    sed -i 's/^SITE_PREFIX=.*/SITE_PREFIX=kvs/' .env
+fi
 
 # Site prefix for container naming (multi-site support)
 select_site_prefix() {
@@ -3352,10 +3425,16 @@ check_dns() {
     return 0
 }
 
-# DNS Check with retry loop
+# DNS Check with retry loop. The check answers with its status, so it
+# runs as a condition: a plain call under set -e ended the setup on the
+# first mismatch, before the choice to continue (a first pass always runs
+# while the DNS still points at the old server).
 while true; do
-    check_dns
-    dns_status=$?
+    if check_dns; then
+        dns_status=0
+    else
+        dns_status=$?
+    fi
     if [ "$dns_status" -eq 0 ]; then
         echo -e "${GREEN}DNS configuration OK${NC}"
         break
