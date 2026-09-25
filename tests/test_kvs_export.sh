@@ -85,9 +85,7 @@ make_stubs() {
     cat > "$STUB_BIN/mariadb" <<'EOF'
 #!/bin/bash
 {
-    printf 'mariadb argv:'
-    printf ' [%s]' "$@"
-    printf '\n'
+    printf 'mariadb argv:%s\n' "$(printf ' [%s]' "$@")"
     printf 'mariadb env: MYSQL_PWD=[%s]\n' "${MYSQL_PWD-}"
     printf 'mariadb env: HOME=[%s] MYSQL_HOME=[%s]\n' "${HOME-}" "${MYSQL_HOME-}"
 } >> "${STUB_LOG:-/dev/null}"
@@ -109,9 +107,7 @@ EOF
     cat > "$STUB_BIN/mariadb-dump" <<'EOF'
 #!/bin/bash
 {
-    printf 'mariadb-dump argv:'
-    printf ' [%s]' "$@"
-    printf '\n'
+    printf 'mariadb-dump argv:%s\n' "$(printf ' [%s]' "$@")"
     printf 'mariadb-dump env: MYSQL_PWD=[%s]\n' "${MYSQL_PWD-}"
     printf 'mariadb-dump env: HOME=[%s] MYSQL_HOME=[%s]\n' "${HOME-}" "${MYSQL_HOME-}"
 } >> "${STUB_LOG:-/dev/null}"
@@ -230,9 +226,7 @@ make_extra_bin() {
     cat > "$EXTRA_BIN/zstd" <<'EOF'
 #!/bin/bash
 {
-    printf 'zstd argv:'
-    printf ' [%s]' "$@"
-    printf '\n'
+    printf 'zstd argv:%s\n' "$(printf ' [%s]' "$@")"
 } >> "${STUB_LOG:-/dev/null}"
 exec cat
 EOF

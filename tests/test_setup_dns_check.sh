@@ -66,4 +66,32 @@ out=$(run_check "api.ipify.org" 203.0.113.7 198.51.100.9)
 grep -q 'status=1' <<< "$out" || fail "records pointing elsewhere must still be a mismatch, got: $out"
 grep -q 'MISMATCH' <<< "$out" || fail "the mismatch must be reported"
 
+# The retry loop around the check, as the script runs it: under set -e, a
+# mismatch must reach the DNS_CHOICE handling instead of ending the setup.
+awk '/^# DNS Check with retry loop/,/^done$/' "$ROOT_DIR/docker/setup.sh" > "$WORK/loop.sh"
+grep -q '^while true; do' "$WORK/loop.sh" || fail "the DNS retry loop is not where the test expects it"
+grep -q '^    if check_dns; then' "$WORK/loop.sh" || fail "check_dns must run as a condition, a plain call exits under set -e"
+
+run_loop() {
+    # shellcheck disable=SC2016
+    PATH="$WORK/bin:$PATH" STUB_OK="api.ipify.org" STUB_IP=203.0.113.7 STUB_DNS_IP=198.51.100.9 DNS_CHOICE="$1" bash -c '
+        set -e
+        CYAN=; GREEN=; RED=; YELLOW=; NC=; DOMAIN=example.com
+        include_www_for_domain() { return 1; }
+        source "$1"
+        source "$2"
+        echo "reached the next step"
+    ' _ "$WORK/dns.sh" "$WORK/loop.sh" 2>&1
+    echo "exit=$?"
+}
+
+out=$(run_loop 2)
+grep -q 'Continuing without valid DNS' <<< "$out" || fail "DNS_CHOICE=2 must continue past a mismatch, got: $out"
+grep -q 'reached the next step' <<< "$out" || fail "the setup must go on after DNS_CHOICE=2, got: $out"
+grep -q 'exit=0' <<< "$out" || fail "the loop must not fail the run with DNS_CHOICE=2"
+
+out=$(run_loop 3)
+grep -q 'reached the next step' <<< "$out" && fail "DNS_CHOICE=3 must stop the setup"
+grep -q 'exit=1' <<< "$out" || fail "DNS_CHOICE=3 must exit 1, got: $out"
+
 echo "PASS: DNS check public IP fallback"

@@ -287,6 +287,54 @@ import_marker_file() {
     fi
 }
 
+# import_take_over_site <previous site directory> <destination> <source>
+# A site imported earlier under another domain (a development subdomain
+# tried before the real one) moves into place instead of travelling again:
+# the directory is renamed, its source marker follows, and the transfer
+# that comes next carries the changes only. The earlier import must come
+# from the same source and the destination must hold nothing yet.
+import_take_over_site() {
+    local previous="${1%/}"
+    local destination="${2%/}"
+    local source="$3"
+    local previous_marker marker resolved_previous resolved_destination recorded
+
+    if [ ! -d "$previous" ]; then
+        echo "ERROR: IMPORT_REUSE_SITE_DIR is not a directory: $previous" >&2
+        return 1
+    fi
+    resolved_previous=$(readlink -f -- "$previous") || return 1
+    resolved_destination=$(readlink -f -- "$destination" 2>/dev/null) || resolved_destination=$destination
+    if [ "$resolved_previous" = "$resolved_destination" ]; then
+        return 0
+    fi
+    previous_marker=$(import_marker_file "$previous")
+    if [ ! -f "$previous_marker" ]; then
+        echo "ERROR: $previous was not filled by an import (no source marker); IMPORT_REUSE_SITE_DIR takes over the files of an earlier import only" >&2
+        return 1
+    fi
+    recorded=$(cat "$previous_marker")
+    if [ "$recorded" != "$source" ]; then
+        echo "ERROR: $previous was imported from $recorded, not from $source" >&2
+        return 1
+    fi
+    if [ -e "$destination" ] && { [ ! -d "$destination" ] || find "$destination" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; }; then
+        echo "ERROR: $destination already holds something; IMPORT_REUSE_SITE_DIR needs an absent or empty destination" >&2
+        return 1
+    fi
+    marker=$(import_marker_file "$destination")
+    if [ -d "$destination" ] && ! rmdir -- "$destination"; then
+        return 1
+    fi
+    mkdir -p "$(dirname -- "$destination")" "$(dirname -- "$marker")" || return 1
+    if ! mv -- "$previous" "$destination"; then
+        echo "ERROR: could not move $previous to $destination (a mount point has to be moved by hand)" >&2
+        return 1
+    fi
+    mv -f -- "$previous_marker" "$marker" || return 1
+    echo "Site files of $previous taken over as $destination; the transfer carries the changes only"
+}
+
 # import_destination_ready <destination> <source marker>
 # True when the destination is absent, empty, or was filled from the same
 # source: the marker names the source from the first attempt on, so a run

@@ -99,15 +99,24 @@ get_project_url() {
     printf 'https://%s%s\n' "$host" "$suffix"
 }
 
+# The regular expression literal of a query, as the script builds it.
+query_pattern() {
+    printf '%s' "$1" | grep -o "'\^https?://[^']*'" | head -n 1 | tr -d "'"
+}
+
 db_exec() {
     local query="$1"
     local project_url
+    local pattern
 
     printf 'exec:%s\n' "$query" >> "$CONFIG_STATE/calls.log"
     if [[ "$query" == *'REGEXP_REPLACE('* ]]; then
         [ "${TEST_URL_UPDATE_FAIL:-false}" != true ] || return 41
         project_url=$(get_project_url) || return 42
-        printf '%s/contents/videos\n' "$project_url" > "$CONFIG_STATE/url"
+        pattern=$(query_pattern "$query")
+        if [[ "$(<"$CONFIG_STATE/url")" =~ $pattern ]]; then
+            printf '%s/contents/videos\n' "$project_url" > "$CONFIG_STATE/url"
+        fi
         return 0
     fi
     if [[ "$query" == *'streaming_skip_ssl_check = 1'* ]]; then
@@ -129,6 +138,7 @@ db_query() {
     local current_url
     local current_skip
     local expected
+    local pattern
 
     printf 'query:%s\n' "$query" >> "$CONFIG_STATE/calls.log"
     [ "${TEST_DB_QUERY_FAIL:-false}" != true ] || return 44
@@ -146,11 +156,21 @@ db_query() {
         fi
         return 0
     fi
-    if [[ "$query" == *'urls REGEXP '* ]]; then
-        if [[ "$current_url" == "${project_url}/contents/"* ]]; then
+    if [[ "$query" == *'urls NOT REGEXP '* ]]; then
+        pattern=$(query_pattern "$query")
+        if [[ "$current_url" =~ $pattern ]]; then
             printf '0\n'
         else
             printf '1\n'
+        fi
+        return 0
+    fi
+    if [[ "$query" == *'urls REGEXP '* ]]; then
+        pattern=$(query_pattern "$query")
+        if [[ "$current_url" =~ $pattern ]] && [[ "$current_url" != "${project_url}/contents/"* ]]; then
+            printf '1\n'
+        else
+            printf '0\n'
         fi
         return 0
     fi
@@ -821,6 +841,62 @@ test_existing_database_url_and_tls_state_are_synchronized() {
     pass "existing server URLs and TLS verification synchronize bidirectionally and idempotently"
 }
 
+test_storage_urls_on_the_source_domain_follow_the_installation() {
+    local case_dir="$TMP_ROOT/source-domain"
+    local site_dir="$case_dir/site"
+    local state="$case_dir/state"
+    local common_mock="$case_dir/common.sh"
+    local script_copy="$case_dir/40-configure-database.sh"
+
+    mkdir -p "$site_dir/admin/data" "$state"
+    make_configure_database_common_mock "$common_mock"
+    make_script_copy \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/40-configure-database.sh" \
+        "$common_mock" "$script_copy"
+
+    # Without the source domain, a URL on the old domain is a foreign host:
+    # left alone, and announced.
+    printf 'https://www.example.com/contents/videos\n' > "$state/url"
+    printf '0\n' > "$state/ssl-skip"
+    TEST_KVS_PATH="$site_dir" TEST_CONFIG_STATE="$state" \
+        DOMAIN=dev.example.com USE_WWW=false PROJECT_HTTPS_PORT=443 SSL_PROVIDER=selfsigned \
+        bash "$script_copy" > "$case_dir/without.log" 2>&1 ||
+        fail "a storage URL on another host must not stop the init"
+    [ "$(<"$state/url")" = 'https://www.example.com/contents/videos' ] ||
+        fail "without IMPORT_SOURCE_DOMAIN a URL on the old domain must stay"
+    assert_file_contains "$case_dir/without.log" 'Storage servers use external hosts'
+
+    # With it, the URL follows the installation.
+    TEST_KVS_PATH="$site_dir" TEST_CONFIG_STATE="$state" IMPORT_SOURCE_DOMAIN=example.com \
+        DOMAIN=dev.example.com USE_WWW=false PROJECT_HTTPS_PORT=443 SSL_PROVIDER=selfsigned \
+        bash "$script_copy" > "$case_dir/with.log" 2>&1 ||
+        fail "the source domain rewrite must not stop the init"
+    [ "$(<"$state/url")" = 'https://dev.example.com/contents/videos' ] ||
+        fail "a storage URL on the source domain must follow the installation"
+    assert_file_contains "$case_dir/with.log" 'Storage URLs on example.com move to https://dev.example.com'
+    assert_file_contains "$case_dir/with.log" 'Server URLs configured: https://dev.example.com/contents/...'
+
+    # A CDN stays, source domain or not.
+    printf 'https://cdn.example.net/contents/videos\n' > "$state/url"
+    TEST_KVS_PATH="$site_dir" TEST_CONFIG_STATE="$state" IMPORT_SOURCE_DOMAIN=example.com \
+        DOMAIN=dev.example.com USE_WWW=false PROJECT_HTTPS_PORT=443 SSL_PROVIDER=selfsigned \
+        bash "$script_copy" > "$case_dir/cdn.log" 2>&1 ||
+        fail "a CDN storage URL must not stop the init"
+    [ "$(<"$state/url")" = 'https://cdn.example.net/contents/videos' ] || fail "a CDN URL must stay"
+
+    # A value that is not a domain name never reaches the SQL.
+    printf 'https://example.com/contents/videos\n' > "$state/url"
+    TEST_KVS_PATH="$site_dir" TEST_CONFIG_STATE="$state" IMPORT_SOURCE_DOMAIN="example.com'; DROP" \
+        DOMAIN=dev.example.com USE_WWW=false PROJECT_HTTPS_PORT=443 SSL_PROVIDER=selfsigned \
+        bash "$script_copy" > "$case_dir/bad.log" 2>&1 ||
+        fail "a bad source domain must be ignored, not fatal"
+    [ "$(<"$state/url")" = 'https://example.com/contents/videos' ] || fail "a bad source domain must change nothing"
+    assert_file_contains "$case_dir/bad.log" 'IMPORT_SOURCE_DOMAIN is not a domain name, ignored'
+    grep -q "DROP" "$state/calls.log" && fail "a bad source domain reached the SQL"
+
+    pass "storage URLs on the source domain follow the installation"
+}
+
 test_database_configuration_errors_are_propagated() {
     local case_dir="$TMP_ROOT/database-configuration-errors"
     local site_dir="$case_dir/site"
@@ -920,6 +996,7 @@ test_dump_without_final_marker_is_rejected
 test_marker_mismatch_after_import_is_fatal
 test_database_inspection_failure_is_not_treated_as_empty
 test_existing_database_url_and_tls_state_are_synchronized
+test_storage_urls_on_the_source_domain_follow_the_installation
 test_database_configuration_errors_are_propagated
 
 echo "1..$TESTS_RUN"

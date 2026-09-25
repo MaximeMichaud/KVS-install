@@ -202,6 +202,9 @@ services:
       - PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT:-443}
       - KVS_ADMIN_PASSWORD=${KVS_ADMIN_PASSWORD:-}
       - DISABLE_KVS_SUPPORT_ACCESS=${DISABLE_KVS_SUPPORT_ACCESS:-false}
+      # The domain an imported site was served from: storage URLs on it move
+      # to this installation's host (see 40-configure-database.sh).
+      - IMPORT_SOURCE_DOMAIN=${IMPORT_SOURCE_DOMAIN:-}
     depends_on:
       mariadb:
         condition: service_healthy
