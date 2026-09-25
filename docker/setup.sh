@@ -73,6 +73,13 @@ ENVIRONMENT VARIABLES:
                           size (300); past that the import goes on with what
                           was counted and the space used on the old server's
                           filesystem as the upper bound. 0 measures it all.
+    IMPORT_EXCLUDE=PATHS  Directories left behind, space separated, relative
+                          to the site directory (contents/videos_sources
+                          backup). Temporary files, compiled templates,
+                          hidden entries and network mounts stay behind on
+                          their own; IMPORT_INCLUDE=PATHS takes a hidden
+                          entry or a mount along. Kept in .env for the next
+                          pass.
 
 EXAMPLES:
     # Production installation
@@ -175,6 +182,12 @@ IMPORT_REMOTE_DIR="${IMPORT_REMOTE_DIR:-}"
 IMPORT_SSH_KEY="${IMPORT_SSH_KEY:-}"
 IMPORT_SSH_ACCEPT_NEW="${IMPORT_SSH_ACCEPT_NEW:-}"
 IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
+# What the transfer leaves behind and takes along, on top of what the
+# exporter decides on its own; the choice of the first pass is kept in
+# .env so the second pass repeats it.
+IMPORT_EXCLUDE="${IMPORT_EXCLUDE-$(sed -n 's/^IMPORT_EXCLUDE=//p' .env 2>/dev/null | tail -n 1)}"
+IMPORT_INCLUDE="${IMPORT_INCLUDE-$(sed -n 's/^IMPORT_INCLUDE=//p' .env 2>/dev/null | tail -n 1)}"
+IMPORT_EXCLUDE_PATTERNS=()
 IMPORT_CHOICE="${IMPORT_CHOICE:-}"
 IMPORT_SOURCES_GIVEN=0
 if [ -n "$IMPORT_ARCHIVE" ]; then
@@ -535,22 +548,92 @@ import_inspect_archive() {
 # the site, the bounds shown here.
 import_remote_size_text() {
     local report="$1"
-    local status size used
+    local status size used total
 
     status=$(import_kv "$report" site_size_status)
     size=$(import_kv "$report" site_size_mb)
     used=$(import_kv "$report" site_fs_used_mb)
     case "$status" in
         exact|"")
-            echo "${size:-?} MB"
+            total=$(import_kv "$report" site_total_mb)
+            if [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" != "$size" ]; then
+                echo "${size:-?} MB to transfer of $total MB"
+            else
+                echo "${size:-?} MB"
+            fi
             ;;
         incomplete)
-            echo "at least ${size:-0} MB ($(import_kv "$report" site_size_entries) of $(import_kv "$report" site_size_entries_total) entries measured in $(import_kv "$report" site_size_seconds) s), at most ${used:-?} MB (the filesystem usage)"
+            echo "at least ${size:-0} MB to transfer ($(import_kv "$report" site_size_entries) of $(import_kv "$report" site_size_entries_total) entries measured in $(import_kv "$report" site_size_seconds) s), at most ${used:-?} MB (the filesystem usage)"
             ;;
         *)
             echo "not measured, at most ${used:-?} MB (the filesystem usage)"
             ;;
     esac
+}
+
+# import_remote_show_entries <report>
+# The directories of the old site, largest first, with what stays behind
+# and why: temporary files and compiled templates KVS rebuilds, hidden
+# entries and network mounts (a storage server, most likely) unless
+# included, and whatever IMPORT_EXCLUDE names. A size is ? when the walk
+# measured nothing apart.
+import_remote_show_entries() {
+    local report="$1"
+    local path mb kind state note size lines
+
+    lines=$(sed -n 's/^entry_[0-9]*=//p' "$report")
+    [ -n "$lines" ] || return 0
+    echo "  Entries, largest first (IMPORT_EXCLUDE leaves one behind, IMPORT_INCLUDE takes a hidden entry or a mount along):"
+    while IFS='|' read -r path mb kind state; do
+        [ -n "$path" ] || continue
+        size=$(import_mb_text "$mb")
+        case "$kind" in
+            transient) note="temporary files or compiled templates, KVS rebuilds them" ;;
+            hidden) note="hidden, not part of KVS" ;;
+            extra) note="not part of KVS" ;;
+            network:*) note="on a network filesystem (${kind#network:}), a storage server most likely" ;;
+            named) note="named by IMPORT_EXCLUDE" ;;
+            *) note="" ;;
+        esac
+        if [ "$state" = excluded ]; then
+            echo -e "    $(printf '%-10s %-34s' "$size" "$path") ${YELLOW}left behind${NC}${note:+ ($note)}"
+        else
+            echo "    $(printf '%-10s %-34s' "$size" "$path") copied${note:+ ($note)}"
+        fi
+    done < <(printf '%s\n' "$lines" | awk -F'|' '{ mb = ($2 == "" ? 0 : $2); print mb "\t" NR "\t" $0 }' | sort -k1,1nr -k2,2n | cut -f3-)
+}
+
+# import_remote_show_servers <report>
+# The storage servers of the old site. A local one outside the site
+# directory holds content the transfer does not carry and a path the
+# import does not rewrite; a remote one stays where it is.
+import_remote_show_servers() {
+    local report="$1"
+    local title path remote placement urls lines
+
+    lines=$(sed -n 's/^server_[0-9]*=//p' "$report")
+    [ -n "$lines" ] || return 0
+    echo "  Storage servers:"
+    while IFS='|' read -r title path remote placement urls; do
+        [ -n "$title$path" ] || continue
+        if [ "$remote" = 1 ]; then
+            echo "    $title: remote (${urls:-no URL}), stays where it is"
+        elif [ "$placement" = inside ]; then
+            echo "    $title: $path, inside the site, moves with it"
+        else
+            echo -e "    ${YELLOW}$title: $path, OUTSIDE the site directory: not transferred, and its path is not rewritten${NC}"
+        fi
+    done <<< "$lines"
+}
+
+# import_remote_load_excludes <report>: the patterns the transfer applies.
+import_remote_load_excludes() {
+    local pattern
+
+    IMPORT_EXCLUDE_PATTERNS=()
+    while IFS= read -r pattern; do
+        [ -n "$pattern" ] && IMPORT_EXCLUDE_PATTERNS+=("$pattern")
+    done < <(sed -n 's/^exclude_[0-9]*=//p' "$1")
 }
 
 # import_remote_free_space_check <report> <destination>
@@ -605,6 +688,10 @@ import_inspect_remote() {
         echo -e "${RED}ERROR: IMPORT_SIZE_TIMEOUT must be a number of seconds (0 measures the whole site), got '$IMPORT_SIZE_TIMEOUT'${NC}"
         exit 1
     fi
+    if ! import_remote_paths_ok "$IMPORT_EXCLUDE $IMPORT_INCLUDE"; then
+        echo -e "${RED}ERROR: IMPORT_EXCLUDE and IMPORT_INCLUDE take plain paths relative to the site directory, space separated (contents/videos_sources backup), got '$IMPORT_EXCLUDE' and '$IMPORT_INCLUDE'${NC}"
+        exit 1
+    fi
     case "${IMPORT_SSH_ACCEPT_NEW,,}" in
         y|yes|true) accept_new=yes ;;
         *) accept_new=no ;;
@@ -618,13 +705,16 @@ import_inspect_remote() {
     fi
     IMPORT_REMOTE_REPORT="$LOG_DIR/import-remote.txt"
     rm -f "$IMPORT_REMOTE_REPORT"
+    # The outer loop runs the detection again when the operator names more
+    # to leave behind after seeing the entries and their sizes.
+    while :; do
     while :; do
         if [ "$IMPORT_SIZE_TIMEOUT" -gt 0 ]; then
             echo "  Looking for the site on $IMPORT_SSH_TARGET (its size is measured for at most $IMPORT_SIZE_TIMEOUT s; IMPORT_SIZE_TIMEOUT=0 measures all of it)..."
         else
             echo "  Looking for the site on $IMPORT_SSH_TARGET (its whole size is measured, IMPORT_SIZE_TIMEOUT bounds that)..."
         fi
-        if import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$IMPORT_SIZE_TIMEOUT"; then
+        if import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$IMPORT_SIZE_TIMEOUT" "$IMPORT_EXCLUDE" "$IMPORT_INCLUDE"; then
             break
         fi
         if grep -q '^site_candidate_1=' "$IMPORT_REMOTE_REPORT" 2>/dev/null; then
@@ -664,6 +754,8 @@ import_inspect_remote() {
     esac
     echo "  KVS version:     ${IMPORT_SITE_VERSION:-unknown}"
     echo "  Site directory:  $IMPORT_REMOTE_DIR ($(import_remote_size_text "$IMPORT_REMOTE_REPORT"))"
+    import_remote_show_entries "$IMPORT_REMOTE_REPORT"
+    import_remote_show_servers "$IMPORT_REMOTE_REPORT"
     echo "  Project URL:     $(import_kv "$IMPORT_REMOTE_REPORT" project_url)"
     echo "  Table prefix:    ${prefix:-unknown}"
     echo "  Database:        $(import_kv "$IMPORT_REMOTE_REPORT" db_name) on $(import_kv "$IMPORT_REMOTE_REPORT" db_host), user $(import_kv "$IMPORT_REMOTE_REPORT" db_user), password $(import_kv "$IMPORT_REMOTE_REPORT" db_password_hint)"
@@ -679,6 +771,38 @@ import_inspect_remote() {
     fi
     if [ "$(import_kv "$IMPORT_REMOTE_REPORT" db_non_transactional)" -gt 0 ] 2>/dev/null; then
         echo -e "  ${YELLOW}$(import_kv "$IMPORT_REMOTE_REPORT" db_non_transactional) tables use MyISAM or Aria: the dump locks the tables while it runs, writes on the old site wait.${NC}"
+    fi
+    if [ "${HEADLESS:-}" = "y" ]; then
+        break
+    fi
+    while :; do
+        echo -n "Paths to leave behind, space separated (empty: as listed above): "
+        read -r more
+        [ -n "$more" ] || break 2
+        if import_remote_paths_ok "$more"; then
+            IMPORT_EXCLUDE="${IMPORT_EXCLUDE:+$IMPORT_EXCLUDE }$more"
+            break
+        fi
+        echo -e "${RED}Plain paths relative to the site directory, space separated (contents/videos_sources backup)${NC}"
+    done
+    echo "  Detecting again, leaving behind: $IMPORT_EXCLUDE"
+    echo ""
+    done
+    import_remote_load_excludes "$IMPORT_REMOTE_REPORT"
+    if [ -f .env ]; then
+        if [ -n "$IMPORT_EXCLUDE" ]; then
+            set_env_value IMPORT_EXCLUDE "$IMPORT_EXCLUDE" || true
+        else
+            remove_env_value IMPORT_EXCLUDE
+        fi
+        if [ -n "$IMPORT_INCLUDE" ]; then
+            set_env_value IMPORT_INCLUDE "$IMPORT_INCLUDE" || true
+        else
+            remove_env_value IMPORT_INCLUDE
+        fi
+    fi
+    if [ -n "$IMPORT_EXCLUDE$IMPORT_INCLUDE" ]; then
+        echo "  Left behind on request: ${IMPORT_EXCLUDE:-nothing}; taken along on request: ${IMPORT_INCLUDE:-nothing} (kept in .env for the next pass)"
     fi
     if [ -z "$IMPORT_SITE_VERSION" ] || [ -z "$IMPORT_OLD_PATH" ]; then
         echo -e "${RED}ERROR: the KVS version or the project path could not be read on the old server${NC}"
@@ -834,7 +958,7 @@ import_fetch_remote() {
     echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR...${NC}"
     import_destination_ready "$destination" "$source" || exit 1
     import_mark_destination "$destination" "$source" || exit 1
-    if ! import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC"; then
+    if ! import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}"; then
         echo -e "${RED}ERROR: the file transfer failed; run the same command again to resume it${NC}"
         exit 1
     fi

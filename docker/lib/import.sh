@@ -1009,17 +1009,51 @@ import_ssh_rsh() {
     printf '%s' "$result"
 }
 
-# import_remote_detect <exporter script> <site directory or empty> <output file> [size budget]
+# import_mb_text <megabytes>: a size for a summary line.
+import_mb_text() {
+    local mb="$1"
+
+    [[ "$mb" =~ ^[0-9]+$ ]] || { echo "?"; return 0; }
+    if [ "$mb" -lt 1024 ]; then
+        echo "$mb MB"
+    elif [ "$mb" -lt 1048576 ]; then
+        echo "$((mb / 1024)).$(((mb * 10 / 1024) % 10)) GB"
+    else
+        echo "$((mb / 1048576)).$(((mb * 10 / 1048576) % 10)) TB"
+    fi
+}
+
+# import_remote_paths_ok <space separated paths>
+# Paths for the exporter's --exclude and --include: plain, relative to the
+# site directory, no .. component, only characters that survive the
+# command line the old server's shell splits.
+import_remote_paths_ok() {
+    local item
+
+    for item in $1; do
+        [[ "$item" =~ ^[A-Za-z0-9._@%+,=-][A-Za-z0-9._@%+,=/-]*$ ]] || return 1
+        [[ "$item" != ".." && "$item" != ../* && "$item" != */.. && "$item" != */../* ]] || return 1
+    done
+    return 0
+}
+
+# import_remote_detect <exporter script> <site directory or empty> <output file> [size budget] [excluded paths] [included paths]
 # Run the exporter's detection on the old server; the script travels on
 # stdin, nothing is written there. The key=value report lands in the
 # output file. The budget is how many seconds the exporter may spend
 # measuring the site size (0: all of it); past it the report carries a
-# lower bound and the filesystem usage.
+# lower bound and the filesystem usage. The paths, space separated and
+# relative to the site directory, are what the transfer leaves behind on
+# top of what the exporter leaves on its own, and what it takes along
+# after all.
 import_remote_detect() {
     local exporter="$1"
     local dir="$2"
     local output="$3"
     local budget="${4:-}"
+    local excludes="${5:-}"
+    local includes="${6:-}"
+    local item
     local -a options=()
 
     if [ -n "$dir" ]; then
@@ -1028,6 +1062,16 @@ import_remote_detect() {
     if [ -n "$budget" ]; then
         options=(--size-timeout "$budget")
     fi
+    if [ -n "$excludes$includes" ] && ! import_remote_paths_ok "$excludes $includes"; then
+        echo "ERROR: the paths to leave behind or take along must be plain paths relative to the site directory, space separated: '$excludes $includes'" >&2
+        return 1
+    fi
+    for item in $excludes; do
+        options+=(--exclude "$item")
+    done
+    for item in $includes; do
+        options+=(--include "$item")
+    done
     if [ -n "$dir" ]; then
         import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- "${options[@]}" detect "$dir" < "$exporter" > "$output"
     else
@@ -1046,12 +1090,16 @@ import_remote_dump() {
     import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- dump "$dir" < "$exporter" > "$output"
 }
 
-# import_remote_files <site directory> <destination> <rsync yes|no>
+# import_remote_files <site directory> <destination> <rsync yes|no> [patterns...]
 # Mirror the site files. rsync when both sides have it (resumable through
 # the partial directory, shows progress, a repeat only transfers the
 # changes), a tar stream otherwise. The incremental recursion stays on: a
 # full scan before the first byte holds the whole file list in memory on
-# both sides, which a small server cannot afford for a large site.
+# both sides, which a small server cannot afford for a large site. The
+# patterns are the exporter's exclude_N lines, anchored at the site
+# directory (/tmp/*, /backup): what stays behind. rsync takes them as they
+# are; the tar on the old server gets them under its ./ prefix, which
+# anchors them too, quoted for the shell that splits its command line.
 # Symbolic links that leave the site (a contents directory on another
 # disk) come as their targets, since the container only mounts the site;
 # links inside it stay links. Files that vanish during the transfer are
@@ -1062,16 +1110,31 @@ import_remote_files() {
     local destination="$2"
     local use_rsync="$3"
     local status=0
+    local pattern
     local -a rsync_path=()
+    local -a patterns=("${@:4}")
+    local -a rsync_excludes=()
+    local -a tar_excludes=()
 
     import_remote_path_check "$dir" || return 1
     mkdir -p "$destination" || return 1
+    for pattern in "${patterns[@]}"; do
+        case "$pattern" in
+            /*) ;;
+            *)
+                echo "ERROR: an exclusion pattern must start at the site directory, got '$pattern'" >&2
+                return 1
+                ;;
+        esac
+        rsync_excludes+=("--exclude=$pattern")
+        tar_excludes+=("'--exclude=.$pattern'")
+    done
     if [ "$use_rsync" = yes ]; then
         if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
             rsync_path=(--rsync-path="sudo -n rsync")
         fi
         rsync -a -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --info=progress2 --human-readable \
-            "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/" || status=$?
+            "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/" || status=$?
         case "$status" in
             24)
                 echo "  Some files vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
@@ -1089,7 +1152,7 @@ import_remote_files() {
     # removed while they were read), anything else is a file it could not
     # read or a connection that broke.
     local -a pipe_status=()
-    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" tar -C "$dir" -chf - . | tar -xf - --no-same-owner -C "$destination"
+    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" tar -C "$dir" "${tar_excludes[@]}" -chf - . | tar -xf - --no-same-owner -C "$destination"
     pipe_status=("${PIPESTATUS[@]}")
     case "${pipe_status[0]}" in
         0) ;;

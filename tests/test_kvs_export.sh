@@ -95,6 +95,15 @@ if [ "${STUB_DB_FAIL:-no}" = yes ]; then
     echo "ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)" >&2
     exit 1
 fi
+for arg in "$@"; do
+    case "$arg" in
+        *admin_servers*)
+            # The storage server rows, tab separated, as the batch mode prints them.
+            printf '%b' "${STUB_SERVERS:-}"
+            exit 0
+            ;;
+    esac
+done
 printf '11.8.2-MariaDB\t127\t45\t%s\n' "${STUB_NON_TRANSACTIONAL:-0}"
 EOF
     cat > "$STUB_BIN/mariadb-dump" <<'EOF'
@@ -150,11 +159,8 @@ EOF
     # STUB_DU_SLEEP makes every call slow, for the time budget test.
     cat > "$STUB_BIN/du" <<'EOF'
 #!/bin/bash
-{
-    printf 'du argv:'
-    printf ' [%s]' "$@"
-    printf '\n'
-} >> "${STUB_LOG:-/dev/null}"
+# One write per line: several of these run at once on the same log.
+printf 'du argv:%s\n' "$(printf ' [%s]' "$@")" >> "${STUB_LOG:-/dev/null}"
 if [ -n "${STUB_DU_SLEEP:-}" ]; then
     # Die on TERM at once, as the real du does, without leaving a sleep
     # behind that would keep the pipe open.
@@ -163,9 +169,45 @@ if [ -n "${STUB_DU_SLEEP:-}" ]; then
     wait $!
 fi
 printf '%s\t%s\n' "${STUB_DU_KB:-1024}" "${*: -1}"
-echo "du done: ${*: -1}" >> "${STUB_LOG:-/dev/null}"
+printf 'du done: %s\n' "${*: -1}" >> "${STUB_LOG:-/dev/null}"
 EOF
-    chmod +x "$STUB_BIN/mariadb" "$STUB_BIN/mariadb-dump" "$STUB_BIN/df" "$STUB_BIN/du"
+    # findmnt answers nfs for the path named in STUB_NFS_PATH, ext4 otherwise.
+    cat > "$STUB_BIN/findmnt" <<'EOF'
+#!/bin/bash
+path=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -T) path=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ -n "${STUB_NFS_PATH:-}" ] && [ "$path" = "$STUB_NFS_PATH" ]; then
+    echo nfs4
+else
+    echo ext4
+fi
+EOF
+    chmod +x "$STUB_BIN/mariadb" "$STUB_BIN/mariadb-dump" "$STUB_BIN/df" "$STUB_BIN/du" "$STUB_BIN/findmnt"
+}
+
+# A site with what a real webroot accumulates: temporary uploads, compiled
+# templates, logs and KVS backups, a hidden ACME directory, an old backup
+# and a custom library at the root, sources next to the converted videos.
+make_site_with_extras() {
+    local dir="$1"
+
+    make_site "$dir"
+    mkdir -p "$dir/tmp" "$dir/admin/data/tmp" "$dir/admin/smarty/template-c" "$dir/admin/logs" "$dir/admin/data/backup" \
+        "$dir/contents/videos_sources/0/1" "$dir/.well-known/acme" "$dir/backup" "$dir/lib"
+    echo "part" > "$dir/tmp/upload.part"
+    echo "tmp" > "$dir/admin/data/tmp/t"
+    echo "compiled" > "$dir/admin/smarty/template-c/x.php"
+    echo "log" > "$dir/admin/logs/cron.txt"
+    echo "backup" > "$dir/admin/data/backup/b.tar.gz"
+    echo "source" > "$dir/contents/videos_sources/0/1/s.mp4"
+    echo "token" > "$dir/.well-known/acme/t"
+    echo "old" > "$dir/backup/old.sql"
+    echo "lib" > "$dir/lib/a.php"
 }
 
 # A PATH without zstd and without pigz cannot be built by pruning the real
@@ -174,7 +216,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep awk sort stat; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -329,6 +371,109 @@ test_the_size_walk_stops_at_its_time_budget() {
         fail "the budget from the environment must work: $(cat "$err")"
     assert_key "$out" site_size_status incomplete
     pass "the size walk stops at its time budget"
+}
+
+# entry_value <detect output> <path> prints "mb|kind|state" of an entry.
+entry_value() {
+    sed -n "s/^entry_[0-9]*=$(printf '%s' "$2" | sed 's/[.[\/*^$]/\\&/g')|//p" "$1" | head -n 1
+}
+
+# has_pattern <detect output> <pattern>: the pattern is among the exclude_N lines.
+has_pattern() {
+    sed -n 's/^exclude_[0-9]*=//p' "$1" | grep -Fxq -- "$2"
+}
+
+test_detect_reports_the_entries_and_what_stays_behind() {
+    local site="$TMP_ROOT/entries-site"
+    local out="$TMP_ROOT/entries.out"
+    local err="$TMP_ROOT/entries.err"
+
+    make_site_with_extras "$site"
+    export STUB_SERVERS="Local Videos\t$site/contents/videos\t0\thttps://www.example.com/contents/videos\nDisk 2\t/mnt/disk2/videos\t0\thttps://www.example.com/videos2\nCDN\t/var/storage\t1\thttps://cdn.example.com/\n"
+    export STUB_NFS_PATH="$site/contents/videos_sources"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    unset STUB_SERVERS STUB_NFS_PATH
+
+    # Thirteen entries three levels down, 1 MB each from the stub; the
+    # temporary files, the compiled templates and the hidden directory
+    # stay behind on their own, the source videos sit on NFS.
+    assert_key "$out" site_total_mb 13
+    assert_key "$out" site_size_mb 8
+    [ "$(entry_value "$out" contents/videos)" = "1|kvs|copied" ] || fail "contents/videos: $(entry_value "$out" contents/videos)"
+    [ "$(entry_value "$out" contents/videos_sources)" = "1|network:nfs4|excluded" ] || fail "a network mount stays behind: $(entry_value "$out" contents/videos_sources)"
+    [ "$(entry_value "$out" tmp)" = "1|transient|excluded" ] || fail "tmp: $(entry_value "$out" tmp)"
+    [ "$(entry_value "$out" admin/data/tmp)" = "1|transient|excluded" ] || fail "admin/data/tmp: $(entry_value "$out" admin/data/tmp)"
+    [ "$(entry_value "$out" admin/smarty/template-c)" = "1|transient|excluded" ] || fail "compiled templates: $(entry_value "$out" admin/smarty/template-c)"
+    [ "$(entry_value "$out" .well-known)" = "1|hidden|excluded" ] || fail "a hidden entry stays behind: $(entry_value "$out" .well-known)"
+    [ "$(entry_value "$out" backup)" = "1|extra|copied" ] || fail "an unknown directory is reported and copied: $(entry_value "$out" backup)"
+    [ "$(entry_value "$out" lib)" = "1|extra|copied" ] || fail "lib: $(entry_value "$out" lib)"
+    [ "$(entry_value "$out" admin/logs)" = "1|kvs|copied" ] || fail "admin/logs: $(entry_value "$out" admin/logs)"
+    [ "$(entry_value "$out" admin/data/backup)" = "1|kvs|copied" ] || fail "admin/data/backup: $(entry_value "$out" admin/data/backup)"
+    [ "$(entry_value "$out" admin)" = "7|kvs|copied" ] || fail "admin holds its seven entries: $(entry_value "$out" admin)"
+    [ "$(entry_value "$out" contents)" = "2|kvs|copied" ] || fail "contents holds two: $(entry_value "$out" contents)"
+    has_pattern "$out" '/tmp/*' || fail "the temporary files leave as a pattern on their content: $(grep '^exclude_' "$out")"
+    has_pattern "$out" '/.well-known' || fail "the hidden entry leaves whole: $(grep '^exclude_' "$out")"
+    has_pattern "$out" '/contents/videos_sources' || fail "the mount leaves whole: $(grep '^exclude_' "$out")"
+    has_pattern "$out" '/admin/data/tmp/*' || fail "admin/data/tmp pattern: $(grep '^exclude_' "$out")"
+    has_pattern "$out" '/admin/smarty/template-c/*' || fail "compiled templates pattern: $(grep '^exclude_' "$out")"
+    [ "$(grep -c '^exclude_' "$out")" -eq 5 ] || fail "five patterns, got $(grep -c '^exclude_' "$out")"
+    grep -q '^entry_1=\.well-known|' "$out" || fail "the entries come in C order, hidden first: $(grep '^entry_1=' "$out")"
+    grep -Fxq "server_1=Local Videos|$site/contents/videos|0|inside|https://www.example.com/contents/videos" "$out" || fail "a local server inside the site: $(grep '^server_' "$out")"
+    grep -Fxq "server_2=Disk 2|/mnt/disk2/videos|0|outside|https://www.example.com/videos2" "$out" || fail "a local server outside the site: $(grep '^server_' "$out")"
+    grep -Fxq "server_3=CDN|/var/storage|1|outside|https://cdn.example.com/" "$out" || fail "a remote server: $(grep '^server_' "$out")"
+    grep -q 'MYSQL_PWD=\[' "$STUB_LOG" || fail "the server query goes through the same password handling"
+    pass "detect reports the entries, what stays behind and the storage servers"
+}
+
+test_excluded_and_included_paths_change_what_travels() {
+    local site="$TMP_ROOT/choice-site"
+    local out="$TMP_ROOT/choice.out"
+    local err="$TMP_ROOT/choice.err"
+    local archive="$TMP_ROOT/choice.tar"
+
+    make_site_with_extras "$site"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude contents/videos_sources --exclude=backup/ --include .well-known detect "$site" ||
+        fail "detect with choices must succeed: $(cat "$err")"
+    assert_key "$out" site_total_mb 13
+    assert_key "$out" site_size_mb 8
+    [ "$(entry_value "$out" contents/videos_sources)" = "1|kvs|excluded" ] || fail "an excluded bucket: $(entry_value "$out" contents/videos_sources)"
+    [ "$(entry_value "$out" backup)" = "1|extra|excluded" ] || fail "an excluded extra: $(entry_value "$out" backup)"
+    [ "$(entry_value "$out" .well-known)" = "1|hidden|copied" ] || fail "an included hidden entry: $(entry_value "$out" .well-known)"
+    has_pattern "$out" '/tmp/*' || fail "patterns: $(grep '^exclude_' "$out")"
+    has_pattern "$out" '/backup' || fail "patterns: $(grep '^exclude_' "$out")"
+    has_pattern "$out" '/contents/videos_sources' || fail "patterns: $(grep '^exclude_' "$out")"
+    has_pattern "$out" '/.well-known' && fail "an included entry has no pattern"
+    [ "$(grep -c '^exclude_' "$out")" -eq 5 ] || fail "five patterns, got $(grep '^exclude_' "$out")"
+
+    # A path that is no listed entry still leaves; a parent excluded with
+    # its child counts once.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude contents/videos/1.mp4 --exclude contents --exclude contents/videos detect "$site" ||
+        fail "nested exclusions must succeed: $(cat "$err")"
+    assert_key "$out" site_size_mb 7
+    [ "$(entry_value "$out" contents/videos/1.mp4)" = "1|named|excluded" ] || fail "a named path: $(entry_value "$out" contents/videos/1.mp4)"
+    has_pattern "$out" '/contents' || fail "the parent leaves as one pattern: $(grep '^exclude_' "$out")"
+    has_pattern "$out" '/contents/videos' && fail "a child of an excluded parent needs no pattern"
+    has_pattern "$out" '/contents/videos/1.mp4' && fail "a named child of an excluded parent needs no pattern"
+
+    # The archive leaves the same things behind, the transient directories
+    # themselves travel empty.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" --exclude backup archive "$site" ||
+        fail "the archive with exclusions must be written: $(cat "$err")"
+    tar -tf "$archive" | grep -Fxq "www/tmp/" || fail "tmp travels as an empty directory: $(tar -tf "$archive")"
+    tar -tf "$archive" | grep -Fq "www/tmp/upload.part" && fail "temporary files must not travel"
+    tar -tf "$archive" | grep -Fq "www/admin/smarty/template-c/x.php" && fail "compiled templates must not travel"
+    tar -tf "$archive" | grep -Fq "www/backup" && fail "an excluded directory must not travel"
+    tar -tf "$archive" | grep -Fq "www/.well-known" && fail "a hidden directory must not travel"
+    tar -tf "$archive" | grep -Fxq "www/contents/videos_sources/0/1/s.mp4" || fail "the sources travel when not excluded"
+    tar -tf "$archive" | grep -Fxq "www/lib/a.php" || fail "an unknown directory travels"
+    grep -q "backup .*excluded" "$err" || fail "the summary lists what stays behind: $(cat "$err")"
+    grep -q "Entries, largest first" "$err" || fail "the summary has the entry table"
+
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude "../etc" detect "$site" && fail "a path leaving the site must be refused"
+    grep -q "must be a plain path" "$err" || fail "the refusal must explain: $(cat "$err")"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude "a b" detect "$site" && fail "a path with a space must be refused"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude / detect "$site" && fail "the whole site cannot be excluded"
+    pass "excluded and included paths change what travels"
 }
 
 test_the_size_walk_can_be_skipped() {
@@ -824,6 +969,8 @@ make_extra_bin
 test_detect_reports_the_installation_as_key_value_lines
 test_the_size_walk_stops_at_its_time_budget
 test_the_size_walk_can_be_skipped
+test_detect_reports_the_entries_and_what_stays_behind
+test_excluded_and_included_paths_change_what_travels
 test_the_password_reaches_the_client_only_through_the_environment
 test_the_connection_follows_the_host_written_in_setup_db
 test_an_unreachable_database_is_reported_without_stopping_detect
