@@ -122,25 +122,29 @@ if grep -q "mysqldump_path" "$site/admin/include/setup.php"; then
     fail "a key the site does not set must not be invented"
 fi
 
-# --- the debug mode of the old server is turned off, once ------------------
+# --- the debug switches of the old server are turned off, once -------------
 site="$TEST_DIR/debug"
 write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
-printf '%s\n' "/* for dev debugging */" "\$config['enable_debug']=\"true\";" >> "$site/admin/include/setup.php"
-run_config "$site" > "$TEST_DIR/debug.log" 2>&1 || fail "a site with debug mode on must be configured"
+printf '%s\n' "/* for dev debugging */" "\$config['enable_debug']=\"true\";" "\$config['sql_debug']='true';" >> "$site/admin/include/setup.php"
+run_config "$site" > "$TEST_DIR/debug.log" 2>&1 || fail "a site with the debug switches on must be configured"
 setup_php="$site/admin/include/setup.php"
 [ "$(config_value "$setup_php" enable_debug)" = false ] ||
     fail "enable_debug must be turned off (got '$(config_value "$setup_php" enable_debug)')"
-grep -Fq "KVS debug mode (enable_debug in setup.php) was on: turned off" "$TEST_DIR/debug.log" ||
-    fail "the debug mode switch-off must be announced"
+[ "$(config_value "$setup_php" sql_debug)" = false ] ||
+    fail "sql_debug, the query log switch, must be turned off whatever its quotes (got '$(config_value "$setup_php" sql_debug)')"
+grep -Fq "KVS enable_debug was on in setup.php: turned off" "$TEST_DIR/debug.log" ||
+    fail "the enable_debug switch-off must be announced"
+grep -Fq "KVS sql_debug was on in setup.php: turned off" "$TEST_DIR/debug.log" ||
+    fail "the sql_debug switch-off must be announced"
 run_config "$site" > "$TEST_DIR/debug-again.log" 2>&1 || fail "the second run must succeed"
-if grep -Fq "was on: turned off" "$TEST_DIR/debug-again.log"; then
+if grep -Fq "was on in setup.php: turned off" "$TEST_DIR/debug-again.log"; then
     fail "a second run must not announce a switch-off again"
 fi
 site="$TEST_DIR/nodebug"
 write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
-run_config "$site" > /dev/null 2>&1 || fail "a setup.php without enable_debug must be accepted"
-if grep -q "enable_debug" "$site/admin/include/setup.php"; then
-    fail "enable_debug must not be invented"
+run_config "$site" > /dev/null 2>&1 || fail "a setup.php without the debug switches must be accepted"
+if grep -q "enable_debug\|sql_debug" "$site/admin/include/setup.php"; then
+    fail "a debug switch must not be invented"
 fi
 
 echo "PASS: binaries of an imported site point inside the containers"
