@@ -1356,12 +1356,223 @@ import_remote_dump() {
     import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- dump "$dir" < "$exporter" > "$output"
 }
 
+#################################################################
+# Transfer progress
+#################################################################
+
+# import_bytes_text <bytes>: a size for a summary line, in the units of
+# import_mb_text; below a megabyte, in kilobytes.
+import_bytes_text() {
+    local bytes="$1"
+
+    [[ "$bytes" =~ ^[0-9]+$ ]] || { echo "?"; return 0; }
+    if [ "$bytes" -lt 1048576 ]; then
+        echo "$((bytes / 1024)) kB"
+    else
+        import_mb_text "$((bytes / 1048576))"
+    fi
+}
+
+# import_count_text <number>: thousands separated, for a summary line.
+import_count_text() {
+    local n="$1" out=""
+
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "?"; return 0; }
+    while [ "${#n}" -gt 3 ]; do
+        out=",${n: -3}$out"
+        n=${n:0:${#n}-3}
+    done
+    echo "$n$out"
+}
+
+# import_rsync_stats_totals: reads the --stats block of an rsync dry run
+# and prints "<files>\t<bytes>\t<site files>\t<site bytes>": what the
+# transfer moves (regular files and their size) and what the site
+# holds. Prints nothing without the two transfer figures.
+import_rsync_stats_totals() {
+    awk '
+        function number(s) { gsub(/[^0-9]/, "", s); return s + 0 }
+        /^Number of files: / {
+            site_files = number($4)
+            if (match($0, /reg: [0-9,.]+/)) site_files = number(substr($0, RSTART + 5, RLENGTH - 5))
+        }
+        /^Number of (regular )?files transferred: / { files = number($NF); have_files = 1 }
+        /^Total file size: / { site_bytes = number($4) }
+        /^Total transferred file size: / { bytes = number($5); have_bytes = 1 }
+        END { if (have_files && have_bytes) printf "%d\t%d\t%d\t%d\n", files, bytes, site_files, site_bytes }
+    '
+}
+
+# import_rsync_totals <rsync arguments...>
+# The dry run of the transfer, its statistics reduced by
+# import_rsync_stats_totals: a scan of the old server without a byte
+# moved, its memory bounded by the incremental recursion as for the
+# transfer itself. It gets IMPORT_SIZE_TIMEOUT seconds (300; 0 for no
+# limit), the budget of the size measurement: a site of millions of
+# files is not scanned twice for a figure. Prints nothing when rsync
+# gave no statistics; returns 124 when the budget ran out.
+import_rsync_totals() {
+    local budget="${IMPORT_SIZE_TIMEOUT:-300}"
+
+    [[ "$budget" =~ ^[0-9]+$ ]] || budget=300
+    timeout "$budget" rsync --dry-run --stats "$@" 2>/dev/null | import_rsync_stats_totals
+    return "${PIPESTATUS[0]}"
+}
+
+# import_rsync_progress <bytes to transfer> <files to transfer> [terminal yes|no]
+# Reads the output of rsync --info=progress2 and shows the transfer
+# against the totals of its dry run: bytes and files done out of the
+# whole and the time left that follows the slower of the two, since the
+# tail of a site is many small files where the bytes hardly move while
+# the files go by; then the rates of the last twenty seconds, the
+# entries rsync has checked of those its scan has found (a repeat of a
+# large site spends most of its time there, moving nothing), and the
+# time elapsed. Two lines rewritten in place on a terminal, one line
+# every ten seconds otherwise (a log); no time left before five seconds
+# have passed, the first rate says little. Without totals the counts
+# show alone. Whatever else rsync prints passes through. rsync's own
+# figures mislead here: the line it prints when a file completes carries
+# the time elapsed and the average rate, not an estimate (its code
+# switches to them on that line), and its percentage is relative to the
+# files the scan has found so far. The clock comes from srand(), which
+# mawk and gawk both seed with the time of day.
+import_rsync_progress() {
+    local total_bytes="${1:-0}" total_files="${2:-0}" terminal="${3:-}"
+
+    if [ -z "$terminal" ]; then
+        if [ -t 1 ]; then terminal=yes; else terminal=no; fi
+    fi
+    awk -v total_bytes="$total_bytes" -v total_files="$total_files" -v terminal="$terminal" '
+        function now(    t) { srand(); t = srand(); return t + 0 }
+        function commas(n,    s, r) {
+            s = sprintf("%d", n)
+            r = ""
+            while (length(s) > 3) {
+                r = "," substr(s, length(s) - 2) r
+                s = substr(s, 1, length(s) - 3)
+            }
+            return s r
+        }
+        function size(b) {
+            if (b >= 1073741824) return sprintf("%.2f GB", b / 1073741824)
+            if (b >= 1048576) return sprintf("%.1f MB", b / 1048576)
+            if (b >= 1024) return sprintf("%.0f kB", b / 1024)
+            return sprintf("%d B", b)
+        }
+        function clock(s,    h, m) {
+            s = int(s + 0.5)
+            h = int(s / 3600)
+            m = int((s % 3600) / 60)
+            return sprintf("%d:%02d:%02d", h, m, s % 60)
+        }
+        # Once a second on a terminal, every ten seconds otherwise, and at
+        # the end. The rates are those of the last twenty seconds (the
+        # average since the start before that); the time left is the longer
+        # of the two they give.
+        function report(final,    t, elapsed, i, o, byte_rate, file_rate, left, left_files, first, second, pct) {
+            t = now()
+            if (!final) {
+                if (terminal == "yes" && t == shown) return
+                if (terminal != "yes" && t - shown < 10) return
+            }
+            shown = t
+            elapsed = t - start
+            seen_bytes[t] = bytes
+            seen_files[t] = files
+            delete seen_bytes[t - 61]
+            delete seen_files[t - 61]
+            o = -1
+            for (i = t - 20; i < t; i++) if (i in seen_bytes) { o = i; break }
+            if (o >= 0) {
+                byte_rate = (bytes - seen_bytes[o]) / (t - o)
+                file_rate = (files - seen_files[o]) / (t - o)
+            } else if (elapsed > 0) {
+                byte_rate = bytes / elapsed
+                file_rate = files / elapsed
+            } else {
+                byte_rate = 0
+                file_rate = 0
+            }
+            if (final) {
+                if (elapsed > 0) {
+                    byte_rate = bytes / elapsed
+                    file_rate = files / elapsed
+                }
+                first = sprintf("  Transferred %s files, %s in %s (%s/s, %s files/s)", commas(files), size(bytes), clock(elapsed), size(byte_rate), commas(file_rate))
+                if (terminal == "yes") {
+                    if (drawn) printf "\r\033[1A"
+                    printf "%s\033[K\n\033[K", first
+                } else {
+                    printf "%s\n", first
+                }
+                fflush()
+                return
+            }
+            if (total_bytes > 0 || total_files > 0) {
+                left = -1
+                if (total_bytes > bytes && byte_rate > 0) left = (total_bytes - bytes) / byte_rate
+                if (total_files > files && file_rate > 0) {
+                    left_files = (total_files - files) / file_rate
+                    if (left_files > left) left = left_files
+                }
+                if (elapsed < 5) left = -1
+                if (total_bytes > 0) pct = 100 * bytes / total_bytes
+                else pct = 100 * files / total_files
+                if (pct > 100) pct = 100
+                first = sprintf("  %s of %s (%d%%), %s of %s files, %s left", size(bytes), size(total_bytes), pct, commas(files), commas(total_files), (left < 0 ? "?" : clock(left)))
+            } else {
+                first = sprintf("  %s, %s files", size(bytes), commas(files))
+            }
+            if (found > 0) {
+                second = sprintf("  %s/s, %s files/s, %s of %s entries checked, scan %s, %s elapsed", size(byte_rate), commas(file_rate), commas(found - to_check), commas(found), (scan_done ? "done" : "running"), clock(elapsed))
+            } else {
+                second = sprintf("  %s/s, %s files/s, %s elapsed", size(byte_rate), commas(file_rate), clock(elapsed))
+            }
+            if (terminal == "yes") {
+                if (drawn) printf "\r\033[1A"
+                printf "%s\033[K\n%s\033[K", first, second
+                drawn = 1
+            } else {
+                printf "%s, %s\n", first, substr(second, 3)
+            }
+            fflush()
+        }
+        BEGIN { RS = "\r|\n"; start = now(); shown = -100; bytes = 0; files = 0; found = 0; to_check = 0; scan_done = 0; drawn = 0 }
+        /^ *[0-9][0-9,.]* +[0-9]+% +[0-9.]+[kMGT]?B\/s +[0-9]+:[0-9][0-9]:[0-9][0-9]/ {
+            b = $1
+            gsub(/[,.]/, "", b)
+            bytes = b + 0
+            if (match($0, /xfr#[0-9]+/)) files = substr($0, RSTART + 4, RLENGTH - 4) + 0
+            if (match($0, /chk=[0-9]+\/[0-9]+/)) {
+                split(substr($0, RSTART + 4, RLENGTH - 4), chk, "/")
+                to_check = chk[1] + 0
+                found = chk[2] + 0
+                scan_done = ($0 ~ /to-chk=/)
+            }
+            report(0)
+            next
+        }
+        /^[[:space:]]*$/ { next }
+        {
+            if (terminal == "yes" && drawn) {
+                printf "\r\033[1A\033[K\n\033[K\r\033[1A"
+                drawn = 0
+            }
+            print
+            fflush()
+        }
+        END { report(1) }
+    '
+}
+
 # import_remote_files <site directory> <destination> <rsync yes|no> [patterns...]
 # Mirror the site files. rsync when both sides have it (resumable through
-# the partial directory, shows progress, a repeat only transfers the
-# changes), a tar stream otherwise. The incremental recursion stays on: a
-# full scan before the first byte holds the whole file list in memory on
-# both sides, which a small server cannot afford for a large site. The
+# the partial directory, a repeat only transfers the changes), a tar
+# stream otherwise. The transfer is counted first, a dry run, and shown
+# against that count by import_rsync_progress. The incremental recursion
+# stays on for both: a full scan before the first byte holds the whole
+# file list in memory on both sides, which a small server cannot afford
+# for a large site. The
 # patterns are the exporter's exclude_N lines, anchored at the site
 # directory (/tmp/*, /backup): what stays behind. rsync takes them as they
 # are; the tar on the old server gets them under its ./ prefix, which
@@ -1376,8 +1587,9 @@ import_remote_files() {
     local destination="$2"
     local use_rsync="$3"
     local status=0
-    local pattern
+    local pattern totals count_status files=0 bytes=0 site_files site_bytes
     local -a rsync_path=()
+    local -a rsync_args=()
     local -a patterns=("${@:4}")
     local -a rsync_excludes=()
     local -a tar_excludes=()
@@ -1399,8 +1611,23 @@ import_remote_files() {
         if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
             rsync_path=(--rsync-path="sudo -n rsync")
         fi
-        rsync -a -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --info=progress2 --human-readable \
-            "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/" || status=$?
+        rsync_args=(-a -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
+            "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/")
+        echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
+        totals=$(import_rsync_totals "${rsync_args[@]}")
+        count_status=$?
+        if [ -n "$totals" ]; then
+            IFS=$'\t' read -r files bytes site_files site_bytes <<< "$totals"
+            if [ "$files" -eq 0 ] && [ "$bytes" -eq 0 ]; then
+                echo "  To transfer:     nothing, the site's $(import_count_text "$site_files") files ($(import_bytes_text "$site_bytes")) are already here; rsync checks them"
+            else
+                echo "  To transfer:     $(import_count_text "$files") files, $(import_bytes_text "$bytes") of the site's $(import_count_text "$site_files") files, $(import_bytes_text "$site_bytes")"
+            fi
+        elif [ "$count_status" -eq 124 ]; then
+            echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the transfer shows its counts without a whole"
+        fi
+        rsync "${rsync_args[@]}" --info=progress2 | import_rsync_progress "$bytes" "$files"
+        status=${PIPESTATUS[0]}
         case "$status" in
             24)
                 echo "  Some files vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
