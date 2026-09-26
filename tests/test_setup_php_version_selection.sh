@@ -33,6 +33,8 @@ functions_file="$TEST_DIR/functions.sh"
     extract_function select_php_version
 } > "$functions_file"
 # shellcheck source=/dev/null
+source "$ROOT_DIR/docker/lib/import.sh"
+# shellcheck source=/dev/null
 source "$functions_file"
 
 RED=''
@@ -112,6 +114,22 @@ run_case "no archive outside an import" 8.1 select_php_version
 grep -q "Could not read the KVS version" "$TEST_DIR/out" ||
     fail "outside an import the site version must not be used"
 IMPORT_MODE='' IMPORT_SITE_VERSION=''
+
+# 1c. A site in place, imported without the archive or installed from one
+# since removed, says its version itself on a re-run.
+seed_no_archive
+mkdir -p "$TEST_DIR/site/admin/include"
+cat > "$TEST_DIR/site/admin/include/version.php" <<'EOF'
+<?php
+$config['project_version'] = "6.2.0";
+EOF
+marker=$(kvs_documented_php_version "$TEST_DIR/site") ||
+    fail "a site in place must give its version"
+[ "$marker" = $'6.2.0\t7.4' ] ||
+    fail "the version of the site in place decides the PHP release: $marker"
+rm -f "$TEST_DIR/site/admin/include/version.php"
+kvs_documented_php_version "$TEST_DIR/site" > /dev/null 2>&1 &&
+    fail "without version.php the site in place gives nothing"
 
 # 2. An encoded archive must not silently consume a stray interactive answer.
 seed_archive 7.0.2
