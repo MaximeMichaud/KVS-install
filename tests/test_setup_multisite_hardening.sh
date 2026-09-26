@@ -545,10 +545,10 @@ grep -Fq "fastcgi_param REMOTE_ADDR \$http_x_real_ip;" \
 grep -Fq 'Multi-site mode does not support selecting ZeroSSL explicitly' \
     "$ROOT_DIR/docker/setup.sh" ||
     fail "multi-site mode can silently ignore an explicit ZeroSSL choice"
-[ "$(grep -Fc 'docker compose --profile setup run --rm --no-deps phpmyadmin-init' \
+[ "$(grep -Ec 'docker compose --profile setup run --rm --no-deps .*phpmyadmin-init$' \
     "$ROOT_DIR/docker/setup.sh")" -eq 1 ] ||
     fail "setup does not run phpMyAdmin initialization as a checked one-shot"
-[ "$(grep -Fc 'docker compose --profile setup run --rm --no-deps kvs-init' \
+[ "$(grep -Ec 'docker compose --profile setup run --rm --no-deps .*kvs-init$' \
     "$ROOT_DIR/docker/setup.sh")" -eq 1 ] ||
     fail "setup does not run KVS initialization as a checked one-shot"
 [ "$(grep -Fc 'docker compose --profile setup run --rm --no-deps phpmyadmin-init' \

@@ -323,7 +323,7 @@ test_setup_and_init_are_wired_for_imports() {
     grep -A2 -F '[ "${KEEP_EXISTING_DB:-false}" != true ] &&' "$setup" | grep -Fq '[ "$IMPORT_MODE" != true ]; then' ||
         fail "an imported database must keep its admin password instead of getting a one-time one"
     grep -Fq "SELECT value FROM \${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';" "$setup" || fail "the completion marker must be verified before the KVS init"
-    grep -Fq 'MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}' "$setup" || fail "an import must wait for the dump replay"
+    grep -Fq 'MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-0}' "$setup" || fail "an import must wait without an arbitrary deadline"
     grep -Fq '{{.RestartCount}} {{.State.Status}}' "$REPO_ROOT/docker/lib/database.sh" || fail "a restarted MariaDB container must be reported"
     grep -Fq "database_root_query -h 127.0.0.1 --protocol=tcp -e 'SELECT 1'" "$REPO_ROOT/docker/lib/database.sh" || fail "the readiness probe must use TCP, the socket answers during the init replay"
     grep -Fq 'IMPORT_MARKER_DIR="$IMPORT_STAGING"' "$setup" || fail "the source marker must live outside the webroot"

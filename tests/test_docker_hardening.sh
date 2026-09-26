@@ -782,10 +782,11 @@ test_final_compose_failure_is_fatal() {
     local output="$TMP_ROOT/compose-up-output.log"
 
     awk '
-        /^if log_command docker compose up -d --force-recreate; then$/ { capture = 1 }
+        /^if .*log_command docker compose up -d --force-recreate; then$/ { capture = 1 }
         capture { print }
         capture && /^fi$/ { exit }
     ' "$REPO_ROOT/docker/setup.sh" > "$block_file"
+    [ -s "$block_file" ] || fail "the final Compose failure check was not found"
 
     if (
         set -e
@@ -798,6 +799,8 @@ test_final_compose_failure_is_fatal() {
         NC=''
         # shellcheck disable=SC2034
         DEBUG_LOG=/tmp/test-debug.log
+        # shellcheck disable=SC2034
+        RESUME_IMPORT=false
         # shellcheck disable=SC2329
         log_command() { return 1; }
         # shellcheck source=/dev/null

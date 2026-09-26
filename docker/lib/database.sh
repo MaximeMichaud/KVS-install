@@ -3,11 +3,25 @@
 # Read-only MariaDB startup/import monitoring, shared by setup and reconfigure.
 
 database_root_query() {
-    timeout 8 docker compose exec -T mariadb sh -c '
+    local arg
+    local -a query=(timeout -k 1 8 docker compose exec -T mariadb sh -c '
         MYSQL_PWD=$MARIADB_ROOT_PASSWORD
         export MYSQL_PWD
         exec mariadb --connect-timeout=3 -u root "$@"
-    ' sh "$@"
+    ' sh "$@")
+    # Compose still attaches stdin with -T. Under timeout in an interactive
+    # setup shell, that terminal read can stop the probe with SIGTTIN even
+    # when SQL has already succeeded. Argument-based queries need no input.
+    for arg in "$@"; do
+        case "$arg" in
+            -e*|--execute|--execute=*)
+                "${query[@]}" </dev/null
+                return $?
+                ;;
+        esac
+    done
+    # Preserve stdin for SQL supplied through a pipe or heredoc.
+    "${query[@]}"
 }
 
 database_import_snapshot() {
@@ -39,7 +53,7 @@ SQL
 database_dump_position() {
     # The image replays dumps as mysql. Matching its UID allows /proc FD
     # inspection without granting SYS_PTRACE to the container.
-    timeout 8 docker compose exec -T --user mysql mariadb sh -c '
+    timeout -k 1 8 docker compose exec -T --user mysql mariadb sh -c '
         for process in /proc/[0-9]*; do
             read -r name < "$process/comm" 2>/dev/null || continue
             case "$name" in mariadb|mysql|zstd|gzip|gunzip|xz|cat) ;; *) continue ;; esac
@@ -57,7 +71,26 @@ database_dump_position() {
                 done < "$process/fdinfo/${fd##*/}"
             done
         done
-    ' 2>/dev/null
+    ' </dev/null 2>/dev/null
+}
+
+# Report a bounded category, never raw client output or environment values.
+database_readiness_failure() {
+    local status="$1" output="$2"
+    case "$status" in
+        124|137) printf 'TCP readiness command exceeded its time limit (exit %s); this does not measure SQL import progress' "$status" ;;
+        *)
+            if [[ "$output" == *'ERROR 1045 '* ]]; then
+                printf 'TCP authentication was refused (MariaDB error 1045)'
+            elif [[ "$output" == *'ERROR 2026 '* ]]; then
+                printf 'TCP TLS negotiation failed (MariaDB error 2026)'
+            elif [[ "$output" == *'ERROR 2002 '* || "$output" == *'ERROR 2003 '* ]]; then
+                printf 'TCP connection is unavailable (MariaDB error 2002/2003)'
+            else
+                printf 'TCP readiness command failed (exit %s)' "$status"
+            fi
+            ;;
+    esac
 }
 
 database_size_text() {
@@ -101,7 +134,7 @@ database_progress_line() {
         [ -z "$active" ] || printf '; %s active SQL sessions' "$active"
         printf '%s' "$operation"
     else
-        printf '; starting or restarting the database server (SQL status unavailable)'
+        printf '; SQL status unavailable (the query timed out or SQL is not accessible)'
     fi
     printf '\n'
 }
@@ -168,50 +201,110 @@ database_import_jobs() {
     database_import_jobs_for_resources "$cpus" "$available" "$pool"
 }
 
+# Docker metadata requests also need a deadline: the daemon may be slow even
+# before a SQL connection is attempted. Do not hide a timeout as a missing DB.
+database_docker_query() {
+    timeout -k 1 3 docker "$@"
+}
+
+# A separate timer keeps status visible while foreground probes are blocked.
+# It reports pending checks, never fabricated SQL progress or a stale sample.
+database_progress_heartbeat() {
+    local started="$1" timer='' stopping=no
+    trap 'if [ -n "$timer" ]; then kill "$timer" 2>/dev/null || true; wait "$timer" 2>/dev/null || true; fi' EXIT
+    # Finish assigning the timer PID before exiting if a signal arrives
+    # between starting sleep and storing $!. Otherwise sleep could be orphaned.
+    trap 'stopping=yes' INT TERM HUP
+    while :; do
+        [ "$stopping" != yes ] || exit 0
+        command sleep 5 &
+        timer=$!
+        [ "$stopping" != yes ] || exit 0
+        wait "$timer" || exit 0
+        timer=''
+        [ "$stopping" != yes ] || exit 0
+        printf '  MariaDB: %ss elapsed; readiness/activity checks are still in progress.\n' "$((SECONDS - started))" >&2
+    done
+}
+
+database_wait_timeout() {
+    echo "ERROR: MariaDB not ready after $1 seconds (MARIADB_WAIT_SECONDS=$2)." >&2
+    echo "The database container is left running. Inspect it with ./reconfigure.sh --import-status or docker compose logs mariadb." >&2
+}
+
 # Wait against wall time, not an assumed two seconds per iteration. A socket
 # accepts SQL during the init replay, but readiness still requires TCP and
 # setup separately verifies its unique final SQL completion marker.
-database_wait_ready() {
-    local budget="$1" once="${2:-no}" start=$SECONDS shown=-10 elapsed container state snapshot position
-    [[ "$budget" =~ ^[1-9][0-9]*$ ]] || {
-        echo "ERROR: MARIADB_WAIT_SECONDS must be a positive number of seconds" >&2
+database_wait_ready() (
+    local budget="$1" once="${2:-no}" start=$SECONDS shown=-10 elapsed container state snapshot position heartbeat_pid=''
+    local tcp_output tcp_status tcp_failure previous_failure=''
+    [[ "$budget" =~ ^(0|[1-9][0-9]*)$ ]] || {
+        echo "ERROR: MARIADB_WAIT_SECONDS must be a non-negative number of seconds (0 waits without a deadline)" >&2
         return 1
     }
-    echo "  Waiting for MariaDB; import activity is reported every 10 seconds."
+    echo "  Checking MariaDB readiness; pending checks are reported every 5 seconds."
+    trap 'if [ -n "$heartbeat_pid" ]; then kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true; fi' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    database_progress_heartbeat "$start" &
+    heartbeat_pid=$!
     while :; do
         elapsed=$((SECONDS - start))
-        container=$(docker compose ps -a -q mariadb 2>/dev/null | head -n 1)
-        if [ -z "$container" ]; then
-            echo "ERROR: no MariaDB container found for this Compose project." >&2
+        if [ "$budget" -gt 0 ] && [ "$elapsed" -ge "$budget" ]; then
+            database_wait_timeout "$elapsed" "$budget"
             return 1
         fi
-        state=$(docker inspect --format '{{.RestartCount}} {{.State.Status}}' "$container" 2>/dev/null) || state="0 unknown"
-        if [[ "$state" != "0 running" && "$state" != "0 created" && "$state" != "0 unknown" ]]; then
+        if ! container=$(database_docker_query compose ps -a -q mariadb 2>/dev/null); then
+            echo "ERROR: Docker did not return the MariaDB container status; the container is left untouched." >&2
+            return 1
+        fi
+        if [ -z "$container" ] || [[ "$container" == *$'\n'* ]]; then
+            echo "ERROR: expected one MariaDB container for this Compose project." >&2
+            return 1
+        fi
+        if ! state=$(database_docker_query inspect --format '{{.RestartCount}} {{.State.Status}}' "$container" 2>/dev/null); then
+            echo "ERROR: Docker did not return the MariaDB running state; the container is left untouched." >&2
+            return 1
+        fi
+        if [[ "$state" != "0 running" && "$state" != "0 created" ]]; then
             echo "ERROR: MariaDB stopped or restarted during initialization ($state)." >&2
-            docker compose logs --tail 20 mariadb >&2
+            database_docker_query compose logs --tail 20 mariadb >&2 || true
             return 1
         fi
-        if [ "$elapsed" -ge "$budget" ]; then
-            echo "ERROR: MariaDB not ready after $elapsed seconds (MARIADB_WAIT_SECONDS=$budget)." >&2
-            echo "The database container is left running. Inspect it with ./reconfigure.sh --import-status or docker compose logs mariadb." >&2
+        elapsed=$((SECONDS - start))
+        if [ "$budget" -gt 0 ] && [ "$elapsed" -ge "$budget" ]; then
+            database_wait_timeout "$elapsed" "$budget"
             return 1
         fi
-        if database_root_query -h 127.0.0.1 --protocol=tcp -e 'SELECT 1' > /dev/null 2>&1; then
+        if tcp_output=$(database_root_query -h 127.0.0.1 --protocol=tcp -e 'SELECT 1' 2>&1); then
+            elapsed=$((SECONDS - start))
             echo "  MariaDB accepts TCP connections after $elapsed seconds. This alone does not verify an import; setup checks its completion marker separately."
-            snapshot=$(database_import_snapshot) || true
-            database_progress_line "$elapsed" "$snapshot" ""
             return 0
+        else
+            tcp_status=$?
+        fi
+        tcp_failure=$(database_readiness_failure "$tcp_status" "$tcp_output")
+        if [ "$tcp_failure" != "$previous_failure" ]; then
+            printf '  MariaDB: %s.\n' "$tcp_failure"
+            previous_failure=$tcp_failure
+        fi
+        elapsed=$((SECONDS - start))
+        if [ "$budget" -gt 0 ] && [ "$elapsed" -ge "$budget" ]; then
+            database_wait_timeout "$elapsed" "$budget"
+            return 1
         fi
         if [ "$once" = yes ] || [ "$((elapsed - shown))" -ge 10 ]; then
             snapshot=$(database_import_snapshot) || true
             position=$(database_dump_position) || true
+            elapsed=$((SECONDS - start))
             database_progress_line "$elapsed" "$snapshot" "$position"
             shown=$elapsed
         fi
         [ "$once" != yes ] || return 0
         sleep 2
     done
-}
+)
 
 # Reserve most memory for the rest of this shared KVS host. Explicit sizes
 # persist unchanged. The automatic value is 25% of available RAM, bounded

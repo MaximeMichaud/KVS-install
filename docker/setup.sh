@@ -29,12 +29,18 @@ fi
 # Usage: ./setup.sh --dev
 # Enables: no-cache builds, self-signed SSL, skip GeoIP, auto-cleanup
 DEV_MODE=false
+RESUME_IMPORT=false
 DOCKER_BUILD_FLAGS=""
+SETUP_RUN_FLAGS=()
 # shellcheck disable=SC2034  # Read by lib/database.sh after .env is loaded.
 MARIADB_BUFFER_POOL_SIZE_REQUEST="${MARIADB_BUFFER_POOL_SIZE:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --resume-import)
+            RESUME_IMPORT=true
+            shift
+            ;;
         --dev)
             DEV_MODE=true
             shift
@@ -54,6 +60,12 @@ OPTIONS:
                 - Auto-cleanup volumes
                 - Skip Manticore (faster startup)
                 - Bypass pre-flight warnings (disk space, internet)
+
+    --resume-import
+                Finish an already staged import using its existing MariaDB
+                container, files and saved .env. No transfer or database restart.
+                Incompatible with --dev. Imports wait without a deadline unless
+                MARIADB_WAIT_SECONDS is explicitly set to a positive budget.
 
     --help      Show this help message
 
@@ -148,6 +160,11 @@ EOF
     esac
 done
 
+if [ "$RESUME_IMPORT" = true ] && [ "$DEV_MODE" = true ]; then
+    echo "ERROR: --resume-import cannot be combined with --dev" >&2
+    exit 1
+fi
+
 # Keep help and option validation available to every user, but reject any
 # operational invocation before logs, network checks, or host changes.
 if [ "$EUID" -ne 0 ]; then
@@ -169,6 +186,548 @@ rm -f "${LOG_DIR}/setup-trace.log" 2>/dev/null || true
 } >> "$DEBUG_LOG" 2>/dev/null || true
 chmod 600 "$DEBUG_LOG" 2>/dev/null || true
 
+
+# Shared finalization helpers are also available when preparation is skipped.
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+PROGRESS_TOTAL=11
+PROGRESS_CURRENT=0
+
+log_command() {
+    local logfile="/tmp/log_cmd_$$.log"
+    local result=0
+
+    {
+        echo ">>> [$(date '+%Y-%m-%d %H:%M:%S')] EXECUTING: $*"
+    } >> "$DEBUG_LOG" 2>/dev/null || true
+
+    if "$@" >"$logfile" 2>&1; then
+        result=0
+    else
+        result=$?
+    fi
+
+    {
+        cat "$logfile" 2>/dev/null || echo "(no output)"
+        echo "<<< EXIT CODE: $result"
+        echo ""
+    } >> "$DEBUG_LOG" 2>/dev/null || true
+
+    rm -f "$logfile"
+    return $result
+}
+
+report_step_failure() {
+    local logfile="$1"
+
+    [ -s "$logfile" ] || return 0
+    echo "    Error (last lines, full output in ${DEBUG_LOG:-the debug log}):"
+    tail -n 20 "$logfile" | sed 's/^/    /'
+    if grep -q 'No space left on device' "$logfile"; then
+        echo "    The filesystem is full: free space on the Docker image store (docker system df,"
+        echo "    docker builder prune) or move it to a larger disk (README, Disk layout)."
+    fi
+}
+
+run_step() {
+    local title="$1"
+    shift
+    local logfile="/tmp/run_step_$$.log"
+    local result=0
+
+    if command -v gum &>/dev/null; then
+        # With gum: show spinner, log output to file
+        # Note: $@ and $0 must be expanded by sh -c, not the parent shell
+        # shellcheck disable=SC2016
+        if gum spin --spinner dot --title "$title" -- sh -c '"$@" >"$0" 2>&1' "$logfile" "$@"; then
+            echo -e "  ${GREEN}✓${NC} $title"
+            result=0
+        else
+            echo -e "  ${RED}✗${NC} $title"
+            report_step_failure "$logfile"
+            result=1
+        fi
+    else
+        # Fallback without gum
+        echo -n "  $title..."
+        if "$@" >"$logfile" 2>&1; then
+            echo -e " ${GREEN}✓${NC}"
+            result=0
+        else
+            echo -e " ${RED}✗${NC}"
+            report_step_failure "$logfile"
+            result=1
+        fi
+    fi
+
+    # Append step output to debug log with timestamp and title
+    {
+        echo "--- [$(date '+%Y-%m-%d %H:%M:%S')] $title $([ $result -eq 0 ] && echo '[SUCCESS]' || echo '[FAILED]') ---"
+        cat "$logfile" 2>/dev/null || echo "(no output)"
+        echo ""
+    } >> "$DEBUG_LOG" 2>/dev/null || true
+
+    rm -f "$logfile"
+    return $result
+}
+
+progress_bar() {
+    local title="$1"
+    local pct filled empty bar i
+    PROGRESS_CURRENT=$((PROGRESS_CURRENT + 1))
+    pct=$((PROGRESS_CURRENT * 100 / PROGRESS_TOTAL))
+    filled=$((pct / 5))
+    empty=$((20 - filled))
+    bar=""
+    for ((i=0; i<filled; i++)); do
+        bar+="█"
+    done
+    for ((i=0; i<empty; i++)); do
+        bar+="░"
+    done
+
+    echo ""
+    if command -v gum &>/dev/null; then
+        gum style --foreground 212 --border-foreground 99 --border rounded --width 50 --padding "0 1" \
+            "[$bar] $pct% ($PROGRESS_CURRENT/$PROGRESS_TOTAL)" "→ $title"
+    else
+        echo -e "${CYAN}[$bar] $pct% ($PROGRESS_CURRENT/$PROGRESS_TOTAL)${NC}"
+        echo -e "${CYAN}→ $title${NC}"
+    fi
+}
+
+progress_header() {
+    local title="$1"
+    local subtitle="${2:-}"
+    echo ""
+    if command -v gum &>/dev/null; then
+        if [[ -n "$subtitle" ]]; then
+            gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title" "$subtitle"
+        else
+            gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title"
+        fi
+    else
+        echo "========================================"
+        echo "  $title"
+        [[ -n "$subtitle" ]] && echo "  $subtitle"
+        echo "========================================"
+    fi
+}
+
+progress_success() {
+    local msg="${1:-Setup Complete!}"
+    echo ""
+    if command -v gum &>/dev/null; then
+        gum style --foreground 82 --border-foreground 82 --border double --align center --width 50 --padding "1 2" \
+            "✓ $msg" "All $PROGRESS_TOTAL steps finished"
+    else
+        echo -e "${GREEN}========================================"
+        echo "  ✓ $msg"
+        echo "  All $PROGRESS_TOTAL steps finished"
+        echo -e "========================================${NC}"
+    fi
+}
+
+run_root_mariadb() {
+    local argument
+    # shellcheck disable=SC2016  # Expanded inside the container.
+    local -a query=(docker compose exec -T mariadb sh -c '
+        [ -n "${MARIADB_ROOT_PASSWORD:-}" ] || exit 1
+        MYSQL_PWD=$MARIADB_ROOT_PASSWORD
+        export MYSQL_PWD
+        exec mariadb "$@"
+    ' sh "$@")
+    # Argument-based queries must not let Compose read the installer's terminal.
+    # Keep stdin available when SQL is supplied through a pipe or heredoc.
+    for argument in "$@"; do
+        case "$argument" in
+            -e*|--execute|--execute=*)
+                "${query[@]}" </dev/null
+                return $?
+                ;;
+        esac
+    done
+    "${query[@]}"
+}
+
+configure_disk_space_limit() {
+    echo ""
+    echo -e "${CYAN}Configuring KVS disk space limit...${NC}"
+
+    # Get total disk space in MB for the KVS directory
+    # Use root partition as fallback if /var/www/$DOMAIN doesn't exist yet
+    if [ -d "/var/www/$DOMAIN" ]; then
+        TOTAL_DISK_MB=$(df -m "/var/www/$DOMAIN" 2>/dev/null | awk 'NR==2 {print $2}')
+    else
+        TOTAL_DISK_MB=$(df -m / 2>/dev/null | awk 'NR==2 {print $2}')
+    fi
+
+    # Validate we got a number before doing arithmetic
+    # Use positive check to avoid issues with ! and set -e
+    if [[ "$TOTAL_DISK_MB" =~ ^[0-9]+$ ]] && [ "$TOTAL_DISK_MB" -gt 0 ]; then
+        TOTAL_DISK_GB=$((TOTAL_DISK_MB / 1024))
+    else
+        echo -e "${YELLOW}Could not detect disk size. Using KVS default (30 GB).${NC}"
+        return
+    fi
+
+    # Formula: min_free = MAX(2048, MIN(32768, total_disk_mb × 5%))
+    # Using binary units: 2 GB = 2048 MB, 32 GB = 32768 MB
+    CALCULATED=$((TOTAL_DISK_MB * 5 / 100))
+    MIN_FLOOR=2048    # 2 GB minimum
+    MAX_CEIL=32768    # 32 GB maximum
+
+    # Apply floor
+    if [ "$CALCULATED" -lt "$MIN_FLOOR" ]; then
+        MIN_FREE_SPACE=$MIN_FLOOR
+    # Apply ceiling
+    elif [ "$CALCULATED" -gt "$MAX_CEIL" ]; then
+        MIN_FREE_SPACE=$MAX_CEIL
+    else
+        MIN_FREE_SPACE=$CALCULATED
+    fi
+
+    MIN_FREE_SPACE_GB=$((MIN_FREE_SPACE / 1024))
+    PERCENT_OF_DISK=$((MIN_FREE_SPACE * 100 / TOTAL_DISK_MB))
+
+    # Warning for small disks (< 20 GB)
+    if [ "$TOTAL_DISK_GB" -lt 20 ]; then
+        echo ""
+        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
+        echo -e "${YELLOW}⚠️  WARNING: Limited disk space detected (${TOTAL_DISK_GB} GB)${NC}"
+        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
+        echo -e "${YELLOW}This configuration is suitable for development/testing only.${NC}"
+        echo -e "${YELLOW}For production use, we recommend increasing your disk space${NC}"
+        echo -e "${YELLOW}as KVS requires storage for:${NC}"
+        echo -e "${YELLOW}  • Video thumbnails and screenshots${NC}"
+        echo -e "${YELLOW}  • Temporary video processing files${NC}"
+        echo -e "${YELLOW}  • Database and log files${NC}"
+        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
+        echo ""
+    fi
+
+    # Find the KVS options table and update the setting
+    # KVS uses different table prefixes, so we detect it dynamically
+    # Use || true to prevent set -e from crashing if DB query fails
+    OPTIONS_TABLE=$(run_root_mariadb -u root "$DOMAIN" -N -e \
+        "SHOW TABLES LIKE '%options%';" 2>/dev/null | grep -E 'options$' | head -1) || OPTIONS_TABLE=""
+
+    if [ -n "$OPTIONS_TABLE" ]; then
+        # Update the disk space limit setting (|| true to prevent set -e crash)
+        # KVS uses 'variable' column, not 'name'
+        run_root_mariadb -u root "$DOMAIN" -e \
+            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE variable='MAIN_SERVER_MIN_FREE_SPACE_MB';" 2>/dev/null || true
+
+        # Also update storage server group limit
+        run_root_mariadb -u root "$DOMAIN" -e \
+            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE variable='SERVER_GROUP_MIN_FREE_SPACE_MB';" 2>/dev/null || true
+
+        echo -e "${GREEN}✓ KVS disk space limit configured${NC}"
+    else
+        echo -e "${YELLOW}Could not find KVS options table. You can configure this manually in:${NC}"
+        echo -e "${YELLOW}  Admin Panel → Settings → System → Minimum free disc space${NC}"
+    fi
+
+    # Display information message
+    echo ""
+    echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│             KVS Disk Space Configuration                         │${NC}"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "${CYAN}│${NC} KVS default alert threshold: ${RED}30000 MB${NC} (30 GB)                    ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC} Adjusted to: ${GREEN}${MIN_FREE_SPACE} MB${NC} (~${MIN_FREE_SPACE_GB} GB) based on your server         ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC}                                                                  ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC} Your disk: ${GREEN}${TOTAL_DISK_MB} MB${NC} (~${TOTAL_DISK_GB} GB)                                 ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC} Reserved:  ${GREEN}${PERCENT_OF_DISK}%${NC} of total disk                                  ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC}                                                                  ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC} Formula: MAX(2048, MIN(32768, total_disk × 5%))                  ${CYAN}│${NC}"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "${CYAN}│${NC} ${YELLOW}ℹ${NC}  KVS needs disk space for thumbnails, screenshots, and        ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC}    temporary files. Upgrade disk if hosting many videos.        ${CYAN}│${NC}"
+    echo -e "${CYAN}└──────────────────────────────────────────────────────────────────┘${NC}"
+}
+
+validate_domain() {
+    local domain="$1"
+    local label
+    local -a labels
+
+    # The domain is also used directly as the MariaDB database identifier.
+    if [ -z "$domain" ] || [ "${#domain}" -gt 64 ]; then
+        return 1
+    fi
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
+        return 1
+    fi
+
+    IFS='.' read -r -a labels <<< "$domain"
+    for label in "${labels[@]}"; do
+        [ "${#label}" -le 63 ] || return 1
+    done
+    return 0
+}
+
+include_www_for_domain() {
+    local dot_count
+
+    [ "${USE_WWW:-false}" = "true" ] && return 0
+    dot_count=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
+    [ "$dot_count" -eq 1 ]
+}
+
+set_env_value() {
+    local key="$1"
+    local value="$2"
+    local env_owner
+    local temporary
+    local temporary_owner
+    local line
+    local matches=0
+
+    [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    if ! env_owner=$(stat -c '%u:%g' .env) ||
+        ! temporary=$(mktemp ./.env.tmp.XXXXXX); then
+        return 1
+    fi
+    if ! sed "/^${key}=/d" .env > "$temporary" ||
+        ! printf '%s=%s\n' "$key" "$value" >> "$temporary" ||
+        ! chmod 600 "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    if ! temporary_owner=$(stat -c '%u:%g' "$temporary"); then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    if [ "$temporary_owner" != "$env_owner" ] &&
+        ! chown "$env_owner" "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$line" = "${key}=${value}" ]; then
+            matches=$((matches + 1))
+        fi
+    done < "$temporary"
+    if [ "$matches" -ne 1 ] || ! mv -f -- "$temporary" .env; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+}
+
+parse_publish_endpoint() {
+    local endpoint="$1"
+    local host=""
+    local port=""
+    local octet
+    local -a octets
+
+    if [[ "$endpoint" =~ ^([0-9]+)$ ]]; then
+        port="${BASH_REMATCH[1]}"
+    elif [[ "$endpoint" =~ ^\[([0-9A-Fa-f:.%]+)\]:([0-9]+)$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[2]}"
+    elif [[ "$endpoint" =~ ^(([0-9]{1,3}\.){3}[0-9]{1,3}):([0-9]+)$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[3]}"
+        IFS='.' read -r -a octets <<< "$host"
+        for octet in "${octets[@]}"; do
+            [ "$((10#$octet))" -le 255 ] || return 1
+        done
+    else
+        return 1
+    fi
+
+    [ "${#port}" -le 5 ] || return 1
+    [ "$((10#$port))" -ge 1 ] || return 1
+    [ "$((10#$port))" -le 65535 ] || return 1
+    PUBLISH_HOST="$host"
+    PUBLISH_PORT=$((10#$port))
+}
+
+resolve_public_port_configuration() {
+    if [ "$MODE" = "multi" ]; then
+        PUBLIC_HTTP_ENDPOINT=80
+        PUBLIC_HTTPS_ENDPOINT=443
+    else
+        PUBLIC_HTTP_ENDPOINT=${HTTP_PORT:-80}
+        PUBLIC_HTTPS_ENDPOINT=${HTTPS_PORT:-443}
+    fi
+
+    if ! parse_publish_endpoint "$PUBLIC_HTTP_ENDPOINT"; then
+        echo -e "${RED}ERROR: Invalid HTTP_PORT endpoint: ${PUBLIC_HTTP_ENDPOINT}${NC}"
+        return 1
+    fi
+    PUBLIC_HTTP_PORT=$PUBLISH_PORT
+
+    if ! parse_publish_endpoint "$PUBLIC_HTTPS_ENDPOINT"; then
+        echo -e "${RED}ERROR: Invalid HTTPS_PORT endpoint: ${PUBLIC_HTTPS_ENDPOINT}${NC}"
+        return 1
+    fi
+    PUBLIC_HTTPS_PORT=$PUBLISH_PORT
+}
+
+setup_resume_docker_query() {
+    local message=$1 status
+    shift
+    echo "$message" >&2
+    if timeout -k 1 3 docker "$@"; then
+        return 0
+    else
+        status=$?
+        echo "ERROR: the Docker metadata check failed or exceeded its time limit; recovery stopped without changing MariaDB." >&2
+        return "$status"
+    fi
+}
+
+setup_resume_database_snapshot() {
+    setup_resume_docker_query "Checking MariaDB state and its existing data volume..." inspect --format \
+        '{{index .Config.Labels "com.docker.compose.project"}}{{printf "\t"}}{{.State.Status}} {{.RestartCount}} {{.State.OOMKilled}}{{printf "\t"}}{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Type}}:{{.Name}}:{{.Source}}{{end}}{{end}}{{printf "\t"}}{{.State.StartedAt}}' "$1"
+}
+
+setup_resume_assert_database() {
+    local container snapshot project mount state started
+
+    container=$(setup_resume_docker_query "Locating the existing MariaDB container..." compose ps -a -q mariadb) || return 1
+    if [ "$container" != "$IMPORT_RESUME_CONTAINER" ]; then
+        echo "ERROR: the MariaDB container changed during import recovery; stopping finalization." >&2
+        return 1
+    fi
+    snapshot=$(setup_resume_database_snapshot "$container") || return 1
+    IFS=$'\t' read -r project state mount started <<< "$snapshot"
+    if [ "$project" != "$COMPOSE_PROJECT_NAME" ] || [ "$mount" != "$IMPORT_RESUME_MOUNT" ] ||
+        [ "$state" != 'running 0 false' ] ||
+        [ "$started" != "$IMPORT_RESUME_STARTED_AT" ]; then
+        echo "ERROR: the MariaDB volume or running state changed during import recovery." >&2
+        return 1
+    fi
+}
+
+setup_resume_runtime_services() {
+    local service configured
+    local -a services=()
+
+    configured=$(setup_resume_docker_query "Reading the saved runtime service configuration..." compose config --services) || return 1
+    while IFS= read -r service; do
+        case "$service" in mariadb|phpmyadmin-init|kvs-init|'') continue ;; esac
+        [[ "$service" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+        services+=("$service")
+    done <<< "$configured"
+    [ "${#services[@]}" -gt 0 ] || return 1
+    setup_resume_assert_database || return 1
+    log_command docker compose up -d --no-deps --no-recreate --no-build --pull missing "${services[@]}"
+}
+
+# KVS initialization was built before the SQL import started. Compose run
+# has no --no-build flag, so refuse a missing cached image before it can build.
+setup_resume_require_init_image() {
+    local images image
+    images=$(setup_resume_docker_query "Checking the saved initialization image..." \
+        compose --profile setup config --images kvs-init) || return 1
+    if [ -z "$images" ]; then
+        echo "ERROR: the saved KVS initialization image could not be resolved; recovery stopped." >&2
+        return 1
+    fi
+    while IFS= read -r image; do
+        [ -n "$image" ] || continue
+        if ! setup_resume_docker_query "Checking cached initialization images..." \
+            image inspect --format '{{.Id}}' "$image" >/dev/null; then
+            echo "ERROR: a previously built initialization image is unavailable ($image); recovery will not rebuild it. MariaDB and the staged import are preserved." >&2
+            return 1
+        fi
+    done <<< "$images"
+}
+
+setup_resume_import() {
+    local key site_info snapshot state project marker resume_library wait_budget="${MARIADB_WAIT_SECONDS:-0}"
+    echo "Inspecting the saved import configuration and existing MariaDB container..."
+    resume_library="$(dirname "${BASH_SOURCE[0]}")/lib/import-resume.sh"
+
+    if [ ! -f .env ] || [ ! -f docker-compose.yml ] || [ ! -f "$resume_library" ]; then
+        echo "ERROR: run --resume-import from the existing docker directory with its saved .env and recovery helpers." >&2
+        return 1
+    fi
+    # Resume the saved installation. Ignore shell overrides from the initial
+    # import command, including alternate Compose files, images and domains.
+    unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+    unset DOMAIN SITE_PREFIX MODE SSL_PROVIDER DEV_SSL_INTELLIGENT KVS_ADMIN_PASSWORD
+    while IFS= read -r key; do
+        [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+        unset "$key"
+    done < <(sed -n -E 's/^([A-Z][A-Z0-9_]*)=.*/\1/p' .env .env.example 2>/dev/null | sort -u)
+    set -a
+    source .env
+    set +a
+    MARIADB_WAIT_SECONDS=$wait_budget
+    if ! validate_domain "${DOMAIN:-}" || [[ ! "${TABLES_PREFIX:-}" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+        echo "ERROR: saved DOMAIN or TABLES_PREFIX is invalid; recovery will not guess the database." >&2
+        return 1
+    fi
+    if [[ ! "${COMPOSE_PROJECT_NAME:-}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+        echo "ERROR: saved COMPOSE_PROJECT_NAME is missing or invalid." >&2
+        return 1
+    fi
+    MODE=${MODE:-single}
+    SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+    USE_WWW=${USE_WWW:-false}
+    DISABLE_KVS_SUPPORT_ACCESS=${DISABLE_KVS_SUPPORT_ACCESS:-false}
+    resolve_public_port_configuration || return 1
+    IMPORT_RESUME_CONTAINER=$(setup_resume_docker_query "Locating the existing MariaDB container..." compose ps -a -q mariadb) || return 1
+    if [[ ! "$IMPORT_RESUME_CONTAINER" =~ ^[a-f0-9]{12,64}$ ]]; then
+        echo "ERROR: recovery requires exactly one existing MariaDB container; it will not create one." >&2
+        return 1
+    fi
+    snapshot=$(setup_resume_database_snapshot "$IMPORT_RESUME_CONTAINER") || return 1
+    IFS=$'\t' read -r project state IMPORT_RESUME_MOUNT IMPORT_RESUME_STARTED_AT <<< "$snapshot"
+    if [ "$project" != "$COMPOSE_PROJECT_NAME" ] || [ "$state" != 'running 0 false' ] ||
+        [ -z "$IMPORT_RESUME_MOUNT" ] || [ -z "$IMPORT_RESUME_STARTED_AT" ]; then
+        echo "ERROR: the saved project must have a running, unrestarted MariaDB container with its existing data volume." >&2
+        return 1
+    fi
+    IMPORT_MODE=true
+    IMPORT_SOURCE=resume
+    IMPORT_SITE_DIR="/var/www/$DOMAIN"
+    if ! site_info=$(import_validate_site "$IMPORT_SITE_DIR"); then
+        echo "ERROR: the previously copied site is unavailable; recovery will not transfer or replace files." >&2
+        return 1
+    fi
+    IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
+    IMPORT_TABLES_PREFIX=$(import_field "$site_info" 3)
+    if [ "$IMPORT_TABLES_PREFIX" != "$TABLES_PREFIX" ]; then
+        echo "ERROR: the copied site's table prefix differs from saved .env." >&2
+        return 1
+    fi
+    IMPORT_RAW_DUMP=""
+    IMPORT_STAGING=""
+    IMPORT_NATIVE_STAGE=""
+    IMPORT_DUMP_TABLES=""
+    KVS_ADMIN_PASSWORD_PROVIDED=false
+    KVS_ADMIN_PASSWORD_GENERATED=false
+    KEEP_EXISTING_DB=true
+    # Missing service images may not have been pulled before the import wait.
+    # Reuse cached images and allow the unfinished services to fetch theirs.
+    SETUP_RUN_FLAGS=(--pull missing)
+    # shellcheck source=lib/import-resume.sh
+    source "$resume_library"
+    import_resume_discover mariadb/init "$DOMAIN" "$TABLES_PREFIX" || return 1
+    echo "Resuming the staged import with the existing MariaDB container and saved configuration."
+    database_wait_ready "$MARIADB_WAIT_SECONDS" || return 1
+    setup_resume_assert_database || return 1
+    marker=$(import_resume_marker "$DOMAIN" "$TABLES_PREFIX") || return 1
+    echo "Checking the final token in the staged dump (compressed SQL is read once; no SQL is replayed)."
+    IMPORT_TOKEN=$(import_resume_token "$IMPORT_STAGED_DUMP") || return 1
+    [ "$marker" = "$IMPORT_TOKEN" ] || {
+        echo "ERROR: the database marker differs from this staged import; finalization is refused." >&2
+        return 1
+    }
+    import_resume_verify "$DOMAIN" "$TABLES_PREFIX" "$IMPORT_TOKEN" || return 1
+    setup_resume_assert_database
+}
+
+if [ "$RESUME_IMPORT" != true ]; then
 if [ "$DEV_MODE" = true ]; then
     echo ""
     echo "🔧 DEV MODE ENABLED"
@@ -1258,11 +1817,6 @@ case "$DISABLE_KVS_SUPPORT_ACCESS_REQUEST" in
 esac
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
 
 readonly MAX_SITE_PREFIX_LENGTH=235
 
@@ -1552,87 +2106,12 @@ install_gum() {
 
 # Log a command's output without showing it to the user
 # Usage: log_command <command> [args...]
-log_command() {
-    local logfile="/tmp/log_cmd_$$.log"
-    local result=0
-
-    {
-        echo ">>> [$(date '+%Y-%m-%d %H:%M:%S')] EXECUTING: $*"
-    } >> "$DEBUG_LOG" 2>/dev/null || true
-
-    if "$@" >"$logfile" 2>&1; then
-        result=0
-    else
-        result=$?
-    fi
-
-    {
-        cat "$logfile" 2>/dev/null || echo "(no output)"
-        echo "<<< EXIT CODE: $result"
-        echo ""
-    } >> "$DEBUG_LOG" 2>/dev/null || true
-
-    rm -f "$logfile"
-    return $result
-}
 
 # Run a command with spinner, showing title and result
 # A failed step used to show its first ten lines, which for a Docker build
 # is the BuildKit preamble while the cause sits at the end. Show the end,
 # point at the debug log and name a full filesystem, the usual build killer.
-report_step_failure() {
-    local logfile="$1"
 
-    [ -s "$logfile" ] || return 0
-    echo "    Error (last lines, full output in ${DEBUG_LOG:-the debug log}):"
-    tail -n 20 "$logfile" | sed 's/^/    /'
-    if grep -q 'No space left on device' "$logfile"; then
-        echo "    The filesystem is full: free space on the Docker image store (docker system df,"
-        echo "    docker builder prune) or move it to a larger disk (README, Disk layout)."
-    fi
-}
-
-run_step() {
-    local title="$1"
-    shift
-    local logfile="/tmp/run_step_$$.log"
-    local result=0
-
-    if command -v gum &>/dev/null; then
-        # With gum: show spinner, log output to file
-        # Note: $@ and $0 must be expanded by sh -c, not the parent shell
-        # shellcheck disable=SC2016
-        if gum spin --spinner dot --title "$title" -- sh -c '"$@" >"$0" 2>&1' "$logfile" "$@"; then
-            echo -e "  ${GREEN}✓${NC} $title"
-            result=0
-        else
-            echo -e "  ${RED}✗${NC} $title"
-            report_step_failure "$logfile"
-            result=1
-        fi
-    else
-        # Fallback without gum
-        echo -n "  $title..."
-        if "$@" >"$logfile" 2>&1; then
-            echo -e " ${GREEN}✓${NC}"
-            result=0
-        else
-            echo -e " ${RED}✗${NC}"
-            report_step_failure "$logfile"
-            result=1
-        fi
-    fi
-
-    # Append step output to debug log with timestamp and title
-    {
-        echo "--- [$(date '+%Y-%m-%d %H:%M:%S')] $title $([ $result -eq 0 ] && echo '[SUCCESS]' || echo '[FAILED]') ---"
-        cat "$logfile" 2>/dev/null || echo "(no output)"
-        echo ""
-    } >> "$DEBUG_LOG" 2>/dev/null || true
-
-    rm -f "$logfile"
-    return $result
-}
 
 #################################################################
 # Progress Tracking
@@ -1640,169 +2119,12 @@ run_step() {
 PROGRESS_TOTAL=11
 PROGRESS_CURRENT=0
 
-progress_bar() {
-    local title="$1"
-    local pct filled empty bar i
-    PROGRESS_CURRENT=$((PROGRESS_CURRENT + 1))
-    pct=$((PROGRESS_CURRENT * 100 / PROGRESS_TOTAL))
-    filled=$((pct / 5))
-    empty=$((20 - filled))
-    bar=""
-    for ((i=0; i<filled; i++)); do
-        bar+="█"
-    done
-    for ((i=0; i<empty; i++)); do
-        bar+="░"
-    done
 
-    echo ""
-    if command -v gum &>/dev/null; then
-        gum style --foreground 212 --border-foreground 99 --border rounded --width 50 --padding "0 1" \
-            "[$bar] $pct% ($PROGRESS_CURRENT/$PROGRESS_TOTAL)" "→ $title"
-    else
-        echo -e "${CYAN}[$bar] $pct% ($PROGRESS_CURRENT/$PROGRESS_TOTAL)${NC}"
-        echo -e "${CYAN}→ $title${NC}"
-    fi
-}
 
-progress_header() {
-    local title="$1"
-    local subtitle="${2:-}"
-    echo ""
-    if command -v gum &>/dev/null; then
-        if [[ -n "$subtitle" ]]; then
-            gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title" "$subtitle"
-        else
-            gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title"
-        fi
-    else
-        echo "========================================"
-        echo "  $title"
-        [[ -n "$subtitle" ]] && echo "  $subtitle"
-        echo "========================================"
-    fi
-}
 
-progress_success() {
-    local msg="${1:-Setup Complete!}"
-    echo ""
-    if command -v gum &>/dev/null; then
-        gum style --foreground 82 --border-foreground 82 --border double --align center --width 50 --padding "1 2" \
-            "✓ $msg" "All $PROGRESS_TOTAL steps finished"
-    else
-        echo -e "${GREEN}========================================"
-        echo "  ✓ $msg"
-        echo "  All $PROGRESS_TOTAL steps finished"
-        echo -e "========================================${NC}"
-    fi
-}
-
-run_root_mariadb() {
-    docker compose exec -T mariadb sh -c '
-        [ -n "${MARIADB_ROOT_PASSWORD:-}" ] || exit 1
-        MYSQL_PWD=$MARIADB_ROOT_PASSWORD
-        export MYSQL_PWD
-        exec mariadb "$@"
-    ' sh "$@"
-}
 
 # Calculate and configure dynamic disk space limit for KVS
 # Formula: MIN_FREE = MAX(2048, MIN(32768, TOTAL_DISK_MB × 5%))
-configure_disk_space_limit() {
-    echo ""
-    echo -e "${CYAN}Configuring KVS disk space limit...${NC}"
-
-    # Get total disk space in MB for the KVS directory
-    # Use root partition as fallback if /var/www/$DOMAIN doesn't exist yet
-    if [ -d "/var/www/$DOMAIN" ]; then
-        TOTAL_DISK_MB=$(df -m "/var/www/$DOMAIN" 2>/dev/null | awk 'NR==2 {print $2}')
-    else
-        TOTAL_DISK_MB=$(df -m / 2>/dev/null | awk 'NR==2 {print $2}')
-    fi
-
-    # Validate we got a number before doing arithmetic
-    # Use positive check to avoid issues with ! and set -e
-    if [[ "$TOTAL_DISK_MB" =~ ^[0-9]+$ ]] && [ "$TOTAL_DISK_MB" -gt 0 ]; then
-        TOTAL_DISK_GB=$((TOTAL_DISK_MB / 1024))
-    else
-        echo -e "${YELLOW}Could not detect disk size. Using KVS default (30 GB).${NC}"
-        return
-    fi
-
-    # Formula: min_free = MAX(2048, MIN(32768, total_disk_mb × 5%))
-    # Using binary units: 2 GB = 2048 MB, 32 GB = 32768 MB
-    CALCULATED=$((TOTAL_DISK_MB * 5 / 100))
-    MIN_FLOOR=2048    # 2 GB minimum
-    MAX_CEIL=32768    # 32 GB maximum
-
-    # Apply floor
-    if [ "$CALCULATED" -lt "$MIN_FLOOR" ]; then
-        MIN_FREE_SPACE=$MIN_FLOOR
-    # Apply ceiling
-    elif [ "$CALCULATED" -gt "$MAX_CEIL" ]; then
-        MIN_FREE_SPACE=$MAX_CEIL
-    else
-        MIN_FREE_SPACE=$CALCULATED
-    fi
-
-    MIN_FREE_SPACE_GB=$((MIN_FREE_SPACE / 1024))
-    PERCENT_OF_DISK=$((MIN_FREE_SPACE * 100 / TOTAL_DISK_MB))
-
-    # Warning for small disks (< 20 GB)
-    if [ "$TOTAL_DISK_GB" -lt 20 ]; then
-        echo ""
-        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
-        echo -e "${YELLOW}⚠️  WARNING: Limited disk space detected (${TOTAL_DISK_GB} GB)${NC}"
-        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
-        echo -e "${YELLOW}This configuration is suitable for development/testing only.${NC}"
-        echo -e "${YELLOW}For production use, we recommend increasing your disk space${NC}"
-        echo -e "${YELLOW}as KVS requires storage for:${NC}"
-        echo -e "${YELLOW}  • Video thumbnails and screenshots${NC}"
-        echo -e "${YELLOW}  • Temporary video processing files${NC}"
-        echo -e "${YELLOW}  • Database and log files${NC}"
-        echo -e "${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
-        echo ""
-    fi
-
-    # Find the KVS options table and update the setting
-    # KVS uses different table prefixes, so we detect it dynamically
-    # Use || true to prevent set -e from crashing if DB query fails
-    OPTIONS_TABLE=$(run_root_mariadb -u root "$DOMAIN" -N -e \
-        "SHOW TABLES LIKE '%options%';" 2>/dev/null | grep -E 'options$' | head -1) || OPTIONS_TABLE=""
-
-    if [ -n "$OPTIONS_TABLE" ]; then
-        # Update the disk space limit setting (|| true to prevent set -e crash)
-        # KVS uses 'variable' column, not 'name'
-        run_root_mariadb -u root "$DOMAIN" -e \
-            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE variable='MAIN_SERVER_MIN_FREE_SPACE_MB';" 2>/dev/null || true
-
-        # Also update storage server group limit
-        run_root_mariadb -u root "$DOMAIN" -e \
-            "UPDATE $OPTIONS_TABLE SET value='$MIN_FREE_SPACE' WHERE variable='SERVER_GROUP_MIN_FREE_SPACE_MB';" 2>/dev/null || true
-
-        echo -e "${GREEN}✓ KVS disk space limit configured${NC}"
-    else
-        echo -e "${YELLOW}Could not find KVS options table. You can configure this manually in:${NC}"
-        echo -e "${YELLOW}  Admin Panel → Settings → System → Minimum free disc space${NC}"
-    fi
-
-    # Display information message
-    echo ""
-    echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│             KVS Disk Space Configuration                         │${NC}"
-    echo -e "${CYAN}├──────────────────────────────────────────────────────────────────┤${NC}"
-    echo -e "${CYAN}│${NC} KVS default alert threshold: ${RED}30000 MB${NC} (30 GB)                    ${CYAN}│${NC}"
-    echo -e "${CYAN}│${NC} Adjusted to: ${GREEN}${MIN_FREE_SPACE} MB${NC} (~${MIN_FREE_SPACE_GB} GB) based on your server         ${CYAN}│${NC}"
-    echo -e "${CYAN}│${NC}                                                                  ${CYAN}│${NC}"
-    echo -e "${CYAN}│${NC} Your disk: ${GREEN}${TOTAL_DISK_MB} MB${NC} (~${TOTAL_DISK_GB} GB)                                 ${CYAN}│${NC}"
-    echo -e "${CYAN}│${NC} Reserved:  ${GREEN}${PERCENT_OF_DISK}%${NC} of total disk                                  ${CYAN}│${NC}"
-    echo -e "${CYAN}│${NC}                                                                  ${CYAN}│${NC}"
-    echo -e "${CYAN}│${NC} Formula: MAX(2048, MIN(32768, total_disk × 5%))                  ${CYAN}│${NC}"
-    echo -e "${CYAN}├──────────────────────────────────────────────────────────────────┤${NC}"
-    echo -e "${CYAN}│${NC} ${YELLOW}ℹ${NC}  KVS needs disk space for thumbnails, screenshots, and        ${CYAN}│${NC}"
-    echo -e "${CYAN}│${NC}    temporary files. Upgrade disk if hosting many videos.        ${CYAN}│${NC}"
-    echo -e "${CYAN}└──────────────────────────────────────────────────────────────────┘${NC}"
-}
 
 # Gum only improves the interactive output. Network or archive extraction
 # failures must not prevent the plain-text fallback from running.
@@ -1882,25 +2204,6 @@ chmod 600 .env
 source .env
 
 # Domain validation
-validate_domain() {
-    local domain="$1"
-    local label
-    local -a labels
-
-    # The domain is also used directly as the MariaDB database identifier.
-    if [ -z "$domain" ] || [ "${#domain}" -gt 64 ]; then
-        return 1
-    fi
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
-        return 1
-    fi
-
-    IFS='.' read -r -a labels <<< "$domain"
-    for label in "${labels[@]}"; do
-        [ "${#label}" -le 63 ] || return 1
-    done
-    return 0
-}
 
 validate_site_prefix() {
     local prefix="$1"
@@ -1918,54 +2221,7 @@ validate_email() {
     return 0
 }
 
-include_www_for_domain() {
-    local dot_count
 
-    [ "${USE_WWW:-false}" = "true" ] && return 0
-    dot_count=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
-    [ "$dot_count" -eq 1 ]
-}
-
-set_env_value() {
-    local key="$1"
-    local value="$2"
-    local env_owner
-    local temporary
-    local temporary_owner
-    local line
-    local matches=0
-
-    [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
-    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
-    if ! env_owner=$(stat -c '%u:%g' .env) ||
-        ! temporary=$(mktemp ./.env.tmp.XXXXXX); then
-        return 1
-    fi
-    if ! sed "/^${key}=/d" .env > "$temporary" ||
-        ! printf '%s=%s\n' "$key" "$value" >> "$temporary" ||
-        ! chmod 600 "$temporary"; then
-        rm -f -- "$temporary"
-        return 1
-    fi
-    if ! temporary_owner=$(stat -c '%u:%g' "$temporary"); then
-        rm -f -- "$temporary"
-        return 1
-    fi
-    if [ "$temporary_owner" != "$env_owner" ] &&
-        ! chown "$env_owner" "$temporary"; then
-        rm -f -- "$temporary"
-        return 1
-    fi
-    while IFS= read -r line || [ -n "$line" ]; do
-        if [ "$line" = "${key}=${value}" ]; then
-            matches=$((matches + 1))
-        fi
-    done < "$temporary"
-    if [ "$matches" -ne 1 ] || ! mv -f -- "$temporary" .env; then
-        rm -f -- "$temporary"
-        return 1
-    fi
-}
 
 remove_env_value() {
     local key="$1"
@@ -2017,35 +2273,6 @@ version_at_least() {
     [ "$(printf '%s\n' "$minimum" "$current" | sort -V | head -n 1)" = "$minimum" ]
 }
 
-parse_publish_endpoint() {
-    local endpoint="$1"
-    local host=""
-    local port=""
-    local octet
-    local -a octets
-
-    if [[ "$endpoint" =~ ^([0-9]+)$ ]]; then
-        port="${BASH_REMATCH[1]}"
-    elif [[ "$endpoint" =~ ^\[([0-9A-Fa-f:.%]+)\]:([0-9]+)$ ]]; then
-        host="${BASH_REMATCH[1]}"
-        port="${BASH_REMATCH[2]}"
-    elif [[ "$endpoint" =~ ^(([0-9]{1,3}\.){3}[0-9]{1,3}):([0-9]+)$ ]]; then
-        host="${BASH_REMATCH[1]}"
-        port="${BASH_REMATCH[3]}"
-        IFS='.' read -r -a octets <<< "$host"
-        for octet in "${octets[@]}"; do
-            [ "$((10#$octet))" -le 255 ] || return 1
-        done
-    else
-        return 1
-    fi
-
-    [ "${#port}" -le 5 ] || return 1
-    [ "$((10#$port))" -ge 1 ] || return 1
-    [ "$((10#$port))" -le 65535 ] || return 1
-    PUBLISH_HOST="$host"
-    PUBLISH_PORT=$((10#$port))
-}
 
 publish_endpoint_is_listening() {
     local endpoint="$1"
@@ -2106,27 +2333,6 @@ caddy_publishes_required_multi_site_ports() {
         container_publishes_host_port kvs-caddy 443 udp 443
 }
 
-resolve_public_port_configuration() {
-    if [ "$MODE" = "multi" ]; then
-        PUBLIC_HTTP_ENDPOINT=80
-        PUBLIC_HTTPS_ENDPOINT=443
-    else
-        PUBLIC_HTTP_ENDPOINT=${HTTP_PORT:-80}
-        PUBLIC_HTTPS_ENDPOINT=${HTTPS_PORT:-443}
-    fi
-
-    if ! parse_publish_endpoint "$PUBLIC_HTTP_ENDPOINT"; then
-        echo -e "${RED}ERROR: Invalid HTTP_PORT endpoint: ${PUBLIC_HTTP_ENDPOINT}${NC}"
-        return 1
-    fi
-    PUBLIC_HTTP_PORT=$PUBLISH_PORT
-
-    if ! parse_publish_endpoint "$PUBLIC_HTTPS_ENDPOINT"; then
-        echo -e "${RED}ERROR: Invalid HTTPS_PORT endpoint: ${PUBLIC_HTTPS_ENDPOINT}${NC}"
-        return 1
-    fi
-    PUBLIC_HTTPS_PORT=$PUBLISH_PORT
-}
 
 public_port_conflicts_exist() {
     PUBLIC_PORT_CONFLICTS=()
@@ -3898,10 +4104,6 @@ import_verify_database() {
         echo "Then run the import again with VOLUME_CHOICE=1 so the partial volume is replaced."
         exit 1
     fi
-    if ! run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';"; then
-        echo -e "${RED}ERROR: could not remove the import completion marker${NC}"
-        exit 1
-    fi
     echo -e "  ${GREEN}✓${NC} Database imported ($IMPORT_DUMP_TABLES tables in the dump)"
 }
 
@@ -3914,13 +4116,16 @@ import_place_site_files
 # The temporary socket-only server loads the dump before TCP is ready.
 # Report real activity while keeping the completion-marker verification.
 if [ "$IMPORT_MODE" = true ]; then
-    MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}
+    MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-0}
 else
     MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-180}
 fi
 database_wait_ready "$MARIADB_WAIT_SECONDS" || exit 1
 
 import_verify_database
+else
+    setup_resume_import
+fi
 
 # Older installations may still contain the archive's default admin account.
 # Rotate it during this run without changing an already-hardened credential.
@@ -3998,10 +4203,14 @@ if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
     verify_existing_database_domain || exit $?
 fi
 
+if [ "$RESUME_IMPORT" = true ]; then
+    setup_resume_require_init_image || exit 1
+fi
+
 # Step 3: Initialize phpMyAdmin and KVS
 progress_bar "Initializing phpMyAdmin"
 run_step "Initializing phpMyAdmin" \
-    docker compose --profile setup run --rm --no-deps phpmyadmin-init
+    docker compose --profile setup run --rm --no-deps "${SETUP_RUN_FLAGS[@]}" phpmyadmin-init
 
 if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
     echo -e "${YELLOW}Note: Keeping existing database - KVS settings will be updated but data preserved${NC}"
@@ -4010,43 +4219,53 @@ fi
 # Record the import in .env, drop the staged dump and write the row counts
 # of every table so they can be compared with the old server.
 import_finish() {
-    local report table_list table_name query
+    local report table_list table_name query rows completed_at
 
     [ "$IMPORT_MODE" = true ] || return 0
     report="$LOG_DIR/import-rows.txt"
     if ! table_list=$(run_root_mariadb -u root -N -e \
-        "SELECT table_name FROM information_schema.tables WHERE table_schema='$DOMAIN' ORDER BY table_name;" | tr -d '\r'); then
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='$DOMAIN' ORDER BY table_name;"); then
         echo -e "${RED}ERROR: could not list the imported tables${NC}"
         exit 1
     fi
+    table_list=${table_list//$'\r'/}
     query=""
     while IFS= read -r table_name; do
         [ -n "$table_name" ] || continue
         query="${query:+$query UNION ALL }SELECT '${table_name}', COUNT(*) FROM \`${table_name}\`"
     done <<< "$table_list"
+    if ! rows=$(run_root_mariadb -u root -N "$DOMAIN" -e "${query};"); then
+        echo -e "${RED}ERROR: could not count the imported rows; the completion marker and staged dump are preserved.${NC}"
+        exit 1
+    fi
     {
         echo "# Rows per table after the import of $IMPORT_SITE_DIR with $IMPORT_DB_DUMP, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "# Run the same SELECT COUNT(*) per table on the old server to compare."
-        run_root_mariadb -u root -N "$DOMAIN" -e "${query};" | tr -d '\r'
+        printf '%s\n' "$rows" | tr -d '\r'
     } > "$report" || {
         echo -e "${RED}ERROR: could not count the imported rows${NC}"
         exit 1
     }
-    set_env_value KVS_IMPORT_COMPLETED "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 1
+    completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    set_env_value KVS_IMPORT_COMPLETED "$completed_at" || exit 1
+    if [ "$(grep -Fxc "KVS_IMPORT_COMPLETED=$completed_at" .env)" -ne 1 ]; then
+        echo "ERROR: the import completion receipt was not persisted; the marker and staged dump are preserved." >&2
+        exit 1
+    fi
+    run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';" || exit 1
     [ -n "$IMPORT_STAGED_DUMP" ] && rm -f "$IMPORT_STAGED_DUMP"
     [ -n "$IMPORT_NATIVE_STAGE" ] && rm -rf -- "$IMPORT_NATIVE_STAGE"
     # The raw dump served its purpose; the old server keeps the original.
     # The source marker stays: a later pass from the same source is how the
     # changes made on the old server in the meantime are picked up.
     [ -n "$IMPORT_RAW_DUMP" ] && rm -f "$IMPORT_RAW_DUMP"
-    rm -f "$IMPORT_STAGING/kvs-export.manifest"
+    [ -z "$IMPORT_STAGING" ] || rm -f "$IMPORT_STAGING/kvs-export.manifest"
     echo -e "  ${GREEN}✓${NC} Import complete: $(grep -c -v '^#' "$report") tables, row counts in $report"
 }
 
 progress_bar "Initializing KVS"
 run_step "Initializing KVS" \
-    docker compose --profile setup run --rm --no-deps kvs-init
-import_finish
+    docker compose --profile setup run --rm --no-deps "${SETUP_RUN_FLAGS[@]}" kvs-init
 if [ "$KVS_ADMIN_PASSWORD_GENERATED" = true ]; then
     echo -e "  ${CYAN}Admin login:${NC} admin"
     echo -e "  ${CYAN}One-time admin password:${NC} $KVS_ADMIN_PASSWORD"
@@ -4062,13 +4281,23 @@ configure_disk_space_limit
 
 # Step 5: Start nginx and get certificate
 progress_bar "Starting Nginx"
-run_step "Starting Nginx" docker compose up -d --force-recreate nginx
+if [ "$RESUME_IMPORT" = true ]; then
+    run_step "Starting PHP-FPM" docker compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm
+    run_step "Starting Nginx" docker compose up -d --no-deps --no-recreate --no-build --pull missing nginx
+else
+    run_step "Starting Nginx" docker compose up -d --force-recreate nginx
+fi
 
 if [ "$MODE" = "multi" ]; then
     progress_bar "Starting Caddy"
-    run_step "Starting Caddy reverse proxy" \
-        env ACME_EMAIL="${EMAIL:-admin@example.com}" \
-        ./multi-site/site-manager.sh caddy-start
+    if [ "$RESUME_IMPORT" = true ]; then
+        (cd multi-site && env ACME_EMAIL="${EMAIL:-admin@example.com}" \
+            docker compose -p multi-site -f docker-compose.caddy.yml up -d --no-deps --no-recreate --no-build --pull missing caddy)
+    else
+        run_step "Starting Caddy reverse proxy" \
+            env ACME_EMAIL="${EMAIL:-admin@example.com}" \
+            ./multi-site/site-manager.sh caddy-start
+    fi
 fi
 
 # SSL Certificate based on SSL_PROVIDER
@@ -4188,7 +4417,11 @@ configure_direct_acme_certificate() {
     local force_issuance=false
     local -a acme_args
 
-    run_step "Starting ACME" docker compose up -d --force-recreate acme || return $?
+    if [ "$RESUME_IMPORT" = true ]; then
+        run_step "Starting ACME" docker compose up -d --no-deps --no-recreate --no-build --pull missing acme || return $?
+    else
+        run_step "Starting ACME" docker compose up -d --force-recreate acme || return $?
+    fi
     sleep 3
     echo "Issuing SSL certificate for $DOMAIN..."
 
@@ -4258,7 +4491,7 @@ configure_direct_acme_certificate() {
     echo -e "${GREEN}SSL certificate installed and validated${NC}"
 }
 
-if [ "${DEV_SSL_INTELLIGENT:-false}" = "true" ]; then
+if [ "$RESUME_IMPORT" != true ] && [ "${DEV_SSL_INTELLIGENT:-false}" = "true" ]; then
     echo ""
     echo "🔍 Dev mode: Checking for existing SSL certificate..."
 
@@ -4287,8 +4520,12 @@ fi
 progress_bar "Starting all services"
 # Don't use gum spin for docker compose up - it can timeout on slow operations
 echo -n "  Starting all services..."
-log_command docker compose pull --quiet || true
-if log_command docker compose up -d --force-recreate; then
+if [ "$RESUME_IMPORT" = true ]; then
+    setup_resume_runtime_services || exit 1
+else
+    log_command docker compose pull --quiet || true
+fi
+if [ "$RESUME_IMPORT" = true ] || log_command docker compose up -d --force-recreate; then
     echo -e " ${GREEN}✓${NC}"
 else
     echo -e " ${RED}✗${NC}"
@@ -4299,6 +4536,11 @@ fi
 
 progress_bar "Reloading Nginx"
 run_step "Reloading Nginx" docker compose exec nginx nginx -s reload
+
+if [ "$RESUME_IMPORT" = true ]; then
+    setup_resume_assert_database
+fi
+import_finish
 
 # Done
 progress_success "KVS Docker Setup Complete!"

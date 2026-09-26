@@ -170,14 +170,24 @@ After installation or import, run these commands from the installation's `docker
 
 Enable builds/starts the search service, waits for the videos, albums and searches indexes, then configures the KVS plugin and verifies its saved configuration through PHP. It does not rerun the database import or the full installation. Disable restores KVS built-in search and stops Manticore while keeping its index volume. Both choices persist in `.env`; later setup runs keep enabled search unless `MANTICORE_CHOICE=2` explicitly disables it. Initial indexing reports activity while waiting (up to `MANTICORE_WAIT_SECONDS`, default 3600 seconds). A failed start or index build leaves the KVS search configuration unchanged.
 
-During MariaDB initialization, setup reports elapsed time, tables created, the actual InnoDB buffer pool size and the current SQL operation every ten seconds. Where the reader is available, it also reports the dump bytes read, including compressed input. This percentage measures input consumed, not SQL committed: 100% read can still mean MariaDB is executing or committing statements. TCP readiness and the dump's unique final marker are checked before declaring the import complete. Inspect an ongoing import without restarting it:
+During MariaDB initialization, setup reports its state immediately and keeps a five-second status heartbeat visible while readiness or activity probes are pending. Activity samples include elapsed time, tables created, the actual InnoDB buffer pool size and the current SQL operation. An already-ready server proceeds directly to completion verification without another activity scan. Where the reader is available, it also reports the dump bytes read, including compressed input. This percentage measures input consumed, not SQL committed: 100% read can still mean MariaDB is executing or committing statements. TCP readiness and the dump's unique final marker are checked before declaring the import complete. Inspect an ongoing import without restarting it:
 
 ```bash
 ./reconfigure.sh --import-status
 ./reconfigure.sh --import-status --watch
 ```
 
-The wait defaults to one hour for imports (`MARIADB_WAIT_SECONDS=7200` allows two hours). A timeout leaves the database container running. Do not restart it or rerun setup over an active replay just to inspect progress.
+Imports wait without a deadline by default (`MARIADB_WAIT_SECONDS=0`). Set a positive value to limit the wait, for example `MARIADB_WAIT_SECONDS=7200` for two hours. Connection attempts remain bounded, and stopped or restarted containers are reported. A timeout stops the installer, not the database container. Do not restart MariaDB or repeat the original installation command over an active replay.
+
+After an import wait times out, update the installer files and resume from the existing `docker` directory:
+
+```bash
+./setup.sh --resume-import
+```
+
+Resume uses the saved configuration and the existing container, volume, site files and staged dump. It waits for the ongoing replay, checks the dump's unique final marker, then completes site initialization and service startup without recreating MariaDB or transferring the source again. It preserves the staged dump and marker if finalization fails, so the same resume command can be retried. It cannot be combined with `--dev`.
+
+For older compressed SQL dumps, verifying the expected marker requires reading the compressed dump once after MariaDB is ready; this does not replay SQL. This verification reports its elapsed time immediately and every three seconds until the check finishes. A missing or mismatched marker stops recovery without replacing the database. Older installers could lose the final marker if a dump left autocommit disabled, so a missing marker requires investigation rather than an automatic fresh import.
 
 On first setup, `MARIADB_BUFFER_POOL_SIZE` is selected automatically: 25% of available host memory, reduced by cgroup and MariaDB Compose memory limits, rounded down to 128 MiB steps, with a 128 MiB minimum and a 4 GiB maximum. For example, 1 GiB available gives 256 MiB; 24 GiB available gives 4 GiB. This reserves memory for PHP, search and other services; it is not a guarantee against memory pressure from other workloads. The value persists in `.env`. Set `MARIADB_BUFFER_POOL_SIZE=2G` when running setup to override it. Explicit/saved sizes are preserved, and a size reaching the container's memory limit is rejected before startup. The new value applies when setup starts MariaDB, not to an import already running. New exports also use `--no-autocommit` to group INSERT statements per table during replay; newer dump clients may already do this by default. Existing dumps are not rewritten to change their transactions.
 
