@@ -847,6 +847,11 @@ KVS_ROOT_DIRS=" _INSTALL admin blocks contents langs player static template tmp 
 # Directories KVS fills by itself, temporary files and compiled templates:
 # their content never travels, the directories do, empty.
 KVS_TRANSIENT_DIRS=" tmp admin/data/tmp admin/smarty/cache admin/smarty/template-c admin/smarty/template-c-site "
+# The query logs of the KVS debug switch ($config['sql_debug'] in setup.php,
+# a line KVS support adds by hand): every query of every request, gigabytes
+# on a busy site, of no use to the new server, which starts with the switch
+# off. They stay behind unless included.
+KVS_DEBUG_LOGS=" admin/logs/debug_sql.txt admin/logs/debug_sql_get.txt admin/logs/debug_sql_post.txt "
 # Directories worth a line of their own in the report when present.
 KVS_REPORTED_DIRS="admin/logs admin/data/backup"
 # Filesystem types that mean the data lives on another machine: a storage
@@ -899,13 +904,28 @@ kvs_fs_type() {
     printf '%s' "$type"
 }
 
-# kvs_entry_kind <relative path>: transient, network:<fs>, hidden, extra
-# or kvs.
+# kvs_file_mb <path>: the size of one file in MB, empty when unknown.
+kvs_file_mb() {
+    local bytes
+
+    bytes=$(stat -L -c %s -- "$1" 2> /dev/null < /dev/null) ||
+        bytes=$(stat -L -f %z -- "$1" 2> /dev/null < /dev/null) || bytes=""
+    if kvs_is_number "$bytes"; then
+        printf '%s' "$((bytes / 1048576))"
+    fi
+}
+
+# kvs_entry_kind <relative path>: debuglog, transient, network:<fs>,
+# hidden, extra or kvs.
 kvs_entry_kind() {
     local rel="$1"
     local name="${rel##*/}"
     local fs
 
+    if kvs_in_word_list "$rel" "$KVS_DEBUG_LOGS"; then
+        printf 'debuglog'
+        return 0
+    fi
     if kvs_in_word_list "$rel" "$KVS_TRANSIENT_DIRS"; then
         printf 'transient'
         return 0
@@ -934,8 +954,9 @@ kvs_entry_kind() {
     fi
 }
 
-# The directories the report lists: the ones at the root, the ones under
-# contents/, and the few under admin/ that grow on their own.
+# The entries the report lists: the directories at the root, the ones
+# under contents/, the few under admin/ that grow on their own, and the
+# query logs of the debug switch when present.
 kvs_list_entry_candidates() {
     local path
     local rel
@@ -947,6 +968,11 @@ kvs_list_entry_candidates() {
         fi
         for rel in $KVS_REPORTED_DIRS $KVS_TRANSIENT_DIRS; do
             if [ -d "$SITE_DIR/$rel" ]; then
+                printf '%s/%s\n' "$SITE_DIR" "$rel"
+            fi
+        done
+        for rel in $KVS_DEBUG_LOGS; do
+            if [ -f "$SITE_DIR/$rel" ]; then
                 printf '%s/%s\n' "$SITE_DIR" "$rel"
             fi
         done
@@ -1010,7 +1036,7 @@ kvs_collect_entries() {
         kind=$(kvs_entry_kind "$rel")
         state="copied"
         case $kind in
-            transient | hidden | network:*) state="excluded" ;;
+            transient | hidden | network:* | debuglog) state="excluded" ;;
         esac
         if kvs_path_listed "$rel" "${OPT_EXCLUDES[@]}"; then
             state="excluded"
@@ -1021,6 +1047,11 @@ kvs_collect_entries() {
         mb=""
         if [ "$MEASURE_PER_ENTRY" = "yes" ]; then
             mb=$((${MEASURE_ENTRY_KB[$rel]:-0} / 1024))
+        fi
+        if [ "$kind" = "debuglog" ] && [ -z "${MEASURE_ENTRY_KB[$rel]+set}" ]; then
+            # Beyond the walk (skipped or cut short): one file, sized on
+            # its own.
+            mb=$(kvs_file_mb "$SITE_DIR/$rel")
         fi
         ENTRY_PATHS+=("$rel")
         ENTRY_MB+=("$mb")
@@ -1051,7 +1082,10 @@ kvs_collect_entries() {
             else
                 EXCLUDE_PATTERNS+=("/${ENTRY_PATHS[$i]}")
             fi
-            if kvs_is_number "${ENTRY_MB[$i]}"; then
+            # A file's size leaves the total only when the walk counted it
+            # (an exact walk); a bounded walk may not have reached it.
+            if kvs_is_number "${ENTRY_MB[$i]}" &&
+                { [ "${ENTRY_KIND[$i]}" != "debuglog" ] || [ "$SITE_SIZE_STATUS" = "exact" ]; }; then
                 excluded_mb=$((excluded_mb + ENTRY_MB[i]))
             fi
         fi
@@ -1114,6 +1148,7 @@ kvs_entry_line() {
     fi
     case ${ENTRY_KIND[$i]} in
         transient) note="temporary files or compiled templates, KVS rebuilds them" ;;
+        debuglog) note="query log of the KVS debug switch, the new server starts without it" ;;
         hidden) note="hidden, not part of KVS" ;;
         extra) note="not part of KVS" ;;
         network:*) note="on a network filesystem (${ENTRY_KIND[$i]#network:}), a storage server most likely" ;;

@@ -602,9 +602,9 @@ import_remote_size_text() {
 # import_remote_show_entries <report>
 # The directories of the old site, largest first, with what stays behind
 # and why: temporary files and compiled templates KVS rebuilds, hidden
-# entries and network mounts (a storage server, most likely) unless
-# included, and whatever IMPORT_EXCLUDE names. A size is ? when the walk
-# measured nothing apart.
+# entries, network mounts (a storage server, most likely) and the query
+# logs of the KVS debug switch unless included, and whatever IMPORT_EXCLUDE
+# names. A size is ? when the walk measured nothing apart.
 import_remote_show_entries() {
     local report="$1"
     local path mb kind state note size lines
@@ -620,6 +620,7 @@ import_remote_show_entries() {
             hidden) note="hidden, not part of KVS" ;;
             extra) note="not part of KVS" ;;
             network:*) note="on a network filesystem (${kind#network:}), a storage server most likely" ;;
+            debuglog) note="query log of the KVS debug switch, the new server starts without it" ;;
             named) note="named by IMPORT_EXCLUDE" ;;
             *) note="" ;;
         esac
