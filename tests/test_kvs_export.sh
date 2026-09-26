@@ -18,6 +18,10 @@ STUB_LOG="$TMP_ROOT/stub.log"
 export STUB_LOG
 # Keep the staging directory of the archive inside the fixtures.
 export TMPDIR="$TMP_ROOT"
+# The nginx probe looks for a binary and reads /etc/nginx otherwise; the
+# tests point it at nothing unless they test it.
+export KVS_EXPORT_NGINX_BIN="$TMP_ROOT/no-nginx"
+export KVS_EXPORT_NGINX_ROOT="$TMP_ROOT/no-etc-nginx"
 
 # The password as PHP writes it in setup_db.php, and the string it stands
 # for: a quote and a backslash are the two characters PHP escapes there.
@@ -339,6 +343,81 @@ test_detect_reports_the_installation_as_key_value_lines() {
     grep -q "^Site size: 4 MB (4 entries, " "$err" || fail "the measured size must be reported with the time it took: $(cat "$err")"
     grep -q "The filesystem holding the site uses" "$err" || fail "the filesystem usage must be shown before the walk: $(cat "$err")"
     pass "detect reports the installation as key=value lines"
+}
+
+# nginx_config_lines <detect output> <file>: the web server configuration
+# the report carries, written back as text.
+nginx_config_lines() {
+    sed -n 's/^nginx_config_[0-9][0-9]*=//p' "$1" > "$2"
+}
+
+test_detect_reports_the_encoding_and_the_web_server_configuration() {
+    local site="$TMP_ROOT/nginx-site"
+    local out="$TMP_ROOT/nginx.out"
+    local err="$TMP_ROOT/nginx.err"
+    local bin="$TMP_ROOT/bin-nginx"
+    local root="$TMP_ROOT/etc-nginx"
+    local text="$TMP_ROOT/nginx.text"
+
+    make_site "$site"
+    # A plain functions_base.php: the site is not encoded.
+    printf '<?php\nfunction sql() {}\n' > "$site/admin/include/functions_base.php"
+    mkdir -p "$bin" "$root/conf.d" "$root/sites-available" "$root/sites-enabled"
+    # The stub nginx prints its configuration as nginx -T does, every file
+    # behind a header line, or fails like a binary whose test fails.
+    cat > "$bin/nginx" <<EOF
+#!/bin/bash
+[ "\${1:-}" = -T ] || exit 1
+[ "\${STUB_NGINX_FAIL:-no}" = yes ] && exit 1
+printf '# configuration file /etc/nginx/nginx.conf:\\nhttp {\\n    include /etc/nginx/conf.d/*.conf;\\n}\\n'
+printf '# configuration file /etc/nginx/conf.d/site.conf:\\nserver {\\n    root $site;\\n    rewrite ^/videos/\$ /videos.php last;\\n}\\n'
+EOF
+    chmod +x "$bin/nginx"
+
+    KVS_EXPORT_NGINX_BIN="$bin/nginx" run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+        fail "detect must succeed with an nginx: $(cat "$err")"
+    assert_key "$out" ioncube no
+    assert_key "$out" nginx_config_source "nginx -T"
+    assert_key "$out" nginx_config_lines 9
+    assert_key "$out" nginx_site_files /etc/nginx/conf.d/site.conf
+    nginx_config_lines "$out" "$text"
+    [ "$(wc -l < "$text")" -eq 9 ] || fail "the configuration travels line by line, got $(wc -l < "$text") lines"
+    grep -q "^    root $site;$" "$text" || fail "the vhost must be in the configuration carried: $(cat "$text")"
+    grep -q '^    rewrite ^/videos/$ /videos.php last;$' "$text" || fail "the rewrite rules travel untouched"
+    # The configuration comes last so the head of the report stays readable.
+    [ "$(grep -n '^nginx_config_1=' "$out" | cut -d: -f1)" -gt "$(grep -n '^entry_1=' "$out" | cut -d: -f1)" ] ||
+        fail "the configuration lines must follow the entries"
+
+    # An encoded site, and an nginx that cannot print its configuration:
+    # the files under the configuration directory are read instead, the
+    # ones in conf.d and the links in sites-enabled among them.
+    printf "<?php //004fb\nif(!extension_loaded('ionCube Loader')){die();}\n" > "$site/admin/include/functions_base.php"
+    printf 'user www-data;\ninclude /etc/nginx/sites-enabled/*;\n' > "$root/nginx.conf"
+    printf 'server {\n    root %s;\n}\n' "$site" > "$root/sites-available/site"
+    ln -s "$root/sites-available/site" "$root/sites-enabled/site"
+    printf 'gzip on;\n' > "$root/conf.d/gzip.conf"
+    STUB_NGINX_FAIL=yes KVS_EXPORT_NGINX_BIN="$bin/nginx" KVS_EXPORT_NGINX_ROOT="$root" \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+        fail "detect must succeed when nginx cannot print its configuration: $(cat "$err")"
+    assert_key "$out" ioncube yes
+    assert_key "$out" nginx_config_source files
+    assert_key "$out" nginx_site_files "$root/sites-enabled/site"
+    nginx_config_lines "$out" "$text"
+    grep -q "^# configuration file $root/conf.d/gzip.conf:$" "$text" || fail "the conf.d files must travel"
+    grep -q "^# configuration file $root/nginx.conf:$" "$text" || fail "nginx.conf must travel"
+    grep -q "^# configuration file $root/sites-enabled/site:$" "$text" || fail "the enabled sites must travel through their links"
+    grep -q "^# configuration file $root/sites-available/site:$" "$text" && fail "an available site that is not enabled stays behind"
+    [ "$(grep -c "^# configuration file " "$text")" -eq 3 ] || fail "three files, got $(grep -c '^# configuration file ' "$text")"
+
+    # No nginx at all: reported as none, detect goes on.
+    KVS_EXPORT_NGINX_BIN="$TMP_ROOT/no-nginx" KVS_EXPORT_NGINX_ROOT="$TMP_ROOT/no-such-dir" \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+        fail "detect must succeed without nginx"
+    assert_key "$out" nginx_config_source none
+    assert_key "$out" nginx_config_lines 0
+    assert_key "$out" nginx_site_files ""
+    grep -q '^nginx_config_1=' "$out" && fail "no configuration lines without a configuration"
+    pass "detect reports the encoding and the web server configuration"
 }
 
 test_the_size_walk_stops_at_its_time_budget() {
@@ -981,6 +1060,7 @@ make_min_bin
 make_extra_bin
 
 test_detect_reports_the_installation_as_key_value_lines
+test_detect_reports_the_encoding_and_the_web_server_configuration
 test_the_size_walk_stops_at_its_time_budget
 test_the_size_walk_can_be_skipped
 test_detect_reports_the_entries_and_what_stays_behind

@@ -13,7 +13,8 @@
 #
 # The Docker setup of kvs-install also pipes this file to the old server over
 # SSH, as "ssh host bash -s -- detect [dir]" to show what it found before it
-# transfers anything, then as "dump [dir]" to stream the database. bash then
+# transfers anything (the site, its database, its encoding and the nginx
+# configuration it runs under), then as "dump [dir]" to stream the database. bash then
 # reads this script itself from stdin, which is why every command here that
 # could read stdin is given < /dev/null, why the file is only function
 # definitions followed by a single main line, and why detect and dump keep
@@ -90,6 +91,13 @@ SERVER_LINES=()
 COMPRESSOR=""
 HAS_RSYNC="no"
 HOST_NAME=""
+# The encoding of the site and the web server configuration it runs under:
+# what the new server needs when the KVS archive is not at hand.
+SITE_IONCUBE="unknown"
+NGINX_CONFIG_SOURCE="none"
+NGINX_CONFIG_LINES=0
+NGINX_CONFIG=""
+NGINX_SITE_FILES=""
 SITE_CANDIDATES=()
 DB_CONN_ARGS=()
 DUMP_ARGS=()
@@ -1396,7 +1404,24 @@ kvs_print_detect() {
     printf 'compressor=%s\n' "$COMPRESSOR"
     printf 'rsync=%s\n' "$HAS_RSYNC"
     printf 'hostname=%s\n' "$HOST_NAME"
+    printf 'ioncube=%s\n' "$SITE_IONCUBE"
+    printf 'nginx_config_source=%s\n' "$NGINX_CONFIG_SOURCE"
+    printf 'nginx_config_lines=%s\n' "$NGINX_CONFIG_LINES"
+    printf 'nginx_site_files=%s\n' "$NGINX_SITE_FILES"
     kvs_print_entry_lines
+    kvs_print_nginx_config_lines
+}
+
+# The web server configuration, one nginx_config_N=<line> per line at the
+# end of the report, so the head of it stays readable.
+kvs_print_nginx_config_lines() {
+    local line i=0
+
+    [ -n "$NGINX_CONFIG" ] || return 0
+    while IFS= read -r line; do
+        i=$((i + 1))
+        printf 'nginx_config_%s=%s\n' "$i" "$line"
+    done <<< "$NGINX_CONFIG"
 }
 
 # The entries, the patterns of what stays behind and the storage servers,
@@ -1529,6 +1554,88 @@ kvs_report_archive() {
 # Commands
 #################################################################
 
+# The encoding of the site: ionCube leaves its signatures at the top of
+# admin/include/functions_base.php, which every request loads first (the
+# "<?php //0xxxxx" header, the loader check). The new server builds its
+# PHP image with or without the loader from this. Only the head of the
+# file is read: an encoded one is large.
+kvs_probe_encoding() {
+    local file="$SITE_DIR/admin/include/functions_base.php"
+    local head="" first=""
+
+    SITE_IONCUBE="unknown"
+    [ -r "$file" ] || return 0
+    IFS= read -r -N 4096 head < "$file" || true
+    first=${head%%$'\n'*}
+    if [[ "$first" =~ ^[[:space:]]*\<\?php[[:space:]]+//[0-9a-f]{5,6} ]] ||
+        [[ "$head" == *"extension_loaded('ionCube Loader')"* ]] ||
+        [[ "$head" == *_il_exec* ]]; then
+        SITE_IONCUBE="yes"
+    else
+        SITE_IONCUBE="no"
+    fi
+}
+
+# The web server configuration the site runs under, for the new server to
+# keep its custom rules and, when the site has no _INSTALL/nginx_config.txt,
+# to recover the KVS rewrite rules from it. nginx -T prints every file the
+# running configuration includes (nginx.conf, sites-enabled, conf.d,
+# snippets), each behind a "# configuration file <path>:" line; without a
+# usable nginx binary the files under the configuration directory are read
+# the same way. The report carries the configuration one line per key at
+# its end, and apart the files that name the site directory or the
+# project path: the vhost among them, whatever its place under /etc/nginx.
+kvs_probe_web_server_config() {
+    local nginx="" file="" line="" current="" root="${KVS_EXPORT_NGINX_ROOT:-/etc/nginx}"
+    local -a candidates=(nginx /usr/sbin/nginx /usr/local/sbin/nginx /usr/local/nginx/sbin/nginx)
+
+    NGINX_CONFIG_SOURCE="none"
+    NGINX_CONFIG_LINES=0
+    NGINX_CONFIG=""
+    NGINX_SITE_FILES=""
+    # KVS_EXPORT_NGINX_BIN names the binary to use instead of looking for
+    # one; KVS_EXPORT_NGINX_ROOT the configuration directory read when the
+    # binary cannot print the configuration. Both are for the tests.
+    if [ -n "${KVS_EXPORT_NGINX_BIN:-}" ]; then
+        candidates=("$KVS_EXPORT_NGINX_BIN")
+    fi
+    for nginx in "${candidates[@]}"; do
+        command -v "$nginx" > /dev/null 2>&1 || continue
+        if NGINX_CONFIG=$("$nginx" -T 2> /dev/null < /dev/null) && [ -n "$NGINX_CONFIG" ]; then
+            NGINX_CONFIG_SOURCE="nginx -T"
+            break
+        fi
+        NGINX_CONFIG=""
+    done
+    if [ -z "$NGINX_CONFIG" ] && [ -d "$root" ]; then
+        while IFS= read -r file; do
+            [ -r "$file" ] || continue
+            NGINX_CONFIG="${NGINX_CONFIG}# configuration file ${file}:"$'\n'"$(< "$file")"$'\n'
+        done < <(find -L "$root" -maxdepth 3 -type f \( -name '*.conf' -o -path '*/sites-enabled/*' \) 2> /dev/null | sort)
+        NGINX_CONFIG=${NGINX_CONFIG%$'\n'}
+        [ -z "$NGINX_CONFIG" ] || NGINX_CONFIG_SOURCE="files"
+    fi
+    [ -n "$NGINX_CONFIG" ] || return 0
+    NGINX_CONFIG_LINES=$(printf '%s\n' "$NGINX_CONFIG" | wc -l)
+    NGINX_CONFIG_LINES=${NGINX_CONFIG_LINES//[!0-9]/}
+    while IFS= read -r line; do
+        case "$line" in
+            "# configuration file "*)
+                current=${line#"# configuration file "}
+                current=${current%:}
+                continue
+                ;;
+        esac
+        [ -n "$current" ] || continue
+        if [[ "$line" == *"$SITE_DIR"* ]] || { [ -n "$PROJECT_PATH" ] && [[ "$line" == *"$PROJECT_PATH"* ]]; }; then
+            case ",$NGINX_SITE_FILES," in
+                *",$current,"*) ;;
+                *) NGINX_SITE_FILES="${NGINX_SITE_FILES:+$NGINX_SITE_FILES,}$current" ;;
+            esac
+        fi
+    done <<< "$NGINX_CONFIG"
+}
+
 kvs_collect() {
     local measure_site="${1:-yes}"
     local setup="$SITE_DIR/admin/include/setup.php"
@@ -1572,6 +1679,8 @@ kvs_collect() {
     kvs_probe_database
     kvs_probe_servers
     if [ "$measure_site" = "yes" ]; then
+        kvs_probe_encoding
+        kvs_probe_web_server_config
         kvs_measure_site
         kvs_collect_entries
     fi
