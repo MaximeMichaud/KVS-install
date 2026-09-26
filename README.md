@@ -93,6 +93,7 @@ MODE_CHOICE=1 \
 | `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry, 2=Continue anyway, 3=Exit |
 | `DISABLE_KVS_SUPPORT_ACCESS` | `true`/`false` | `false` | Turn off KVS support access (Kernel Team login with kvs_support); the admin dashboard re-enables it |
 | `KVS_PHP_VERSION` | `7.4`, `8.1`-`8.4` | detected | PHP release for an unencoded archive (IONCUBE_CHOICE=2 or IONCUBE=NO); an encoded archive keeps the release KVS documents |
+| `KVS_INSTALL_BRANCH` | branch | `main` | Branch of this repository installed into `/opt/kvs`, to try a change before it is merged (run the `kvs-install.sh` of that branch); works outside headless mode too |
 
 #### Standalone Headless (Legacy)
 

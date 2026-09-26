@@ -979,6 +979,36 @@ test_import_source_given_needs_no_archive() {
   ) || fail "an import source in the environment must be recognized (case $?)"
 }
 
+test_the_wrapper_installs_the_requested_branch() {
+  local temp_dir
+  local log
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  log="$temp_dir/git.log"
+  git() {
+    printf '%s\n' "$*" >>"$log"
+    [[ ${1:-} == clone ]] && mkdir -p "${@: -1}"
+    return 0
+  }
+
+  (
+    KVS_INSTALL_BRANCH=import-without-archive clone_kvs_install "$temp_dir/install" >/dev/null 2>&1 || exit 1
+    grep -q '^clone --branch import-without-archive https://github.com/MaximeMichaud/KVS-install.git ' "$log" || exit 2
+    [[ -d "$temp_dir/install" ]] || exit 3
+    : >"$log"
+    unset KVS_INSTALL_BRANCH
+    clone_kvs_install "$temp_dir/install" >/dev/null 2>&1 || exit 4
+    grep -q '^clone --branch main ' "$log" || exit 5
+    : >"$log"
+    KVS_INSTALL_BRANCH=import-without-archive update_kvs_install >/dev/null 2>&1 || exit 6
+    [[ "$(cat "$log")" == $'fetch origin import-without-archive\ncheckout import-without-archive\npull --ff-only origin import-without-archive' ]] || exit 7
+    : >"$log"
+    update_kvs_install >/dev/null 2>&1 || exit 8
+    [[ "$(cat "$log")" == "pull" ]] || exit 9
+    exit 0
+  ) || fail "the wrapper must install and update the requested branch (case $?)"
+}
+
 run_test "installation failures stop the pipeline" test_install_failure_stops_pipeline || failures=$((failures + 1))
 run_test "visual progress failures are non-fatal" test_visual_progress_failure_is_nonfatal || failures=$((failures + 1))
 run_test "headless PHP detection" test_headless_php_detection || failures=$((failures + 1))
@@ -1003,6 +1033,7 @@ run_test "phpMyAdmin staged update succeeds" test_phpmyadmin_success_swaps_stage
 run_test "NGINX cleanup is scoped" test_nginx_cleanup_uses_scoped_paths || failures=$((failures + 1))
 run_test "runtime input stays quiet without a terminal" test_runtime_input_stays_quiet_without_a_terminal || failures=$((failures + 1))
 run_test "an import source needs no archive" test_import_source_given_needs_no_archive || failures=$((failures + 1))
+run_test "the wrapper installs the requested branch" test_the_wrapper_installs_the_requested_branch || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2
