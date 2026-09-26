@@ -792,6 +792,55 @@ EOF
     pass "the rewrite recovery follows the includes of the server block"
 }
 
+test_the_transfer_is_counted_first_and_shown_against_the_count() {
+    local stats out status
+
+    stats=$'\nNumber of files: 3,012 (reg: 3,008, dir: 4)\nNumber of created files: 3,011 (reg: 3,008, dir: 3)\nNumber of deleted files: 0\nNumber of regular files transferred: 3,008\nTotal file size: 38,000,000 bytes\nTotal transferred file size: 38,000,000 bytes\nLiteral data: 0 bytes\n'
+    [ "$(import_rsync_stats_totals <<< "$stats")" = $'3008\t38000000\t3008\t38000000' ] ||
+        fail "the statistics of the dry run give the files and bytes to transfer and the site's: $(import_rsync_stats_totals <<< "$stats")"
+    [ "$(printf 'Number of files transferred: 12\nTotal transferred file size: 3400 bytes\n' | import_rsync_stats_totals)" = $'12\t3400\t0\t0' ] ||
+        fail "the wording of an older rsync is read too"
+    [ -z "$(import_rsync_stats_totals <<< "rsync: connection unexpectedly closed")" ] || fail "no statistics, no totals"
+    [ "$(import_bytes_text 38000000)" = "36 MB" ] && [ "$(import_bytes_text 4499689472)" = "4.1 GB" ] && [ "$(import_bytes_text 3400)" = "3 kB" ] ||
+        fail "sizes for the summary line: $(import_bytes_text 38000000), $(import_bytes_text 4499689472), $(import_bytes_text 3400)"
+    [ "$(import_count_text 305965)" = "305,965" ] && [ "$(import_count_text 12)" = "12" ] && [ "$(import_count_text 1000)" = "1,000" ] ||
+        fail "counts for the summary line: $(import_count_text 305965)"
+
+    # The progress records of rsync, carriage-return separated, with a
+    # message in between, shown as a log (no terminal): the first record
+    # against the totals with the scan counted, the message as it is, the
+    # end summed up.
+    out=$(printf '\r              0   0%%    0.00kB/s    0:00:00 (xfr#0, ir-chk=1000/3012)\r        4000000  10%%    4.03MB/s    0:00:00 (xfr#1, ir-chk=1007/3012)\rskipping non-regular file "x"\n       32042000  84%%    3.91MB/s    0:00:07 (xfr#2029, ir-chk=979/3012)\r       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' |
+        import_rsync_progress 38000000 3008 no)
+    grep -q '^  0 B of 36.2 MB (0%), 0 of 3,008 files, ? left, 0 B/s, 0 files/s, 2,012 of 3,012 entries checked, scan running, 0:00:00 elapsed$' <<< "$out" ||
+        fail "the first record is shown against the totals, the scan counted: $out"
+    grep -q '^skipping non-regular file "x"$' <<< "$out" || fail "what else rsync prints passes through: $out"
+    grep -q '^  Transferred 3,008 files, 36.2 MB in 0:00:0[0-9] (.* files/s)$' <<< "$out" || fail "the end is summed up: $out"
+    # Without totals the counts show alone, the scan still counted.
+    out=$(printf '       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' | import_rsync_progress 0 0 no)
+    grep -q '^  36.2 MB, 3,008 files, .* files/s, 3,012 of 3,012 entries checked, scan done, 0:00:0[0-9] elapsed$' <<< "$out" ||
+        fail "without totals the counts show alone: $out"
+    # Without a scan figure (a record inside a file) the rates and the
+    # time stand alone.
+    out=$(printf '       32768   0%%    0.00kB/s    0:00:00  \n' | import_rsync_progress 0 0 no)
+    grep -q '^  32 kB, 0 files, 0 B/s, 0 files/s, 0:00:0[0-9] elapsed$' <<< "$out" || fail "a record without a scan figure: $out"
+    # On a terminal two lines are rewritten in place (cursor up one line)
+    # and the end replaces them with its summary.
+    out=$(printf '       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' | import_rsync_progress 38000000 3008 yes | tr '\r\033' '|^')
+    [[ "$out" == "  36.2 MB of 36.2 MB (100%), 3,008 of 3,008 files, ? left^[K"$'\n'"  "*"entries checked, scan done, 0:00:0"?" elapsed^[K|^[1A  Transferred 3,008 files"*"^[K"$'\n'"^[K" ]] ||
+        fail "on a terminal the two lines are rewritten in place: $out"
+    # The count of the transfer has a time budget: past it, no totals and
+    # status 124 from timeout (which runs rsync by name, so the stub is a
+    # program on the PATH).
+    mkdir -p "$TMP_ROOT/slow-bin"
+    printf '#!/bin/bash\nsleep 3\n' > "$TMP_ROOT/slow-bin/rsync"
+    chmod +x "$TMP_ROOT/slow-bin/rsync"
+    status=0
+    out=$(PATH="$TMP_ROOT/slow-bin:$PATH" IMPORT_SIZE_TIMEOUT=1 import_rsync_totals -a src/ dst/) || status=$?
+    [ "$status" -eq 124 ] && [ -z "$out" ] || fail "a count past its budget must give nothing and status 124, got $status: '$out'"
+    pass "the transfer is counted first and shown against the count"
+}
+
 test_remote_detect_dump_and_files_go_through_one_ssh() {
     local bin="$TMP_ROOT/ssh-bin" exporter="$TMP_ROOT/fake-export.sh" site destination
 
@@ -838,7 +887,10 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         import_remote_dump "$exporter" "$site" "$TMP_ROOT/remote.sql.gz" || exit 10
         [ "$(import_inspect_dump "$TMP_ROOT/remote.sql.gz" ktvs_)" = $'1\t\t0\tyes' ] || exit 11
 
-        import_remote_files "$site" "$destination" yes >/dev/null 2>&1 || exit 12
+        import_remote_files "$site" "$destination" yes > "$TMP_ROOT/transfer-out.txt" 2>&1 || exit 12
+        grep -Eq '^  To transfer:     [0-9,]+ files, [0-9.]+ [kMGT]B of the site'"'"'s [0-9,]+ files, [0-9.]+ [kMGT]B$' "$TMP_ROOT/transfer-out.txt" || exit 41
+        grep -Eq '^  Transferred [0-9,]+ files, [0-9.]+ [kMGT]?B in [0-9]+:[0-9]{2}:[0-9]{2} ' "$TMP_ROOT/transfer-out.txt" || exit 42
+        [ "$(grep -c '^command rsync --server' "$bin/ssh.log")" -eq 2 ] || exit 43
         [ -f "$destination/admin/include/setup.php" ] || exit 13
         [ -f "$destination/contents/videos/1.mp4" ] || exit 14
         grep -q '^command rsync --server' "$bin/ssh.log" || exit 15
@@ -1046,6 +1098,7 @@ test_ssh_setup_validates_and_builds_the_options
 test_a_password_reaches_ssh_through_sshpass
 test_the_old_nginx_configuration_is_saved_and_its_rewrites_recovered
 test_the_rewrite_recovery_follows_the_includes_of_the_server_block
+test_the_transfer_is_counted_first_and_shown_against_the_count
 test_remote_detect_dump_and_files_go_through_one_ssh
 test_a_user_with_sudo_runs_the_remote_side_through_it
 test_password_protected_archives_are_refused_with_a_reason
