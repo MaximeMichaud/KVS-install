@@ -284,6 +284,10 @@ import_prepare_dump() {
         import_dump_cat "$dump" | sed -E '/^(CREATE DATABASE|USE )/d; /^SET @@(GLOBAL|SESSION)\.(GTID_PURGED|SQL_LOG_BIN)/d; /^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g'
         echo
         echo "-- kvs-install import"
+        # --no-autocommit dumps can leave this session in manual commit mode.
+        # Commit their final transaction and persist the adjustments and
+        # completion marker below, including after the client disconnects.
+        printf '\nSET autocommit=1;\n'
         if [ -z "$initial" ]; then
             printf "INSERT INTO \`%soptions\` (variable, value) VALUES ('INITIAL_VERSION', '%s') ON DUPLICATE KEY UPDATE value = value;\n" \
                 "$prefix" "$(import_sql_escape "$version")"

@@ -17,6 +17,9 @@ if [ -f "$IMPORT_LIB" ]; then
     # shellcheck source=lib/import.sh
     source "$IMPORT_LIB"
 fi
+if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh" ]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh"
+fi
 
 #################################################################
 # Dev mode flag parsing
@@ -24,6 +27,8 @@ fi
 # Enables: no-cache builds, self-signed SSL, skip GeoIP, auto-cleanup
 DEV_MODE=false
 DOCKER_BUILD_FLAGS=""
+# shellcheck disable=SC2034  # Read by lib/database.sh after .env is loaded.
+MARIADB_BUFFER_POOL_SIZE_REQUEST="${MARIADB_BUFFER_POOL_SIZE:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -82,6 +87,10 @@ ENVIRONMENT VARIABLES:
                           1 keeps a single stream. Separate SSH connections
                           are used when authentication allows it; a final
                           pass reconciles the site and removes stale files.
+    MARIADB_BUFFER_POOL_SIZE=SIZE
+                          InnoDB cache, for example 2G. On first setup the
+                          default is 25% of available RAM, capped at 4G.
+                          The selected value is kept in .env.
     IMPORT_EXCLUDE=PATHS  Directories left behind, space separated, relative
                           to the site directory (contents/videos_sources
                           backup). Temporary files, compiled templates,
@@ -156,7 +165,7 @@ if [ "$DEV_MODE" = true ]; then
     echo "  • Intelligent SSL: reuse Let's Encrypt if exists, else self-signed"
     echo "  • Skip GeoIP database download"
     echo "  • Auto-cleanup existing containers/volumes"
-    echo "  • Skip Manticore Search (faster startup)"
+    echo "  • Manticore defaults to disabled; explicit and saved choices are kept"
     echo ""
 
     # Enable headless mode with dev-specific overrides
@@ -166,7 +175,8 @@ if [ "$DEV_MODE" = true ]; then
     export VOLUME_CHOICE=1           # Delete volumes (clean slate)
     export STOP_EXISTING=Y           # Always stop existing
     export DNS_CHOICE=2              # Continue anyway (localhost testing)
-    export MANTICORE_CHOICE=2        # Skip Manticore
+    # The headless search selector defaults to disabled, while preserving
+    # an explicit choice or an enabled search service from .env.
     export DOMAIN="${DOMAIN:-maximemichaud.ca}"  # Default test domain
     export EMAIL="${EMAIL:-dev@localhost.local}"
 
@@ -497,10 +507,11 @@ import_note_external_search() {
     local host
 
     host=$(import_external_search_host "$IMPORT_SITE_DIR") || return 0
-    if [ "${MANTICORE_CHOICE:-}" = "1" ]; then
+    if [ "${MANTICORE_CHOICE:-}" = "1" ] ||
+        { [ -z "${MANTICORE_CHOICE:-}" ] && [ "${ENABLE_MANTICORE:-false}" = true ]; }; then
         echo "  Search: the site uses the External Search plugin (${host:-unknown host}); Manticore is enabled here and takes it over"
     else
-        echo -e "  ${YELLOW}Search: the site uses the External Search plugin (${host:-unknown host}); without Manticore (MANTICORE_CHOICE=1) its configuration is removed and KVS falls back to its MySQL search.${NC}"
+        echo -e "  ${YELLOW}Search: the site uses the External Search plugin (${host:-unknown host}); Manticore is not enabled in the destination Docker stack. The old server may run it outside Docker. Use MANTICORE_CHOICE=1 now or ./reconfigure.sh --manticore enable after import; otherwise KVS uses its MySQL search here.${NC}"
     fi
 }
 
@@ -3091,7 +3102,9 @@ select_manticore() {
     # interactive default: read would block on a terminal and end the setup
     # without one.
     if [[ -z "$MANTICORE_CHOICE" ]]; then
-        if [ "${HEADLESS:-}" = "y" ]; then
+        if [ "${ENABLE_MANTICORE:-false}" = true ]; then
+            MANTICORE_CHOICE=1
+        elif [ "${HEADLESS:-}" = "y" ]; then
             MANTICORE_CHOICE=2
         else
             echo "Options:"
@@ -3509,6 +3522,9 @@ if [ "$MODE" = "single" ] && [ "$SSL_PROVIDER" != "selfsigned" ] &&
     exit 1
 fi
 
+# Validate and persist the database memory budget before replacing any volume.
+database_configure_buffer_pool || exit 1
+
 # Open firewall ports if ufw is active
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     echo -e "${CYAN}Opening configured public firewall ports...${NC}"
@@ -3808,38 +3824,15 @@ import_stage_dump
 run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
 import_place_site_files
 
-# Wait for MariaDB: 3 minutes, or MARIADB_WAIT_SECONDS. An import replays
-# the dump during this time and waits up to an hour by default. A container
-# that restarted or stopped failed its initialization: report it at once.
-# The probe goes through TCP: while the image initializes the volume it runs
-# a temporary server reachable on the socket only, and the socket would
-# answer before the init files have been replayed.
-echo -n "  Waiting for MariaDB..."
+# The temporary socket-only server loads the dump before TCP is ready.
+# Report real activity while keeping the completion-marker verification.
 if [ "$IMPORT_MODE" = true ]; then
     MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-3600}
 else
     MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-180}
 fi
-WAITED=0
-while ! run_root_mariadb -u root -h 127.0.0.1 --protocol=tcp -e "SELECT 1" > /dev/null 2>&1; do
-    MARIADB_CONTAINER=$(docker compose ps -q mariadb 2>/dev/null | head -n 1)
-    MARIADB_STATE=$(docker inspect --format '{{.RestartCount}} {{.State.Status}}' "$MARIADB_CONTAINER" 2>/dev/null || echo "0 unknown")
-    if [ "${MARIADB_STATE%% *}" != "0" ] || [ "${MARIADB_STATE#* }" = "exited" ]; then
-        echo -e " ${RED}✗${NC}"
-        echo -e "${RED}ERROR: the MariaDB container stopped during its initialization${NC}"
-        docker compose logs --tail 20 mariadb 2>/dev/null | sed 's/^/    /'
-        exit 1
-    fi
-    WAITED=$((WAITED + 2))
-    if [ "$WAITED" -ge "$MARIADB_WAIT_SECONDS" ]; then
-        echo -e " ${RED}✗${NC}"
-        echo -e "${RED}ERROR: MariaDB not ready after ${MARIADB_WAIT_SECONDS} seconds${NC}"
-        echo "Check logs: docker compose logs mariadb"
-        exit 1
-    fi
-    sleep 2
-done
-echo -e " ${GREEN}✓${NC}"
+database_wait_ready "$MARIADB_WAIT_SECONDS" || exit 1
+
 import_verify_database
 
 # Older installations may still contain the archive's default admin account.

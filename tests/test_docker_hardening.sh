@@ -605,6 +605,7 @@ EOF
 #!/bin/bash
 destination=${!#}
 for kind in videos albums searches; do
+    [ "${TEST_MANTICORE_MISSING:-}" != "$kind" ] || continue
     cat > "$destination/kvs_manticore_search_${kind}.php" <<PHP
 <?php
 \$manticore_host = '127.0.0.1';
@@ -681,6 +682,16 @@ EOF
             fail "$compose must mount the manticore-api volume in nginx, php-fpm and kvs-init"
         grep -Eq '^  manticore-api:$' "$compose" || fail "$compose does not declare the manticore-api volume"
     done
+
+    cp "$site_dir/admin/data/plugins/external_search/data.dat" "$case_dir/saved-plugin.dat"
+    if PATH="$mock_bin:/usr/bin:/bin" TEST_KVS_PATH="$site_dir" \
+        MANTICORE_API_DIR="$case_dir/api" DOMAIN=7.0.2.target.example \
+        ENABLE_MANTICORE=true TEST_MANTICORE_MISSING=albums \
+        bash "$script_copy" > "$case_dir/incomplete-output.log" 2>&1; then
+        fail "an incomplete search-script archive was accepted"
+    fi
+    cmp "$case_dir/saved-plugin.dat" "$site_dir/admin/data/plugins/external_search/data.dat" ||
+        fail "a failed search-script download changed the saved plugin configuration"
 
     TEST_KVS_PATH="$site_dir" \
         MANTICORE_API_DIR="$case_dir/api" \

@@ -45,11 +45,21 @@ log_info "Index prefix: ${DOMAIN_SAFE}"
 
 # Download and configure Manticore PHP files
 log_info "Downloading Manticore search scripts..."
-curl -fsSL https://kernel-scripts.com/files/manticore.zip -o /tmp/manticore.zip
-unzip -q -o /tmp/manticore.zip -d /tmp/
+work=$(mktemp -d /tmp/kvs-manticore.XXXXXX)
+plugin_temp=""
+trap 'rm -rf -- "$work"; [ -z "$plugin_temp" ] || rm -f -- "$plugin_temp"' EXIT
+curl --connect-timeout 15 --max-time 300 -fsSL https://kernel-scripts.com/files/manticore.zip -o "$work/manticore.zip"
+unzip -q -o "$work/manticore.zip" -d "$work/"
+# A failed or incomplete download must leave the existing search configured.
+for kind in videos albums searches; do
+    [ -s "$work/kvs_manticore_search_${kind}.php" ] || {
+        log_error "Missing Manticore $kind script in the downloaded archive"
+        exit 1
+    }
+done
 
 # Update host and index names in PHP files
-for file in /tmp/kvs_manticore_search_*.php; do
+for file in "$work"/kvs_manticore_search_*.php; do
     [ -f "$file" ] || continue
 
     sed -i "s/\$manticore_host = '127.0.0.1'/\$manticore_host = 'searchd'/" "$file"
@@ -73,9 +83,10 @@ for file in /tmp/kvs_manticore_search_*.php; do
     sed -i "s/http_response_code(503);/\/\/ Return empty XML on error/" "$file"
     sed -E -i "s|^[[:space:]]*die\\(.*FATAL.*$|    die('<search_feed total_count=\"0\" from=\"0\" query=\"\"></search_feed>');|" "$file"
 
-    mkdir -p "$SCRIPT_DIR"
-    cp "$file" "$SCRIPT_DIR/"
+    php -l "$file" >/dev/null
 done
+mkdir -p "$SCRIPT_DIR"
+cp "$work"/kvs_manticore_search_*.php "$SCRIPT_DIR/"
 remove_legacy_scripts
 
 log_info "Manticore PHP scripts installed in $SCRIPT_DIR"
@@ -91,7 +102,8 @@ mkdir -p "$PLUGIN_DATA_DIR"
 # other display mode adds the internal results and shows every hit twice.
 # The internal fallback stays at its default, so KVS still answers with its
 # own search while Manticore is down.
-cat > /tmp/configure_external_search.php << 'EOPHP'
+plugin_temp=$(mktemp "$PLUGIN_DATA_DIR/.data.dat.XXXXXX")
+cat > "$work/configure_external_search.php" << 'EOPHP'
 <?php
 $plugin_data = array(
     'enable_external_search' => 1,
@@ -110,15 +122,17 @@ $plugin_data = array(
     'outgoing_url_searches' => getenv('PROJECT_URL')
 );
 
-$plugin_data_dir = getenv('PLUGIN_DATA_DIR');
-file_put_contents("$plugin_data_dir/data.dat", serialize($plugin_data), LOCK_EX);
+$payload = serialize($plugin_data);
+if (file_put_contents(getenv('PLUGIN_DATA_FILE'), $payload, LOCK_EX) !== strlen($payload)) exit(1);
 echo "External Search plugin configured\n";
 EOPHP
 
-DOMAIN="$DOMAIN" PROJECT_URL="$PROJECT_URL" PLUGIN_DATA_DIR="$PLUGIN_DATA_DIR" \
-    php /tmp/configure_external_search.php
+DOMAIN="$DOMAIN" PROJECT_URL="$PROJECT_URL" PLUGIN_DATA_FILE="$plugin_temp" \
+    php "$work/configure_external_search.php"
 chown -R 1000:1000 "$PLUGIN_DATA_DIR"
-chmod 600 "$PLUGIN_DATA_DIR/data.dat"
+chmod 600 "$plugin_temp"
+mv -f "$plugin_temp" "$PLUGIN_DATA_DIR/data.dat"
+plugin_temp=""
 
 log_info "External Search plugin configured:"
 log_info "  - Videos: http://manticore-api:8080/kvs_manticore_search_videos.php"

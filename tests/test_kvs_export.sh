@@ -691,6 +691,7 @@ test_the_dump_uses_the_compressor_that_is_installed() {
     grep -Fq 'CREATE TABLE `ktvs_options`' <<< "$plain" || fail "the dump must carry the tables"
     grep -Fq -- '-- Dump completed' <<< "$plain" || fail "the dump must carry the completion line"
     argv_lines | grep -Fq -- '[--single-transaction]' || fail "the dump needs --single-transaction"
+    argv_lines | grep -Fq -- '[--no-autocommit]' || fail "the dump must batch INSERT statements during replay"
     argv_lines | grep -Fq -- '[--quick]' || fail "the dump needs --quick"
     argv_lines | grep -Fq -- '[--hex-blob]' || fail "the dump needs --hex-blob"
     argv_lines | grep -Fq -- '[--triggers]' || fail "the dump needs --triggers"

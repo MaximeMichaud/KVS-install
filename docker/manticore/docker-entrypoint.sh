@@ -54,7 +54,8 @@ if gosu manticore bash -o pipefail -c \
     'indexer --all 2>&1 | tee /var/log/manticore/indexer-init.log'; then
     echo "✓ Initial indexes built successfully"
 else
-    echo "⚠ Initial indexing had warnings (check /var/log/manticore/indexer-init.log)"
+    echo "ERROR: Initial indexing failed (check /var/log/manticore/indexer-init.log)"
+    exit 1
 fi
 
 # Start cron for hourly updates
