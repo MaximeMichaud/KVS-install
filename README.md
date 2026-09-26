@@ -154,6 +154,27 @@ The nginx configuration of the old server travels with the detection: `nginx -T`
 
 A site whose search ran through the KVS External Search plugin (Sphinx or Manticore on the old server) is announced: with Manticore enabled (`MANTICORE_CHOICE=1`) the init points the plugin at the stack's own Manticore (used always and replacing the internal search, as the plugin form advises for Manticore, the internal fallback kept for when Manticore is down), which indexes the imported database when its container starts and every hour, its three search scripts kept outside the KVS tree in the `manticore-api` volume shared by nginx, php-fpm and the init (the KVS audit plugin reports every file or directory it does not know inside the site as suspicious); without it the init removes the plugin configuration and KVS falls back to its MySQL search. A reindex by hand runs as the container's own user (`docker compose exec -u manticore manticore indexer --rotate --all`): run as root it leaves rotation files searchd cannot read, which the hourly job clears before indexing.
 
+After installation or import, run these commands from the installation's `docker` directory:
+
+```bash
+./reconfigure.sh --manticore enable
+./reconfigure.sh --manticore status
+./reconfigure.sh --manticore disable
+```
+
+Enable builds/starts the search service, waits for the videos, albums and searches indexes, then configures the KVS plugin and verifies its saved configuration through PHP. It does not rerun the database import or the full installation. Disable restores KVS built-in search and stops Manticore while keeping its index volume. Both choices persist in `.env`; later setup runs keep enabled search unless `MANTICORE_CHOICE=2` explicitly disables it. Initial indexing reports activity while waiting (up to `MANTICORE_WAIT_SECONDS`, default 3600 seconds). A failed start or index build leaves the KVS search configuration unchanged.
+
+During MariaDB initialization, setup reports elapsed time, tables created, the actual InnoDB buffer pool size and the current SQL operation every ten seconds. Where the reader is available, it also reports the dump bytes read, including compressed input. This percentage measures input consumed, not SQL committed: 100% read can still mean MariaDB is executing or committing statements. TCP readiness and the dump's unique final marker are checked before declaring the import complete. Inspect an ongoing import without restarting it:
+
+```bash
+./reconfigure.sh --import-status
+./reconfigure.sh --import-status --watch
+```
+
+The wait defaults to one hour for imports (`MARIADB_WAIT_SECONDS=7200` allows two hours). A timeout leaves the database container running. Do not restart it or rerun setup over an active replay just to inspect progress.
+
+On first setup, `MARIADB_BUFFER_POOL_SIZE` is selected automatically: 25% of available host memory, reduced by cgroup and MariaDB Compose memory limits, rounded down to 128 MiB steps, with a 128 MiB minimum and a 4 GiB maximum. For example, 1 GiB available gives 256 MiB; 24 GiB available gives 4 GiB. This reserves memory for PHP, search and other services; it is not a guarantee against memory pressure from other workloads. The value persists in `.env`. Set `MARIADB_BUFFER_POOL_SIZE=2G` when running setup to override it. Explicit/saved sizes are preserved, and a size reaching the container's memory limit is rejected before startup. The new value applies when setup starts MariaDB, not to an import already running. New exports also use `--no-autocommit` to group INSERT statements per table during replay; newer dump clients may already do this by default. Existing dumps are not rewritten to change their transactions.
+
 The table prefix comes from the site's `setup.php` (`ktvs_` for every archive KVS ships, whatever the old server used for an imported site) and reaches every script that names a table, the Manticore indexer included, through `TABLES_PREFIX` in `.env`.
 
 The debug switches of the old server's `setup.php` are turned off on import: `enable_debug`, and `sql_debug`, the query log KVS support turns on by hand, which writes every query into `admin/logs/debug_sql_get.txt` and `debug_sql_post.txt` for as long as it stays on.

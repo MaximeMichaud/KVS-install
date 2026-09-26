@@ -1323,6 +1323,7 @@ kvs_build_dump_args() {
     fi
     DUMP_ARGS+=(
         --quick
+        --no-autocommit
         --hex-blob
         --triggers
         --default-character-set=utf8mb4

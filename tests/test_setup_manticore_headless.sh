@@ -74,7 +74,14 @@ run_case() {
 run_case "headless run without MANTICORE_CHOICE skips Manticore" false y "" ""
 run_case "headless run with MANTICORE_CHOICE=1 enables Manticore" true y 1 ""
 run_case "headless run with MANTICORE_CHOICE=2 skips Manticore" false y 2 ""
+ENABLE_MANTICORE=true run_case "rerun keeps previously enabled Manticore" true y "" ""
+ENABLE_MANTICORE=true run_case "explicit disable wins over saved configuration" false y 2 ""
 run_case "interactive run reads the answer" true "" "" $'1\n'
 run_case "interactive run defaults to skip on an empty answer" false "" "" $'\n'
+
+# Development mode must not overwrite an explicit enable or a saved choice.
+if sed -n '/^if.*DEV_MODE.*true.*then/,/^fi/p' "$ROOT_DIR/docker/setup.sh" | grep -q 'export MANTICORE_CHOICE=2'; then
+    fail "development mode overrides the search choice"
+fi
 
 echo "All Manticore headless tests passed"

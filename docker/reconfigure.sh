@@ -4,11 +4,29 @@
 
 set -e
 set -o pipefail
+RUNTIME_ACTION=""
+MANTICORE_ACTION=""
+IMPORT_WATCH=no
 
 # Keep help and option validation available from anywhere, before any check
 # that assumes an installed stack.
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --manticore)
+            [ -z "$RUNTIME_ACTION" ] || { echo "ERROR: choose one operation" >&2; exit 1; }
+            case "${2:-}" in enable|disable|status) MANTICORE_ACTION=$2 ;; *) echo "ERROR: use --manticore enable|disable|status" >&2; exit 1 ;; esac
+            RUNTIME_ACTION=manticore
+            shift 2
+            ;;
+        --import-status)
+            [ -z "$RUNTIME_ACTION" ] || { echo "ERROR: choose one operation" >&2; exit 1; }
+            RUNTIME_ACTION=import-status
+            shift
+            ;;
+        --watch)
+            IMPORT_WATCH=yes
+            shift
+            ;;
         --help)
             cat << 'EOF'
 KVS Docker Reconfiguration Script
@@ -28,6 +46,13 @@ DESCRIPTION:
 
 OPTIONS:
     --help      Show this help message
+    --manticore enable|disable|status
+                Manage search on an installed site without rerunning setup.
+                Enable waits for indexing, configures KVS and verifies it.
+                Disable restores KVS search and keeps the index volume.
+    --import-status [--watch]
+                Inspect MariaDB startup/import activity without changing it.
+                --watch refreshes until TCP is ready or the wait times out.
 
 REQUIREMENTS:
     Run it from the docker directory of the installation. The .env file
@@ -42,6 +67,10 @@ EOF
             ;;
     esac
 done
+if [ "$IMPORT_WATCH" = yes ] && [ "$RUNTIME_ACTION" != import-status ]; then
+    echo "ERROR: --watch goes with --import-status" >&2
+    exit 1
+fi
 
 # Colors
 RED='\033[0;31m'
@@ -265,6 +294,23 @@ fi
 if [ -z "${MARIADB_PASSWORD:-}" ]; then
     echo -e "${RED}ERROR: MARIADB_PASSWORD not set in .env${NC}"
     exit 1
+fi
+if [ -n "$RUNTIME_ACTION" ]; then
+    case "$RUNTIME_ACTION" in
+        import-status)
+            # shellcheck source=/dev/null
+            source "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh"
+            once=yes
+            [ "$IMPORT_WATCH" != yes ] || once=no
+            database_wait_ready "${MARIADB_WAIT_SECONDS:-3600}" "$once"
+            ;;
+        manticore)
+            # shellcheck source=/dev/null
+            source "$(dirname "${BASH_SOURCE[0]}")/lib/manticore.sh"
+            manticore_manage "$MANTICORE_ACTION"
+            ;;
+    esac
+    exit $?
 fi
 if [[ ! "$SITE_PREFIX" =~ ^[a-z0-9][a-z0-9_-]*$ ]] ||
     [ "${#SITE_PREFIX}" -gt 235 ]; then

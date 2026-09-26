@@ -41,6 +41,7 @@ mariadb() {
 indexer() {
     printf '%s\n' "${TEST_EFFECTIVE_USER:-unset}" >> "$INDEXER_LOG"
     [ "${TEST_EFFECTIVE_USER:-}" = manticore ] || return 91
+    [ "${TEST_INDEXER_EXIT:-37}" = 0 ] && return 0
     echo "deterministic indexer failure" >&2
     return 37
 }
@@ -69,11 +70,13 @@ gosu() {
 
 export -f mariadb indexer service chown chmod gosu
 
-output=$(
+if output=$(
     DOMAIN=example.com \
     MARIADB_PASSWORD=test-password \
     bash "${TEST_DIR}/docker-entrypoint.sh" true 2>&1
-)
+); then
+    fail "a failed initial index build must stop the container"
+fi
 
 generated_config="${TEST_DIR}/etc/manticoresearch/manticore.conf"
 # Manticore must receive these placeholders literally.
@@ -111,7 +114,7 @@ if grep '^argument=' "$MARIADB_LOG" | grep -Fq 'test-password'; then
     fail "the MariaDB password was exposed through process arguments"
 fi
 
-grep -Fq 'Initial indexing had warnings' <<< "$output" ||
+grep -Fq 'Initial indexing failed' <<< "$output" ||
     fail "an indexer failure was not reported"
 if grep -Fq 'Initial indexes built successfully' <<< "$output"; then
     fail "an indexer failure was reported as successful"
@@ -119,6 +122,7 @@ fi
 
 # The prefix of an imported site reaches every query of the indexer.
 prefixed=$(
+    TEST_INDEXER_EXIT=0 \
     DOMAIN=example.com \
     MARIADB_PASSWORD=test-password \
     TABLES_PREFIX=kvs7_ \
