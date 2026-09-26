@@ -20,7 +20,8 @@
 # definitions followed by a single main line, and why detect and dump keep
 # stdout for their payload and write every message on stderr.
 #
-# Nothing is installed or modified on the old server, and the database
+# No software is installed or configuration changed on the old server. Native
+# format uses private temporary files that are removed on exit. The database
 # password is never printed, written to a file or passed on a command line:
 # it reaches the client through MYSQL_PWD and is shown masked.
 #
@@ -45,6 +46,7 @@ OPT_SITE_DIR=""
 OPT_OUTPUT=""
 OPT_DUMP_ONLY="no"
 OPT_FORCE_GZIP="no"
+OPT_DATABASE_FORMAT="auto"
 OPT_ASSUME_YES="no"
 OPT_SIZE_TIMEOUT="${KVS_EXPORT_SIZE_TIMEOUT:-0}"
 OPT_MEASURE_SIZE="yes"
@@ -72,6 +74,10 @@ DB_SERVER_VERSION=""
 DB_TABLES="0"
 DB_SIZE_MB="0"
 DB_NON_TRANSACTIONAL="0"
+DB_DUMP_FORMAT="sql"
+DB_DIRECTORY_REASON="not checked"
+DB_DIRECTORY_TABLES=()
+DB_DIRECTORY_CONN_ARGS=()
 SITE_SIZE_MB="0"
 SITE_SIZE_STATUS="skipped"
 SITE_SIZE_SECONDS="0"
@@ -106,6 +112,8 @@ TAR_EXCLUDES=()
 
 # Removed by the exit trap
 STAGING_DIR=""
+NATIVE_STAGING_DIR=""
+NATIVE_DUMP_READY="no"
 TEMP_ERR_FILE=""
 UNITS_FILE=""
 # The size walk in progress: its lines arrive on descriptor 3.
@@ -134,6 +142,10 @@ Options
       --dump-only     Write only the database dump
       --gzip          Compress the dump with gzip (default: zstd when
                       installed, else pigz, else gzip)
+      --database-format FORMAT
+                      auto (default), sql, or directory. The native MariaDB
+                      directory format needs a local database, FILE access,
+                      compatible tables and a recent mariadb-dump client.
       --size-timeout SECONDS
                       Stop measuring the site size after that long and go
                       on with what was counted as a lower bound (0, the
@@ -154,7 +166,8 @@ Environment
   KVS_EXPORT_SIZE_JOBS      How many du measure the site at once (default:
                             the CPU count, at most 4)
   TMPDIR                    Where the dump is staged while the archive is
-                            written (needs room for the compressed dump)
+                            written. Native export needs uncompressed data
+                            space and honors secure_file_priv when set.
 
 Exit codes
   0 success, 1 error, 2 no site found or several found,
@@ -189,6 +202,9 @@ kvs_cleanup() {
     fi
     if [ -n "$STAGING_DIR" ]; then
         rm -rf -- "$STAGING_DIR"
+    fi
+    if [ -n "$NATIVE_STAGING_DIR" ]; then
+        rm -rf -- "$NATIVE_STAGING_DIR"
     fi
 }
 
@@ -1284,6 +1300,13 @@ kvs_choose_compressor() {
 }
 
 kvs_dump_extension() {
+    if [ "$DB_DUMP_FORMAT" = directory ]; then
+        case $COMPRESSOR in
+            zstd) printf 'mariadb.tar.zst' ;;
+            *) printf 'mariadb.tar.gz' ;;
+        esac
+        return 0
+    fi
     case $COMPRESSOR in
         zstd) printf 'sql.zst' ;;
         *) printf 'sql.gz' ;;
@@ -1321,9 +1344,16 @@ kvs_build_dump_args() {
     else
         DUMP_ARGS=(--single-transaction)
     fi
+    # System option files still supply connection settings. Override their
+    # export layout explicitly so skip-opt/skip-extended-insert or a tiny
+    # net buffer cannot silently turn the restore into small INSERTs.
+    # Do not use --opt here: it also changes the table-locking choice above.
     DUMP_ARGS+=(
         --quick
         --no-autocommit
+        --extended-insert
+        --disable-keys
+        --net-buffer-length=1048576
         --hex-blob
         --triggers
         --default-character-set=utf8mb4
@@ -1348,12 +1378,252 @@ kvs_build_dump_args() {
 # Write the compressed dump on stdout. pipefail carries a failure of the
 # dump tool through the compressor, so a truncated dump is an error.
 kvs_stream_dump() {
+    if [ "$DB_DUMP_FORMAT" = directory ]; then
+        kvs_prepare_directory_dump || return 1
+        tar -cf - -C "$NATIVE_STAGING_DIR/bundle" kvs-native-export.manifest SHA256SUMS data < /dev/null | "${COMPRESS_CMD[@]}"
+        return $?
+    fi
     (
-        # shellcheck disable=SC2031  # Same deliberate subshell as the probe.
+        # shellcheck disable=SC2030,SC2031  # Same deliberate subshell as the probe.
         export MYSQL_PWD="$DB_PASSWORD"
         kvs_ignore_user_option_files
         "$DB_DUMP_TOOL" "${DUMP_ARGS[@]}" < /dev/null
     ) | "${COMPRESS_CMD[@]}"
+}
+
+# Native exports contain files written by the server itself. A private
+# round-trip probe verifies FILE access and that both processes see the
+# same directory before auto mode selects this format.
+kvs_directory_query() {
+    (
+        # shellcheck disable=SC2030,SC2031  # Keep the password in this client subprocess only.
+        export MYSQL_PWD="$DB_PASSWORD"
+        kvs_ignore_user_option_files
+        "$DB_CLIENT" --connect-timeout=10 "${DB_CONN_ARGS[@]}" --batch --skip-column-names --raw "$DB_NAME" -e "$1" < /dev/null
+    )
+}
+
+kvs_directory_refuse() {
+    DB_DIRECTORY_REASON=$1
+    DB_DUMP_FORMAT=sql
+    if [ -n "$NATIVE_STAGING_DIR" ]; then
+        rm -rf -- "$NATIVE_STAGING_DIR"
+        NATIVE_STAGING_DIR=""
+    fi
+    if [ "$OPT_DATABASE_FORMAT" = directory ]; then
+        kvs_error "native directory export is unavailable: $DB_DIRECTORY_REASON"
+        return 1
+    fi
+    return 0
+}
+
+kvs_select_database_format() {
+    local help metadata kind value extra directory_hex="unread" directory="" unsupported="" table_count=""
+    local mysql_uid mysql_gid owner_uid escaped_path sentinel socket_hex="" socket_path=""
+
+    DB_DUMP_FORMAT=sql
+    DB_DIRECTORY_TABLES=()
+    DB_DIRECTORY_CONN_ARGS=("${DB_CONN_ARGS[@]}")
+    NATIVE_DUMP_READY=no
+    if [ "$OPT_DATABASE_FORMAT" = sql ]; then
+        DB_DIRECTORY_REASON="SQL format requested"
+        return 0
+    fi
+    if [ "$DB_OK" != yes ] || [ -z "$DB_DUMP_TOOL" ]; then
+        kvs_directory_refuse "the database or dump client is unavailable"
+        return $?
+    fi
+    help=$("$DB_DUMP_TOOL" --help < /dev/null 2>&1 || true)
+    if [[ "$help" != *--dir* || "$help" != *--parallel* ]]; then
+        kvs_directory_refuse "the dump client does not support --dir and --parallel"
+        return $?
+    fi
+    case $DB_HOST_RAW in
+        '' | localhost | localhost:* | 127.0.0.1 | 127.0.0.1:*) ;;
+        *) kvs_directory_refuse "the database is not local to the export process"; return $? ;;
+    esac
+    if [[ ! "$DB_NAME" =~ ^[A-Za-z0-9_]+$ || ! "$TABLES_PREFIX" =~ ^[A-Za-z0-9_]+$ ]]; then
+        kvs_directory_refuse "the database name or table prefix is not supported by the native bundle"
+        return $?
+    fi
+    if [[ ! "$KVS_VERSION" =~ ^[0-9]+([.][0-9]+)+([._+-][A-Za-z0-9]+)*$ ]]; then
+        kvs_directory_refuse "the KVS version cannot be recorded reliably in a native bundle"
+        return $?
+    fi
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        kvs_directory_refuse "sha256sum is required to verify native bundles"
+        return $?
+    fi
+    mysql_uid=$(id -u mysql 2>/dev/null) || mysql_uid=""
+    mysql_gid=$(id -g mysql 2>/dev/null) || mysql_gid=""
+    owner_uid=$(id -u)
+    if [ -z "$mysql_uid" ] || { [ "$owner_uid" != 0 ] && [ "$owner_uid" != "$mysql_uid" ]; }; then
+        kvs_directory_refuse "run the exporter as root or the local mysql OS user to create private server-writable files"
+        return $?
+    fi
+    if ! metadata=$(kvs_directory_query "
+SELECT 'unsupported',
+ (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND (table_type<>'BASE TABLE' OR engine NOT IN ('InnoDB','MyISAM','Aria') OR create_options LIKE '%SYSTEM VERSIONING%')) +
+ (SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE()) +
+ (SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema=DATABASE()) +
+ (SELECT COUNT(*) FROM information_schema.events WHERE event_schema=DATABASE()) +
+ (SELECT COUNT(*) FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND constraint_type='FOREIGN KEY') +
+ (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND extra REGEXP 'GENERATED|INVISIBLE');
+SELECT 'count', COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();
+SELECT 'table', table_name FROM information_schema.tables WHERE table_schema=DATABASE() ORDER BY table_name;
+SELECT 'directory', COALESCE(HEX(@@secure_file_priv),'');
+SELECT 'socket', HEX(@@socket);" 2>/dev/null); then
+        kvs_directory_refuse "the source metadata or secure_file_priv could not be inspected"
+        return $?
+    fi
+    while IFS=$'\t' read -r kind value extra; do
+        case $kind in
+            unsupported) unsupported=$value ;;
+            count) table_count=$value ;;
+            table)
+                if [[ ! "$value" =~ ^[A-Za-z0-9_]+$ || -n "$extra" ]]; then
+                    kvs_directory_refuse "a table name is not supported by the native bundle"
+                    return $?
+                fi
+                DB_DIRECTORY_TABLES+=("$value")
+                ;;
+            directory) directory_hex=$value ;;
+            socket) socket_hex=$value ;;
+        esac
+    done <<< "$metadata"
+    if [ "$unsupported" != 0 ]; then
+        kvs_directory_refuse "views, triggers, routines, events, foreign keys, generated columns or special table engines require SQL format"
+        return $?
+    fi
+    if [[ ! "$table_count" =~ ^[1-9][0-9]*$ ]] || [ "$table_count" -ne "${#DB_DIRECTORY_TABLES[@]}" ]; then
+        kvs_directory_refuse "the complete table list could not be verified"
+        return $?
+    fi
+    # Preserve the successful connection without importing unrelated dump
+    # options from my.cnf. A bare localhost used the configured socket; TCP
+    # and explicitly named sockets already have complete connection args.
+    case $DB_HOST_RAW in
+        '' | localhost)
+            if [[ -z "$socket_hex" || "$socket_hex" == *[!A-Fa-f0-9]* ]]; then
+                kvs_directory_refuse "the local database socket could not be determined"
+                return $?
+            fi
+            socket_path=$(printf '%b' "$(printf '%s' "$socket_hex" | sed 's/../\\x&/g')")
+            if [[ "$socket_path" != /* || "$socket_path" == *[$'\n\r\t']* ]]; then
+                kvs_directory_refuse "the local database socket path is not supported"
+                return $?
+            fi
+            DB_DIRECTORY_CONN_ARGS+=(--socket="$socket_path")
+            ;;
+    esac
+    if [[ "$directory_hex" == *[!A-Fa-f0-9]* ]]; then
+        kvs_directory_refuse "secure_file_priv does not allow a usable export directory"
+        return $?
+    fi
+    if [ -n "$directory_hex" ]; then
+        directory=$(printf '%b' "$(printf '%s' "$directory_hex" | sed 's/../\\x&/g')")
+    else
+        directory=${TMPDIR:-/tmp}
+    fi
+    if [[ "$directory" != /* || "$directory" == *[$'\n\r\t']* ]] || [ ! -d "$directory" ]; then
+        kvs_directory_refuse "the allowed export directory is not available locally"
+        return $?
+    fi
+    NATIVE_STAGING_DIR=$(mktemp -d "$directory/kvs-native-export.XXXXXX" 2>/dev/null) || NATIVE_STAGING_DIR=""
+    if [ -z "$NATIVE_STAGING_DIR" ] || ! chmod 700 "$NATIVE_STAGING_DIR" ||
+        { [ "$owner_uid" = 0 ] && ! chown "$mysql_uid:$mysql_gid" "$NATIVE_STAGING_DIR"; }; then
+        kvs_directory_refuse "a private mysql-owned export directory could not be created"
+        return $?
+    fi
+    escaped_path="$NATIVE_STAGING_DIR/access-probe"
+    escaped_path=${escaped_path//\\/\\\\}
+    escaped_path=${escaped_path//\'/\\\'}
+    if ! kvs_directory_query "SELECT 'kvs-native-export-probe' INTO OUTFILE '$escaped_path';" >/dev/null 2>&1 ||
+        ! read -r sentinel < "$NATIVE_STAGING_DIR/access-probe" || [ "$sentinel" != kvs-native-export-probe ]; then
+        kvs_directory_refuse "FILE access or a private directory shared with MariaDB is unavailable (check secure_file_priv and the server sandbox)"
+        return $?
+    fi
+    rm -f -- "$NATIVE_STAGING_DIR/access-probe"
+    if ! kvs_check_free_space "$((DB_SIZE_MB * 2 + 64))" "$NATIVE_STAGING_DIR" >/dev/null 2>&1; then
+        kvs_directory_refuse "the source filesystem has insufficient space for a staged native export"
+        return $?
+    fi
+    # MariaDB's parallel dump connections do not share one coordinated
+    # snapshot; table locks can also end before workers finish. Keep source
+    # reads on one connection. Native restoration remains parallel.
+    DB_DUMP_FORMAT=directory
+    DB_DIRECTORY_REASON="native export prerequisites verified"
+    return 0
+}
+
+kvs_prepare_directory_dump() {
+    local table file owner_uid mysql_uid mysql_gid expected actual
+    local native_args=()
+
+    [ "$NATIVE_DUMP_READY" != yes ] || return 0
+    [ -n "$NATIVE_STAGING_DIR" ] || return 1
+    mkdir -m 700 "$NATIVE_STAGING_DIR/native" "$NATIVE_STAGING_DIR/bundle" || return 1
+    owner_uid=$(id -u)
+    if [ "$owner_uid" = 0 ]; then
+        mysql_uid=$(id -u mysql) || return 1
+        mysql_gid=$(id -g mysql) || return 1
+        chown "$mysql_uid:$mysql_gid" "$NATIVE_STAGING_DIR/native" || return 1
+    fi
+    if [ "$DB_NON_TRANSACTIONAL" -gt 0 ]; then
+        native_args=(--skip-single-transaction --lock-tables)
+        kvs_warn "$DB_NON_TRANSACTIONAL tables use MyISAM or Aria: native export keeps table locks until it finishes"
+    else
+        native_args=(--single-transaction --skip-lock-tables)
+    fi
+    native_args+=(--dir="$NATIVE_STAGING_DIR/native" --parallel=0
+        --default-character-set=binary --no-tablespaces --quick --create-options
+        --quote-names --add-drop-table --comments --dump-date --tz-utc
+        --skip-no-data --skip-no-create-info --skip-triggers --skip-routines --skip-events
+        $'--fields-terminated-by=\t' $'--lines-terminated-by=\n' "--fields-escaped-by=\\")
+    kvs_say "Exporting $DB_NAME in native MariaDB format (one consistent source connection; parallel restoration)..."
+    if ! (
+        # shellcheck disable=SC2030,SC2031  # Keep the password in this client subprocess only.
+        export MYSQL_PWD="$DB_PASSWORD"
+        kvs_ignore_user_option_files
+        "$DB_DUMP_TOOL" --no-defaults "${native_args[@]}" "${DB_DIRECTORY_CONN_ARGS[@]}" "$DB_NAME" < /dev/null
+    ) >&2; then
+        kvs_error "native export failed before any bundle was streamed"
+        return 1
+    fi
+    if [ ! -d "$NATIVE_STAGING_DIR/native/$DB_NAME" ]; then
+        kvs_error "native export did not create the expected database directory"
+        return 1
+    fi
+    mv -- "$NATIVE_STAGING_DIR/native/$DB_NAME" "$NATIVE_STAGING_DIR/bundle/data" || return 1
+    expected=$((${#DB_DIRECTORY_TABLES[@]} * 2))
+    actual=0
+    for file in "$NATIVE_STAGING_DIR/bundle/data/"*; do
+        [ -f "$file" ] && [ ! -L "$file" ] || {
+            kvs_error "native export contains an unexpected file type"
+            return 1
+        }
+        actual=$((actual + 1))
+    done
+    if [ "$actual" -ne "$expected" ]; then
+        kvs_error "native export file count differs from the source table list"
+        return 1
+    fi
+    for table in "${DB_DIRECTORY_TABLES[@]}"; do
+        if [ ! -s "$NATIVE_STAGING_DIR/bundle/data/$table.sql" ] || [ ! -f "$NATIVE_STAGING_DIR/bundle/data/$table.txt" ]; then
+            kvs_error "native export is incomplete for table $table"
+            return 1
+        fi
+    done
+    {
+        printf 'format=1\ncomplete=yes\nsource_database=%s\ntables_prefix=%s\nkvs_version=%s\ntables=%s\n' \
+            "$DB_NAME" "$TABLES_PREFIX" "$KVS_VERSION" "${#DB_DIRECTORY_TABLES[@]}"
+    } > "$NATIVE_STAGING_DIR/bundle/kvs-native-export.manifest" || return 1
+    (
+        cd "$NATIVE_STAGING_DIR/bundle" || exit 1
+        sha256sum kvs-native-export.manifest data/* > SHA256SUMS && sha256sum -c SHA256SUMS >/dev/null
+    ) || return 1
+    NATIVE_DUMP_READY=yes
+    return 0
 }
 
 kvs_require_dump_tool() {
@@ -1387,6 +1657,8 @@ kvs_print_detect() {
     printf 'db_password_hint=%s\n' "$DB_PASSWORD_HINT"
     printf 'db_client=%s\n' "$DB_CLIENT"
     printf 'db_dump_tool=%s\n' "$DB_DUMP_TOOL"
+    printf 'db_dump_format=%s\n' "$DB_DUMP_FORMAT"
+    printf 'db_directory_reason=%s\n' "$DB_DIRECTORY_REASON"
     printf 'db_ok=%s\n' "$DB_OK"
     if [ "$DB_OK" != "yes" ]; then
         printf 'db_error=%s\n' "$DB_ERROR"
@@ -1476,7 +1748,10 @@ kvs_print_summary() {
     else
         kvs_say "  Database access: FAILED ($DB_ERROR)"
     fi
-    kvs_say "  Dump:            ${DB_DUMP_TOOL:-no dump tool found}, compressed with $COMPRESSOR"
+    kvs_say "  Dump:            ${DB_DUMP_TOOL:-no dump tool found}, $DB_DUMP_FORMAT format, compressed with $COMPRESSOR"
+    if [ "$DB_DUMP_FORMAT" = sql ] && [ "$OPT_DATABASE_FORMAT" = auto ]; then
+        kvs_say "  Format choice:   $DB_DIRECTORY_REASON"
+    fi
     kvs_say ""
 }
 
@@ -1702,6 +1977,7 @@ kvs_command_detect() {
         printf 'kvs_export=1\n'
         return 1
     fi
+    kvs_select_database_format || return 1
     kvs_print_detect
     return 0
 }
@@ -1710,7 +1986,10 @@ kvs_command_dump() {
     kvs_resolve_site_dir || return $?
     kvs_collect no || return 1
     kvs_require_dump_tool || return $?
-    kvs_build_dump_args
+    kvs_select_database_format || return 1
+    if [ "$DB_DUMP_FORMAT" = sql ]; then
+        kvs_build_dump_args
+    fi
     kvs_compressor_args
     kvs_say "Dumping ${DB_NAME} with ${DB_DUMP_TOOL}, compressed with ${COMPRESSOR}"
     if ! kvs_stream_dump; then
@@ -1745,8 +2024,9 @@ kvs_command_archive() {
 
     kvs_resolve_site_dir || return $?
     kvs_collect yes || return 1
-    kvs_print_summary
     kvs_require_dump_tool || return $?
+    kvs_select_database_format || return 1
+    kvs_print_summary
 
     stamp=$(date +%Y%m%d-%H%M)
     output=$OPT_OUTPUT
@@ -1777,7 +2057,9 @@ kvs_command_archive() {
         fi
         kvs_check_free_space "$needed" "$output" || return 1
     fi
-    kvs_build_dump_args
+    if [ "$DB_DUMP_FORMAT" = sql ]; then
+        kvs_build_dump_args
+    fi
     kvs_compressor_args
 
     if [ "$OPT_DUMP_ONLY" = "yes" ]; then
@@ -1892,6 +2174,15 @@ kvs_parse_arguments() {
                 OPT_FORCE_GZIP="yes"
                 shift
                 ;;
+            --database-format)
+                if [ $# -lt 2 ]; then
+                    kvs_error "$1 needs a value"
+                    return 1
+                fi
+                OPT_DATABASE_FORMAT=$2
+                shift 2
+                ;;
+            --database-format=*) OPT_DATABASE_FORMAT=${1#*=}; shift ;;
             --size-timeout)
                 if [ $# -lt 2 ]; then
                     kvs_error "$1 needs a number of seconds"
@@ -1970,6 +2261,10 @@ kvs_parse_arguments() {
         kvs_error "--size-timeout needs a number of seconds, got '$OPT_SIZE_TIMEOUT'"
         return 1
     fi
+    case $OPT_DATABASE_FORMAT in
+        auto | sql | directory) ;;
+        *) kvs_error "--database-format must be auto, sql or directory"; return 1 ;;
+    esac
     case $first in
         archive | detect | dump)
             OPT_COMMAND=$first

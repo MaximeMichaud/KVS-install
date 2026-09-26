@@ -20,10 +20,14 @@ SET SESSION max_statement_time=2;
 SET SESSION lock_wait_timeout=1;
 SELECT 'tables', COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND LEFT(table_name, LENGTH('$prefix'))='$prefix' AND table_type='BASE TABLE';
 SELECT 'pool', @@innodb_buffer_pool_size;
+SELECT 'active', COUNT(*) FROM information_schema.processlist WHERE id<>CONNECTION_ID() AND db=DATABASE() AND command<>'Sleep';
 SELECT LOWER(variable_name), variable_value FROM information_schema.global_status WHERE variable_name='INNODB_DATA_WRITTEN';
 SELECT 'operation', COALESCE(NULLIF(state,''),command), time,
- CASE WHEN info REGEXP '^(INSERT INTO|REPLACE INTO|CREATE TABLE|ALTER TABLE|LOCK TABLES) ' AND LOCATE(CHAR(96),info)>0
- THEN SUBSTRING_INDEX(SUBSTRING_INDEX(info,CHAR(96),2),CHAR(96),-1) ELSE '-' END,
+ CASE WHEN info REGEXP '^(INSERT INTO|REPLACE INTO|CREATE TABLE|ALTER TABLE|LOCK TABLES|LOAD DATA) ' AND LOCATE(CHAR(96),info)>0
+ THEN CASE WHEN SUBSTRING_INDEX(SUBSTRING_INDEX(info,CHAR(96),3),CHAR(96),-1) REGEXP '^[[:space:]]*[.][[:space:]]*$'
+      THEN SUBSTRING_INDEX(SUBSTRING_INDEX(info,CHAR(96),4),CHAR(96),-1)
+      ELSE SUBSTRING_INDEX(SUBSTRING_INDEX(info,CHAR(96),2),CHAR(96),-1) END
+ ELSE '-' END,
  ROUND(progress,1)
  FROM information_schema.processlist WHERE id<>CONNECTION_ID() AND db=DATABASE() AND command<>'Sleep' ORDER BY time DESC LIMIT 1;
 SQL
@@ -65,11 +69,12 @@ database_size_text() {
 
 database_progress_line() {
     local elapsed="$1" snapshot="$2" position="$3"
-    local key a b c d tables="?" written="" pool="" operation="" bytes=0 total=0 pct
+    local key a b c d tables="?" written="" pool="" operation="" active="" bytes=0 total=0 pct
     while IFS=$'\t' read -r key a b c d; do
         case "$key" in
             tables) tables=$a ;;
             pool) pool=$a ;;
+            active) active=$a ;;
             innodb_data_written) written=$a ;;
             operation)
                 # Sanitize server-supplied names/states before the terminal.
@@ -93,11 +98,74 @@ database_progress_line() {
         printf '; %s%s tables created' "$tables" "${IMPORT_DUMP_TABLES:+/$IMPORT_DUMP_TABLES}"
         [ -z "$written" ] || printf '; InnoDB written %s since startup' "$(database_size_text "$written")"
         [ -z "$pool" ] || printf '; buffer pool %s' "$(database_size_text "$pool")"
+        [ -z "$active" ] || printf '; %s active SQL sessions' "$active"
         printf '%s' "$operation"
     else
         printf '; starting or restarting the database server (SQL status unavailable)'
     fi
     printf '\n'
+}
+
+# A conservative connection budget for native LOAD DATA jobs. Keep a memory
+# reserve for MariaDB and the shared KVS host; manual concurrency is explicit.
+database_import_jobs_for_resources() {
+    local cpus="$1" available="$2" pool="$3" jobs memory_jobs
+    [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || cpus=1
+    [[ "$available" =~ ^[0-9]+$ ]] || available=512
+    [[ "$pool" =~ ^[0-9]+$ ]] || pool=128
+    jobs=$cpus
+    [ "$jobs" -le 8 ] || jobs=8
+    memory_jobs=$(((available - pool - 256) / 256))
+    [ "$memory_jobs" -ge 1 ] || memory_jobs=1
+    [ "$jobs" -le "$memory_jobs" ] || jobs=$memory_jobs
+    printf '%s\n' "$jobs"
+}
+
+database_compose_cpu_limit() {
+    local config
+    config=$(docker compose config) || return 1
+    printf '%s\n' "$config" | awk '
+        /^  mariadb:$/ { db=1; next }
+        db && /^  [^ ]/ { db=0 }
+        db && /^    deploy:/ { deploy=1; next }
+        db && /^    [^ ]/ { deploy=0; resources=0; limits=0 }
+        db && deploy && /^      resources:/ { resources=1; next }
+        resources && /^      [^ ]/ { resources=0; limits=0 }
+        db && resources && /^        limits:/ { limits=1; next }
+        limits && /^        [^ ]/ { limits=0 }
+        db && (/^    cpus:/ || (limits && /^          cpus:/)) {
+            value=$2; gsub(/"/, "", value)
+            if (value+0>0 && (!min || value+0<min)) min=value+0
+        }
+        END { print min ? (int(min)<1 ? 1 : int(min)) : 0 }
+    '
+}
+
+database_import_jobs() {
+    local requested="${1:-auto}" available limit cpus cpu_limit pool
+    if [ "$requested" != auto ]; then
+        [[ "$requested" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]] || {
+            echo "ERROR: IMPORT_DATABASE_JOBS must be auto or an integer from 1 to 32" >&2
+            return 1
+        }
+        printf '%s\n' "$requested"
+        return 0
+    fi
+    available=$(database_available_memory_mb)
+    limit=$(database_compose_memory_limit) || return 1
+    if [ "$limit" -gt 0 ] && [ "$((limit / 1048576))" -lt "$available" ]; then
+        available=$((limit / 1048576))
+    fi
+    cpus=$(nproc 2>/dev/null) || cpus=1
+    cpu_limit=$(database_compose_cpu_limit) || return 1
+    if [ "$cpu_limit" -gt 0 ] && [ "$cpu_limit" -lt "$cpus" ]; then cpus=$cpu_limit; fi
+    pool=${MARIADB_BUFFER_POOL_SIZE:-128M}
+    case "$pool" in
+        *[Gg]) pool=$((${pool%?} * 1024)) ;;
+        *[Mm]) pool=${pool%?} ;;
+        *) pool=128 ;;
+    esac
+    database_import_jobs_for_resources "$cpus" "$available" "$pool"
 }
 
 # Wait against wall time, not an assumed two seconds per iteration. A socket

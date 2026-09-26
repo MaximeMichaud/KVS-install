@@ -174,6 +174,15 @@ import_inspect_dump() {
     local prefix="$2"
     local tool
 
+    if import_is_native_dump "$dump"; then
+        if ! declare -F native_import_inspect >/dev/null; then
+            echo "ERROR: native MariaDB import support is missing from this checkout" >&2
+            return 1
+        fi
+        native_import_inspect "$dump" "$prefix"
+        return $?
+    fi
+
     if [ ! -f "$dump" ]; then
         echo "ERROR: IMPORT_DB_DUMP is not a file: $dump" >&2
         return 1
@@ -202,6 +211,19 @@ import_inspect_dump() {
         }
         END { printf "%d\t%s\t%d\t%s\n", tables, initial, statements, completed }
     '
+}
+
+import_is_native_dump() {
+    case "$1" in
+        *.mariadb.tar.zst|*.mariadb.tar.gz) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The source must still be the file inspected by setup before its full scan
+# can be reused. Include nanosecond timestamps and inode identity.
+import_dump_identity() {
+    stat -Lc '%d:%i:%s:%y:%z' -- "$1"
 }
 
 # import_sql_escape <text>: escape a value for a single-quoted SQL string.
@@ -271,7 +293,10 @@ import_prepare_dump() {
     local token="$7"
     local inspection tables initial statements
 
-    inspection=$(import_inspect_dump "$dump" "$prefix") || return 1
+    inspection=${8:-}
+    if [ -z "$inspection" ]; then
+        inspection=$(import_inspect_dump "$dump" "$prefix") || return 1
+    fi
     tables=$(import_field "$inspection" 1)
     initial=$(import_field "$inspection" 2)
     statements=$(import_field "$inspection" 3)
@@ -773,7 +798,7 @@ import_archive_analyze() {
                 name = names[i]
                 if (root != "" && index(name, root) == 1) continue
                 if (root == "" && index(name, "/") > 0) continue
-                if (name ~ /\.sql(\.gz|\.xz|\.zst)?$/ && types[i] == "f") {
+                if (name ~ /(\.sql(\.gz|\.xz|\.zst)?|\.mariadb\.tar\.(gz|zst))$/ && types[i] == "f") {
                     dumps++
                     if (dumps == 1) dump = name; else dump_list = dump_list ", " name
                     continue
@@ -783,7 +808,7 @@ import_archive_analyze() {
                 if (types[i] == "d") {
                     keep = ancestor_of(name, root)
                     for (j = 1; j <= count; j++) {
-                        if (names[j] ~ /\.sql(\.gz|\.xz|\.zst)?$/ && types[j] == "f" && ancestor_of(name, names[j])) keep = 1
+                        if (names[j] ~ /(\.sql(\.gz|\.xz|\.zst)?|\.mariadb\.tar\.(gz|zst))$/ && types[j] == "f" && ancestor_of(name, names[j])) keep = 1
                     }
                     if (keep) continue
                 }
@@ -792,7 +817,7 @@ import_archive_analyze() {
                 if (extras <= 5) extra_list = extra_list (extra_list == "" ? "" : ", ") name
             }
             if (dumps == 0) {
-                print "ERROR: the archive holds no database dump (.sql, .sql.gz, .sql.xz or .sql.zst) next to the site" > "/dev/stderr"
+                print "ERROR: the archive holds no database dump (.sql, compressed SQL or .mariadb.tar.gz/.zst) next to the site" > "/dev/stderr"
                 exit 1
             }
             if (dumps > 1) {
@@ -1332,6 +1357,9 @@ import_remote_detect() {
     if [ -n "$budget" ]; then
         options=(--size-timeout "$budget")
     fi
+    if [ -n "${IMPORT_DATABASE_FORMAT:-}" ]; then
+        options+=(--database-format "$IMPORT_DATABASE_FORMAT")
+    fi
     if [ -n "$excludes$includes" ] && ! import_remote_paths_ok "$excludes $includes"; then
         echo "ERROR: the paths to leave behind or take along must be plain paths relative to the site directory, space separated: '$excludes $includes'" >&2
         return 1
@@ -1355,9 +1383,13 @@ import_remote_dump() {
     local exporter="$1"
     local dir="$2"
     local output="$3"
+    local -a options=()
 
     import_remote_path_check "$dir" || return 1
-    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- dump "$dir" < "$exporter" > "$output"
+    if [ -n "${IMPORT_REMOTE_DATABASE_FORMAT:-}" ]; then
+        options+=(--database-format "$IMPORT_REMOTE_DATABASE_FORMAT")
+    fi
+    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- "${options[@]}" dump "$dir" < "$exporter" > "$output"
 }
 
 #################################################################
