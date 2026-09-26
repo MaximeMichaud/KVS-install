@@ -151,6 +151,8 @@ A site whose search ran through the KVS External Search plugin (Sphinx or Mantic
 
 The table prefix comes from the site's `setup.php` (`ktvs_` for every archive KVS ships, whatever the old server used for an imported site) and reaches every script that names a table, the Manticore indexer included, through `TABLES_PREFIX` in `.env`.
 
+The debug switches of the old server's `setup.php` are turned off on import: `enable_debug`, and `sql_debug`, the query log KVS support turns on by hand, which writes every query into `admin/logs/debug_sql_get.txt` and `debug_sql_post.txt` for as long as it stays on.
+
 Not covered: a domain the KVS license does not accept (it needs a new archive from KVS), custom web server rules from the old vhost, and the standalone installer.
 
 ## Compatibility

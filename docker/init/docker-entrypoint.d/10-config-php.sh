@@ -12,7 +12,7 @@ setup_php_value() {
     local key="$1"
 
     # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
-    sed -n -E "s/^[[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*\"([^\"]*)\".*/\\1/p" \
+    sed -n -E "s/^[[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p" \
         "$KVS_PATH/admin/include/setup.php" | head -n 1
 }
 
@@ -109,16 +109,20 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     adopt_setup_php_binary image_magick_path /usr/bin/convert /usr/local/bin/convert
     adopt_setup_php_binary mysqldump_path /usr/bin/mysqldump /usr/bin/mariadb-dump
 
-    # KVS debug mode ($config['enable_debug'], "for dev debugging" in the
-    # stock file) writes every request and query into admin/logs
-    # (debug_sql_get.txt and friends), files that grow without limit. An
-    # old server may have left it on; the site starts here without it.
-    if [ "$(setup_php_value enable_debug)" = true ]; then
-        # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
-        sed -E -i "s#^([[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]enable_debug['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*)\"true\"#\\1\"false\"#" \
-            "$KVS_PATH/admin/include/setup.php"
-        log_info "KVS debug mode (enable_debug in setup.php) was on: turned off, it logs every query into admin/logs"
-    fi
+    # Two debug switches of setup.php fill admin/logs without limit:
+    # $config['enable_debug'] ("for dev debugging" in the stock file) and
+    # $config['sql_debug'], which the stock file does not carry (KVS support
+    # adds the line by hand) and which writes every query into
+    # debug_sql_get.txt and debug_sql_post.txt, gigabytes on a busy site. An
+    # old server may have left either on; the site starts here without them.
+    for debug_key in enable_debug sql_debug; do
+        if [ "$(setup_php_value "$debug_key")" = true ]; then
+            # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
+            sed -E -i "s#^([[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${debug_key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*)['\"]true['\"]#\\1\"false\"#" \
+                "$KVS_PATH/admin/include/setup.php"
+            log_info "KVS $debug_key was on in setup.php: turned off, it fills admin/logs on every request"
+        fi
+    done
 else
     log_warn "setup.php not found, skipping PHP configuration"
 fi
