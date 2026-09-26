@@ -731,6 +731,67 @@ EOF
     pass "the old nginx configuration is saved and its rewrites recovered"
 }
 
+test_the_rewrite_recovery_follows_the_includes_of_the_server_block() {
+    local dump="$TMP_ROOT/old-nginx-includes.conf" rules
+
+    cat > "$dump" <<'EOF'
+# configuration file /etc/nginx/nginx.conf:
+http {
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+}
+# configuration file /etc/nginx/conf.d/other.conf:
+server {
+    include globals/other.conf;
+    rewrite ^/other$ /other.php last;
+}
+# configuration file /etc/nginx/globals/other.conf:
+root /var/www/other;
+# configuration file /etc/nginx/sites-enabled/site.conf:
+server {
+    listen 80;
+    server_name example.com;
+    include globals/kvs.conf;
+    location /admin/ {
+        include "/etc/nginx/snippets/admin-?.conf";
+    }
+}
+# configuration file /etc/nginx/globals/kvs.conf:
+root /var/www/website;
+include 'globals/rewrites/*.conf';
+# configuration file /etc/nginx/globals/rewrites/videos.conf:
+rewrite ^/videos/$ /videos.php last;
+include globals/kvs.conf;
+# configuration file /etc/nginx/globals/rewrites/albums.conf:
+location /albums/ {
+    rewrite ^/albums/$ /albums.php last;
+}
+# configuration file /etc/nginx/snippets/admin-a.conf:
+rewrite ^/admin/a$ /admin/a.php last;
+# configuration file /etc/nginx/snippets/admin-other.conf:
+rewrite ^/never$ /never.php last;
+EOF
+    rules=$(import_nginx_rewrites_from_config "$dump" /var/www/website)
+    [ "$rules" = $'rewrite ^/videos/$ /videos.php last;\nrewrite ^/albums/$ /albums.php last;\nrewrite ^/admin/a$ /admin/a.php last;' ] ||
+        fail "the root and the rules of the included files count for the block, a pattern names its files, a cycle stops: $rules"
+    [ "$(import_nginx_rewrites_from_config "$dump" /var/www/other)" = 'rewrite ^/other$ /other.php last;' ] ||
+        fail "a root kept in an included file qualifies the block"
+    # Gathered without nginx, the dump does not start with nginx.conf: a
+    # relative include is found by its ending.
+    cat > "$dump" <<'EOF'
+# configuration file /etc/nginx/sites-enabled/site.conf:
+server {
+    root /var/www/website;
+    include snippets/kvs.conf;
+}
+# configuration file /etc/nginx/snippets/kvs.conf:
+rewrite ^/videos/$ /videos.php last;
+EOF
+    [ "$(import_nginx_rewrites_from_config "$dump" /var/www/website)" = 'rewrite ^/videos/$ /videos.php last;' ] ||
+        fail "a relative include is found by its ending when the dump does not start with nginx.conf"
+    pass "the rewrite recovery follows the includes of the server block"
+}
+
 test_remote_detect_dump_and_files_go_through_one_ssh() {
     local bin="$TMP_ROOT/ssh-bin" exporter="$TMP_ROOT/fake-export.sh" site destination
 
@@ -984,6 +1045,7 @@ test_external_search_plugin_is_recognized
 test_ssh_setup_validates_and_builds_the_options
 test_a_password_reaches_ssh_through_sshpass
 test_the_old_nginx_configuration_is_saved_and_its_rewrites_recovered
+test_the_rewrite_recovery_follows_the_includes_of_the_server_block
 test_remote_detect_dump_and_files_go_through_one_ssh
 test_a_user_with_sudo_runs_the_remote_side_through_it
 test_password_protected_archives_are_refused_with_a_reason

@@ -91,10 +91,23 @@ test_the_encoding_of_the_imported_site_decides() {
     grep -q "Plain PHP files detected in the imported site" "$TEST_DIR/out" || fail "the source of the answer is named"
     IMPORT_SITE_IONCUBE=yes detect_ioncube > "$TEST_DIR/out" || fail "detection must succeed"
     grep -q "^IONCUBE=YES$" .env || fail "an encoded site turns the loader on: $(cat .env)"
-    # Nothing known and no archive: the loader stays on.
+    # Nothing known and no archive: the loader stays as it is.
     IMPORT_SITE_IONCUBE="" detect_ioncube > "$TEST_DIR/out" || fail "detection must succeed without an archive"
     grep -q "^IONCUBE=YES$" .env || fail "without an answer the loader stays on"
-    grep -q "Defaulting to IonCube=YES" "$TEST_DIR/out" || fail "the default is announced"
+    grep -q "Keeping IONCUBE=YES" "$TEST_DIR/out" || fail "what is kept is announced: $(cat "$TEST_DIR/out")"
+    # A site in place decides before the archive, on a re-run as well.
+    local site="$TEST_DIR/placed"
+    mkdir -p "$site/admin/include"
+    printf '<?php //004fe\nif(!extension_loaded("ionCube Loader")){die();}\n' > "$site/admin/include/functions_base.php"
+    echo "IONCUBE=NO" > .env
+    IMPORT_SITE_IONCUBE="" detect_ioncube "$site" > "$TEST_DIR/out" || fail "detection must succeed on a site in place"
+    grep -q "^IONCUBE=YES$" .env || fail "an encoded site in place turns the loader on: $(cat .env)"
+    grep -q "in the site under $site" "$TEST_DIR/out" || fail "the site in place is named as the source: $(cat "$TEST_DIR/out")"
+    printf '<?php\nfunction sql() {}\n' > "$site/admin/include/functions_base.php"
+    : > "kvs-archive/KVS_7.0.2_[example.com].zip"
+    IMPORT_SITE_IONCUBE="" detect_ioncube "$site" > "$TEST_DIR/out" || fail "detection must succeed on a plain site in place"
+    grep -q "^IONCUBE=NO$" .env || fail "a plain site in place turns the loader off, archive or not: $(cat .env)"
+    rm -f "kvs-archive/KVS_7.0.2_[example.com].zip"
     pass "the encoding of the imported site decides"
 }
 
@@ -134,15 +147,17 @@ test_the_rewrites_come_from_the_site_the_operator_the_archive_or_the_old_server(
     echo "rewrite ^/given$ /given.php last;" > "$TEST_DIR/given.txt"
     IMPORT_NGINX_REWRITES="$TEST_DIR/given.txt"
     out=$(import_ensure_nginx_rewrites "$site") || fail "the operator's file is taken"
-    grep -q "from $TEST_DIR/given.txt" <<< "$out" || fail "the operator's file is announced: $out"
+    grep -q "from $TEST_DIR/given.txt (kept in $IMPORT_STAGING/example.com.nginx_config.txt for the next pass)" <<< "$out" || fail "the operator's file is announced: $out"
     [ "$(cat "$site/_INSTALL/nginx_config.txt")" = "rewrite ^/given$ /given.php last;" ] || fail "the operator's file is copied into _INSTALL"
+    [ "$(cat "$IMPORT_STAGING/example.com.nginx_config.txt")" = "rewrite ^/given$ /given.php last;" ] || fail "the operator's file is kept for the next pass"
     rm -rf "$site/_INSTALL"
     IMPORT_NGINX_REWRITES="$TEST_DIR/absent.txt"
     (import_ensure_nginx_rewrites "$site") > "$TEST_DIR/out" 2>&1 && fail "an unreadable operator file must stop the import"
     grep -q "not a readable, non-empty file" "$TEST_DIR/out" || fail "the unreadable file is named: $(cat "$TEST_DIR/out")"
     IMPORT_NGINX_REWRITES=""
 
-    # An archive in kvs-archive/: the init extracts the rules from it.
+    # An archive in kvs-archive/: the init extracts the rules from it,
+    # before the copy kept from the earlier pass.
     rm -rf "$site"
     mkdir -p "$site"
     : > "kvs-archive/KVS_7.0.2_[example.com].zip"
@@ -150,6 +165,22 @@ test_the_rewrites_come_from_the_site_the_operator_the_archive_or_the_old_server(
     grep -q "from the KVS archive" <<< "$out" || fail "the archive is announced: $out"
     [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail "nothing is written when the archive serves"
     rm -f "kvs-archive/KVS_7.0.2_[example.com].zip"
+
+    # The next pass, the site's _INSTALL cleaned by the init: the kept copy serves.
+    out=$(import_ensure_nginx_rewrites "$site") || fail "the kept copy is enough"
+    grep -q "from the earlier pass ($IMPORT_STAGING/example.com.nginx_config.txt)" <<< "$out" || fail "the earlier pass is announced: $out"
+    [ "$(cat "$site/_INSTALL/nginx_config.txt")" = "rewrite ^/given$ /given.php last;" ] || fail "the kept rules are written back"
+    # The real domain taking over the files of the development one: the
+    # copy of that domain serves and becomes this domain's.
+    rm -rf "$site/_INSTALL"
+    mv "$IMPORT_STAGING/example.com.nginx_config.txt" "$IMPORT_STAGING/dev.example.com.nginx_config.txt"
+    IMPORT_REUSE_SITE_DIR=/var/www/dev.example.com
+    out=$(import_ensure_nginx_rewrites "$site") || fail "the copy of the domain taken over is enough"
+    grep -q "from the earlier pass ($IMPORT_STAGING/dev.example.com.nginx_config.txt)" <<< "$out" || fail "the domain taken over is announced: $out"
+    [ "$(cat "$IMPORT_STAGING/example.com.nginx_config.txt")" = "rewrite ^/given$ /given.php last;" ] || fail "the copy now carries this domain's name too"
+    IMPORT_REUSE_SITE_DIR=""
+    rm -f "$IMPORT_STAGING"/*.nginx_config.txt
+    rm -rf "$site/_INSTALL"
 
     # The old server's configuration: the rules of the site's server block.
     cat > "$TEST_DIR/old-nginx.conf" <<'EOF'
@@ -166,12 +197,15 @@ EOF
     IMPORT_NGINX_CONFIG="$TEST_DIR/old-nginx.conf"
     out=$(import_ensure_nginx_rewrites "$site") || fail "the old server's rules are enough"
     grep -q "2 rules recovered from the old server's nginx configuration" <<< "$out" || fail "the recovered rules are counted: $out"
+    grep -q "kept in $IMPORT_STAGING/example.com.nginx_config.txt for the next pass" <<< "$out" || fail "the kept copy is announced: $out"
+    grep -q '^rewrite ^/videos/$ /videos.php last;$' "$IMPORT_STAGING/example.com.nginx_config.txt" || fail "the recovered rules are kept for the next pass"
     grep -q '^rewrite ^/videos/$ /videos.php last;$' "$site/_INSTALL/nginx_config.txt" || fail "the site's rules are written"
     grep -q '^rewrite ^/video/(\[0-9\]{1,8})/$ /view_video.php?id=$1 last;$' "$site/_INSTALL/nginx_config.txt" || fail "a quantifier in a rule does not break the block"
     grep -q '^# Rewrite rules recovered by kvs-install' "$site/_INSTALL/nginx_config.txt" || fail "the file says where it comes from"
     grep -q other "$site/_INSTALL/nginx_config.txt" && fail "the other site's rules stay out"
     # The remote site directory names the block when the project path differs.
     rm -rf "$site/_INSTALL"
+    rm -f "$IMPORT_STAGING/example.com.nginx_config.txt"
     IMPORT_REMOTE_DIR=/var/www/website
     IMPORT_OLD_PATH=/home/old/www
     out=$(import_ensure_nginx_rewrites "$site") || fail "the remote directory names the block"
@@ -181,6 +215,7 @@ EOF
 
     # Nothing at all: the import stops and says what to provide.
     rm -rf "$site/_INSTALL"
+    rm -f "$IMPORT_STAGING/example.com.nginx_config.txt"
     IMPORT_NGINX_CONFIG="$TEST_DIR/old-nginx.conf"
     IMPORT_OLD_PATH=/var/www/nothing
     (import_ensure_nginx_rewrites "$site") > "$TEST_DIR/out" 2>&1 && fail "no rules from anywhere must stop the import"
@@ -190,10 +225,24 @@ EOF
     [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail "nothing is written on failure"
     IMPORT_OLD_PATH=/var/www/website
 
-    # Outside an import, nothing happens.
+    # Outside an import, nothing happens...
     IMPORT_MODE=false
     import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "outside an import the function is a no-op"
     [ ! -s "$TEST_DIR/out" ] || fail "and says nothing"
+    [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail "and writes nothing without a site in place"
+    # ... unless the site is in place without an archive and a copy was
+    # kept: a re-run with recreated volumes gives the init its source back.
+    mkdir -p "$site/admin/include" "$IMPORT_STAGING"
+    : > "$site/admin/include/setup.php"
+    echo "rewrite ^/kept$ /kept.php last;" > "$IMPORT_STAGING/example.com.nginx_config.txt"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "a re-run restores the kept rules"
+    [ ! -s "$TEST_DIR/out" ] || fail "quietly"
+    [ "$(cat "$site/_INSTALL/nginx_config.txt")" = "rewrite ^/kept$ /kept.php last;" ] || fail "the kept rules are back in _INSTALL for the init"
+    rm -rf "$site/_INSTALL"
+    : > "kvs-archive/KVS_7.0.2_[example.com].zip"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "with an archive the init extracts the rules itself"
+    [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail "nothing is written when an archive is there"
+    rm -f "kvs-archive/KVS_7.0.2_[example.com].zip" "$IMPORT_STAGING/example.com.nginx_config.txt"
     IMPORT_MODE=true
     pass "the rewrites come from the site, the operator, the archive or the old server"
 }

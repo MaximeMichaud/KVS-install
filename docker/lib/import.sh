@@ -981,15 +981,27 @@ import_nginx_config_save() {
 # under it), in the form of _INSTALL/nginx_config.txt: what KVS ships in
 # that file is the list of its rewrite directives plus the protection of
 # a few directories, which the stack's own vhost denies already. Each
-# rule once, the http and https blocks repeat them. A brace counts only
-# where nginx formats it, opening at the end of a line and closing at the
-# start of one, so a quantifier inside a regular expression does not
-# unbalance the count. Prints nothing when no block serves the site.
+# rule once, the http and https blocks repeat them. The configuration is
+# the dump of nginx -T, or of the files gathered without it, every file
+# behind a "# configuration file <path>:" line: an include directive met
+# inside a server block is followed into the files of the dump it names
+# (absolute, relative to the directory of the main configuration file,
+# or by their ending when the dump was gathered without nginx), so a root
+# or a rewrite directive kept in an included file counts for the block.
+# A brace counts only where nginx formats it, opening at the end of a
+# line and closing at the start of one, so a quantifier inside a regular
+# expression does not unbalance the count. Prints nothing when no block
+# serves the site.
 import_nginx_rewrites_from_config() {
     local config="$1" site="${2%/}" project="${3:-}"
 
     project=${project%/}
     awk -v site="$site" -v project="$project" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
         function root_of(s,    r) {
             r = s
             sub(/^root[[:space:]]+/, "", r)
@@ -997,28 +1009,95 @@ import_nginx_rewrites_from_config() {
             sub(/\/$/, "", r)
             return r
         }
+        function serves_site(r) {
+            return r == site || (project != "" && r == project) || index(r, site "/") == 1 || (project != "" && index(r, project "/") == 1)
+        }
+        function include_of(s,    p, q) {
+            q = sprintf("%c", 39)
+            p = s
+            sub(/^include[[:space:]]+/, "", p)
+            sub(/[[:space:]]*;.*$/, "", p)
+            if (substr(p, 1, 1) == "\"" || substr(p, 1, 1) == q) p = substr(p, 2)
+            if (substr(p, length(p), 1) == "\"" || substr(p, length(p), 1) == q) p = substr(p, 1, length(p) - 1)
+            return p
+        }
+        # The regular expression of a shell pattern; * and ? stay within one path component.
+        function glob_regex(g,    re, i, c) {
+            re = ""
+            for (i = 1; i <= length(g); i++) {
+                c = substr(g, i, 1)
+                if (c == "*") re = re "[^/]*"
+                else if (c == "?") re = re "[^/]"
+                else if (c ~ /[.+(){}^$|\\]/) re = re "\\" c
+                else re = re c
+            }
+            return re
+        }
+        # The files of the dump an include directive names, in found[level, 1..n].
+        function files_named(pattern, level,    n, i, re) {
+            n = 0
+            if (pattern ~ /^\//) {
+                re = "^" glob_regex(pattern) "$"
+                for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
+                return n
+            }
+            re = "^" glob_regex(prefix "/" pattern) "$"
+            for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
+            if (n > 0) return n
+            re = "/" glob_regex(pattern) "$"
+            for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
+            return n
+        }
+        # A directive of the server block being read, in its own file or in an included one.
+        function directive(l, level,    n, k) {
+            if (l ~ /^root[[:space:]]/) {
+                if (serves_site(root_of(l))) qualifies = 1
+            } else if (l ~ /^rewrite[[:space:]]/) {
+                rules[count++] = l
+            } else if (l ~ /^include[[:space:]]/ && level < 8) {
+                n = files_named(include_of(l), level)
+                for (k = 1; k <= n; k++) included(found[level, k], level + 1)
+            }
+        }
+        # An included file, once per server block.
+        function included(f, level,    i, l) {
+            if ((block, f) in visited) return
+            visited[block, f] = 1
+            for (i = 1; i <= nlines[f]; i++) {
+                l = trim(content[f, i])
+                if (l ~ /^#/) continue
+                directive(l, level)
+            }
+        }
+        NR == FNR {
+            if ($0 ~ /^# configuration file .*:$/) {
+                current = $0
+                sub(/^# configuration file /, "", current)
+                sub(/:$/, "", current)
+                if (!(current in nlines)) {
+                    nlines[current] = 0
+                    files[++nfiles] = current
+                    if (nfiles == 1) {
+                        prefix = current
+                        sub(/\/[^\/]*$/, "", prefix)
+                    }
+                }
+                next
+            }
+            if (current != "") content[current, ++nlines[current]] = $0
+            next
+        }
         {
-            line = $0
-            sub(/^[[:space:]]+/, "", line)
-            sub(/[[:space:]]+$/, "", line)
+            line = trim($0)
             if (line ~ /^#/) next
             if (line ~ /^server[[:space:]]*\{$/) {
                 in_server = 1
                 server_depth = depth
                 qualifies = 0
                 count = 0
+                block++
             }
-            if (in_server) {
-                if (line ~ /^root[[:space:]]/) {
-                    r = root_of(line)
-                    if (r == site || (project != "" && r == project) || index(r, site "/") == 1 || (project != "" && index(r, project "/") == 1)) {
-                        qualifies = 1
-                    }
-                }
-                if (line ~ /^rewrite[[:space:]]/) {
-                    rules[count++] = line
-                }
-            }
+            if (in_server) directive(line, 0)
             if (line ~ /\{$/) depth++
             if (line ~ /^\}/) {
                 depth--
@@ -1032,7 +1111,7 @@ import_nginx_rewrites_from_config() {
                     count = 0
                 }
             }
-        }' "$config"
+        }' "$config" "$config"
 }
 
 #################################################################

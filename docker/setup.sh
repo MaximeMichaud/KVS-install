@@ -96,7 +96,10 @@ ENVIRONMENT VARIABLES:
                           _INSTALL/nginx_config.txt of the site's version)
                           when the site kept none and kvs-archive/ holds no
                           archive; without it they are recovered from the
-                          old server's nginx configuration.
+                          old server's nginx configuration (its include
+                          directives followed). Given or recovered, they are
+                          kept in import/<domain>.nginx_config.txt for the
+                          next pass and for a re-run with recreated volumes.
 
 EXAMPLES:
     # Production installation
@@ -1008,14 +1011,30 @@ import_save_nginx_config() {
 # The KVS rewrite rules the vhost includes, as _INSTALL/nginx_config.txt
 # of the imported site: the file KVS ships, when the site kept it; else
 # IMPORT_NGINX_REWRITES; else the KVS archive (the init extracts them);
-# else the rules recovered from the old server's nginx configuration.
-# Written after every transfer, since rsync mirrors the old server and
-# removes a file it does not have.
+# else the copy kept from an earlier pass, under this domain or under the
+# one whose files are taken over; else the rules recovered from the old
+# server's nginx configuration. Written after every transfer, since
+# rsync mirrors the old server and removes a file it does not have. A
+# file given or recovered is kept as import/<domain>.nginx_config.txt,
+# outside the webroot the init cleans _INSTALL from: the archive of a
+# fresh install has no counterpart here, that copy is what a re-run with
+# recreated volumes takes the rules from.
 import_ensure_nginx_rewrites() {
-    local site="${1:-/var/www/$DOMAIN}" target rules count
+    local site="${1:-/var/www/$DOMAIN}" target kept previous from rules count
 
-    [ "$IMPORT_MODE" = true ] || return 0
     target="$site/_INSTALL/nginx_config.txt"
+    kept="$IMPORT_STAGING/${DOMAIN}.nginx_config.txt"
+    if [ "$IMPORT_MODE" != true ]; then
+        # Outside an import the init keeps the rules it has; a site that
+        # came without the archive gets them back from the kept copy when
+        # its volumes were recreated.
+        if [ -f "$site/admin/include/setup.php" ] && [ ! -s "$target" ] && [ -s "$kept" ] &&
+            ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
+            mkdir -p "$site/_INSTALL" || exit 1
+            cp -- "$kept" "$target" || exit 1
+        fi
+        return 0
+    fi
     if [ -s "$target" ]; then
         echo "  Nginx rewrites:  from the site's _INSTALL/nginx_config.txt"
         return 0
@@ -1025,27 +1044,41 @@ import_ensure_nginx_rewrites() {
             echo -e "${RED}ERROR: IMPORT_NGINX_REWRITES=$IMPORT_NGINX_REWRITES is not a readable, non-empty file${NC}"
             exit 1
         fi
-        mkdir -p "$site/_INSTALL" || exit 1
+        mkdir -p "$site/_INSTALL" "$IMPORT_STAGING" || exit 1
         cp -- "$IMPORT_NGINX_REWRITES" "$target" || exit 1
-        echo "  Nginx rewrites:  from $IMPORT_NGINX_REWRITES"
+        cp -- "$target" "$kept" || exit 1
+        echo "  Nginx rewrites:  from $IMPORT_NGINX_REWRITES (kept in $kept for the next pass)"
         return 0
     fi
     if ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
         echo "  Nginx rewrites:  from the KVS archive in kvs-archive/"
         return 0
     fi
+    previous=""
+    if [ -n "${IMPORT_REUSE_SITE_DIR:-}" ]; then
+        previous="$IMPORT_STAGING/$(basename "$IMPORT_REUSE_SITE_DIR").nginx_config.txt"
+    fi
+    for from in "$kept" "$previous"; do
+        { [ -n "$from" ] && [ -s "$from" ]; } || continue
+        mkdir -p "$site/_INSTALL" || exit 1
+        cp -- "$from" "$target" || exit 1
+        [ "$from" = "$kept" ] || cp -- "$from" "$kept" || exit 1
+        echo "  Nginx rewrites:  from the earlier pass ($from)"
+        return 0
+    done
     if [ -n "$IMPORT_NGINX_CONFIG" ] && [ -s "$IMPORT_NGINX_CONFIG" ]; then
         rules=$(import_nginx_rewrites_from_config "$IMPORT_NGINX_CONFIG" "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH")
         count=$(printf '%s\n' "$rules" | grep -c '^rewrite' || true)
         if [ "${count:-0}" -gt 0 ]; then
-            mkdir -p "$site/_INSTALL" || exit 1
+            mkdir -p "$site/_INSTALL" "$IMPORT_STAGING" || exit 1
             {
                 echo "# Rewrite rules recovered by kvs-install from the nginx configuration of the old server"
                 echo "# ($IMPORT_NGINX_CONFIG, the server blocks serving the site). The KVS package ships"
                 echo "# this file as _INSTALL/nginx_config.txt; replace it with that one to be exact."
                 printf '%s\n' "$rules"
             } > "$target" || exit 1
-            echo "  Nginx rewrites:  $count rules recovered from the old server's nginx configuration, written to $target (check them)"
+            cp -- "$target" "$kept" || exit 1
+            echo "  Nginx rewrites:  $count rules recovered from the old server's nginx configuration, written to $target (check them; kept in $kept for the next pass)"
             return 0
         fi
     fi
@@ -2337,6 +2370,8 @@ select_mariadb_version() {
 
 # Auto-detect IonCube encoding in KVS archive
 detect_ioncube() {
+    local site="${1:-/var/www/${DOMAIN:-}}"
+
     echo ""
     echo -e "${CYAN}Detecting IonCube encoding...${NC}"
 
@@ -2355,11 +2390,29 @@ detect_ioncube() {
             ;;
     esac
 
+    # A site in place (imported without the archive, or installed from
+    # one since removed) is what runs: its own files decide before the
+    # archive.
+    if [ -f "$site/admin/include/functions_base.php" ] && declare -F import_site_ioncube > /dev/null; then
+        case "$(import_site_ioncube "$site")" in
+            yes)
+                echo -e "${GREEN}✓ IonCube encoded files detected in the site under $site${NC}"
+                sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+                return
+                ;;
+            no)
+                echo -e "${GREEN}✓ Plain PHP files detected in the site under $site (no IonCube)${NC}"
+                sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+                return
+                ;;
+        esac
+    fi
+
     # Find KVS archive
     local KVS_FILE
     KVS_FILE=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
     if [ -z "$KVS_FILE" ]; then
-        echo -e "${YELLOW}KVS archive not found. Defaulting to IonCube=YES${NC}"
+        echo -e "${YELLOW}KVS archive not found. Keeping IONCUBE=${IONCUBE:-YES}${NC}"
         return
     fi
 
@@ -2426,9 +2479,12 @@ php_version_is_supported() {
 }
 
 # Read the version KVS documents for the archive in kvs-archive/, or for
-# the imported site when no archive is there (the site says its version
-# itself). Prints nothing and fails when neither gives a version.
+# the imported site when no archive is there, or for the site in place
+# (imported without the archive, or installed from one since removed):
+# the site says its version itself. Prints nothing and fails when none
+# gives a version.
 kvs_documented_php_version() {
+    local site="${1:-/var/www/${DOMAIN:-}}"
     local kvs_file
     local kvs_version=""
     local major
@@ -2441,6 +2497,10 @@ kvs_documented_php_version() {
     fi
     if [ -z "$kvs_version" ] && [ "${IMPORT_MODE:-false}" = true ]; then
         kvs_version=$(printf '%s' "${IMPORT_SITE_VERSION:-}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    fi
+    if [ -z "$kvs_version" ] && [ -f "$site/admin/include/version.php" ] &&
+        declare -F import_read_kvs_version > /dev/null; then
+        kvs_version=$(import_read_kvs_version "$site" 2>/dev/null | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
     fi
     [ -n "$kvs_version" ] || return 1
 
@@ -2601,6 +2661,11 @@ elif [ "$IMPORT_MODE" = true ]; then
     # An imported site brings its version, its encoding and its nginx
     # rewrites; the archive is a fallback for the rewrites only.
     echo "No KVS archive in ./kvs-archive/, none needed for an import"
+elif [ -f "/var/www/$DOMAIN/admin/include/setup.php" ]; then
+    # The site is in place (imported, or installed from an archive since
+    # removed): a re-run reads the site itself, and the init keeps the
+    # nginx rewrites it has or takes them from the copy an import kept.
+    echo "No KVS archive in ./kvs-archive/, none needed: the site is in place under /var/www/$DOMAIN"
 else
     echo -e "${RED}No KVS archive found in ./kvs-archive/${NC}"
     echo "Please copy your KVS_X.X.X_[domain.tld].zip file to ./kvs-archive/"
