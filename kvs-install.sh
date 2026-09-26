@@ -7,6 +7,10 @@
 # This script is intended for a quick and easy installation :
 # bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh)
 #
+# A branch of the repository, to try a change before it is merged, with the
+# kvs-install.sh of that branch:
+# KVS_INSTALL_BRANCH=<branch> bash <(curl -s https://raw.githubusercontent.com/MaximeMichaud/KVS-install/<branch>/kvs-install.sh)
+#
 # KVS-install Copyright (c) 2020-2025 Maxime Michaud
 # Licensed under GNU General Public License v3.0
 #################################################################
@@ -1602,14 +1606,16 @@ function chooseInstallationType() {
 # Clone the repository next to the installation directory and swap it in
 # only once the clone succeeded. A failed pull followed by a failed clone
 # (GitHub unreachable) must leave the Compose files of a running site in
-# place instead of deleting the directory first.
+# place instead of deleting the directory first. The branch is main unless
+# KVS_INSTALL_BRANCH names another one.
 clone_kvs_install() {
   local install_dir="$1"
   local staging="${install_dir}.clone"
+  local branch="${KVS_INSTALL_BRANCH:-main}"
   local status
 
   rm -rf "$staging" || return $?
-  git clone https://github.com/MaximeMichaud/KVS-install.git "$staging"
+  git clone --branch "$branch" https://github.com/MaximeMichaud/KVS-install.git "$staging"
   status=$?
   if ((status != 0)); then
     rm -rf "$staging"
@@ -1617,6 +1623,20 @@ clone_kvs_install() {
   fi
   rm -rf "$install_dir" || return $?
   mv "$staging" "$install_dir"
+}
+
+# Bring an installed copy to the latest commit of its branch, or of the
+# branch KVS_INSTALL_BRANCH names: a change tried before it is merged.
+update_kvs_install() {
+  local branch="${KVS_INSTALL_BRANCH:-}"
+
+  if [[ -z "$branch" ]]; then
+    git pull
+    return $?
+  fi
+  git fetch origin "$branch" || return $?
+  git checkout "$branch" || return $?
+  git pull --ff-only origin "$branch"
 }
 
 backup_user_data() {
@@ -1735,8 +1755,8 @@ function dockerInstall() {
   fi
 
   if [[ -d "$INSTALL_DIR/.git" ]]; then
-    echo "Updating existing installation..."
-    if cd "$INSTALL_DIR" && git pull; then
+    echo "Updating existing installation${KVS_INSTALL_BRANCH:+ (branch $KVS_INSTALL_BRANCH)}..."
+    if cd "$INSTALL_DIR" && update_kvs_install; then
       echo "${green}Updated successfully${normal}"
       if [[ -z "${KVS_BACKUP_DIR:-}" ]]; then
         rmdir "$BACKUP_DIR" 2>/dev/null || true
@@ -1757,7 +1777,7 @@ function dockerInstall() {
   else
     # Directory doesn't exist or is not a git repo
     backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
-    echo "Cloning KVS-install..."
+    echo "Cloning KVS-install${KVS_INSTALL_BRANCH:+ (branch $KVS_INSTALL_BRANCH)}..."
     clone_kvs_install "$INSTALL_DIR"
     clone_status=$?
     if ((clone_status != 0)); then
