@@ -99,6 +99,17 @@ if [ "${STUB_DB_FAIL:-no}" = yes ]; then
 fi
 for arg in "$@"; do
     case "$arg" in
+        *"SELECT 'unsupported'"*)
+            printf 'unsupported\t%s\ncount\t1\ntable\tktvs_options\ndirectory\t\nsocket\t2F746D702F666978747572652E736F636B\n' "${STUB_NATIVE_UNSUPPORTED:-0}"
+            exit 0
+            ;;
+        *'INTO OUTFILE'*)
+            [ "${STUB_NATIVE_FILE_ACCESS:-yes}" = yes ] || exit 1
+            path=${arg#*INTO OUTFILE \'}
+            path=${path%%\'*}
+            printf 'kvs-native-export-probe\n' > "$path"
+            exit 0
+            ;;
         *admin_servers*)
             # The storage server rows, tab separated, as the batch mode prints them.
             printf '%b' "${STUB_SERVERS:-}"
@@ -132,8 +143,23 @@ for arg in "$@"; do
         if [ "${STUB_DUMP_GTID:-no}" = yes ]; then
             printf '  --set-gtid-purged=name\n'
         fi
+        if [ "${STUB_NATIVE_CAPABLE:-no}" = yes ]; then
+            printf '  --dir=name\n  --parallel=count\n'
+        fi
         exit 0
     fi
+done
+for arg in "$@"; do
+    case $arg in
+        --dir=*)
+            [ "${STUB_NATIVE_DUMP_FAIL:-no}" != yes ] || exit 42
+            directory=${arg#*=}/oldsite
+            mkdir -p "$directory"
+            printf 'CREATE TABLE `ktvs_options` (`variable` varchar(255) PRIMARY KEY, `value` text);\n' > "$directory/ktvs_options.sql"
+            printf 'INITIAL_VERSION\t7.0.2\n' > "$directory/ktvs_options.txt"
+            exit 0
+            ;;
+    esac
 done
 if [ "${STUB_DB_FAIL:-no}" = yes ]; then
     echo "mariadb-dump: Got error: 2002: Can't connect to local server" >&2
@@ -218,7 +244,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep awk sort stat; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep awk sort stat id chmod chown mv sha256sum getconf; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -692,6 +718,10 @@ test_the_dump_uses_the_compressor_that_is_installed() {
     grep -Fq -- '-- Dump completed' <<< "$plain" || fail "the dump must carry the completion line"
     argv_lines | grep -Fq -- '[--single-transaction]' || fail "the dump needs --single-transaction"
     argv_lines | grep -Fq -- '[--no-autocommit]' || fail "the dump must batch INSERT statements during replay"
+    argv_lines | grep -Fq -- '[--extended-insert]' || fail "system options must not disable grouped INSERT statements"
+    argv_lines | grep -Fq -- '[--disable-keys]' || fail "the dump must defer non-unique MyISAM index maintenance"
+    argv_lines | grep -Fq -- '[--net-buffer-length=1048576]' || fail "system options must not shrink the INSERT statement buffer"
+    argv_lines | grep -Fq -- '[--opt]' && fail "the grouped options must not override the selected locking mode"
     argv_lines | grep -Fq -- '[--quick]' || fail "the dump needs --quick"
     argv_lines | grep -Fq -- '[--hex-blob]' || fail "the dump needs --hex-blob"
     argv_lines | grep -Fq -- '[--triggers]' || fail "the dump needs --triggers"
@@ -725,6 +755,88 @@ test_the_dump_uses_the_compressor_that_is_installed() {
     run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" --gzip detect "$site" || fail "detect must succeed"
     assert_key "$out" compressor gzip
     pass "the dump uses the compressor that is installed"
+}
+
+test_native_format_selection_and_bundle_integrity() {
+    local site="$TMP_ROOT/native-site" out="$TMP_ROOT/native.out" err="$TMP_ROOT/native.err"
+    local native_bin="$TMP_ROOT/native-bin" extracted="$TMP_ROOT/native-extracted"
+    local test_uid test_gid
+
+    make_site "$site"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "auto detection must succeed with an older dump tool"
+    assert_key "$out" db_dump_format sql
+    grep -q 'does not support --dir' "$out" || fail "SQL fallback must name the missing capability"
+    if run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format directory dump "$site"; then
+        fail "forced native export must refuse an older dump client"
+    fi
+    [ ! -s "$out" ] || fail "a refused native export must not emit a partial stream"
+
+    # The fixture process represents the mysql OS user, without changing
+    # accounts or filesystem ownership on the machine running this test.
+    mkdir "$native_bin" "$extracted"
+    test_uid=$(id -u)
+    test_gid=$(id -g)
+    cat > "$native_bin/id" <<EOF
+#!/bin/bash
+case \$1 in
+    -u) printf '%s\\n' '$test_uid' ;;
+    -g) printf '%s\\n' '$test_gid' ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod +x "$native_bin/id"
+    export STUB_NATIVE_CAPABLE=yes
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+        fail "native prerequisites must be checked: $(cat "$err")"
+    assert_key "$out" db_dump_format directory
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory --gzip dump "$site" ||
+        fail "native export must produce a bundle: $(cat "$err")"
+    tar -xzf "$out" -C "$extracted"
+    (cd "$extracted" && sha256sum -c SHA256SUMS >/dev/null) || fail "native checksums must verify after extraction"
+    assert_key "$extracted/kvs-native-export.manifest" complete yes
+    assert_key "$extracted/kvs-native-export.manifest" source_database oldsite
+    assert_key "$extracted/kvs-native-export.manifest" tables 1
+    [ -f "$extracted/data/ktvs_options.sql" ] && [ -f "$extracted/data/ktvs_options.txt" ] || fail "native data must use the flat bundle layout"
+    argv_lines | grep -Fq '[--parallel=0]' || fail "native source reads must share one consistent connection"
+    argv_lines | grep -Fq 'mariadb-dump argv: [--no-defaults]' || fail "native exports must not inherit filtering or formatting options"
+    grep -Fq '[--socket=/tmp/fixture.sock]' "$STUB_LOG" || fail "native exports must preserve the resolved local socket"
+    argv_lines | grep -Fq '[--default-character-set=binary]' || fail "native data must preserve original character bytes"
+
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory --gzip -y \
+        -o "$TMP_ROOT/native-archive.tar" archive "$site" || fail "native data must also work inside a full archive: $(cat "$err")"
+    tar -xOf "$TMP_ROOT/native-archive.tar" kvs-export.manifest > "$extracted/outer.manifest"
+    assert_key "$extracted/outer.manifest" dump database.mariadb.tar.gz
+    assert_key "$extracted/outer.manifest" db_dump_format directory
+    tar -xOf "$TMP_ROOT/native-archive.tar" database.mariadb.tar.gz | tar -tzf - >/dev/null || fail "the archived native payload must be readable"
+
+    make_site "$TMP_ROOT/native-tcp-site" https://tcp.example.com localhost:3307
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$TMP_ROOT/native-tcp-site" ||
+        fail "an explicit local TCP connection must be preserved: $(cat "$err")"
+    grep -Fq '[--protocol=tcp] [-h] [localhost] [-P] [3307]' "$STUB_LOG" || fail "native export must preserve the configured TCP endpoint"
+    grep -Fq '[--socket=' "$STUB_LOG" && fail "native export must not replace a TCP endpoint with a socket"
+
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=sql detect "$site" || fail "explicit SQL format must stay available"
+    assert_key "$out" db_dump_format sql
+    argv_lines | grep -Fq 'INTO OUTFILE' && fail "explicit SQL format must not probe native filesystem access"
+
+    export STUB_NATIVE_FILE_ACCESS=no
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "auto must fall back without FILE access"
+    assert_key "$out" db_dump_format sql
+    grep -q 'FILE access' "$out" || fail "the fallback must explain unavailable FILE access"
+    unset STUB_NATIVE_FILE_ACCESS
+    export STUB_NATIVE_UNSUPPORTED=1
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "auto must preserve unsupported schema with SQL format"
+    assert_key "$out" db_dump_format sql
+    unset STUB_NATIVE_UNSUPPORTED
+
+    export STUB_NATIVE_DUMP_FAIL=yes
+    if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format directory dump "$site"; then
+        fail "a failed native dump must not appear successful"
+    fi
+    [ ! -s "$out" ] || fail "the native dump must finish before streaming starts"
+    unset STUB_NATIVE_DUMP_FAIL STUB_NATIVE_CAPABLE
+    [ -z "$(find "$TMP_ROOT" -maxdepth 1 -name 'kvs-native-export.*' -print -quit)" ] || fail "private native staging must be removed after success and failure"
+    pass "native selection validates prerequisites and streams only a complete checksummed bundle"
 }
 
 test_column_statistics_is_passed_only_to_a_tool_that_knows_it() {
@@ -1053,6 +1165,9 @@ test_the_usage_is_available_and_bad_options_are_refused() {
     status=0
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -o || status=$?
     [ "$status" -eq 1 ] || fail "an option without its value must exit 1, got $status"
+    if run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format invalid; then
+        fail "an unknown database format must be refused"
+    fi
     pass "the usage is available and bad options are refused"
 }
 
@@ -1070,6 +1185,7 @@ test_the_password_reaches_the_client_only_through_the_environment
 test_the_connection_follows_the_host_written_in_setup_db
 test_an_unreachable_database_is_reported_without_stopping_detect
 test_the_dump_uses_the_compressor_that_is_installed
+test_native_format_selection_and_bundle_integrity
 test_column_statistics_is_passed_only_to_a_tool_that_knows_it
 test_gtid_state_is_left_out_by_a_tool_that_records_it
 test_non_transactional_tables_switch_the_dump_to_table_locks

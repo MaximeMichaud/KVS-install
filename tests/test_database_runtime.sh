@@ -11,6 +11,12 @@ for pair in '256 128M' '512 128M' '1024 256M' '2048 512M' '8192 2048M' '24576 40
     read -r available expected <<< "$pair"
     [ "$(database_buffer_pool_for_host "$available")" = "$expected" ] || fail "RAM budget $pair"
 done
+for budget in '32 24576 4096 8' '2 24576 4096 2' '32 1024 256 2' '8 512 128 1' '8 256 128 1'; do
+    read -r cpus available pool expected <<< "$budget"
+    [ "$(database_import_jobs_for_resources "$cpus" "$available" "$pool")" = "$expected" ] || fail "import connection budget $budget"
+done
+[ "$(database_import_jobs 32)" = 32 ] || fail 'explicit native concurrency'
+if database_import_jobs 33 >/dev/null 2>&1; then fail 'excessive native concurrency accepted'; fi
 
 database_available_memory_mb() { echo 24576; }
 docker() {
@@ -53,11 +59,25 @@ database_configure_buffer_pool >/dev/null
 grep -Fxq 'MARIADB_BUFFER_POOL_SIZE=2G' "$TEST_DIR/persisted.env" || fail 'saved pool was overwritten'
 MARIADB_BUFFER_POOL_SIZE_REQUEST='2G;echo unsafe'
 if database_configure_buffer_pool >/dev/null 2>&1; then fail 'malformed size accepted'; fi
+cat > "$TEST_DIR/compose.yml" <<'YAML'
+services:
+  mariadb:
+    cpus: 4.5
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+  php-fpm:
+    cpus: 1
+YAML
+[ "$(database_compose_cpu_limit)" = 2 ] || fail 'Docker CPU limit parsing'
+MARIADB_BUFFER_POOL_SIZE=2G
+[ "$(database_import_jobs auto)" -le 2 ] || fail 'automatic jobs ignore Docker CPU limit'
 
 IMPORT_DUMP_TABLES=8
-fixture_snapshot=$'tables\t3\npool\t536870912\ninnodb_data_written\t1048576\noperation\tSending data\t9\tktvs_videos\t25.0'
+fixture_snapshot=$'tables\t3\npool\t536870912\nactive\t4\ninnodb_data_written\t1048576\noperation\tSending data\t9\tktvs_videos\t25.0'
 line=$(database_progress_line 3671 "$fixture_snapshot" $'1048576\t2097152')
-for expected in '1:01:11 waiting' '50%, SQL may still be running' '3/8 tables created' 'InnoDB written 1.0 MiB' '512.0 MiB' 'ktvs_videos, 9s' 'statement 25.0%'; do
+for expected in '1:01:11 waiting' '50%, SQL may still be running' '3/8 tables created' 'InnoDB written 1.0 MiB' '512.0 MiB' '4 active SQL sessions' 'ktvs_videos, 9s' 'statement 25.0%'; do
     [[ "$line" == *"$expected"* ]] || fail "missing progress field $expected: $line"
 done
 [[ "$(database_progress_line 0 '' '')" == *'SQL status unavailable'* ]] || fail 'startup diagnostic missing'

@@ -20,6 +20,9 @@ fi
 if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh" ]; then
     source "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh"
 fi
+if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh" ]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh"
+fi
 
 #################################################################
 # Dev mode flag parsing
@@ -67,8 +70,8 @@ ENVIRONMENT VARIABLES:
                           tar.xz or tar.bz2 (kvs-export.sh makes one)
     IMPORT_SITE_DIR=DIR   The site files (admin/include/setup.php), copied to
                           /var/www/<domain> unless they already are there...
-    IMPORT_DB_DUMP=FILE   ... with the database dump (.sql, .sql.gz, .sql.xz
-                          or .sql.zst). Both go together.
+    IMPORT_DB_DUMP=FILE   ... with the database dump (.sql, .sql.gz, .sql.xz,
+                          .sql.zst or .mariadb.tar.gz/.zst). Both go together.
     IMPORT_REMOTE_HOST=H  The old server, reached over SSH; optional
                           IMPORT_REMOTE_PORT (22), IMPORT_REMOTE_USER (root,
                           or a user with passwordless sudo), IMPORT_REMOTE_DIR
@@ -87,6 +90,14 @@ ENVIRONMENT VARIABLES:
                           1 keeps a single stream. Separate SSH connections
                           are used when authentication allows it; a final
                           pass reconciles the site and removes stale files.
+    IMPORT_DATABASE_FORMAT=auto|sql|directory
+                          Remote database export format. Auto uses native
+                          MariaDB bulk loading when the source supports it,
+                          otherwise grouped SQL INSERTs. Default: auto.
+    IMPORT_DATABASE_JOBS=auto|N
+                          Native SQL loading connections (1-32). Auto uses
+                          CPU and available memory, at most 8 connections.
+                          Independent of IMPORT_TRANSFER_JOBS.
     MARIADB_BUFFER_POOL_SIZE=SIZE
                           InnoDB cache, for example 2G. On first setup the
                           default is 25% of available RAM, capped at 4G.
@@ -226,6 +237,19 @@ IMPORT_NGINX_REWRITES="${IMPORT_NGINX_REWRITES:-}"
 IMPORT_REUSE_SITE_DIR="${IMPORT_REUSE_SITE_DIR:-}"
 IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
 IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-4}"
+IMPORT_DATABASE_FORMAT="${IMPORT_DATABASE_FORMAT:-auto}"
+IMPORT_DATABASE_FORMAT_REQUEST=$IMPORT_DATABASE_FORMAT
+IMPORT_DATABASE_JOBS="${IMPORT_DATABASE_JOBS:-auto}"
+IMPORT_DATABASE_JOBS_REQUEST=$IMPORT_DATABASE_JOBS
+IMPORT_REMOTE_DATABASE_FORMAT=sql
+case "$IMPORT_DATABASE_FORMAT" in
+    auto|sql|directory) ;;
+    *) echo "ERROR: IMPORT_DATABASE_FORMAT must be auto, sql or directory" >&2; exit 1 ;;
+esac
+if [[ "$IMPORT_DATABASE_JOBS" != auto && ! "$IMPORT_DATABASE_JOBS" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
+    echo "ERROR: IMPORT_DATABASE_JOBS must be auto or an integer from 1 to 32" >&2
+    exit 1
+fi
 # What the transfer leaves behind and takes along, on top of what the
 # exporter decides on its own; the choice of the first pass is kept in
 # .env so the second pass repeats it.
@@ -266,7 +290,10 @@ IMPORT_OLD_PATH=""
 IMPORT_TABLES_PREFIX=""
 IMPORT_DETECTED_DOMAIN=""
 IMPORT_DUMP_TABLES=""
+IMPORT_DUMP_INFO=""
+IMPORT_DUMP_IDENTITY=""
 IMPORT_STAGED_DUMP=""
+IMPORT_NATIVE_STAGE=""
 IMPORT_RAW_DUMP=""
 IMPORT_TOKEN=""
 IMPORT_VOLUME_TO_DELETE=""
@@ -473,7 +500,9 @@ import_validate_local_materials() {
     echo "  Site: $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
     import_check_site_links
     import_note_external_search
+    IMPORT_DUMP_IDENTITY=$(import_dump_identity "$IMPORT_DB_DUMP") || exit 1
     dump_info=$(import_inspect_dump "$IMPORT_DB_DUMP" "$IMPORT_TABLES_PREFIX") || exit 1
+    IMPORT_DUMP_INFO=$dump_info
     IMPORT_DUMP_TABLES=$(import_field "$dump_info" 1)
     dump_initial_version=$(import_field "$dump_info" 2)
     dump_statements=$(import_field "$dump_info" 3)
@@ -830,6 +859,12 @@ import_inspect_remote() {
     IMPORT_DETECTED_DOMAIN=$(import_kv "$IMPORT_REMOTE_REPORT" domain)
     IMPORT_REMOTE_RSYNC=$(import_kv "$IMPORT_REMOTE_REPORT" rsync)
     IMPORT_REMOTE_COMPRESSOR=$(import_kv "$IMPORT_REMOTE_REPORT" compressor)
+    IMPORT_REMOTE_DATABASE_FORMAT=$(import_kv "$IMPORT_REMOTE_REPORT" db_dump_format)
+    IMPORT_REMOTE_DATABASE_FORMAT=${IMPORT_REMOTE_DATABASE_FORMAT:-sql}
+    case "$IMPORT_REMOTE_DATABASE_FORMAT" in
+        sql|directory) ;;
+        *) echo "ERROR: the source reported an unsupported database format" >&2; exit 1 ;;
+    esac
     prefix=$(import_kv "$IMPORT_REMOTE_REPORT" tables_prefix)
     db_ok=$(import_kv "$IMPORT_REMOTE_REPORT" db_ok)
     echo ""
@@ -848,6 +883,10 @@ import_inspect_remote() {
     echo "  Database:        $(import_kv "$IMPORT_REMOTE_REPORT" db_name) on $(import_kv "$IMPORT_REMOTE_REPORT" db_host), user $(import_kv "$IMPORT_REMOTE_REPORT" db_user), password $(import_kv "$IMPORT_REMOTE_REPORT" db_password_hint)"
     if [ "$db_ok" = yes ]; then
         echo "  Database access: OK ($(import_kv "$IMPORT_REMOTE_REPORT" db_server_version), $(import_kv "$IMPORT_REMOTE_REPORT" db_tables) tables, $(import_kv "$IMPORT_REMOTE_REPORT" db_size_mb) MB)"
+        echo "  Database format: $IMPORT_REMOTE_DATABASE_FORMAT"
+        if [ "$IMPORT_REMOTE_DATABASE_FORMAT" = sql ] && [ "$IMPORT_DATABASE_FORMAT" = auto ]; then
+            echo "  Native import:   $(import_kv "$IMPORT_REMOTE_REPORT" db_directory_reason)"
+        fi
     else
         echo -e "  Database access: ${RED}failed${NC} ($(import_kv "$IMPORT_REMOTE_REPORT" db_error))"
     fi
@@ -1136,6 +1175,14 @@ import_fetch_archive() {
     echo -e "  ${GREEN}✓${NC} Site files in $destination, dump in $IMPORT_DB_DUMP"
 }
 
+import_native_target_supported() {
+    local version="${MARIADB_VERSION:-12.3}" major minor
+    [[ "$version" =~ ^([0-9]+)\.([0-9]+)(\.|$) ]] || return 1
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    ((major > 11 || (major == 11 && minor >= 8)))
+}
+
 import_fetch_remote() {
     local destination="/var/www/$DOMAIN" source dump extension pid
 
@@ -1144,8 +1191,19 @@ import_fetch_remote() {
     if [ "$IMPORT_REMOTE_COMPRESSOR" = zstd ]; then
         extension=zst
     fi
+    if [ "$IMPORT_REMOTE_DATABASE_FORMAT" = directory ] && ! import_native_target_supported; then
+        if [ "$IMPORT_DATABASE_FORMAT" = directory ]; then
+            echo "ERROR: native directory import requires MariaDB 11.8 or newer on the destination" >&2
+            exit 1
+        fi
+        echo "  Using SQL export: the selected destination MariaDB does not support native directory loading with deferred indexes."
+        IMPORT_REMOTE_DATABASE_FORMAT=sql
+    fi
     mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
     dump="$IMPORT_STAGING/${DOMAIN}.sql.$extension"
+    if [ "$IMPORT_REMOTE_DATABASE_FORMAT" = directory ]; then
+        dump="$IMPORT_STAGING/${DOMAIN}.mariadb.tar.$extension"
+    fi
     # The dump first, the files after: whatever the site creates during a
     # long transfer then exists as files the database does not know yet,
     # which is harmless, instead of rows whose files never came. A second
@@ -2139,6 +2197,7 @@ fi
 set_env_value DOMAIN "$DOMAIN"
 export DOMAIN EMAIL
 
+IMPORT_DATABASE_FORMAT=$IMPORT_DATABASE_FORMAT_REQUEST
 select_import_source
 import_check_leftover_dump
 
@@ -3524,6 +3583,10 @@ fi
 
 # Validate and persist the database memory budget before replacing any volume.
 database_configure_buffer_pool || exit 1
+if [ "$IMPORT_MODE" = true ]; then
+    IMPORT_DATABASE_JOBS=$(database_import_jobs "$IMPORT_DATABASE_JOBS_REQUEST") || exit 1
+    echo "  Native database import connections: $IMPORT_DATABASE_JOBS (file transfers use IMPORT_TRANSFER_JOBS separately)."
+fi
 
 # Open firewall ports if ufw is active
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
@@ -3696,6 +3759,7 @@ if [ "$MODE" = "multi" ]; then
     prepare_multi_site_proxy
 fi
 
+IMPORT_DATABASE_FORMAT=$IMPORT_DATABASE_FORMAT_REQUEST
 import_fetch_source
 import_ensure_nginx_rewrites
 
@@ -3756,34 +3820,56 @@ chown 1000:1000 /var/www/"$DOMAIN"
 # database named in .env: an imported dump goes there, prepared for the
 # container and readable by the database user of the image.
 import_stage_dump() {
-    local target
+    local target inspection=""
 
     [ "$IMPORT_MODE" = true ] || return 0
-    # From here on the database is the one of this import: whatever an
-    # earlier import completed no longer stands, so a run interrupted
-    # before the end is never mistaken for a finished one.
-    remove_env_value KVS_IMPORT_COMPLETED
-    if [ -n "$IMPORT_VOLUME_TO_DELETE" ]; then
-        echo -e "  ${YELLOW}Deleting the database volume $IMPORT_VOLUME_TO_DELETE...${NC}"
-        delete_database_volume "$IMPORT_VOLUME_TO_DELETE" || exit 1
-        IMPORT_VOLUME_TO_DELETE=""
+    if import_is_native_dump "$IMPORT_DB_DUMP" && ! import_native_target_supported; then
+        echo "ERROR: native directory import requires MariaDB 11.8 or newer on the destination" >&2
+        exit 1
     fi
     mkdir -p mariadb/init || exit 1
-    rm -f mariadb/init/*kvs-import*
+    rm -rf -- mariadb/init/10-kvs-import-native
+    find mariadb/init -maxdepth 1 -type f -name '*kvs-import*' -delete
+    IMPORT_TOKEN="$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+    if import_is_native_dump "$IMPORT_DB_DUMP"; then
+        IMPORT_NATIVE_STAGE=mariadb/init/10-kvs-import-native
+        echo "  Preparing native MariaDB data files ($IMPORT_DATABASE_JOBS import connections)..."
+        if ! native_import_prepare "$IMPORT_DB_DUMP" "$IMPORT_TABLES_PREFIX" "$IMPORT_SITE_VERSION" \
+            "$IMPORT_OLD_PATH" /var/www/kvs "$IMPORT_NATIVE_STAGE" "$IMPORT_TOKEN" "$DOMAIN" "$IMPORT_DATABASE_JOBS"; then
+            echo "ERROR: could not prepare the native database import" >&2
+            exit 1
+        fi
+        IMPORT_STAGED_DUMP="${IMPORT_NATIVE_STAGE}.sh"
+        return 0
+    fi
     if command -v zstd >/dev/null 2>&1; then
         target=mariadb/init/10-kvs-import.sql.zst
     else
         target=mariadb/init/10-kvs-import.sql
     fi
-    IMPORT_TOKEN="$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
     echo "  Preparing the database dump for MariaDB..."
-    if ! import_prepare_dump "$IMPORT_DB_DUMP" "$IMPORT_TABLES_PREFIX" "$IMPORT_SITE_VERSION" "$IMPORT_OLD_PATH" /var/www/kvs "$target" "$IMPORT_TOKEN" >/dev/null; then
+    if [ -n "$IMPORT_DUMP_IDENTITY" ] && [ "$(import_dump_identity "$IMPORT_DB_DUMP")" = "$IMPORT_DUMP_IDENTITY" ]; then
+        inspection=$IMPORT_DUMP_INFO
+    fi
+    if ! import_prepare_dump "$IMPORT_DB_DUMP" "$IMPORT_TABLES_PREFIX" "$IMPORT_SITE_VERSION" "$IMPORT_OLD_PATH" /var/www/kvs "$target" "$IMPORT_TOKEN" "$inspection" >/dev/null; then
         echo -e "${RED}ERROR: could not prepare $IMPORT_DB_DUMP${NC}"
         exit 1
     fi
     chmod 644 "$target"
     IMPORT_STAGED_DUMP=$target
     echo -e "  ${GREEN}✓${NC} Dump staged in $target"
+}
+
+# Replace an explicitly selected old volume only after the full input has
+# been prepared and validated, including native payload checksums and schema.
+import_replace_database_volume() {
+    [ "$IMPORT_MODE" = true ] || return 0
+    remove_env_value KVS_IMPORT_COMPLETED
+    if [ -n "$IMPORT_VOLUME_TO_DELETE" ]; then
+        echo -e "  ${YELLOW}Deleting the database volume $IMPORT_VOLUME_TO_DELETE...${NC}"
+        delete_database_volume "$IMPORT_VOLUME_TO_DELETE" || exit 1
+        IMPORT_VOLUME_TO_DELETE=""
+    fi
 }
 
 # Copy the imported site into the bind-mounted directory while MariaDB
@@ -3821,6 +3907,7 @@ import_verify_database() {
 
 progress_bar "Starting MariaDB"
 import_stage_dump
+import_replace_database_volume
 run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
 import_place_site_files
 
@@ -3947,6 +4034,7 @@ import_finish() {
     }
     set_env_value KVS_IMPORT_COMPLETED "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 1
     [ -n "$IMPORT_STAGED_DUMP" ] && rm -f "$IMPORT_STAGED_DUMP"
+    [ -n "$IMPORT_NATIVE_STAGE" ] && rm -rf -- "$IMPORT_NATIVE_STAGE"
     # The raw dump served its purpose; the old server keeps the original.
     # The source marker stays: a later pass from the same source is how the
     # changes made on the old server in the meantime are picked up.

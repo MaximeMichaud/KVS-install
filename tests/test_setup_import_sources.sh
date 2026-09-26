@@ -254,6 +254,12 @@ test_analysis_finds_the_site_root_and_the_dump() {
     [ "$(import_field "$result" 2)" = database.sql.zst ] || fail "zstd dump must be found"
     [ "$(import_field "$result" 3)" = kvs-export.manifest ] || fail "the manifest must be found"
 
+    layout=$(make_layout native www/ database.mariadb.tar.gz)
+    archive_of "$layout" "$TMP_ROOT/native.tar"
+    import_archive_list "$TMP_ROOT/native.tar" tar > "$TMP_ROOT/native.list"
+    result=$(import_archive_analyze "$TMP_ROOT/native.list") || fail "a native database bundle next to the site must be accepted"
+    [ "$(import_field "$result" 2)" = database.mariadb.tar.gz ] || fail "the native bundle must be selected as the database"
+
     layout=$(make_layout deep example.com/public_html/ dump/site.sql)
     archive_of "$layout" "$TMP_ROOT/deep.tar.gz"
     import_archive_list "$TMP_ROOT/deep.tar.gz" tar > "$TMP_ROOT/deep.list"

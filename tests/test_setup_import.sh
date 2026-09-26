@@ -339,7 +339,8 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'TABLES_PREFIX=${TABLES_PREFIX:-ktvs_}' "$REPO_ROOT/docker/docker-compose.yml" || fail "the Manticore container must receive the table prefix"
     grep -Fq 'TABLES_PREFIX=$(get_tables_prefix)' "$configure" || fail "the init must read the prefix from the site"
     grep -Fq 'rm -f "/var/www/$DOMAIN/.kvs-import-source"' "$setup" && fail "the source marker must stay for a later pass from the same source"
-    grep -Fq 'rm -f mariadb/init/*kvs-import*' "$setup" || fail "stale staged dumps must be removed before staging"
+    grep -Fq "find mariadb/init -maxdepth 1 -type f -name '*kvs-import*' -delete" "$setup" || fail "stale staged dumps must be removed before staging"
+    grep -Fq 'rm -rf -- mariadb/init/10-kvs-import-native' "$setup" || fail "stale native data must be removed before staging"
     grep -Eq '^    trap import_ssh_close EXIT$' "$setup" || fail "the ssh master must be closed however the setup ends"
     grep -Fq 'if ! import_remote_privileges; then' "$setup" || fail "the SSH user privileges must be probed on the first connection"
     grep -Fq 'passwordless sudo, used for the dump and the files' "$setup" || fail "the use of sudo on the old server must be displayed"
@@ -371,6 +372,23 @@ test_setup_and_init_are_wired_for_imports() {
     pass "setup and init are wired for imports"
 }
 
+test_cached_dump_inspection_preserves_output() {
+    local dump="$TMP_ROOT/cached-source.sql" inspection identity
+    make_dump "$dump" yes
+    inspection=$(import_inspect_dump "$dump" ktvs_)
+    identity=$(import_dump_identity "$dump")
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$TMP_ROOT/uncached.sql" cached-token >/dev/null
+    (
+        # shellcheck disable=SC2329  # Fail if the sourced preparation helper rescans the dump.
+        import_inspect_dump() { fail 'an unchanged validated dump must not be scanned again'; }
+        import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$TMP_ROOT/cached.sql" cached-token "$inspection" >/dev/null
+    ) || fail 'preparation with a cached inspection failed'
+    cmp "$TMP_ROOT/uncached.sql" "$TMP_ROOT/cached.sql" || fail 'cached preparation changed the SQL payload'
+    printf '\n-- changed\n' >> "$dump"
+    [ "$identity" != "$(import_dump_identity "$dump")" ] || fail 'a changed source must invalidate its inspection identity'
+    pass 'cached inspection avoids a full scan without changing prepared SQL'
+}
+
 test_php_config_values_are_read_as_kvs_writes_them
 test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip
@@ -380,5 +398,6 @@ test_sql_escaping_survives_quotes_and_like_wildcards
 test_site_placement_copies_once_and_refuses_a_used_directory
 test_free_space_check_uses_the_nearest_existing_parent
 test_setup_and_init_are_wired_for_imports
+test_cached_dump_inspection_preserves_output
 
 echo "All $TESTS_RUN import tests passed."
