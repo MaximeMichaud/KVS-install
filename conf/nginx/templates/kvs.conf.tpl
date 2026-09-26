@@ -167,3 +167,20 @@ server {
         return 404;
     }
 }
+
+# Requests for a name this site does not serve, the bare IP address first:
+# nothing answers, no redirect that would hand the domain to whoever scans
+# the address. The blocks above match their names only. On 443 the TLS
+# handshake is refused before any certificate is sent, so the domain does
+# not leak through the certificate either (no certificate is needed here).
+server {
+    listen      80 default_server;
+    server_name _;
+    return      444;
+}
+
+server {
+    listen      443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}

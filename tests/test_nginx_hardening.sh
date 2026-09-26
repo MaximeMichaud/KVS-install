@@ -498,7 +498,37 @@ EOF
         fail "the certificate monitor is defined but never started"
 }
 
+# assert_unknown_hosts_are_dropped <site config>
+# A request for the bare IP address or for a name the site does not serve
+# reaches the default server of its port, which must answer nothing: no
+# redirect to the domain (it would hand the name to whoever scans the
+# address) and, on 443, no certificate (the handshake is refused first).
+# The site's own blocks stay matched by name only.
+assert_unknown_hosts_are_dropped() {
+    local site_config="$1"
+    local default_servers
+
+    # Every server block carrying default_server, its directives on one
+    # line, single spaced.
+    default_servers=$(awk '
+        /^server[[:space:]]*\{/ { inside = 1; block = ""; next }
+        inside && /^\}/ { inside = 0; if (block ~ /default_server/) print block; next }
+        inside && /^[[:space:]]*#/ { next }
+        inside { gsub(/[[:space:]]+/, " "); sub(/^ /, ""); sub(/ $/, ""); block = block $0 " " }
+    ' "$site_config")
+    grep -q 'listen 80 default_server; server_name _; return 444;' <<< "$default_servers" ||
+        fail "${site_config}: the default server of port 80 must answer nothing"
+    grep -q 'listen 443 ssl default_server; server_name _; ssl_reject_handshake on;' <<< "$default_servers" ||
+        fail "${site_config}: the default server of port 443 must refuse the handshake without a certificate"
+    grep -Eq 'return 301|ssl_certificate|proxy_pass|fastcgi_pass|root ' <<< "$default_servers" &&
+        fail "${site_config}: a default server must neither redirect, serve nor carry a certificate"
+    [ "$(grep -c 'default_server' "$site_config")" -eq 2 ] ||
+        fail "${site_config}: the site's own blocks must be matched by name only"
+}
+
 assert_protected_locations_precede_php \
+    "${ROOT_DIR}/conf/nginx/templates/kvs.conf.tpl"
+assert_unknown_hosts_are_dropped \
     "${ROOT_DIR}/conf/nginx/templates/kvs.conf.tpl"
 assert_protected_locations_precede_php \
     "${ROOT_DIR}/docker/multi-site/nginx/kvs-caddy.conf.template"
