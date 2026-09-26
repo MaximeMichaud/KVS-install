@@ -97,7 +97,31 @@ import_validate_site() {
         echo "ERROR: the KVS version was not found in $dir/admin/include/version.php" >&2
         return 1
     fi
-    printf '%s\t%s\t%s\n' "$version" "$path" "$prefix"
+    printf '%s\t%s\t%s\t%s\n' "$version" "$path" "$prefix" "$(import_site_ioncube "$dir")"
+}
+
+# import_site_ioncube <site directory>: yes, no or unknown, from the
+# signatures ionCube leaves at the top of admin/include/functions_base.php
+# (the "<?php //0xxxxx" header, the loader check), the file every request
+# loads first. The PHP image is built with or without the loader from it
+# when no KVS archive says.
+import_site_ioncube() {
+    local file="$1/admin/include/functions_base.php"
+    local head="" first=""
+
+    if [ ! -r "$file" ]; then
+        printf 'unknown'
+        return 0
+    fi
+    IFS= read -r -N 4096 head < "$file" || true
+    first=${head%%$'\n'*}
+    if [[ "$first" =~ ^[[:space:]]*\<\?php[[:space:]]+//[0-9a-f]{5,6} ]] ||
+        [[ "$head" == *"extension_loaded('ionCube Loader')"* ]] ||
+        [[ "$head" == *_il_exec* ]]; then
+        printf 'yes'
+    else
+        printf 'no'
+    fi
 }
 
 # import_field <tab separated line> <index from 1>
@@ -504,6 +528,7 @@ import_tool_package() {
         gzip) echo gzip ;;
         rsync) echo rsync ;;
         ssh) echo openssh-client ;;
+        sshpass) echo sshpass ;;
         *) return 1 ;;
     esac
 }
@@ -873,9 +898,10 @@ import_archive_settle() {
 
 # import_archive_peek <file> <command> <site root> <output directory>
 # Extract only the site's configuration files (setup.php, setup_db.php
-# and version.php) so the site can be validated before the whole archive
-# is unpacked. zip and 7z find members through their index; tar reads
-# until it has found them.
+# and version.php, plus functions_base.php for the encoding when it is
+# there) so the site can be validated before the whole archive is
+# unpacked. zip and 7z find members through their index; tar reads until
+# it has found them.
 import_archive_peek() {
     local file="$1"
     local command="$2"
@@ -885,7 +911,7 @@ import_archive_peek() {
 
     mkdir -p "$output/admin/include" || return 1
     errors=$(mktemp) || return 1
-    for member in setup.php setup_db.php version.php; do
+    for member in setup.php setup_db.php version.php functions_base.php; do
         target="$output/admin/include/$member"
         status=0
         case "$command" in
@@ -906,6 +932,12 @@ import_archive_peek() {
                 ;;
         esac
         if [ "$status" -ne 0 ] || [ ! -s "$target" ]; then
+            if [ "$member" = functions_base.php ]; then
+                # Only the encoding comes from it: an archive without it
+                # is still a site, of unknown encoding.
+                rm -f "$target"
+                continue
+            fi
             if grep -qiE 'password|encrypted' "$errors"; then
                 import_archive_report_failure "$file" "$errors"
             fi
@@ -917,11 +949,100 @@ import_archive_peek() {
 }
 
 #################################################################
+# The web server configuration of the old server
+#################################################################
+
+# import_nginx_config_save <report> <output file>
+# The nginx configuration of the old server, as the exporter's detect (or
+# the manifest of its archive) carries it, one nginx_config_N line each,
+# written back as text for the operator's custom rules and for the KVS
+# rewrite rules. Prints the number of lines; fails when the report
+# carries none.
+import_nginx_config_save() {
+    local report="$1" output="$2" lines
+
+    sed -n 's/^nginx_config_[0-9][0-9]*=//p' "$report" 2>/dev/null | tr -d '\000-\010\013-\037\177' > "$output.tmp" || {
+        rm -f "$output.tmp"
+        return 1
+    }
+    if [ ! -s "$output.tmp" ]; then
+        rm -f "$output.tmp"
+        return 1
+    fi
+    chmod 600 "$output.tmp"
+    mv -f "$output.tmp" "$output" || return 1
+    lines=$(wc -l < "$output")
+    printf '%s\n' "${lines//[!0-9]/}"
+}
+
+# import_nginx_rewrites_from_config <configuration> <site directory> [project path]
+# The rewrite rules of the server blocks that serve the site (a root
+# directive naming its directory, the project path, or a directory
+# under it), in the form of _INSTALL/nginx_config.txt: what KVS ships in
+# that file is the list of its rewrite directives plus the protection of
+# a few directories, which the stack's own vhost denies already. Each
+# rule once, the http and https blocks repeat them. A brace counts only
+# where nginx formats it, opening at the end of a line and closing at the
+# start of one, so a quantifier inside a regular expression does not
+# unbalance the count. Prints nothing when no block serves the site.
+import_nginx_rewrites_from_config() {
+    local config="$1" site="${2%/}" project="${3:-}"
+
+    project=${project%/}
+    awk -v site="$site" -v project="$project" '
+        function root_of(s,    r) {
+            r = s
+            sub(/^root[[:space:]]+/, "", r)
+            sub(/[[:space:]]*;.*$/, "", r)
+            sub(/\/$/, "", r)
+            return r
+        }
+        {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            if (line ~ /^#/) next
+            if (line ~ /^server[[:space:]]*\{$/) {
+                in_server = 1
+                server_depth = depth
+                qualifies = 0
+                count = 0
+            }
+            if (in_server) {
+                if (line ~ /^root[[:space:]]/) {
+                    r = root_of(line)
+                    if (r == site || (project != "" && r == project) || index(r, site "/") == 1 || (project != "" && index(r, project "/") == 1)) {
+                        qualifies = 1
+                    }
+                }
+                if (line ~ /^rewrite[[:space:]]/) {
+                    rules[count++] = line
+                }
+            }
+            if (line ~ /\{$/) depth++
+            if (line ~ /^\}/) {
+                depth--
+                if (in_server && depth == server_depth) {
+                    if (qualifies) {
+                        for (i = 0; i < count; i++) {
+                            if (!seen[rules[i]]++) print rules[i]
+                        }
+                    }
+                    in_server = 0
+                    count = 0
+                }
+            }
+        }' "$config"
+}
+
+#################################################################
 # The old server over SSH
 #################################################################
 
 IMPORT_SSH_TARGET=""
 IMPORT_SSH_OPTS=()
+# ssh, or sshpass in front of it when the old server takes a password.
+IMPORT_SSH_COMMAND=(ssh)
 # shellcheck disable=SC2034  # Read by docker/setup.sh.
 IMPORT_REMOTE_PRIVILEGES=none
 IMPORT_REMOTE_SUDO_ERROR=""
@@ -946,14 +1067,16 @@ import_remote_path_check() {
     return 1
 }
 
-# import_ssh_setup <host> <port> <user> <identity file> <batch yes|no> <accept new host keys yes|no>
+# import_ssh_setup <host> <port> <user> <identity file> <batch yes|no> <accept new host keys yes|no> [password]
 # One multiplexed connection for the whole import: a password is typed
 # once on ssh's own prompt, never read by the setup, and every later
 # command and the file transfer reuse the connection. Batch mode makes a
 # headless run fail at once instead of waiting on a prompt nobody sees.
 # An unknown host key is shown and confirmed by ssh itself unless the
 # caller opted into accepting it: the first connection is the one where
-# the old server's password travels.
+# the old server's password travels. A password given to the setup
+# (IMPORT_REMOTE_PASSWORD, for runs nobody attends) is handed to sshpass
+# through its environment, never on a command line.
 import_ssh_setup() {
     local host="$1"
     local port="${2:-22}"
@@ -961,6 +1084,7 @@ import_ssh_setup() {
     local key="$4"
     local batch="${5:-no}"
     local accept_new="${6:-no}"
+    local password="${7:-}"
     local control_dir="${IMPORT_SSH_CONTROL_DIR:-/run/kvs-install}"
 
     if [ -z "$host" ] || [[ "$host" =~ [[:space:]] ]]; then
@@ -989,6 +1113,21 @@ import_ssh_setup() {
         -o ConnectTimeout=20
         -p "$port"
     )
+    IMPORT_SSH_COMMAND=(ssh)
+    if [ -n "$password" ]; then
+        # sshpass answers ssh's password prompt from SSHPASS, so ssh's
+        # prompts must stay (no batch mode, one attempt), and the host key
+        # of a server not in known_hosts yet is accepted on this first
+        # connection: the answer an operator gives on ssh's question,
+        # which sshpass cannot relay.
+        import_ensure_tool sshpass || return 1
+        SSHPASS=$password
+        export SSHPASS
+        IMPORT_SSH_COMMAND=(sshpass -e ssh)
+        IMPORT_SSH_OPTS+=(-o NumberOfPasswordPrompts=1)
+        batch=no
+        accept_new=yes
+    fi
     if [ "$batch" = yes ]; then
         IMPORT_SSH_OPTS+=(-o BatchMode=yes)
     fi
@@ -1003,13 +1142,13 @@ import_ssh_setup() {
 # import_ssh <command...>: run a command on the old server.
 import_ssh() {
     # shellcheck disable=SC2029  # The arguments are meant for the remote shell.
-    ssh "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" "$@"
+    "${IMPORT_SSH_COMMAND[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" "$@"
 }
 
 # import_ssh_close: end the multiplexed connection.
 import_ssh_close() {
     [ -n "$IMPORT_SSH_TARGET" ] || return 0
-    ssh "${IMPORT_SSH_OPTS[@]}" -O exit "$IMPORT_SSH_TARGET" >/dev/null 2>&1 || true
+    "${IMPORT_SSH_COMMAND[@]}" "${IMPORT_SSH_OPTS[@]}" -O exit "$IMPORT_SSH_TARGET" >/dev/null 2>&1 || true
 }
 
 # import_remote_privileges: what the SSH user may do on the old server.
@@ -1046,7 +1185,7 @@ import_remote_privileges() {
 # splits it on spaces and honours quotes, so an option holding a space
 # (a key path) is single-quoted.
 import_ssh_rsh() {
-    local option result="ssh"
+    local option result="${IMPORT_SSH_COMMAND[*]}"
 
     for option in "${IMPORT_SSH_OPTS[@]}"; do
         case "$option" in

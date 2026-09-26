@@ -1681,6 +1681,23 @@ ensure_docker_prerequisites() {
   apt-get update -qq && apt_install -qq "${missing[@]}"
 }
 
+# An import source named in the environment: the setup then takes the
+# site's version, its encoding and its nginx rewrites from the site
+# itself, and needs no KVS archive.
+import_source_given() {
+  [[ -n "${IMPORT_REMOTE_HOST:-}${IMPORT_ARCHIVE:-}${IMPORT_SITE_DIR:-}" ]] ||
+    [[ "${IMPORT_CHOICE:-}" =~ ^[2-4]$ ]]
+}
+
+# Without an archive, an attended run may be an import: the setup's own
+# questions then choose the source.
+import_wanted_instead_of_archive() {
+  local answer
+
+  read -rp "Import an existing KVS site instead (no archive needed)? [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]]
+}
+
 function dockerInstall() {
   local INSTALL_DIR
   local BACKUP_DIR
@@ -1765,6 +1782,10 @@ function dockerInstall() {
     echo "Found KVS archive in /root, copying to kvs-archive/..."
     cp /root/KVS_*.zip kvs-archive/
     echo "${green}KVS archive copied${normal}"
+  elif import_source_given; then
+    echo "No KVS archive found; none is needed to import an existing site (its version, its encoding and its nginx rewrites come from the site)"
+  elif [[ "${HEADLESS:-}" != "y" ]] && import_wanted_instead_of_archive; then
+    echo "The setup asks where the site comes from"
   else
     echo "${red}No KVS archive found${normal}"
     echo "Please upload your KVS_X.X.X_[domain.tld].zip file to /root"

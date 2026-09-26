@@ -630,6 +630,107 @@ test_ssh_setup_validates_and_builds_the_options() {
     pass "ssh setup validates its inputs and builds the options"
 }
 
+test_a_password_reaches_ssh_through_sshpass() {
+    local bin="$TMP_ROOT/sshpass-bin"
+
+    make_fake_ssh "$bin"
+    # A fake sshpass: records its mode and the password it was given
+    # through the environment, then runs ssh.
+    cat > "$bin/sshpass" <<EOF
+#!/bin/bash
+echo "sshpass \$1 SSHPASS=[\${SSHPASS-}]" >> "$bin/sshpass.log"
+[ "\$1" != -e ] || shift
+exec "\$@"
+EOF
+    chmod +x "$bin/sshpass"
+    (
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/ctl" import_ssh_setup old.example.com 22 root "" yes no "s3cret pass" || exit 1
+        [ "${IMPORT_SSH_COMMAND[*]}" = "sshpass -e ssh" ] || exit 2
+        [ "${SSHPASS-}" = "s3cret pass" ] || exit 3
+        printf '%s\n' "${IMPORT_SSH_OPTS[@]}" | grep -q '^BatchMode=yes$' && exit 4
+        printf '%s\n' "${IMPORT_SSH_OPTS[@]}" | grep -q '^StrictHostKeyChecking=accept-new$' || exit 5
+        printf '%s\n' "${IMPORT_SSH_OPTS[@]}" | grep -q '^NumberOfPasswordPrompts=1$' || exit 6
+        rsh=$(import_ssh_rsh)
+        [[ "$rsh" == "sshpass -e ssh -o ControlMaster=auto"* ]] || exit 7
+        [[ "$rsh" != *s3cret* ]] || exit 8
+        out=$(import_ssh echo remote-ok < /dev/null) || exit 9
+        [ "$out" = remote-ok ] || exit 10
+        grep -q '^sshpass -e SSHPASS=\[s3cret pass\]$' "$bin/sshpass.log" || exit 11
+        grep -q '^command echo remote-ok$' "$bin/ssh.log" || exit 12
+        # Without a password ssh runs bare, batch mode as asked.
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/ctl" import_ssh_setup old.example.com 22 root "" yes no "" || exit 13
+        [ "${IMPORT_SSH_COMMAND[*]}" = ssh ] || exit 14
+        printf '%s\n' "${IMPORT_SSH_OPTS[@]}" | grep -q '^BatchMode=yes$' || exit 15
+        exit 0
+    ) || fail "a password must reach ssh through sshpass and its environment only (case $?)"
+    pass "a password reaches ssh through sshpass and its environment only"
+}
+
+test_the_old_nginx_configuration_is_saved_and_its_rewrites_recovered() {
+    local report="$TMP_ROOT/nginx-report.txt" saved="$TMP_ROOT/old-nginx.conf" lines rules
+
+    {
+        echo "kvs_export=1"
+        echo "nginx_config_lines=3"
+        echo "entry_1=contents|1|kvs|copied"
+        printf 'nginx_config_1=# configuration file /etc/nginx/nginx.conf:\n'
+        printf 'nginx_config_2=http {\tinclude conf.d/*.conf;\001 }\n'
+        printf 'nginx_config_3=}\n'
+    } > "$report"
+    lines=$(import_nginx_config_save "$report" "$saved") || fail "a report with a configuration must be saved"
+    [ "$lines" = 3 ] || fail "three lines, got $lines"
+    [ "$(stat -c %a "$saved")" = 600 ] || fail "the saved configuration is private"
+    [ "$(sed -n 2p "$saved")" = $'http {\tinclude conf.d/*.conf; }' ] || fail "tabs stay, control characters go: $(sed -n 2p "$saved")"
+    echo "kvs_export=1" > "$report"
+    import_nginx_config_save "$report" "$saved.none" 2>/dev/null && fail "a report without a configuration must fail"
+    [ ! -e "$saved.none" ] || fail "no file without a configuration"
+
+    cat > "$saved" <<'EOF'
+# configuration file /etc/nginx/nginx.conf:
+http {
+    include /etc/nginx/conf.d/*.conf;
+}
+# configuration file /etc/nginx/conf.d/other.conf:
+server {
+    server_name other.example.com;
+    root /var/www/other;
+    rewrite ^/other$ /other.php last;
+}
+# configuration file /etc/nginx/conf.d/site.conf:
+server {
+    listen 80;
+    server_name example.com;
+    root /var/www/website/;
+    # rewrite ^/commented$ /no.php last;
+    rewrite ^/videos/$ /videos.php last;
+    rewrite ^/video/([0-9]{1,8})/([^/]+)/$ /view_video.php?id=$1&dir=$2 last;
+    location /admin/ {
+        root /var/www/website;
+        rewrite ^/admin/x$ /admin/y.php last;
+    }
+    location ~ ^/get_file/([0-9]{1,3})/ {
+        internal;
+    }
+}
+server {
+    listen 443 ssl;
+    server_name example.com;
+    root /var/www/website;
+    rewrite ^/videos/$ /videos.php last;
+    rewrite ^/video/([0-9]{1,8})/([^/]+)/$ /view_video.php?id=$1&dir=$2 last;
+    rewrite ^/https-only$ /x.php last;
+}
+EOF
+    rules=$(import_nginx_rewrites_from_config "$saved" /var/www/website)
+    [ "$rules" = $'rewrite ^/videos/$ /videos.php last;\nrewrite ^/video/([0-9]{1,8})/([^/]+)/$ /view_video.php?id=$1&dir=$2 last;\nrewrite ^/admin/x$ /admin/y.php last;\nrewrite ^/https-only$ /x.php last;' ] ||
+        fail "the rules of the blocks serving the site, once each, nothing from the other site or the comments: $rules"
+    rules=$(import_nginx_rewrites_from_config "$saved" /home/elsewhere /var/www/website)
+    [[ "$rules" == "rewrite ^/videos/"* ]] || fail "the project path names the site too: $rules"
+    [ -z "$(import_nginx_rewrites_from_config "$saved" /var/www/nothing)" ] || fail "no block serving the site, no rules"
+    pass "the old nginx configuration is saved and its rewrites recovered"
+}
+
 test_remote_detect_dump_and_files_go_through_one_ssh() {
     local bin="$TMP_ROOT/ssh-bin" exporter="$TMP_ROOT/fake-export.sh" site destination
 
@@ -881,6 +982,8 @@ test_take_over_moves_the_files_of_an_earlier_import
 test_url_domain_and_key_value_helpers
 test_external_search_plugin_is_recognized
 test_ssh_setup_validates_and_builds_the_options
+test_a_password_reaches_ssh_through_sshpass
+test_the_old_nginx_configuration_is_saved_and_its_rewrites_recovered
 test_remote_detect_dump_and_files_go_through_one_ssh
 test_a_user_with_sudo_runs_the_remote_side_through_it
 test_password_protected_archives_are_refused_with_a_reason

@@ -53,6 +53,6 @@ if [ -n "$KVS_ARCHIVE" ]; then
     mv -f "$TEMP_REWRITES" "$REWRITES_FILE"
     log_info "Nginx rewrites extracted from archive"
 else
-    log_error "Could not find nginx rewrites configuration"
+    log_error "No nginx rewrites: the site has no _INSTALL/nginx_config.txt and no KVS archive is mounted (an import writes that file from IMPORT_NGINX_REWRITES or the old server's nginx configuration)"
     exit 1
 fi
