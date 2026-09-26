@@ -966,6 +966,19 @@ run_test() {
 }
 
 failures=0
+test_import_source_given_needs_no_archive() {
+  (
+    unset IMPORT_REMOTE_HOST IMPORT_ARCHIVE IMPORT_SITE_DIR IMPORT_CHOICE
+    import_source_given && exit 1
+    IMPORT_REMOTE_HOST=old.example.com import_source_given || exit 2
+    IMPORT_ARCHIVE=/root/site.tar import_source_given || exit 3
+    IMPORT_SITE_DIR=/var/www/old import_source_given || exit 4
+    IMPORT_CHOICE=4 import_source_given || exit 5
+    IMPORT_CHOICE=1 import_source_given && exit 6
+    exit 0
+  ) || fail "an import source in the environment must be recognized (case $?)"
+}
+
 run_test "installation failures stop the pipeline" test_install_failure_stops_pipeline || failures=$((failures + 1))
 run_test "visual progress failures are non-fatal" test_visual_progress_failure_is_nonfatal || failures=$((failures + 1))
 run_test "headless PHP detection" test_headless_php_detection || failures=$((failures + 1))
@@ -989,6 +1002,7 @@ run_test "phpMyAdmin failure is non-destructive" test_phpmyadmin_failure_preserv
 run_test "phpMyAdmin staged update succeeds" test_phpmyadmin_success_swaps_staged_installation || failures=$((failures + 1))
 run_test "NGINX cleanup is scoped" test_nginx_cleanup_uses_scoped_paths || failures=$((failures + 1))
 run_test "runtime input stays quiet without a terminal" test_runtime_input_stays_quiet_without_a_terminal || failures=$((failures + 1))
+run_test "an import source needs no archive" test_import_source_given_needs_no_archive || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2

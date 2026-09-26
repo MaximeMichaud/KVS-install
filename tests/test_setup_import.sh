@@ -82,7 +82,14 @@ test_site_validation_accepts_a_kvs_site_and_refuses_the_rest() {
     make_site "$site" /home/old/www
 
     output=$(import_validate_site "$site") || fail "a KVS site must validate"
-    [ "$output" = $'7.0.2\t/home/old/www\tktvs_' ] || fail "validation must print the version, the project path and the prefix: got '$output'"
+    [ "$output" = $'7.0.2\t/home/old/www\tktvs_\tunknown' ] || fail "validation must print the version, the project path, the prefix and the encoding (unknown without functions_base.php): got '$output'"
+    printf '<?php\nfunction sql() {}\n' > "$site/admin/include/functions_base.php"
+    [ "$(import_validate_site "$site")" = $'7.0.2\t/home/old/www\tktvs_\tno' ] || fail "a plain functions_base.php means no encoding"
+    printf "<?php //004fb\nif(!extension_loaded('ionCube Loader')){die();}\n" > "$site/admin/include/functions_base.php"
+    [ "$(import_validate_site "$site")" = $'7.0.2\t/home/old/www\tktvs_\tyes' ] || fail "the ionCube header means an encoded site"
+    printf '<?php\n/* long preamble */\nif (!extension_loaded("x")) { _il_exec(); }\n' > "$site/admin/include/functions_base.php"
+    [ "$(import_validate_site "$site")" = $'7.0.2\t/home/old/www\tktvs_\tyes' ] || fail "the loader call means an encoded site"
+    rm -f "$site/admin/include/functions_base.php"
 
     output=$(import_validate_site "$TMP_ROOT/missing" 2>&1) && fail "a missing directory must be refused"
     grep -q "not a directory" <<< "$output" || fail "a missing directory must be named: $output"
@@ -93,7 +100,7 @@ test_site_validation_accepts_a_kvs_site_and_refuses_the_rest() {
 
     make_site "$TMP_ROOT/site-prefix" /home/old/www "site_"
     output=$(import_validate_site "$TMP_ROOT/site-prefix") || fail "a site with another table prefix must validate"
-    [ "$output" = $'7.0.2\t/home/old/www\tsite_' ] || fail "the site's own prefix must be returned: got '$output'"
+    [ "$output" = $'7.0.2\t/home/old/www\tsite_\tunknown' ] || fail "the site's own prefix must be returned: got '$output'"
     make_site "$TMP_ROOT/site-badprefix" /home/old/www "kt vs;"
     output=$(import_validate_site "$TMP_ROOT/site-badprefix" 2>&1) && fail "a prefix that is not an identifier must be refused"
     grep -q "table prefix 'kt vs;'" <<< "$output" || fail "the bad prefix must be named: $output"
@@ -104,7 +111,7 @@ test_site_validation_accepts_a_kvs_site_and_refuses_the_rest() {
     make_site "$TMP_ROOT/site-same" /home/old/www "kvs2_"
     echo "\$config['tables_prefix_multi']=\"kvs2_\";" >> "$TMP_ROOT/site-same/admin/include/setup.php"
     output=$(import_validate_site "$TMP_ROOT/site-same") || fail "equal prefixes are the ordinary site"
-    [ "$output" = $'7.0.2\t/home/old/www\tkvs2_' ] || fail "the ordinary site keeps its prefix: got '$output'"
+    [ "$output" = $'7.0.2\t/home/old/www\tkvs2_\tunknown' ] || fail "the ordinary site keeps its prefix: got '$output'"
 
     make_site "$TMP_ROOT/site-nodb" /home/old/www
     rm "$TMP_ROOT/site-nodb/admin/include/setup_db.php"

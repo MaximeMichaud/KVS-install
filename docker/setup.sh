@@ -52,9 +52,11 @@ OPTIONS:
 ENVIRONMENT VARIABLES:
     PREFLIGHT_BYPASS=y    Bypass pre-flight warnings (disk space, internet)
                           Note: Critical checks (Docker, commands) cannot be bypassed
-    Import an existing KVS site (experimental), one source at a time; the
-    KVS archive of the same version must be in kvs-archive/. Interactive
-    runs ask instead. See README, "Importing an existing site".
+    Import an existing KVS site (experimental), one source at a time; no
+    KVS archive is needed, the site brings its version, its encoding and
+    its nginx rewrites (an archive in kvs-archive/ must then be of the
+    site's version). Interactive runs ask instead. See README, "Importing
+    an existing site".
     IMPORT_ARCHIVE=FILE   An archive holding the site directory and its
                           database dump: zip, 7z, tar, tar.gz, tar.zst,
                           tar.xz or tar.bz2 (kvs-export.sh makes one)
@@ -66,9 +68,12 @@ ENVIRONMENT VARIABLES:
                           IMPORT_REMOTE_PORT (22), IMPORT_REMOTE_USER (root,
                           or a user with passwordless sudo), IMPORT_REMOTE_DIR
                           (site directory, searched for when empty) and
-                          IMPORT_SSH_KEY (identity file). Headless runs need
-                          key authentication, and IMPORT_SSH_ACCEPT_NEW=y to
-                          trust a host key that is not in known_hosts yet.
+                          IMPORT_SSH_KEY (identity file) or
+                          IMPORT_REMOTE_PASSWORD (the user's password, handed
+                          to sshpass, never stored). Headless runs need one
+                          of the two, and IMPORT_SSH_ACCEPT_NEW=y to trust a
+                          host key that is not in known_hosts yet (a password
+                          implies it).
     IMPORT_SIZE_TIMEOUT=S Seconds the old server spends measuring the site
                           size (300); past that the import goes on with what
                           was counted and the space used on the old server's
@@ -86,6 +91,12 @@ ENVIRONMENT VARIABLES:
                           development subdomain tried first): moved to
                           /var/www/<domain>, the transfer then carries the
                           changes only. With IMPORT_REMOTE_HOST only.
+    IMPORT_NGINX_REWRITES=FILE
+                          The KVS rewrite rules for nginx (the
+                          _INSTALL/nginx_config.txt of the site's version)
+                          when the site kept none and kvs-archive/ holds no
+                          archive; without it they are recovered from the
+                          old server's nginx configuration.
 
 EXAMPLES:
     # Production installation
@@ -187,6 +198,11 @@ IMPORT_REMOTE_USER="${IMPORT_REMOTE_USER:-root}"
 IMPORT_REMOTE_DIR="${IMPORT_REMOTE_DIR:-}"
 IMPORT_SSH_KEY="${IMPORT_SSH_KEY:-}"
 IMPORT_SSH_ACCEPT_NEW="${IMPORT_SSH_ACCEPT_NEW:-}"
+# The password of the SSH user, for runs nobody attends: handed to sshpass
+# through its environment, never written to .env or anywhere else.
+IMPORT_REMOTE_PASSWORD="${IMPORT_REMOTE_PASSWORD:-}"
+# The KVS rewrite rules for nginx when the site kept no _INSTALL directory.
+IMPORT_NGINX_REWRITES="${IMPORT_NGINX_REWRITES:-}"
 # The site directory of an earlier import of the same old server under
 # another domain (a development subdomain tried before the real one):
 # taken over instead of transferred again.
@@ -245,6 +261,10 @@ IMPORT_ARCHIVE_IGNORED=""
 IMPORT_REMOTE_RSYNC=""
 IMPORT_REMOTE_COMPRESSOR=""
 IMPORT_REMOTE_REPORT=""
+# yes, no or empty: what the imported site's own files say of their encoding.
+IMPORT_SITE_IONCUBE=""
+# The nginx configuration of the old server, saved next to the import marker.
+IMPORT_NGINX_CONFIG=""
 # Raw dumps taken out of an archive or received from the old server wait
 # here, outside the webroot, until they are prepared for MariaDB; the
 # marker that binds /var/www/<domain> to its source lives here too.
@@ -430,6 +450,7 @@ import_validate_local_materials() {
     IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
     IMPORT_OLD_PATH=$(import_field "$site_info" 2)
     IMPORT_TABLES_PREFIX=$(import_field "$site_info" 3)
+    IMPORT_SITE_IONCUBE=$(import_field "$site_info" 4)
     IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$IMPORT_SITE_DIR/admin/include/setup.php" project_url)")
     echo "  Site: $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
     import_check_site_links
@@ -551,6 +572,7 @@ import_inspect_archive() {
     IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
     IMPORT_OLD_PATH=$(import_field "$site_info" 2)
     IMPORT_TABLES_PREFIX=$(import_field "$site_info" 3)
+    IMPORT_SITE_IONCUBE=$(import_field "$site_info" 4)
     IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$peek/admin/include/setup.php" project_url)")
     rm -rf "$peek"
     echo "  Archive: $IMPORT_ARCHIVE (${IMPORT_ARCHIVE_MB} MB uncompressed)"
@@ -715,13 +737,14 @@ import_remote_free_space_check() {
 # connection: what it holds, whether its database answers, what tools it
 # has. Nothing is written or installed there.
 import_inspect_remote() {
-    local batch=no accept_new=no attempt=1 prefix db_ok
+    local batch=no accept_new=no attempt=1 prefix db_ok encoding nginx_lines nginx_files
 
     if [ ! -f "$IMPORT_EXPORTER" ]; then
         echo -e "${RED}ERROR: $IMPORT_EXPORTER is missing; run setup.sh from a full checkout of the repository${NC}"
         exit 1
     fi
-    if [ "${HEADLESS:-}" = "y" ]; then
+    # Batch mode refuses every prompt, the password one included.
+    if [ "${HEADLESS:-}" = "y" ] && [ -z "$IMPORT_REMOTE_PASSWORD" ]; then
         batch=yes
     fi
     import_ensure_tool ssh || exit 1
@@ -737,7 +760,7 @@ import_inspect_remote() {
         y|yes|true) accept_new=yes ;;
         *) accept_new=no ;;
     esac
-    import_ssh_setup "$IMPORT_REMOTE_HOST" "$IMPORT_REMOTE_PORT" "$IMPORT_REMOTE_USER" "$IMPORT_SSH_KEY" "$batch" "$accept_new" || exit 1
+    import_ssh_setup "$IMPORT_REMOTE_HOST" "$IMPORT_REMOTE_PORT" "$IMPORT_REMOTE_USER" "$IMPORT_SSH_KEY" "$batch" "$accept_new" "$IMPORT_REMOTE_PASSWORD" || exit 1
     trap import_ssh_close EXIT
     echo "  Connecting to $IMPORT_SSH_TARGET (port $IMPORT_REMOTE_PORT)..."
     if ! import_remote_privileges; then
@@ -810,6 +833,18 @@ import_inspect_remote() {
     else
         echo "  Transfer:        tar over ssh (install rsync on the old server for progress and resumable transfers), dump compressed with ${IMPORT_REMOTE_COMPRESSOR:-gzip}"
     fi
+    encoding=$(import_kv "$IMPORT_REMOTE_REPORT" ioncube)
+    case "$encoding" in
+        yes) echo "  Encoding:        IonCube (the PHP image gets the loader)" ;;
+        no) echo "  Encoding:        plain PHP (no IonCube loader)" ;;
+    esac
+    nginx_lines=$(import_kv "$IMPORT_REMOTE_REPORT" nginx_config_lines)
+    nginx_files=$(import_kv "$IMPORT_REMOTE_REPORT" nginx_site_files)
+    if [ "${nginx_lines:-0}" -gt 0 ] 2>/dev/null; then
+        echo "  Web server:      nginx configuration read ($(import_kv "$IMPORT_REMOTE_REPORT" nginx_config_source), $nginx_lines lines${nginx_files:+; the site is named in ${nginx_files//,/, }})"
+    else
+        echo "  Web server:      no nginx configuration found on the old server"
+    fi
     if [ "$(import_kv "$IMPORT_REMOTE_REPORT" db_non_transactional)" -gt 0 ] 2>/dev/null; then
         echo -e "  ${YELLOW}$(import_kv "$IMPORT_REMOTE_REPORT" db_non_transactional) tables use MyISAM or Aria: the dump locks the tables while it runs, writes on the old site wait.${NC}"
     fi
@@ -830,6 +865,8 @@ import_inspect_remote() {
     echo ""
     done
     import_remote_load_excludes "$IMPORT_REMOTE_REPORT"
+    IMPORT_SITE_IONCUBE=$(import_kv "$IMPORT_REMOTE_REPORT" ioncube)
+    import_save_nginx_config "$IMPORT_REMOTE_REPORT"
     if [ -f .env ]; then
         if [ -n "$IMPORT_EXCLUDE" ]; then
             set_env_value IMPORT_EXCLUDE "$IMPORT_EXCLUDE" || true
@@ -879,15 +916,17 @@ import_inspect_remote() {
     fi
 }
 
-# The nginx rewrites and the PHP version come from the KVS archive, so the
-# archive in kvs-archive/ must be the version of the imported site.
+# A KVS archive is optional for an import: the site brings its version,
+# its encoding and its nginx rewrites. One in kvs-archive/ must be the
+# version of the imported site, it is what the init falls back on for
+# the rewrites.
 import_check_kvs_archive_version() {
     local archive archive_version
 
     archive=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null | head -n 1)
     if [ -z "$archive" ]; then
-        echo -e "${RED}ERROR: the KVS archive of version $IMPORT_SITE_VERSION must be in kvs-archive/ (nginx rewrites and PHP version come from it)${NC}"
-        exit 1
+        echo "  KVS archive:     none in kvs-archive/, none needed (the site brings its version, its encoding and its nginx rewrites)"
+        return 0
     fi
     archive_version=$(import_archive_version "$archive")
     if [ "$archive_version" != "$IMPORT_SITE_VERSION" ]; then
@@ -948,6 +987,73 @@ import_fetch_source() {
     import_validate_local_materials
 }
 
+# The nginx configuration of the old server, as the exporter's detect or
+# the manifest of its archive carried it, lands next to the import marker:
+# the operator's custom rules to merge into the stack's vhost template,
+# and the KVS rewrite rules when the site kept no _INSTALL directory.
+import_save_nginx_config() {
+    local report="$1" lines
+
+    IMPORT_NGINX_CONFIG="$IMPORT_STAGING/${DOMAIN}.old-nginx.conf"
+    mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
+    if lines=$(import_nginx_config_save "$report" "$IMPORT_NGINX_CONFIG"); then
+        echo "  Old nginx configuration saved to $IMPORT_NGINX_CONFIG ($lines lines): merge custom rules into conf/nginx/templates/kvs.conf.tpl"
+    else
+        rm -f "$IMPORT_NGINX_CONFIG"
+        IMPORT_NGINX_CONFIG=""
+    fi
+}
+
+# import_ensure_nginx_rewrites [site directory]
+# The KVS rewrite rules the vhost includes, as _INSTALL/nginx_config.txt
+# of the imported site: the file KVS ships, when the site kept it; else
+# IMPORT_NGINX_REWRITES; else the KVS archive (the init extracts them);
+# else the rules recovered from the old server's nginx configuration.
+# Written after every transfer, since rsync mirrors the old server and
+# removes a file it does not have.
+import_ensure_nginx_rewrites() {
+    local site="${1:-/var/www/$DOMAIN}" target rules count
+
+    [ "$IMPORT_MODE" = true ] || return 0
+    target="$site/_INSTALL/nginx_config.txt"
+    if [ -s "$target" ]; then
+        echo "  Nginx rewrites:  from the site's _INSTALL/nginx_config.txt"
+        return 0
+    fi
+    if [ -n "$IMPORT_NGINX_REWRITES" ]; then
+        if [ ! -s "$IMPORT_NGINX_REWRITES" ]; then
+            echo -e "${RED}ERROR: IMPORT_NGINX_REWRITES=$IMPORT_NGINX_REWRITES is not a readable, non-empty file${NC}"
+            exit 1
+        fi
+        mkdir -p "$site/_INSTALL" || exit 1
+        cp -- "$IMPORT_NGINX_REWRITES" "$target" || exit 1
+        echo "  Nginx rewrites:  from $IMPORT_NGINX_REWRITES"
+        return 0
+    fi
+    if ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
+        echo "  Nginx rewrites:  from the KVS archive in kvs-archive/"
+        return 0
+    fi
+    if [ -n "$IMPORT_NGINX_CONFIG" ] && [ -s "$IMPORT_NGINX_CONFIG" ]; then
+        rules=$(import_nginx_rewrites_from_config "$IMPORT_NGINX_CONFIG" "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH")
+        count=$(printf '%s\n' "$rules" | grep -c '^rewrite' || true)
+        if [ "${count:-0}" -gt 0 ]; then
+            mkdir -p "$site/_INSTALL" || exit 1
+            {
+                echo "# Rewrite rules recovered by kvs-install from the nginx configuration of the old server"
+                echo "# ($IMPORT_NGINX_CONFIG, the server blocks serving the site). The KVS package ships"
+                echo "# this file as _INSTALL/nginx_config.txt; replace it with that one to be exact."
+                printf '%s\n' "$rules"
+            } > "$target" || exit 1
+            echo "  Nginx rewrites:  $count rules recovered from the old server's nginx configuration, written to $target (check them)"
+            return 0
+        fi
+    fi
+    echo -e "${RED}ERROR: no nginx rewrite rules for the site: it has no _INSTALL/nginx_config.txt, kvs-archive/ holds no KVS archive and the old server's nginx configuration gave none.${NC}"
+    echo "Set IMPORT_NGINX_REWRITES to the nginx_config.txt of KVS ${IMPORT_SITE_VERSION:-<version>} (the _INSTALL directory of its package) or to the rewrite block of the old vhost${IMPORT_NGINX_CONFIG:+ (saved in $IMPORT_NGINX_CONFIG)}, and run the same command again."
+    exit 1
+}
+
 # The archive is unpacked in a private directory next to the site, then
 # the site's entries are renamed into place: nothing the archive holds
 # besides the site ever sits in the webroot, and the dump never does.
@@ -968,6 +1074,9 @@ import_fetch_archive() {
     mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
     settled=$(import_archive_settle "$stage" "$IMPORT_ARCHIVE_ROOT" "$IMPORT_ARCHIVE_DUMP" "$IMPORT_ARCHIVE_MANIFEST" "$IMPORT_STAGING" "$destination") || exit 1
     IMPORT_DB_DUMP=$(import_field "$settled" 1)
+    if [ -s "$(import_field "$settled" 2)" ]; then
+        import_save_nginx_config "$(import_field "$settled" 2)"
+    fi
     IMPORT_RAW_DUMP=$IMPORT_DB_DUMP
     IMPORT_SITE_DIR=$destination
     chmod 600 "$IMPORT_DB_DUMP" 2>/dev/null || true
@@ -2231,6 +2340,21 @@ detect_ioncube() {
     echo ""
     echo -e "${CYAN}Detecting IonCube encoding...${NC}"
 
+    # An imported site is what runs: its own files decide, the archive
+    # only when they could not say.
+    case "${IMPORT_SITE_IONCUBE:-}" in
+        yes)
+            echo -e "${GREEN}✓ IonCube encoded files detected in the imported site${NC}"
+            sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+            return
+            ;;
+        no)
+            echo -e "${GREEN}✓ Plain PHP files detected in the imported site (no IonCube)${NC}"
+            sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+            return
+            ;;
+    esac
+
     # Find KVS archive
     local KVS_FILE
     KVS_FILE=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
@@ -2301,19 +2425,23 @@ php_version_is_supported() {
     return 1
 }
 
-# Read the version KVS documents for the archive in kvs-archive/. Prints
-# nothing and fails when the archive or its version cannot be read.
+# Read the version KVS documents for the archive in kvs-archive/, or for
+# the imported site when no archive is there (the site says its version
+# itself). Prints nothing and fails when neither gives a version.
 kvs_documented_php_version() {
     local kvs_file
-    local kvs_version
+    local kvs_version=""
     local major
     local minor
     local patch
 
     kvs_file=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
-    [ -n "$kvs_file" ] || return 1
-
-    kvs_version=$(basename "$kvs_file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    if [ -n "$kvs_file" ]; then
+        kvs_version=$(basename "$kvs_file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    fi
+    if [ -z "$kvs_version" ] && [ "${IMPORT_MODE:-false}" = true ]; then
+        kvs_version=$(printf '%s' "${IMPORT_SITE_VERSION:-}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    fi
     [ -n "$kvs_version" ] || return 1
 
     major=$(echo "$kvs_version" | cut -d. -f1)
@@ -2467,7 +2595,13 @@ echo ""
 echo "Checking for KVS archive..."
 mkdir -p kvs-archive
 
-if ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
+if ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
+    echo -e "${GREEN}KVS archive found${NC}"
+elif [ "$IMPORT_MODE" = true ]; then
+    # An imported site brings its version, its encoding and its nginx
+    # rewrites; the archive is a fallback for the rewrites only.
+    echo "No KVS archive in ./kvs-archive/, none needed for an import"
+else
     echo -e "${RED}No KVS archive found in ./kvs-archive/${NC}"
     echo "Please copy your KVS_X.X.X_[domain.tld].zip file to ./kvs-archive/"
     # Skip prompt in headless mode
@@ -2480,9 +2614,8 @@ if ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
         echo -e "${RED}ERROR: Still no KVS archive found. Exiting.${NC}"
         exit 1
     fi
+    echo -e "${GREEN}KVS archive found${NC}"
 fi
-
-echo -e "${GREEN}KVS archive found${NC}"
 
 # The table prefix reaches .env once the archive it may come from is here.
 set_env_value TABLES_PREFIX "$(kvs_tables_prefix)" || exit 1
@@ -3474,6 +3607,7 @@ if [ "$MODE" = "multi" ]; then
 fi
 
 import_fetch_source
+import_ensure_nginx_rewrites
 
 # Show progress header
 progress_header "KVS Docker Setup" "Building and deploying containers"

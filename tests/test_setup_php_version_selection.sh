@@ -91,6 +91,28 @@ seed_archive 5.5.0
 IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y
 run_case "encoded 5.5.0" 7.4 select_php_version
 
+# 1b. An imported site without an archive says its version itself.
+seed_no_archive() {
+    rm -rf "$TEST_DIR/work"
+    mkdir -p "$TEST_DIR/work/kvs-archive"
+    rm -f "$TEST_DIR/applied"
+    cd "$TEST_DIR/work"
+}
+seed_no_archive
+IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y IMPORT_MODE=true IMPORT_SITE_VERSION=6.2.0
+run_case "imported 6.2.0 without an archive" 7.4 select_php_version
+seed_no_archive
+IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y IMPORT_MODE=true IMPORT_SITE_VERSION=7.0.2
+run_case "imported 7.0.2 without an archive" 8.1 select_php_version
+grep -q "Detected KVS version: 7.0.2" "$TEST_DIR/out" ||
+    fail "the imported site's version must be the one detected"
+seed_no_archive
+IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y IMPORT_MODE=false IMPORT_SITE_VERSION=7.0.2
+run_case "no archive outside an import" 8.1 select_php_version
+grep -q "Could not read the KVS version" "$TEST_DIR/out" ||
+    fail "outside an import the site version must not be used"
+IMPORT_MODE='' IMPORT_SITE_VERSION=''
+
 # 2. An encoded archive must not silently consume a stray interactive answer.
 seed_archive 7.0.2
 IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=''
