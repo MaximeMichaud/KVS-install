@@ -1291,7 +1291,8 @@ test_remote_entries_are_shown_and_their_patterns_reach_the_transfer() {
         source "$lib"
         printf '%s\n' 'entry_1=admin|900|kvs|copied' 'entry_2=contents/videos|2097152|kvs|copied' 'entry_3=tmp|12000|transient|excluded' \
             'entry_4=.well-known|1|hidden|excluded' 'entry_5=backup|204800|extra|copied' 'entry_6=contents/nfs|800000|network:nfs4|excluded' \
-            'entry_7=lib||extra|copied' 'exclude_1=/tmp/*' 'exclude_2=/.well-known' 'exclude_3=/contents/nfs' \
+            'entry_7=lib||extra|copied' 'entry_8=admin/logs/debug_sql_post.txt|3518|debuglog|excluded' \
+            'exclude_1=/tmp/*' 'exclude_2=/.well-known' 'exclude_3=/contents/nfs' 'exclude_4=/admin/logs/debug_sql_post.txt' \
             'server_1=Local Videos|/var/www/site/contents/videos|0|inside|https://site/contents/videos' \
             'server_2=Disk 2|/mnt/disk2/videos|0|outside|https://site/videos2' 'server_3=CDN|/var/storage|1|outside|https://cdn.example.com/' > "$report"
         out=$(import_remote_show_entries "$report") || exit 1
@@ -1301,14 +1302,16 @@ test_remote_entries_are_shown_and_their_patterns_reach_the_transfer() {
         printf '%s\n' "$out" | grep -q '200.0 GB *backup *copied (not part of KVS)' || exit 5
         printf '%s\n' "$out" | grep -q '11.7 GB *tmp *left behind (temporary files or compiled templates, KVS rebuilds them)' || exit 6
         printf '%s\n' "$out" | grep -q '^ *? *lib *copied (not part of KVS)' || exit 7
+        printf '%s\n' "$out" | grep -q '3.4 GB *admin/logs/debug_sql_post.txt *left behind (query log of the KVS debug switch, the new server starts without it)' || exit 19
         [ "$(printf '%s\n' "$out" | tail -n 1 | awk '{print $2}')" = "lib" ] || exit 8
         out=$(import_remote_show_servers "$report") || exit 9
         printf '%s\n' "$out" | grep -q '^ *Local Videos: /var/www/site/contents/videos, inside the site, moves with it$' || exit 10
         printf '%s\n' "$out" | grep -q 'Disk 2: /mnt/disk2/videos, OUTSIDE the site directory: not transferred, and its path is not rewritten' || exit 11
         printf '%s\n' "$out" | grep -q '^ *CDN: remote (https://cdn.example.com/), stays where it is$' || exit 12
         import_remote_load_excludes "$report"
-        [ "${#IMPORT_EXCLUDE_PATTERNS[@]}" -eq 3 ] || exit 13
-        [ "${IMPORT_EXCLUDE_PATTERNS[0]}" = '/tmp/*' ] && [ "${IMPORT_EXCLUDE_PATTERNS[2]}" = '/contents/nfs' ] || exit 14
+        [ "${#IMPORT_EXCLUDE_PATTERNS[@]}" -eq 4 ] || exit 13
+        [ "${IMPORT_EXCLUDE_PATTERNS[0]}" = '/tmp/*' ] && [ "${IMPORT_EXCLUDE_PATTERNS[2]}" = '/contents/nfs' ] &&
+            [ "${IMPORT_EXCLUDE_PATTERNS[3]}" = '/admin/logs/debug_sql_post.txt' ] || exit 14
         import_remote_paths_ok "contents/videos_sources backup .well-known" || exit 15
         import_remote_paths_ok "a b;c" && exit 16
         import_remote_paths_ok "../x" && exit 17

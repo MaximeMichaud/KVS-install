@@ -187,8 +187,9 @@ EOF
 }
 
 # A site with what a real webroot accumulates: temporary uploads, compiled
-# templates, logs and KVS backups, a hidden ACME directory, an old backup
-# and a custom library at the root, sources next to the converted videos.
+# templates, logs (a 2 MB query log of the debug switch among them) and KVS
+# backups, a hidden ACME directory, an old backup and a custom library at
+# the root, sources next to the converted videos.
 make_site_with_extras() {
     local dir="$1"
 
@@ -199,6 +200,7 @@ make_site_with_extras() {
     echo "tmp" > "$dir/admin/data/tmp/t"
     echo "compiled" > "$dir/admin/smarty/template-c/x.php"
     echo "log" > "$dir/admin/logs/cron.txt"
+    head -c 2097152 /dev/zero > "$dir/admin/logs/debug_sql_post.txt"
     echo "backup" > "$dir/admin/data/backup/b.tar.gz"
     echo "source" > "$dir/contents/videos_sources/0/1/s.mp4"
     echo "token" > "$dir/.well-known/acme/t"
@@ -389,9 +391,11 @@ test_detect_reports_the_entries_and_what_stays_behind() {
     unset STUB_SERVERS STUB_NFS_PATH
 
     # Thirteen entries three levels down, 1 MB each from the stub; the
-    # temporary files, the compiled templates and the hidden directory
-    # stay behind on their own, the source videos sit on NFS.
-    assert_key "$out" site_total_mb 13
+    # temporary files, the compiled templates, the hidden directory and the
+    # query log stay behind on their own, the source videos sit on NFS. The
+    # du stub answers 1 MB per measured entry whatever it holds, the query
+    # log among them.
+    assert_key "$out" site_total_mb 14
     assert_key "$out" site_size_mb 8
     [ "$(entry_value "$out" contents/videos)" = "1|kvs|copied" ] || fail "contents/videos: $(entry_value "$out" contents/videos)"
     [ "$(entry_value "$out" contents/videos_sources)" = "1|network:nfs4|excluded" ] || fail "a network mount stays behind: $(entry_value "$out" contents/videos_sources)"
@@ -401,16 +405,18 @@ test_detect_reports_the_entries_and_what_stays_behind() {
     [ "$(entry_value "$out" .well-known)" = "1|hidden|excluded" ] || fail "a hidden entry stays behind: $(entry_value "$out" .well-known)"
     [ "$(entry_value "$out" backup)" = "1|extra|copied" ] || fail "an unknown directory is reported and copied: $(entry_value "$out" backup)"
     [ "$(entry_value "$out" lib)" = "1|extra|copied" ] || fail "lib: $(entry_value "$out" lib)"
-    [ "$(entry_value "$out" admin/logs)" = "1|kvs|copied" ] || fail "admin/logs: $(entry_value "$out" admin/logs)"
+    [ "$(entry_value "$out" admin/logs)" = "2|kvs|copied" ] || fail "admin/logs holds its two entries: $(entry_value "$out" admin/logs)"
+    [ "$(entry_value "$out" admin/logs/debug_sql_post.txt)" = "1|debuglog|excluded" ] || fail "the query log stays behind: $(entry_value "$out" admin/logs/debug_sql_post.txt)"
     [ "$(entry_value "$out" admin/data/backup)" = "1|kvs|copied" ] || fail "admin/data/backup: $(entry_value "$out" admin/data/backup)"
-    [ "$(entry_value "$out" admin)" = "7|kvs|copied" ] || fail "admin holds its seven entries: $(entry_value "$out" admin)"
+    [ "$(entry_value "$out" admin)" = "8|kvs|copied" ] || fail "admin holds its eight entries: $(entry_value "$out" admin)"
     [ "$(entry_value "$out" contents)" = "2|kvs|copied" ] || fail "contents holds two: $(entry_value "$out" contents)"
     has_pattern "$out" '/tmp/*' || fail "the temporary files leave as a pattern on their content: $(grep '^exclude_' "$out")"
     has_pattern "$out" '/.well-known' || fail "the hidden entry leaves whole: $(grep '^exclude_' "$out")"
     has_pattern "$out" '/contents/videos_sources' || fail "the mount leaves whole: $(grep '^exclude_' "$out")"
     has_pattern "$out" '/admin/data/tmp/*' || fail "admin/data/tmp pattern: $(grep '^exclude_' "$out")"
     has_pattern "$out" '/admin/smarty/template-c/*' || fail "compiled templates pattern: $(grep '^exclude_' "$out")"
-    [ "$(grep -c '^exclude_' "$out")" -eq 5 ] || fail "five patterns, got $(grep -c '^exclude_' "$out")"
+    has_pattern "$out" '/admin/logs/debug_sql_post.txt' || fail "the query log leaves as a file pattern: $(grep '^exclude_' "$out")"
+    [ "$(grep -c '^exclude_' "$out")" -eq 6 ] || fail "six patterns, got $(grep -c '^exclude_' "$out")"
     grep -q '^entry_1=\.well-known|' "$out" || fail "the entries come in C order, hidden first: $(grep '^entry_1=' "$out")"
     grep -Fxq "server_1=Local Videos|$site/contents/videos|0|inside|https://www.example.com/contents/videos" "$out" || fail "a local server inside the site: $(grep '^server_' "$out")"
     grep -Fxq "server_2=Disk 2|/mnt/disk2/videos|0|outside|https://www.example.com/videos2" "$out" || fail "a local server outside the site: $(grep '^server_' "$out")"
@@ -426,17 +432,20 @@ test_excluded_and_included_paths_change_what_travels() {
     local archive="$TMP_ROOT/choice.tar"
 
     make_site_with_extras "$site"
-    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude contents/videos_sources --exclude=backup/ --include .well-known detect "$site" ||
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude contents/videos_sources --exclude=backup/ --include .well-known \
+        --include admin/logs/debug_sql_post.txt detect "$site" ||
         fail "detect with choices must succeed: $(cat "$err")"
-    assert_key "$out" site_total_mb 13
-    assert_key "$out" site_size_mb 8
+    assert_key "$out" site_total_mb 14
+    assert_key "$out" site_size_mb 9
     [ "$(entry_value "$out" contents/videos_sources)" = "1|kvs|excluded" ] || fail "an excluded bucket: $(entry_value "$out" contents/videos_sources)"
     [ "$(entry_value "$out" backup)" = "1|extra|excluded" ] || fail "an excluded extra: $(entry_value "$out" backup)"
     [ "$(entry_value "$out" .well-known)" = "1|hidden|copied" ] || fail "an included hidden entry: $(entry_value "$out" .well-known)"
+    [ "$(entry_value "$out" admin/logs/debug_sql_post.txt)" = "1|debuglog|copied" ] || fail "an included query log: $(entry_value "$out" admin/logs/debug_sql_post.txt)"
     has_pattern "$out" '/tmp/*' || fail "patterns: $(grep '^exclude_' "$out")"
     has_pattern "$out" '/backup' || fail "patterns: $(grep '^exclude_' "$out")"
     has_pattern "$out" '/contents/videos_sources' || fail "patterns: $(grep '^exclude_' "$out")"
     has_pattern "$out" '/.well-known' && fail "an included entry has no pattern"
+    has_pattern "$out" '/admin/logs/debug_sql_post.txt' && fail "an included query log has no pattern"
     [ "$(grep -c '^exclude_' "$out")" -eq 5 ] || fail "five patterns, got $(grep '^exclude_' "$out")"
 
     # A path that is no listed entry still leaves; a parent excluded with
@@ -456,6 +465,8 @@ test_excluded_and_included_paths_change_what_travels() {
     tar -tf "$archive" | grep -Fxq "www/tmp/" || fail "tmp travels as an empty directory: $(tar -tf "$archive")"
     tar -tf "$archive" | grep -Fq "www/tmp/upload.part" && fail "temporary files must not travel"
     tar -tf "$archive" | grep -Fq "www/admin/smarty/template-c/x.php" && fail "compiled templates must not travel"
+    tar -tf "$archive" | grep -Fq "www/admin/logs/debug_sql_post.txt" && fail "the query log must not travel"
+    tar -tf "$archive" | grep -Fxq "www/admin/logs/cron.txt" || fail "the other logs travel"
     tar -tf "$archive" | grep -Fq "www/backup" && fail "an excluded directory must not travel"
     tar -tf "$archive" | grep -Fq "www/.well-known" && fail "a hidden directory must not travel"
     tar -tf "$archive" | grep -Fxq "www/contents/videos_sources/0/1/s.mp4" || fail "the sources travel when not excluded"
@@ -483,6 +494,15 @@ test_the_size_walk_can_be_skipped() {
     [[ "$(detect_value "$out" site_fs_used_mb)" =~ ^[0-9]+$ ]] || fail "the filesystem usage stands in for the size"
     grep -q "^du argv:" "$STUB_LOG" && fail "no du may run with --no-size"
     grep -q "not measured" "$err" || fail "skipping the size must be said: $(cat "$err")"
+
+    # Beyond the walk, the query log is still sized, on its own, and
+    # leaves nothing from a size that was not measured.
+    make_site_with_extras "$TMP_ROOT/nosize-extras"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --no-size detect "$TMP_ROOT/nosize-extras" ||
+        fail "detect without the size must succeed on a site with extras: $(cat "$err")"
+    assert_key "$out" site_size_mb 0
+    [ "$(entry_value "$out" admin/logs/debug_sql_post.txt)" = "2|debuglog|excluded" ] || fail "the query log is sized on its own: $(entry_value "$out" admin/logs/debug_sql_post.txt)"
+    [ "$(entry_value "$out" tmp)" = "|transient|excluded" ] || fail "a directory beyond the walk has no size: $(entry_value "$out" tmp)"
 
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --size-timeout abc detect "$site" && fail "a budget that is not a number must be refused"
     grep -q "size-timeout needs a number" "$err" || fail "the refusal must name the option: $(cat "$err")"
