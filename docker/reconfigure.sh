@@ -52,7 +52,8 @@ OPTIONS:
                 Disable restores KVS search and keeps the index volume.
     --import-status [--watch]
                 Inspect MariaDB startup/import activity without changing it.
-                --watch refreshes until TCP is ready or the wait times out.
+                --watch refreshes until TCP is ready, without a deadline
+                unless MARIADB_WAIT_SECONDS is set to a positive value.
 
 REQUIREMENTS:
     Run it from the docker directory of the installation. The .env file
@@ -302,7 +303,7 @@ if [ -n "$RUNTIME_ACTION" ]; then
             source "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh"
             once=yes
             [ "$IMPORT_WATCH" != yes ] || once=no
-            database_wait_ready "${MARIADB_WAIT_SECONDS:-3600}" "$once"
+            database_wait_ready "${MARIADB_WAIT_SECONDS:-0}" "$once"
             ;;
         manticore)
             # shellcheck source=/dev/null

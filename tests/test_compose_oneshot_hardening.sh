@@ -56,9 +56,9 @@ if docker ps -aq --filter "label=com.docker.compose.project=${PROJECT_NAME}" | g
     fail "a disposable one-shot container remained after --rm"
 fi
 
-grep -Fq 'docker compose --profile setup run --rm --no-deps phpmyadmin-init' \
+grep -Eq 'docker compose --profile setup run --rm --no-deps .*phpmyadmin-init$' \
     "$ROOT_DIR/docker/setup.sh" || fail "setup does not use a checked phpMyAdmin one-shot"
-grep -Fq 'docker compose --profile setup run --rm --no-deps kvs-init' \
+grep -Eq 'docker compose --profile setup run --rm --no-deps .*kvs-init$' \
     "$ROOT_DIR/docker/setup.sh" || fail "setup does not use a checked KVS one-shot"
 grep -Fq 'docker compose --profile setup run --rm --no-deps phpmyadmin-init' \
     "$ROOT_DIR/docker/multi-site/site-manager.sh" ||

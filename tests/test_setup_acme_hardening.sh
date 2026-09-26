@@ -38,6 +38,7 @@ source "$functions_file"
 RED=''
 GREEN=''
 NC=''
+RESUME_IMPORT=false
 
 sleep() {
     return 0
@@ -134,6 +135,13 @@ grep -Fq 'compose exec -T acme acme.sh --install-cert -d example.com' \
     "$TEST_DIR/apex.calls" || fail "the issued apex certificate was not installed"
 grep -Fq 'compose exec -T nginx nginx -s reload' "$TEST_DIR/apex.calls" ||
     fail "Nginx was not reloaded after certificate validation"
+
+RESUME_IMPORT=true run_case resume example.com letsencrypt
+grep -Fxq 'compose up -d --no-deps --no-recreate --no-build --pull never acme' "$TEST_DIR/resume.calls" ||
+    fail "import recovery could recreate dependencies while starting ACME"
+if grep -Eq 'force-recreate| up .* mariadb' "$TEST_DIR/resume.calls"; then
+    fail "import recovery must preserve the existing database during certificate setup"
+fi
 
 run_case subdomain 7.0.2.maximemichaud.ca zerossl
 grep -Fq -- '--accountemail admin@example.com --server zerossl' \

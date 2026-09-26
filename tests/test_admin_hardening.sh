@@ -230,7 +230,7 @@ fi
 if grep -Eq 'set_env_value[[:space:]]+KVS_ADMIN_PASSWORD' "$ROOT_DIR/docker/setup.sh"; then
     fail "setup persists the one-time admin password"
 fi
-init_line=$(grep -nF 'docker compose --profile setup run --rm --no-deps kvs-init' \
+init_line=$(grep -nE 'docker compose --profile setup run --rm --no-deps .*kvs-init$' \
     "$ROOT_DIR/docker/setup.sh" | cut -d: -f1)
 unset_line=$(grep -nF 'unset KVS_ADMIN_PASSWORD' "$ROOT_DIR/docker/setup.sh" | head -n 1 | cut -d: -f1)
 next_step_line=$(grep -nF 'progress_bar "Configuring disk space limit"' \
