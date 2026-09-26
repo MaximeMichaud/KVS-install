@@ -7,6 +7,9 @@
 # shellcheck disable=SC2030,SC2031  # PATH is changed inside subshells on purpose.
 set -euo pipefail
 
+# Existing cases exercise the single-stream compatibility path explicitly.
+export IMPORT_TRANSFER_JOBS=1
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(mktemp -d /tmp/kvs-import-sources-test.XXXXXX)
 TESTS_RUN=0
@@ -510,7 +513,10 @@ make_fake_ssh() {
 log="$bin/ssh.log"
 while [ \$# -gt 0 ]; do
     case "\$1" in
-        -o) echo "opt \$2" >> "\$log"; shift 2 ;;
+        -o)
+            echo "opt \$2" >> "\$log"
+            if [ "\$2" = ControlPath=none ] && [ "\${FAKE_SSH_INDEPENDENT_FAIL:-}" = yes ]; then exit 255; fi
+            shift 2 ;;
         -p) echo "port \$2" >> "\$log"; shift 2 ;;
         -i) echo "key \$2" >> "\$log"; shift 2 ;;
         -l) echo "login \$2" >> "\$log"; shift 2 ;;
@@ -522,6 +528,11 @@ done
 echo "target \$1" >> "\$log"
 shift
 echo "command \$*" >> "\$log"
+if [ -n "\${FAKE_SSH_STARTUP_GUARD:-}" ]; then
+    mkdir "\$FAKE_SSH_STARTUP_GUARD" 2>/dev/null || exit 255
+    sleep 0.02
+    rmdir "\$FAKE_SSH_STARTUP_GUARD"
+fi
 # A real sshd hands the command line to the login shell, which splits it.
 exec bash -c "\$*"
 EOF
@@ -1082,6 +1093,161 @@ EOF
     pass "the tar stream reports what the old server could not read"
 }
 
+test_parallel_transfers_preserve_the_mirror() {
+    local bin="$TMP_ROOT/parallel-bin" site="$TMP_ROOT/parallel-site" destination="$TMP_ROOT/parallel-dest"
+    local reference="$TMP_ROOT/parallel-reference" name i
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    mkdir -p "$site/contents/screens/one" "$site/contents/screens/two" "$site/tmp" "$site/backup" "$TMP_ROOT/parallel-store"
+    for ((i = 0; i < 40; i++)); do
+        printf 'screen %s\n' "$i" > "$site/contents/screens/one/$i.jpg"
+    done
+    for name in 'a b' $'a\nb' $'a\tb' 'a\#012b' 'a\b' 'a"b' 'a*b' $'\303\251.jpg'; do
+        printf '%s' "$name" > "$site/contents/screens/two/$name"
+    done
+    echo external > "$TMP_ROOT/parallel-store/video.mp4"
+    ln -s "$TMP_ROOT/parallel-store" "$site/contents/store"
+    ln -s screens/one "$site/contents/inside"
+    echo excluded > "$site/tmp/upload.part"
+    echo excluded > "$site/backup/old.sql"
+    echo literal > "$site/#leading-hash"
+    echo literal > "$site/;leading-semicolon"
+    mkdir -p "$destination"
+    echo stale > "$destination/stale.txt"
+    # A wrapper around real rsync requires all four workers to have started
+    # before allowing any to finish. Serial execution cannot pass it.
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+worker=""; dry=no; server=no
+for arg in "$@"; do
+    case "$arg" in
+        --files-from=*) worker=${arg#*=}; worker=${worker##*/}; worker=${worker%.list} ;;
+        --dry-run) dry=yes ;;
+        --server) server=yes ;;
+    esac
+done
+if [ "$dry" = yes ] && [ "${PARALLEL_SHORT_PLAN:-}" = yes ]; then
+    printf 'KVS-PLAN >f+++++++++ 1 contents/screens/one/0.jpg\n'
+    exit 124
+fi
+if [ -n "$worker" ]; then
+    printf '%s\n' "$*" > "$PARALLEL_BIN/worker-$worker"
+    touch "$PARALLEL_BIN/started-$worker"
+    export PARALLEL_WORKER="$worker"
+    if [ "${PARALLEL_FAIL:-}" = "$worker" ]; then exit 23; fi
+    if [ "${PARALLEL_VANISH:-}" = "$worker" ]; then
+        printf 'KVS_IMPORT_SSH_READY\n' >&2
+        exit 24
+    fi
+fi
+if [ "$server" = yes ] && [ -n "${PARALLEL_WORKER:-}" ]; then
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [ -f "$PARALLEL_BIN/started-1" ] && [ -f "$PARALLEL_BIN/started-2" ] &&
+            [ -f "$PARALLEL_BIN/started-3" ] && [ -f "$PARALLEL_BIN/started-4" ] && break
+        sleep 0.05
+    done
+    [ "$attempt" -lt 100 ] || exit 90
+fi
+if [ "$server" = no ] && [ "$dry" = no ] && [ -z "$worker" ]; then
+    exec "$REAL_RSYNC" "$@" --out-format='FINAL %i %n'
+fi
+exec "$REAL_RSYNC" "$@"
+EOF
+    chmod +x "$bin/rsync"
+    (
+        export REAL_RSYNC
+        REAL_RSYNC=$(command -v rsync)
+        export PARALLEL_BIN="$bin"
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/parallel-ctl" import_ssh_setup old.example.com 2222 root "" yes
+        IMPORT_REMOTE_SUDO=no
+        IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel.out" 2>&1 || {
+            cat "$TMP_ROOT/parallel.out"; exit 1;
+        }
+        grep -q '4 workers on separate SSH connections' "$TMP_ROOT/parallel.out" || exit 2
+        grep -q 'ControlPath=none' "$bin/worker-1" || exit 3
+        grep -q -- '--no-recursive --dirs --from0' "$bin/worker-1" || exit 4
+        grep -q -- '--delete' "$bin/worker-1" && exit 4
+        grep -q '^FINAL >f' "$TMP_ROOT/parallel.out" && exit 15
+        IMPORT_TRANSFER_JOBS=1 import_remote_files "$site" "$reference" yes '/tmp/*' '/backup' > /dev/null || exit 5
+        diff -r --no-dereference "$reference" "$destination" || exit 6
+        [ -L "$destination/contents/inside" ] && [ ! -L "$destination/contents/store" ] || exit 7
+        [ ! -e "$destination/stale.txt" ] && [ ! -e "$destination/backup" ] && [ -d "$destination/tmp" ] || exit 8
+        # An unchanged repeat must not send regular file data again.
+        rm "$bin"/worker-*
+        IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-repeat.out" 2>&1 || exit 9
+        [ ! -e "$bin/worker-1" ] || exit 10
+        # A failed worker must propagate its status, retaining partial work
+        # and stale files for a retry instead of running the deletion pass.
+        rm -rf "$destination/contents/screens"
+        echo stale > "$destination/stale.txt"
+        status=0
+        PARALLEL_FAIL=2 IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-fail.out" 2>&1 || status=$?
+        [ "$status" -eq 23 ] && [ -e "$destination/stale.txt" ] || exit 11
+        IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > /dev/null || exit 12
+        diff -r --no-dereference "$reference" "$destination" || exit 13
+        # Incomplete plans and vanished files still need the final pass.
+        rm -rf "$destination/contents/screens"
+        PARALLEL_SHORT_PLAN=yes IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > /dev/null || exit 16
+        diff -r --no-dereference "$reference" "$destination" || exit 17
+        rm -rf "$destination/contents/screens"
+        PARALLEL_VANISH=2 IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > /dev/null || exit 18
+        diff -r --no-dereference "$reference" "$destination" || exit 19
+        rm "$destination/contents/screens/one/0.jpg"
+        mkdir "$destination/contents/screens/one/0.jpg"
+        echo obsolete > "$destination/contents/screens/one/0.jpg/old"
+        IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > /dev/null || exit 20
+        diff -r --no-dereference "$reference" "$destination" || exit 21
+        rm -rf "$destination/contents/screens"
+        FAKE_SSH_INDEPENDENT_FAIL=yes IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-shared.out" 2>&1 || exit 22
+        grep -q 'sharing the authenticated SSH connection' "$TMP_ROOT/parallel-shared.out" || exit 23
+        diff -r --no-dereference "$reference" "$destination" || exit 24
+        # Even a server accepting just one unauthenticated connection can
+        # run 32 established transfers: the remote readiness marker gates
+        # the next startup while the server-side transfer barrier proves
+        # copying still overlaps.
+        rm "$bin"/worker-* "$bin"/started-*
+        FAKE_SSH_STARTUP_GUARD="$TMP_ROOT/auth-guard" IMPORT_TRANSFER_JOBS=32 import_remote_files "$site" "$TMP_ROOT/parallel-32" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-32.out" 2>&1 || {
+            cat "$TMP_ROOT/parallel-32.out"; exit 25;
+        }
+        [ -f "$bin/started-32" ] || exit 26
+        diff -r --no-dereference "$reference" "$TMP_ROOT/parallel-32" || exit 27
+        grep -q KVS_IMPORT_SSH_READY "$TMP_ROOT/parallel-32.out" && exit 28
+        for jobs in 0 33 -1 04 invalid; do
+            IMPORT_TRANSFER_JOBS="$jobs" import_remote_files "$site" "$destination" yes > /dev/null 2>&1 && exit 14
+        done
+        exit 0
+    ) || fail "parallel copies must match a single mirror, resume and propagate failures (case $?)"
+    pass "parallel transfers preserve the mirror and resume after a worker failure"
+}
+
+test_parallel_interruption_stops_the_process_groups() {
+    local bin="$TMP_ROOT/interrupted-bin" plan="$TMP_ROOT/interrupted-plan" i pid status=0
+    mkdir -p "$bin" "$plan"
+    for i in 1 2 3 4; do printf 'file\0' > "$plan/$i.list"; done
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+echo "$$" >> "$INTERRUPTED_PLAN/pids"
+sleep 60 &
+echo "$!" >> "$INTERRUPTED_PLAN/pids"
+wait
+EOF
+    chmod +x "$bin/rsync"
+    INTERRUPTED_PLAN="$plan" PATH="$bin:$PATH" timeout --preserve-status -k 5s 2s \
+        bash -c 'source "$1"; import_rsync_workers "$2" 4 unused' _ "$REPO_ROOT/docker/lib/import.sh" "$plan" \
+        > "$TMP_ROOT/interrupted.out" 2>&1 || status=$?
+    [ "$status" -eq 143 ] || fail "interruption must return TERM, got $status"
+    [ "$(wc -l < "$plan/pids")" -eq 8 ] || fail "four rsync workers and their children must have started"
+    while read -r pid; do
+        # A reparented child can briefly be a zombie until init reaps it;
+        # it must not be running after the scheduler returns.
+        if kill -0 "$pid" 2>/dev/null; then
+            [ "$(ps -o stat= -p "$pid" | cut -c1)" = Z ] || fail "worker child $pid survived interruption"
+        fi
+    done < "$plan/pids"
+    pass "interruption stops every worker and its SSH process group"
+}
+
 test_archive_names_map_to_kinds_tools_and_packages
 test_only_the_missing_tool_is_installed
 test_listings_are_normalized_for_every_archive_kind
@@ -1104,5 +1270,7 @@ test_a_user_with_sudo_runs_the_remote_side_through_it
 test_password_protected_archives_are_refused_with_a_reason
 test_links_leaving_the_site_are_listed_and_the_copy_follows_them
 test_the_tar_stream_reports_what_the_old_server_could_not_read
+test_parallel_transfers_preserve_the_mirror
+test_parallel_interruption_stops_the_process_groups
 
 echo "All $TESTS_RUN import source tests passed."

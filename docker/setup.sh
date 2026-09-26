@@ -78,6 +78,10 @@ ENVIRONMENT VARIABLES:
                           size (300); past that the import goes on with what
                           was counted and the space used on the old server's
                           filesystem as the upper bound. 0 measures it all.
+    IMPORT_TRANSFER_JOBS=N Concurrent rsync file transfers (4, range 1-32).
+                          1 keeps a single stream. Separate SSH connections
+                          are used when authentication allows it; a final
+                          pass reconciles the site and removes stale files.
     IMPORT_EXCLUDE=PATHS  Directories left behind, space separated, relative
                           to the site directory (contents/videos_sources
                           backup). Temporary files, compiled templates,
@@ -211,6 +215,7 @@ IMPORT_NGINX_REWRITES="${IMPORT_NGINX_REWRITES:-}"
 # taken over instead of transferred again.
 IMPORT_REUSE_SITE_DIR="${IMPORT_REUSE_SITE_DIR:-}"
 IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
+IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-4}"
 # What the transfer leaves behind and takes along, on top of what the
 # exporter decides on its own; the choice of the first pass is kept in
 # .env so the second pass repeats it.
@@ -742,6 +747,10 @@ import_remote_free_space_check() {
 import_inspect_remote() {
     local batch=no accept_new=no attempt=1 prefix db_ok encoding nginx_lines nginx_files
 
+    if [[ ! "$IMPORT_TRANSFER_JOBS" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
+        echo "ERROR: IMPORT_TRANSFER_JOBS must be an integer from 1 to 32" >&2
+        exit 1
+    fi
     if [ ! -f "$IMPORT_EXPORTER" ]; then
         echo -e "${RED}ERROR: $IMPORT_EXPORTER is missing; run setup.sh from a full checkout of the repository${NC}"
         exit 1

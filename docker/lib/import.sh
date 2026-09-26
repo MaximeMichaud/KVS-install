@@ -1266,7 +1266,7 @@ import_remote_privileges() {
 import_ssh_rsh() {
     local option result="${IMPORT_SSH_COMMAND[*]}"
 
-    for option in "${IMPORT_SSH_OPTS[@]}"; do
+    for option in "$@" "${IMPORT_SSH_OPTS[@]}"; do
         case "$option" in
             *[[:space:]\'\"]*) result="$result '${option//\'/\'\'}'" ;;
             *) result="$result $option" ;;
@@ -1413,11 +1413,146 @@ import_rsync_stats_totals() {
 # gave no statistics; returns 124 when the budget ran out.
 import_rsync_totals() {
     local budget="${IMPORT_SIZE_TIMEOUT:-300}"
+    local -a listing=() statuses=()
 
     [[ "$budget" =~ ^[0-9]+$ ]] || budget=300
-    timeout "$budget" rsync --dry-run --stats "$@" 2>/dev/null | import_rsync_stats_totals
-    return "${PIPESTATUS[0]}"
+    if [ -n "${IMPORT_RSYNC_PLAN:-}" ]; then
+        listing=(--out-format='KVS-PLAN %i %l %n')
+    fi
+    LC_ALL=C timeout "$budget" rsync --dry-run --stats "${listing[@]}" "$@" 2>/dev/null |
+        import_rsync_plan "${IMPORT_RSYNC_PLAN:-}" "${IMPORT_TRANSFER_JOBS:-4}" |
+        import_rsync_stats_totals
+    statuses=("${PIPESTATUS[@]}")
+    [ "${statuses[1]}" -eq 0 ] || return "${statuses[1]}"
+    [ "${statuses[2]}" -eq 0 ] || return "${statuses[2]}"
+    return "${statuses[0]}"
 }
+
+# Split only the regular files needing data, using rsync's own exclusions
+# and link traversal. Decode its documented octal filename escapes in the
+# C locale, then write NUL-delimited lists. Each shard keeps traversal order
+# and balances bytes plus a per-file cost without retaining names in RAM.
+import_rsync_plan() {
+    LC_ALL=C awk -v directory="$1" -v jobs="$2" '
+        function decode(s,    result, code) {
+            result = ""
+            while (match(s, /\\#[0-7][0-7][0-7]/)) {
+                code = substr(s, RSTART + 2, 1) * 64 + substr(s, RSTART + 3, 1) * 8 + substr(s, RSTART + 4, 1)
+                result = result substr(s, 1, RSTART - 1) sprintf("%c", code)
+                s = substr(s, RSTART + 5)
+            }
+            return result s
+        }
+        directory != "" && /^KVS-PLAN (<|>)f[^ ]* [0-9]+ / {
+            size = $3 + 0
+            name = $0
+            sub(/^KVS-PLAN [^ ]+ [0-9]+ /, "", name)
+            name = decode(name)
+            if (name == "" || name ~ /^\// || name ~ /(^|\/)\.\.(\/|$)/) exit 1
+            worker = 1
+            for (i = 2; i <= jobs; i++) if (weight[i] + 0 < weight[worker] + 0) worker = i
+            printf "./%s%c", name, 0 > (directory "/" worker ".list")
+            weight[worker] += size + 65536
+            next
+        }
+        !/^KVS-PLAN / { print }
+    '
+}
+
+# A separate process group per rsync lets interruption stop its SSH child
+# as well. Logs stay private; a bounded tail of each supplies one aggregate
+# progress record per second to the existing progress renderer.
+import_rsync_workers() (
+    local plan="$1" jobs="$2" rsh="$3"
+    shift 3
+    local worker pid active result=0 status bytes files snapshot arg remote_program=rsync
+    local -a pids=() logs=() rsync_args=()
+    # Keep the PID returned by $! as the session/process-group leader even
+    # when a caller enabled shell job control (otherwise setsid may fork).
+    set +m
+    for arg in "$@"; do
+        case "$arg" in
+            --delete) ;;
+            --rsync-path=*)
+                remote_program=${arg#*=}
+                [ "${IMPORT_RSYNC_SERIAL_AUTH:-no}" = yes ] || rsync_args+=("$arg")
+                ;;
+            *) rsync_args+=("$arg") ;;
+        esac
+    done
+    if [ "${IMPORT_RSYNC_SERIAL_AUTH:-no}" = yes ]; then
+        # This stderr marker comes from the remote shell after SSH has
+        # authenticated, before rsync starts. Wait for it before opening
+        # the next connection: established transfers remain concurrent,
+        # but our unauthenticated connections never pile up at MaxStartups.
+        rsync_args+=(--rsync-path="printf '%s\\n' KVS_IMPORT_SSH_READY >&2; exec $remote_program")
+    fi
+    trap 'for pid in "${pids[@]}"; do [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true; done; wait' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    for ((worker = 1; worker <= jobs; worker++)); do
+        [ -s "$plan/$worker.list" ] || continue
+        logs+=("$plan/$worker.log")
+        # --force permits a planned file to replace an obsolete nonempty
+        # directory. It does not enable mirroring/deletion of sibling files.
+        setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
+            --files-from="$plan/$worker.list" -e "$rsh" --info=progress2 --outbuf=L \
+            > "$plan/$worker.log" 2> "$plan/$worker.err" < /dev/null &
+        pids[worker]=$!
+        if [ "${IMPORT_RSYNC_SERIAL_AUTH:-no}" = yes ]; then
+            while kill -0 "${pids[worker]}" 2>/dev/null &&
+                ! grep -Fxq KVS_IMPORT_SSH_READY "$plan/$worker.err"; do
+                sleep 0.05
+            done
+            if ! grep -Fxq KVS_IMPORT_SSH_READY "$plan/$worker.err"; then
+                status=0
+                wait "${pids[worker]}" || status=$?
+                pids[worker]=""
+                cat "$plan/$worker.err" >&2
+                [ "$status" -ne 0 ] || status=1
+                echo "ERROR: transfer worker $worker ended before SSH was ready (status $status)" >&2
+                return "$status"
+            fi
+        fi
+    done
+    while :; do
+        active=0
+        for worker in "${!pids[@]}"; do
+            pid=${pids[worker]}
+            [ -n "$pid" ] || continue
+            if kill -0 "$pid" 2>/dev/null; then
+                active=$((active + 1))
+            else
+                status=0
+                wait "$pid" || status=$?
+                pids[worker]=""
+                sed '/^KVS_IMPORT_SSH_READY$/d' "$plan/$worker.err" >&2
+                case "$status" in
+                    0) ;;
+                    24) [ "$result" -ne 0 ] || result=24 ;;
+                    *) echo "ERROR: transfer worker $worker failed (rsync status $status)" >&2; return "$status" ;;
+                esac
+            fi
+        done
+        snapshot=$(
+            for worker in "${logs[@]}"; do
+                tail -c 8192 "$worker" | LC_ALL=C awk '
+                    BEGIN { RS = "\r|\n" }
+                    /^ *[0-9][0-9,.]* +[0-9]+% / {
+                        b = $1; gsub(/[,.]/, "", b)
+                        if (match($0, /xfr#[0-9]+/)) f = substr($0, RSTART + 4, RLENGTH - 4)
+                    }
+                    END { printf "%.0f %.0f\n", b, f }
+                '
+            done | awk '{ bytes += $1; files += $2 } END { printf "%.0f %.0f\n", bytes, files }'
+        )
+        read -r bytes files <<< "$snapshot"
+        printf ' %s 0%% 0.00B/s 0:00:00 (xfr#%s)\n' "$bytes" "$files"
+        [ "$active" -gt 0 ] || break
+        sleep 1
+    done
+    return "$result"
+)
 
 # import_rsync_progress <bytes to transfer> <files to transfer> [terminal yes|no]
 # Reads the output of rsync --info=progress2 and shows the transfer
@@ -1569,10 +1704,9 @@ import_rsync_progress() {
 # Mirror the site files. rsync when both sides have it (resumable through
 # the partial directory, a repeat only transfers the changes), a tar
 # stream otherwise. The transfer is counted first, a dry run, and shown
-# against that count by import_rsync_progress. The incremental recursion
-# stays on for both: a full scan before the first byte holds the whole
-# file list in memory on both sides, which a small server cannot afford
-# for a large site. The
+# against that count by import_rsync_progress. Counting and the final
+# mirror use incremental recursion. Parallel workers take disjoint lists
+# from the count, stored on disk, and only handle their listed files. The
 # patterns are the exporter's exclude_N lines, anchored at the site
 # directory (/tmp/*, /backup): what stays behind. rsync takes them as they
 # are; the tar on the old server gets them under its ./ prefix, which
@@ -1582,18 +1716,24 @@ import_rsync_progress() {
 # links inside it stay links. Files that vanish during the transfer are
 # what a live site does and not a failure; files rsync could not read or
 # links pointing nowhere are.
-import_remote_files() {
+import_remote_files() (
     local dir="$1"
     local destination="$2"
     local use_rsync="$3"
     local status=0
     local pattern totals count_status files=0 bytes=0 site_files site_bytes
+    local jobs="${IMPORT_TRANSFER_JOBS:-4}" worker_rsh worker_auth=no plan=""
+    local -a independent=(-o ControlMaster=no -o ControlPath=none -o Compression=no)
     local -a rsync_path=()
     local -a rsync_args=()
     local -a patterns=("${@:4}")
     local -a rsync_excludes=()
     local -a tar_excludes=()
 
+    if [[ ! "$jobs" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
+        echo "ERROR: IMPORT_TRANSFER_JOBS must be an integer from 1 to 32" >&2
+        return 1
+    fi
     import_remote_path_check "$dir" || return 1
     mkdir -p "$destination" || return 1
     for pattern in "${patterns[@]}"; do
@@ -1613,9 +1753,15 @@ import_remote_files() {
         fi
         rsync_args=(-a -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
             "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/")
+        if [ "$jobs" -gt 1 ] && command -v setsid >/dev/null 2>&1; then
+            plan=$(mktemp -d) || return 1
+            trap 'rm -rf -- "$plan"' EXIT
+        elif [ "$jobs" -gt 1 ]; then
+            echo "  setsid is unavailable; using one transfer worker."
+        fi
         echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
-        totals=$(import_rsync_totals "${rsync_args[@]}")
-        count_status=$?
+        count_status=0
+        totals=$(IMPORT_RSYNC_PLAN="$plan" import_rsync_totals "${rsync_args[@]}") || count_status=$?
         if [ -n "$totals" ]; then
             IFS=$'\t' read -r files bytes site_files site_bytes <<< "$totals"
             if [ "$files" -eq 0 ] && [ "$bytes" -eq 0 ]; then
@@ -1625,6 +1771,41 @@ import_remote_files() {
             fi
         elif [ "$count_status" -eq 124 ]; then
             echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the transfer shows its counts without a whole"
+        fi
+        if [ -n "$plan" ] && [ -s "$plan/1.list" ]; then
+            # New SSH connections spread encryption across cores. A password
+            # typed into the original master cannot be replayed unattended:
+            # probe without prompts, then reuse that master when necessary.
+            if [ "${IMPORT_SSH_COMMAND[0]}" != sshpass ]; then
+                independent+=(-o BatchMode=yes)
+            fi
+            if "${IMPORT_SSH_COMMAND[@]}" "${independent[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" true < /dev/null 2>/dev/null; then
+                worker_rsh=$(import_ssh_rsh "${independent[@]}")
+                worker_auth=yes
+                echo "  Transferring with up to $jobs workers on separate SSH connections."
+            else
+                # OpenSSH normally allows ten sessions per master. Refuse
+                # a larger shared pool instead of dropping planned shards.
+                worker_rsh=$(import_ssh_rsh)
+                if [ "$jobs" -gt 8 ]; then
+                    echo "ERROR: separate SSH authentication is unavailable; set IMPORT_TRANSFER_JOBS to 8 or less, or provide a key or IMPORT_REMOTE_PASSWORD" >&2
+                    return 1
+                fi
+                echo "  Transferring with up to $jobs workers sharing the authenticated SSH connection."
+            fi
+            IMPORT_RSYNC_SERIAL_AUTH="$worker_auth" import_rsync_workers "$plan" "$jobs" "$worker_rsh" "${rsync_args[@]}" |
+                import_rsync_progress "$bytes" "$files"
+            status=${PIPESTATUS[0]}
+            case "$status" in
+                0|24) ;;
+                *) return "$status" ;;
+            esac
+            echo "  Checking the whole site, catching new changes and applying deletions..."
+            # Workers never delete and never recurse into each other's lists.
+            # This ordinary mirror restores directory metadata and links,
+            # handles an incomplete timed-out plan, and removes stale files.
+            bytes=0
+            files=0
         fi
         rsync "${rsync_args[@]}" --info=progress2 | import_rsync_progress "$bytes" "$files"
         status=${PIPESTATUS[0]}
@@ -1661,7 +1842,7 @@ import_remote_files() {
         echo "ERROR: the tar stream from $IMPORT_SSH_TARGET could not be unpacked into $destination (see the messages above)" >&2
         return "${pipe_status[1]}"
     fi
-}
+)
 
 # import_watch_file_size <file> <pid> <label>
 # Print the growing size of a file every few seconds while a process
