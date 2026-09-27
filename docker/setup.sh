@@ -127,14 +127,18 @@ ENVIRONMENT VARIABLES:
                           development subdomain tried first): moved to
                           /var/www/<domain>, the transfer then carries the
                           changes only. With IMPORT_REMOTE_HOST only.
-    IMPORT_NGINX_REWRITES=FILE
+    IMPORT_NGINX_REWRITES=FILE|source
                           Explicit server-context nginx fragment, ready for
                           Docker. Takes priority over the site and archive,
                           including on re-runs. Copied unchanged and kept for
                           later runs; keep custom blocks and their conditions
-                          intact. Automatic recovery only accepts unambiguous
-                          server-level rewrites; nested rules require this
-                          file. Use an absolute path outside the site directory.
+                          intact. Use an absolute path outside the site
+                          directory. Without this option, automatic recovery
+                          only accepts unambiguous server-level rewrites.
+                          Use source to recover complete included routing
+                          fragments from the old server, preserving their
+                          blocks and adapting local PHP sockets to Docker.
+                          No prepared file is needed on a fresh destination.
 
 EXAMPLES:
     # Production installation
@@ -789,7 +793,7 @@ IMPORT_SSH_ACCEPT_NEW="${IMPORT_SSH_ACCEPT_NEW:-}"
 IMPORT_REMOTE_PASSWORD="${IMPORT_REMOTE_PASSWORD:-}"
 # An explicit nginx fragment overrides automatic sources, including on re-runs.
 IMPORT_NGINX_REWRITES="${IMPORT_NGINX_REWRITES:-}"
-if [ -n "$IMPORT_NGINX_REWRITES" ] &&
+if [ -n "$IMPORT_NGINX_REWRITES" ] && [ "$IMPORT_NGINX_REWRITES" != source ] &&
     { [ ! -f "$IMPORT_NGINX_REWRITES" ] || [ ! -r "$IMPORT_NGINX_REWRITES" ] || [ ! -s "$IMPORT_NGINX_REWRITES" ]; }; then
     echo "ERROR: IMPORT_NGINX_REWRITES is not a readable, non-empty file" >&2
     exit 1
@@ -1492,6 +1496,10 @@ import_inspect_remote() {
     import_remote_load_excludes "$IMPORT_REMOTE_REPORT"
     IMPORT_SITE_IONCUBE=$(import_kv "$IMPORT_REMOTE_REPORT" ioncube)
     import_save_nginx_config "$IMPORT_REMOTE_REPORT"
+    # Reject unsupported source routing before starting the dump or site transfer.
+    if [ "$IMPORT_NGINX_REWRITES" = source ]; then
+        import_prepare_source_nginx_rewrites
+    fi
     if [ -f .env ]; then
         if [ -n "$IMPORT_EXCLUDE" ]; then
             set_env_value IMPORT_EXCLUDE "$IMPORT_EXCLUDE" || true
@@ -1629,6 +1637,20 @@ import_save_nginx_config() {
     fi
 }
 
+# Prepare source routing during SSH inspection, before any long-running transfer.
+import_prepare_source_nginx_rewrites() {
+    if [ -z "${IMPORT_NGINX_CONFIG:-}" ] || [ ! -s "$IMPORT_NGINX_CONFIG" ]; then
+        echo "ERROR: IMPORT_NGINX_REWRITES=source requires the old server nginx configuration in the import report." >&2
+        exit 1
+    fi
+    if ! IMPORT_NGINX_SOURCE_RULES=$(import_nginx_rewrites_from_config "$IMPORT_NGINX_CONFIG" \
+        "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH" source) || [ -z "$IMPORT_NGINX_SOURCE_RULES" ]; then
+        echo "ERROR: source nginx routing could not be adapted automatically; no rewrite file was replaced." >&2
+        echo "Provide IMPORT_NGINX_REWRITES as a complete fragment prepared for Docker." >&2
+        exit 1
+    fi
+}
+
 # import_ensure_nginx_rewrites [site directory]
 # The KVS rewrite rules the vhost includes, as _INSTALL/nginx_config.txt
 # of the imported site: IMPORT_NGINX_REWRITES first; else the copy kept
@@ -1646,6 +1668,30 @@ import_ensure_nginx_rewrites() {
 
     target="$site/_INSTALL/nginx_config.txt"
     kept="$IMPORT_STAGING/${DOMAIN}.nginx_config.txt"
+    if [ "$IMPORT_NGINX_REWRITES" = source ]; then
+        if [ "$IMPORT_MODE" != true ]; then
+            if [ ! -s "$kept" ]; then
+                echo "ERROR: no saved nginx source fragment; run source recovery as part of an import first." >&2
+                exit 1
+            fi
+            mkdir -p "$site/_INSTALL" || exit 1
+            cp -- "$kept" "$target" || exit 1
+            echo "  Nginx rewrites:  restored the saved source fragment"
+            return 0
+        fi
+        if [ -z "${IMPORT_NGINX_SOURCE_RULES:-}" ]; then
+            import_prepare_source_nginx_rewrites
+        fi
+        mkdir -p "$site/_INSTALL" "$IMPORT_STAGING" || exit 1
+        temporary=$(mktemp "$IMPORT_STAGING/.nginx-rewrites.XXXXXX") || exit 1
+        if ! printf '# Complete nginx routing fragments recovered from source.\n%s\n' "$IMPORT_NGINX_SOURCE_RULES" > "$temporary" ||
+            ! cp -- "$temporary" "$target" || ! mv -f -- "$temporary" "$kept"; then
+            rm -f -- "$temporary"
+            exit 1
+        fi
+        echo "  Nginx rewrites:  complete source fragments recovered, PHP backend adapted and rules saved for later runs"
+        return 0
+    fi
     if [ -n "$IMPORT_NGINX_REWRITES" ]; then
         if [ ! -f "$IMPORT_NGINX_REWRITES" ] || [ ! -r "$IMPORT_NGINX_REWRITES" ] || [ ! -s "$IMPORT_NGINX_REWRITES" ]; then
             echo -e "${RED}ERROR: IMPORT_NGINX_REWRITES is not a readable, non-empty file${NC}"

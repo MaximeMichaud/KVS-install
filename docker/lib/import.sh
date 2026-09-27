@@ -1004,16 +1004,17 @@ import_nginx_config_save() {
     printf '%s\n' "${lines//[!0-9]/}"
 }
 
-# import_nginx_rewrites_from_config <configuration> <site directory> [project path]
+# import_nginx_rewrites_from_config <configuration> <site directory> [project path] [source]
 # Recover server-level rewrites only. Rules inside another context cannot be
 # flattened without changing request routing. Parse the dumped files and follow
 # includes in their calling context; reject ambiguous input without emitting a
-# partial result. Custom configurations use IMPORT_NGINX_REWRITES instead.
+# partial result. The explicit source mode also imports complete routing
+# fragments included at server level and adapts their local PHP backends.
 import_nginx_rewrites_from_config() {
-    local config="$1" site="${2%/}" project="${3:-}"
+    local config="$1" site="${2%/}" project="${3:-}" mode="${4:-plain}"
 
     project=${project%/}
-    awk -v site="$site" -v project="$project" '
+    awk -v site="$site" -v project="$project" -v mode="$mode" '
         function trim(s) {
             sub(/^[[:space:]]+/, "", s)
             sub(/[[:space:]]+$/, "", s)
@@ -1103,12 +1104,14 @@ import_nginx_rewrites_from_config() {
             n = 0
             # Dynamic or escaped include paths cannot be resolved reliably.
             if (pattern ~ /[$\\]/) return 0
+            if (mode == "source" && (index(pattern, "[") || index(pattern, "]"))) return 0
             re = "^" glob_regex(pattern ~ /^\// ? pattern : prefix "/" pattern) "$"
             for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
             if (n == 0 && pattern !~ /^\//) {
                 re = "/" glob_regex(pattern) "$"
                 for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
             }
+            if (mode == "source" && n > 1 && !index(pattern, "*") && !index(pattern, "?")) return 0
             # nginx expands include globs in filename order.
             for (i = 2; i <= n; i++) {
                 value = found[level, i]
@@ -1120,7 +1123,80 @@ import_nginx_rewrites_from_config() {
             }
             return n
         }
-        function collect(f, first, last, context, level,    i, name, arg, kind, n, k, child) {
+        # Only an entire server-context routing fragment can be carried across.
+        # A vhost or a general-purpose include is traversed for smaller fragments.
+        function fragment_file(f, level,    result) {
+            if (level > 32 || checking[f]) return 0
+            checking[f] = 1
+            result = fragment_nodes(f, level)
+            delete checking[f]
+            return result
+        }
+        function fragment_nodes(f, level,    i, name, kind, n, k, key) {
+            key = "check" level
+            for (i = 1; i <= nodes[f]; i++) {
+                name = command[f, i]; kind = ending[f, i]
+                if (kind == "{") {
+                    if (name !~ /^(location|if)$/) return 0
+                    i = closing[f, i]
+                } else if (name == "include") {
+                    n = files_named(unquote(argument[f, i]), key)
+                    if (!n) return 0
+                    for (k = 1; k <= n; k++) if (!fragment_file(found[key, k], level + 1)) return 0
+                } else if (name == "access_log" && argument[f, i] != "off") return 0
+                else if (name !~ /^(rewrite|set|return|break|error_page|add_header|expires|default_type|index|try_files|deny|allow|log_not_found|recursive_error_pages|access_log)$/) return 0
+            }
+            return 1
+        }
+        # Render complete blocks, including sibling handlers and access controls.
+        # Expand dependencies from the dump, never from the destination filesystem.
+        function render(f, first, last, indent, level,    out, i, name, arg, kind, line, pad, n, k, key, child, backend) {
+            if (level > 32) { unsafe = 1; return "" }
+            key = "render" level
+            pad = sprintf("%*s", indent * 4, "")
+            for (i = first; i <= last; i++) {
+                name = command[f, i]; arg = argument[f, i]; kind = ending[f, i]
+                line = raw[f, i]
+                if (name == "include" && kind == ";") {
+                    n = files_named(unquote(arg), key)
+                    if (!n) unsafe = 1
+                    for (k = 1; k <= n; k++) {
+                        child = found[key, k]
+                        if (rendering[child]) { unsafe = 1; continue }
+                        rendering[child] = 1
+                        out = out render(child, 1, nodes[child], indent, level + 1)
+                        delete rendering[child]
+                    }
+                    continue
+                }
+                if (kind == "{") {
+                    if (name !~ /^(location|if)$/) { unsafe = 1; return "" }
+                    if (name == "location" && unquote(arg) == "/") unsafe = 1
+                    out = out pad line " {\n" render(f, i + 1, closing[f, i] - 1, indent + 1, level + 1) pad "}\n"
+                    i = closing[f, i]
+                    continue
+                }
+                if (name == "fastcgi_pass") {
+                    backend = unquote(arg)
+                    if (backend !~ /^unix:[^[:space:]]*php[^[:space:]]*\.sock$/ &&
+                        backend !~ /^(127\.0\.0\.1|localhost|\[::1\]|php-fpm):9000$/) unsafe = 1
+                    line = "fastcgi_pass php-fpm:9000"
+                } else if (name == "fastcgi_param") {
+                    if (arg ~ /^SCRIPT_FILENAME[[:space:]]+["\047]?\//) unsafe = 1
+                } else if (name == "set" && arg ~ /^\$base[[:space:]]/) {
+                    backend = arg
+                    sub(/^\$base[[:space:]]+/, "", backend)
+                    if (!serves_site(unquote(backend))) unsafe = 1
+                    line = "set $base /var/www/kvs"
+                } else if (name == "access_log") {
+                    if (arg != "off") unsafe = 1
+                } else if (name !~ /^(rewrite|set|return|break|error_page|add_header|expires|default_type|index|try_files|deny|allow|log_not_found|recursive_error_pages|internal|fastcgi_index|fastcgi_read_timeout|fastcgi_send_timeout|fastcgi_connect_timeout|fastcgi_buffering|fastcgi_buffer_size|fastcgi_buffers|fastcgi_request_buffering|fastcgi_intercept_errors|fastcgi_keep_conn|fastcgi_hide_header)$/) unsafe = 1
+                if (name == "rewrite") routing++
+                out = out pad line ";\n"
+            }
+            return out
+        }
+        function collect(f, first, last, context, level,    i, name, arg, kind, n, k, child, rendered, base_path) {
             if (level > 32) { unsafe = 1; return }
             for (i = first; i <= last; i++) {
                 name = command[f, i]; arg = argument[f, i]; kind = ending[f, i]
@@ -1131,7 +1207,12 @@ import_nginx_rewrites_from_config() {
                         child = found[level, k]
                         if (active[child]) { unsafe = 1; continue }
                         active[child] = 1
-                        collect(child, 1, nodes[child], context, level + 1)
+                        if (mode == "source" && context == 0 && fragment_file(child, 0)) {
+                            rendering[child] = 1
+                            rendered = render(child, 1, nodes[child], 0, 0)
+                            delete rendering[child]
+                            if (rendered != "") rules[++count] = rendered
+                        } else collect(child, 1, nodes[child], context, level + 1)
                         delete active[child]
                     }
                 } else if (kind == "{") {
@@ -1140,9 +1221,19 @@ import_nginx_rewrites_from_config() {
                     i = closing[f, i]
                 } else if (name == "root" && context == 0 && serves_site(unquote(arg))) {
                     qualifies = 1
+                } else if (mode == "source" && context == 0 && name == "root" && arg == "$base") {
+                    uses_base = 1
                 } else if (name == "rewrite") {
                     if (context != 0) unsafe = 1
+                    routing++
                     rules[++count] = raw[f, i] ";"
+                } else if (mode == "source" && context == 0 && name == "error_page") {
+                    rules[++count] = raw[f, i] ";"
+                } else if (mode == "source" && context == 0 && name == "set" && arg ~ /^\$base[[:space:]]/) {
+                    base_path = arg
+                    sub(/^\$base[[:space:]]+/, "", base_path)
+                    if (serves_site(unquote(base_path))) base_matches = 1
+                    else control = 1
                 } else if (context == 0 && name ~ /^(set|return|break)$/) control = 1
             }
         }
@@ -1170,21 +1261,33 @@ import_nginx_rewrites_from_config() {
                 f = files[file_index]
                 for (entry = 1; entry <= nodes[f]; entry++) {
                     if (command[f, entry] != "server" || ending[f, entry] != "{" || argument[f, entry] != "") continue
-                    qualifies = 0; unsafe = 0; control = 0; count = 0
+                    qualifies = 0; unsafe = 0; control = 0; count = 0; routing = 0; uses_base = 0; base_matches = 0
                     active[f] = 1
                     collect(f, entry + 1, closing[f, entry] - 1, 0, 0)
                     delete active[f]
-                    if (!qualifies) continue
+                    if (!qualifies && !(mode == "source" && uses_base && base_matches)) continue
+                    if (mode == "source" && !routing) continue
                     if (unsafe || (control && count > 0)) {
-                        print "ERROR: nginx rules depend on nested contexts, control directives or unresolved includes; use IMPORT_NGINX_REWRITES." > "/dev/stderr"
+                        print "ERROR: nginx recovery requires a complete compatible routing fragment; set IMPORT_NGINX_REWRITES to a prepared file." > "/dev/stderr"
                         exit 1
+                    }
+                    if (mode == "source") {
+                        candidate = ""
+                        for (rule_index = 1; rule_index <= count; rule_index++) candidate = candidate rules[rule_index] "\n"
+                        if (source_result != "" && source_result != candidate) {
+                            print "ERROR: matching nginx servers use different routing rules; provide IMPORT_NGINX_REWRITES as a prepared file." > "/dev/stderr"
+                            exit 1
+                        }
+                        source_result = candidate
+                        continue
                     }
                     for (rule_index = 1; rule_index <= count; rule_index++) {
                         if (!seen[rules[rule_index]]++) output[++total] = rules[rule_index]
                     }
                 }
             }
-            for (rule_index = 1; rule_index <= total; rule_index++) print output[rule_index]
+            if (mode == "source") printf "%s", source_result
+            else for (rule_index = 1; rule_index <= total; rule_index++) print output[rule_index]
         }' "$config"
 }
 
