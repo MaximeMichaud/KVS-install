@@ -156,14 +156,16 @@ test_the_rewrites_come_from_the_site_the_operator_the_archive_or_the_old_server(
     grep -q "not a readable, non-empty file" "$TEST_DIR/out" || fail "the unreadable file is named: $(cat "$TEST_DIR/out")"
     IMPORT_NGINX_REWRITES=""
 
-    # An archive in kvs-archive/: the init extracts the rules from it,
-    # before the copy kept from the earlier pass.
+    # A kept override survives even when an archive is also available.
     rm -rf "$site"
     mkdir -p "$site"
     : > "kvs-archive/KVS_7.0.2_[example.com].zip"
-    out=$(import_ensure_nginx_rewrites "$site") || fail "an archive is enough"
+    out=$(import_ensure_nginx_rewrites "$site") || fail "a kept override takes priority"
+    cmp "$IMPORT_STAGING/example.com.nginx_config.txt" "$site/_INSTALL/nginx_config.txt" || fail "the kept override wins over the archive"
+    rm -f "$IMPORT_STAGING/example.com.nginx_config.txt" "$site/_INSTALL/nginx_config.txt"
+    out=$(import_ensure_nginx_rewrites "$site") || fail "an archive is enough without an override"
     grep -q "from the KVS archive" <<< "$out" || fail "the archive is announced: $out"
-    [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail "nothing is written when the archive serves"
+    cp "$TEST_DIR/given.txt" "$IMPORT_STAGING/example.com.nginx_config.txt"
     rm -f "kvs-archive/KVS_7.0.2_[example.com].zip"
 
     # The next pass, the site's _INSTALL cleaned by the init: the kept copy serves.
@@ -191,7 +193,7 @@ server {
 server {
     root /var/www/website;
     rewrite ^/videos/$ /videos.php last;
-    rewrite ^/video/([0-9]{1,8})/$ /view_video.php?id=$1 last;
+    rewrite "^/video/([0-9]{1,8})/$" /view_video.php?id=$1 last;
 }
 EOF
     IMPORT_NGINX_CONFIG="$TEST_DIR/old-nginx.conf"
@@ -200,7 +202,7 @@ EOF
     grep -q "kept in $IMPORT_STAGING/example.com.nginx_config.txt for the next pass" <<< "$out" || fail "the kept copy is announced: $out"
     grep -q '^rewrite ^/videos/$ /videos.php last;$' "$IMPORT_STAGING/example.com.nginx_config.txt" || fail "the recovered rules are kept for the next pass"
     grep -q '^rewrite ^/videos/$ /videos.php last;$' "$site/_INSTALL/nginx_config.txt" || fail "the site's rules are written"
-    grep -q '^rewrite ^/video/(\[0-9\]{1,8})/$ /view_video.php?id=$1 last;$' "$site/_INSTALL/nginx_config.txt" || fail "a quantifier in a rule does not break the block"
+    grep -Fq 'rewrite "^/video/([0-9]{1,8})/$" /view_video.php?id=$1 last;' "$site/_INSTALL/nginx_config.txt" || fail "a quantifier in a rule does not break the block"
     grep -q '^# Rewrite rules recovered by kvs-install' "$site/_INSTALL/nginx_config.txt" || fail "the file says where it comes from"
     grep -q other "$site/_INSTALL/nginx_config.txt" && fail "the other site's rules stay out"
     # The remote site directory names the block when the project path differs.
@@ -230,7 +232,7 @@ EOF
     import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "outside an import the function is a no-op"
     [ ! -s "$TEST_DIR/out" ] || fail "and says nothing"
     [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail "and writes nothing without a site in place"
-    # ... unless the site is in place without an archive and a copy was
+    # ... unless the site is in place and a copy was
     # kept: a re-run with recreated volumes gives the init its source back.
     mkdir -p "$site/admin/include" "$IMPORT_STAGING"
     : > "$site/admin/include/setup.php"
@@ -240,8 +242,8 @@ EOF
     [ "$(cat "$site/_INSTALL/nginx_config.txt")" = "rewrite ^/kept$ /kept.php last;" ] || fail "the kept rules are back in _INSTALL for the init"
     rm -rf "$site/_INSTALL"
     : > "kvs-archive/KVS_7.0.2_[example.com].zip"
-    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "with an archive the init extracts the rules itself"
-    [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail "nothing is written when an archive is there"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "with an archive the kept override still wins"
+    cmp "$IMPORT_STAGING/example.com.nginx_config.txt" "$site/_INSTALL/nginx_config.txt" || fail "the override survives on a re-run with an archive"
     rm -f "kvs-archive/KVS_7.0.2_[example.com].zip" "$IMPORT_STAGING/example.com.nginx_config.txt"
     IMPORT_MODE=true
     pass "the rewrites come from the site, the operator, the archive or the old server"

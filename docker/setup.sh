@@ -128,14 +128,13 @@ ENVIRONMENT VARIABLES:
                           /var/www/<domain>, the transfer then carries the
                           changes only. With IMPORT_REMOTE_HOST only.
     IMPORT_NGINX_REWRITES=FILE
-                          The KVS rewrite rules for nginx (the
-                          _INSTALL/nginx_config.txt of the site's version)
-                          when the site kept none and kvs-archive/ holds no
-                          archive; without it they are recovered from the
-                          old server's nginx configuration (its include
-                          directives followed). Given or recovered, they are
-                          kept in import/<domain>.nginx_config.txt for the
-                          next pass and for a re-run with recreated volumes.
+                          Explicit server-context nginx fragment, ready for
+                          Docker. Takes priority over the site and archive,
+                          including on re-runs. Copied unchanged and kept for
+                          later runs; keep custom blocks and their conditions
+                          intact. Automatic recovery only accepts unambiguous
+                          server-level rewrites; nested rules require this
+                          file. Use an absolute path outside the site directory.
 
 EXAMPLES:
     # Production installation
@@ -788,8 +787,13 @@ IMPORT_SSH_ACCEPT_NEW="${IMPORT_SSH_ACCEPT_NEW:-}"
 # The password of the SSH user, for runs nobody attends: handed to sshpass
 # through its environment, never written to .env or anywhere else.
 IMPORT_REMOTE_PASSWORD="${IMPORT_REMOTE_PASSWORD:-}"
-# The KVS rewrite rules for nginx when the site kept no _INSTALL directory.
+# An explicit nginx fragment overrides automatic sources, including on re-runs.
 IMPORT_NGINX_REWRITES="${IMPORT_NGINX_REWRITES:-}"
+if [ -n "$IMPORT_NGINX_REWRITES" ] &&
+    { [ ! -f "$IMPORT_NGINX_REWRITES" ] || [ ! -r "$IMPORT_NGINX_REWRITES" ] || [ ! -s "$IMPORT_NGINX_REWRITES" ]; }; then
+    echo "ERROR: IMPORT_NGINX_REWRITES is not a readable, non-empty file" >&2
+    exit 1
+fi
 # The site directory of an earlier import of the same old server under
 # another domain (a development subdomain tried before the real one):
 # taken over instead of transferred again.
@@ -1627,10 +1631,10 @@ import_save_nginx_config() {
 
 # import_ensure_nginx_rewrites [site directory]
 # The KVS rewrite rules the vhost includes, as _INSTALL/nginx_config.txt
-# of the imported site: the file KVS ships, when the site kept it; else
-# IMPORT_NGINX_REWRITES; else the KVS archive (the init extracts them);
-# else the copy kept from an earlier pass, under this domain or under the
-# one whose files are taken over; else the rules recovered from the old
+# of the imported site: IMPORT_NGINX_REWRITES first; else the copy kept
+# from an earlier pass, under this domain or the one taken over; else the
+# file KVS ships, when the site kept it; else the KVS archive (the init
+# extracts them); else the unambiguous rules recovered from the old
 # server's nginx configuration. Written after every transfer, since
 # rsync mirrors the old server and removes a file it does not have. A
 # file given or recovered is kept as import/<domain>.nginx_config.txt,
@@ -1638,38 +1642,33 @@ import_save_nginx_config() {
 # fresh install has no counterpart here, that copy is what a re-run with
 # recreated volumes takes the rules from.
 import_ensure_nginx_rewrites() {
-    local site="${1:-/var/www/$DOMAIN}" target kept previous from rules count
+    local site="${1:-/var/www/$DOMAIN}" target kept previous from rules count temporary
 
     target="$site/_INSTALL/nginx_config.txt"
     kept="$IMPORT_STAGING/${DOMAIN}.nginx_config.txt"
-    if [ "$IMPORT_MODE" != true ]; then
-        # Outside an import the init keeps the rules it has; a site that
-        # came without the archive gets them back from the kept copy when
-        # its volumes were recreated.
-        if [ -f "$site/admin/include/setup.php" ] && [ ! -s "$target" ] && [ -s "$kept" ] &&
-            ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
-            mkdir -p "$site/_INSTALL" || exit 1
-            cp -- "$kept" "$target" || exit 1
-        fi
-        return 0
-    fi
-    if [ -s "$target" ]; then
-        echo "  Nginx rewrites:  from the site's _INSTALL/nginx_config.txt"
-        return 0
-    fi
     if [ -n "$IMPORT_NGINX_REWRITES" ]; then
-        if [ ! -s "$IMPORT_NGINX_REWRITES" ]; then
-            echo -e "${RED}ERROR: IMPORT_NGINX_REWRITES=$IMPORT_NGINX_REWRITES is not a readable, non-empty file${NC}"
+        if [ ! -f "$IMPORT_NGINX_REWRITES" ] || [ ! -r "$IMPORT_NGINX_REWRITES" ] || [ ! -s "$IMPORT_NGINX_REWRITES" ]; then
+            echo -e "${RED}ERROR: IMPORT_NGINX_REWRITES is not a readable, non-empty file${NC}"
             exit 1
         fi
         mkdir -p "$site/_INSTALL" "$IMPORT_STAGING" || exit 1
-        cp -- "$IMPORT_NGINX_REWRITES" "$target" || exit 1
-        cp -- "$target" "$kept" || exit 1
+        # Stage before replacing either copy: the input may be one of them.
+        temporary=$(mktemp "$IMPORT_STAGING/.nginx-rewrites.XXXXXX") || exit 1
+        if ! cp -- "$IMPORT_NGINX_REWRITES" "$temporary" ||
+            ! cp -- "$temporary" "$target" || ! mv -f -- "$temporary" "$kept"; then
+            rm -f -- "$temporary"
+            exit 1
+        fi
         echo "  Nginx rewrites:  from $IMPORT_NGINX_REWRITES (kept in $kept for the next pass)"
         return 0
     fi
-    if ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
-        echo "  Nginx rewrites:  from the KVS archive in kvs-archive/"
+    if [ "$IMPORT_MODE" != true ]; then
+        # Restore the saved selection even if a transfer or an archive put
+        # stock rules back into _INSTALL since the previous setup.
+        if [ -f "$site/admin/include/setup.php" ] && [ -s "$kept" ]; then
+            mkdir -p "$site/_INSTALL" || exit 1
+            cp -- "$kept" "$target" || exit 1
+        fi
         return 0
     fi
     previous=""
@@ -1684,8 +1683,20 @@ import_ensure_nginx_rewrites() {
         echo "  Nginx rewrites:  from the earlier pass ($from)"
         return 0
     done
+    if [ -s "$target" ]; then
+        echo "  Nginx rewrites:  from the site's _INSTALL/nginx_config.txt"
+        return 0
+    fi
+    if ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
+        echo "  Nginx rewrites:  from the KVS archive in kvs-archive/"
+        return 0
+    fi
     if [ -n "$IMPORT_NGINX_CONFIG" ] && [ -s "$IMPORT_NGINX_CONFIG" ]; then
-        rules=$(import_nginx_rewrites_from_config "$IMPORT_NGINX_CONFIG" "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH")
+        if ! rules=$(import_nginx_rewrites_from_config "$IMPORT_NGINX_CONFIG" "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH"); then
+            echo "ERROR: automatic nginx rewrite recovery is unsafe; no rewrite file was written." >&2
+            echo "Set IMPORT_NGINX_REWRITES to a complete server-context fragment adapted for Docker, then run the same command again." >&2
+            exit 1
+        fi
         count=$(printf '%s\n' "$rules" | grep -c '^rewrite' || true)
         if [ "${count:-0}" -gt 0 ]; then
             mkdir -p "$site/_INSTALL" "$IMPORT_STAGING" || exit 1

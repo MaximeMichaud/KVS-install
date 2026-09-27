@@ -1005,22 +1005,10 @@ import_nginx_config_save() {
 }
 
 # import_nginx_rewrites_from_config <configuration> <site directory> [project path]
-# The rewrite rules of the server blocks that serve the site (a root
-# directive naming its directory, the project path, or a directory
-# under it), in the form of _INSTALL/nginx_config.txt: what KVS ships in
-# that file is the list of its rewrite directives plus the protection of
-# a few directories, which the stack's own vhost denies already. Each
-# rule once, the http and https blocks repeat them. The configuration is
-# the dump of nginx -T, or of the files gathered without it, every file
-# behind a "# configuration file <path>:" line: an include directive met
-# inside a server block is followed into the files of the dump it names
-# (absolute, relative to the directory of the main configuration file,
-# or by their ending when the dump was gathered without nginx), so a root
-# or a rewrite directive kept in an included file counts for the block.
-# A brace counts only where nginx formats it, opening at the end of a
-# line and closing at the start of one, so a quantifier inside a regular
-# expression does not unbalance the count. Prints nothing when no block
-# serves the site.
+# Recover server-level rewrites only. Rules inside another context cannot be
+# flattened without changing request routing. Parse the dumped files and follow
+# includes in their calling context; reject ambiguous input without emitting a
+# partial result. Custom configurations use IMPORT_NGINX_REWRITES instead.
 import_nginx_rewrites_from_config() {
     local config="$1" site="${2%/}" project="${3:-}"
 
@@ -1031,26 +1019,75 @@ import_nginx_rewrites_from_config() {
             sub(/[[:space:]]+$/, "", s)
             return s
         }
-        function root_of(s,    r) {
-            r = s
-            sub(/^root[[:space:]]+/, "", r)
-            sub(/[[:space:]]*;.*$/, "", r)
-            sub(/\/$/, "", r)
-            return r
+        function unquote(s,    q) {
+            q = substr(s, 1, 1)
+            if ((q == "\"" || q == sprintf("%c", 39)) && substr(s, length(s), 1) == q)
+                return substr(s, 2, length(s) - 2)
+            return s
         }
         function serves_site(r) {
+            sub(/\/$/, "", r)
             return r == site || (project != "" && r == project) || index(r, site "/") == 1 || (project != "" && index(r, project "/") == 1)
         }
-        function include_of(s,    p, q) {
-            q = sprintf("%c", 39)
-            p = s
-            sub(/^include[[:space:]]+/, "", p)
-            sub(/[[:space:]]*;.*$/, "", p)
-            if (substr(p, 1, 1) == "\"" || substr(p, 1, 1) == q) p = substr(p, 2)
-            if (substr(p, length(p), 1) == "\"" || substr(p, length(p), 1) == q) p = substr(p, 1, length(p) - 1)
-            return p
+        function node(f, s, kind,    id, name) {
+            id = ++nodes[f]
+            name = s
+            sub(/[[:space:]].*$/, "", name)
+            command[f, id] = unquote(name)
+            argument[f, id] = trim(substr(s, length(name) + 1))
+            raw[f, id] = s
+            ending[f, id] = kind
+            if (kind == "}") {
+                if (s != "" || depth < 1) invalid = 1
+                else closing[f, stack[depth--]] = id
+            } else {
+                if (s == "" || (kind == "{" && command[f, id] ~ /^(rewrite|root|include)$/)) invalid = 1
+                if (kind == "{") stack[++depth] = id
+            }
         }
-        # The regular expression of a shell pattern; * and ? stay within one path component.
+        # Token boundaries follow nginx quoting, escaping and comments. A brace
+        # in a quoted regex or in ${variable} is part of a word, not a block.
+        function tokenize(f,    text, i, c, s, quote, escaped, comment, space, after_quote) {
+            text = content[f]
+            depth = 0
+            space = 1
+            for (i = 1; i <= length(text); i++) {
+                c = substr(text, i, 1)
+                if (comment) {
+                    if (c != "\n") continue
+                    comment = 0
+                }
+                if (escaped) { s = s c; escaped = 0; space = 0; continue }
+                if (c == "\\") { s = s c; escaped = 1; space = 0; continue }
+                if (quote != "") {
+                    s = s c
+                    if (c == quote) { quote = ""; after_quote = 1 }
+                    continue
+                }
+                if (after_quote) {
+                    if (c !~ /[[:space:];{)]/) invalid = 1
+                    after_quote = 0
+                }
+                if (c == "#" && space) { comment = 1; continue }
+                if ((c == "\"" || c == sprintf("%c", 39)) && space) {
+                    quote = c; s = s c; space = 0; continue
+                }
+                if (c == "{" && !space && substr(s, length(s), 1) == "$") {
+                    s = s c; continue
+                }
+                if (c == ";" || c == "{" || (c == "}" && space)) {
+                    node(f, trim(s), c)
+                    s = ""; space = 1
+                    continue
+                }
+                if (c ~ /[[:space:]]/) {
+                    if (!space) s = s " "
+                    space = 1
+                } else { s = s c; space = 0 }
+            }
+            if (quote != "" || escaped || trim(s) != "" || depth != 0) invalid = 1
+        }
+        # Match only dumped files. Never read source paths on the destination.
         function glob_regex(g,    re, i, c) {
             re = ""
             for (i = 1; i <= length(g); i++) {
@@ -1062,85 +1099,93 @@ import_nginx_rewrites_from_config() {
             }
             return re
         }
-        # The files of the dump an include directive names, in found[level, 1..n].
-        function files_named(pattern, level,    n, i, re) {
+        function files_named(pattern, level,    n, i, j, re, value) {
             n = 0
-            if (pattern ~ /^\//) {
-                re = "^" glob_regex(pattern) "$"
+            # Dynamic or escaped include paths cannot be resolved reliably.
+            if (pattern ~ /[$\\]/) return 0
+            re = "^" glob_regex(pattern ~ /^\// ? pattern : prefix "/" pattern) "$"
+            for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
+            if (n == 0 && pattern !~ /^\//) {
+                re = "/" glob_regex(pattern) "$"
                 for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
-                return n
             }
-            re = "^" glob_regex(prefix "/" pattern) "$"
-            for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
-            if (n > 0) return n
-            re = "/" glob_regex(pattern) "$"
-            for (i = 1; i <= nfiles; i++) if (files[i] ~ re) found[level, ++n] = files[i]
+            # nginx expands include globs in filename order.
+            for (i = 2; i <= n; i++) {
+                value = found[level, i]
+                j = i - 1
+                while (j > 0 && found[level, j] > value) {
+                    found[level, j + 1] = found[level, j]; j--
+                }
+                found[level, j + 1] = value
+            }
             return n
         }
-        # A directive of the server block being read, in its own file or in an included one.
-        function directive(l, level,    n, k) {
-            if (l ~ /^root[[:space:]]/) {
-                if (serves_site(root_of(l))) qualifies = 1
-            } else if (l ~ /^rewrite[[:space:]]/) {
-                rules[count++] = l
-            } else if (l ~ /^include[[:space:]]/ && level < 8) {
-                n = files_named(include_of(l), level)
-                for (k = 1; k <= n; k++) included(found[level, k], level + 1)
-            }
-        }
-        # An included file, once per server block.
-        function included(f, level,    i, l) {
-            if ((block, f) in visited) return
-            visited[block, f] = 1
-            for (i = 1; i <= nlines[f]; i++) {
-                l = trim(content[f, i])
-                if (l ~ /^#/) continue
-                directive(l, level)
-            }
-        }
-        NR == FNR {
-            if ($0 ~ /^# configuration file .*:$/) {
-                current = $0
-                sub(/^# configuration file /, "", current)
-                sub(/:$/, "", current)
-                if (!(current in nlines)) {
-                    nlines[current] = 0
-                    files[++nfiles] = current
-                    if (nfiles == 1) {
-                        prefix = current
-                        sub(/\/[^\/]*$/, "", prefix)
+        function collect(f, first, last, context, level,    i, name, arg, kind, n, k, child) {
+            if (level > 32) { unsafe = 1; return }
+            for (i = first; i <= last; i++) {
+                name = command[f, i]; arg = argument[f, i]; kind = ending[f, i]
+                if (name == "include" && kind == ";") {
+                    n = files_named(unquote(arg), level)
+                    if (!n) unsafe = 1
+                    for (k = 1; k <= n; k++) {
+                        child = found[level, k]
+                        if (active[child]) { unsafe = 1; continue }
+                        active[child] = 1
+                        collect(child, 1, nodes[child], context, level + 1)
+                        delete active[child]
                     }
-                }
-                next
+                } else if (kind == "{") {
+                    if (name == "if" && context == 0) control = 1
+                    collect(f, i + 1, closing[f, i] - 1, context + 1, level + 1)
+                    i = closing[f, i]
+                } else if (name == "root" && context == 0 && serves_site(unquote(arg))) {
+                    qualifies = 1
+                } else if (name == "rewrite") {
+                    if (context != 0) unsafe = 1
+                    rules[++count] = raw[f, i] ";"
+                } else if (context == 0 && name ~ /^(set|return|break)$/) control = 1
             }
-            if (current != "") content[current, ++nlines[current]] = $0
+        }
+        /^# configuration file .*:$/ {
+            current = substr($0, 22, length($0) - 22)
+            if (!(current in content)) {
+                files[++nfiles] = current
+                content[current] = ""
+                if (nfiles == 1) {
+                    prefix = current
+                    sub(/\/[^\/]*$/, "", prefix)
+                }
+            }
             next
         }
-        {
-            line = trim($0)
-            if (line ~ /^#/) next
-            if (line ~ /^server[[:space:]]*\{$/) {
-                in_server = 1
-                server_depth = depth
-                qualifies = 0
-                count = 0
-                block++
+        { content[current] = content[current] $0 "\n" }
+        END {
+            if (trim(content[""]) != "") files[++nfiles] = ""
+            for (file_index = 1; file_index <= nfiles; file_index++) tokenize(files[file_index])
+            if (invalid) {
+                print "ERROR: nginx configuration syntax cannot be recovered safely; use IMPORT_NGINX_REWRITES." > "/dev/stderr"
+                exit 1
             }
-            if (in_server) directive(line, 0)
-            if (line ~ /\{$/) depth++
-            if (line ~ /^\}/) {
-                depth--
-                if (in_server && depth == server_depth) {
-                    if (qualifies) {
-                        for (i = 0; i < count; i++) {
-                            if (!seen[rules[i]]++) print rules[i]
-                        }
+            for (file_index = 1; file_index <= nfiles; file_index++) {
+                f = files[file_index]
+                for (entry = 1; entry <= nodes[f]; entry++) {
+                    if (command[f, entry] != "server" || ending[f, entry] != "{" || argument[f, entry] != "") continue
+                    qualifies = 0; unsafe = 0; control = 0; count = 0
+                    active[f] = 1
+                    collect(f, entry + 1, closing[f, entry] - 1, 0, 0)
+                    delete active[f]
+                    if (!qualifies) continue
+                    if (unsafe || (control && count > 0)) {
+                        print "ERROR: nginx rules depend on nested contexts, control directives or unresolved includes; use IMPORT_NGINX_REWRITES." > "/dev/stderr"
+                        exit 1
                     }
-                    in_server = 0
-                    count = 0
+                    for (rule_index = 1; rule_index <= count; rule_index++) {
+                        if (!seen[rules[rule_index]]++) output[++total] = rules[rule_index]
+                    }
                 }
             }
-        }' "$config" "$config"
+            for (rule_index = 1; rule_index <= total; rule_index++) print output[rule_index]
+        }' "$config"
 }
 
 #################################################################

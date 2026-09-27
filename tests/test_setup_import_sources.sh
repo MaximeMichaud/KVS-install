@@ -721,12 +721,11 @@ server {
     root /var/www/website/;
     # rewrite ^/commented$ /no.php last;
     rewrite ^/videos/$ /videos.php last;
-    rewrite ^/video/([0-9]{1,8})/([^/]+)/$ /view_video.php?id=$1&dir=$2 last;
+    rewrite "^/video/([0-9]{1,8})/([^/]+)/$" /view_video.php?id=$1&dir=$2 last;
     location /admin/ {
         root /var/www/website;
-        rewrite ^/admin/x$ /admin/y.php last;
     }
-    location ~ ^/get_file/([0-9]{1,3})/ {
+    location ~ "^/get_file/([0-9]{1,3})/" {
         internal;
     }
 }
@@ -735,12 +734,12 @@ server {
     server_name example.com;
     root /var/www/website;
     rewrite ^/videos/$ /videos.php last;
-    rewrite ^/video/([0-9]{1,8})/([^/]+)/$ /view_video.php?id=$1&dir=$2 last;
+    rewrite "^/video/([0-9]{1,8})/([^/]+)/$" /view_video.php?id=$1&dir=$2 last;
     rewrite ^/https-only$ /x.php last;
 }
 EOF
     rules=$(import_nginx_rewrites_from_config "$saved" /var/www/website)
-    [ "$rules" = $'rewrite ^/videos/$ /videos.php last;\nrewrite ^/video/([0-9]{1,8})/([^/]+)/$ /view_video.php?id=$1&dir=$2 last;\nrewrite ^/admin/x$ /admin/y.php last;\nrewrite ^/https-only$ /x.php last;' ] ||
+    [ "$rules" = $'rewrite ^/videos/$ /videos.php last;\nrewrite "^/video/([0-9]{1,8})/([^/]+)/$" /view_video.php?id=$1&dir=$2 last;\nrewrite ^/https-only$ /x.php last;' ] ||
         fail "the rules of the blocks serving the site, once each, nothing from the other site or the comments: $rules"
     rules=$(import_nginx_rewrites_from_config "$saved" /home/elsewhere /var/www/website)
     [[ "$rules" == "rewrite ^/videos/"* ]] || fail "the project path names the site too: $rules"
@@ -769,28 +768,23 @@ server {
     listen 80;
     server_name example.com;
     include globals/kvs.conf;
-    location /admin/ {
-        include "/etc/nginx/snippets/admin-?.conf";
-    }
+    include "/etc/nginx/snippets/admin-?.conf";
 }
 # configuration file /etc/nginx/globals/kvs.conf:
 root /var/www/website;
 include 'globals/rewrites/*.conf';
 # configuration file /etc/nginx/globals/rewrites/videos.conf:
 rewrite ^/videos/$ /videos.php last;
-include globals/kvs.conf;
 # configuration file /etc/nginx/globals/rewrites/albums.conf:
-location /albums/ {
-    rewrite ^/albums/$ /albums.php last;
-}
+rewrite ^/albums/$ /albums.php last;
 # configuration file /etc/nginx/snippets/admin-a.conf:
 rewrite ^/admin/a$ /admin/a.php last;
 # configuration file /etc/nginx/snippets/admin-other.conf:
 rewrite ^/never$ /never.php last;
 EOF
     rules=$(import_nginx_rewrites_from_config "$dump" /var/www/website)
-    [ "$rules" = $'rewrite ^/videos/$ /videos.php last;\nrewrite ^/albums/$ /albums.php last;\nrewrite ^/admin/a$ /admin/a.php last;' ] ||
-        fail "the root and the rules of the included files count for the block, a pattern names its files, a cycle stops: $rules"
+    [ "$rules" = $'rewrite ^/albums/$ /albums.php last;\nrewrite ^/videos/$ /videos.php last;\nrewrite ^/admin/a$ /admin/a.php last;' ] ||
+        fail "the root and the rules of the included files count for the block, a pattern names its files in order: $rules"
     [ "$(import_nginx_rewrites_from_config "$dump" /var/www/other)" = 'rewrite ^/other$ /other.php last;' ] ||
         fail "a root kept in an included file qualifies the block"
     # Gathered without nginx, the dump does not start with nginx.conf: a
