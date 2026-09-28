@@ -30,3 +30,8 @@
 
 # Import all site configurations
 import /etc/caddy/sites/*.caddy
+
+# Unknown HTTP hosts must not expose a site or redirect to its domain.
+:80 {
+    abort
+}

@@ -312,6 +312,9 @@ ${canonical_host} {
     reverse_proxy n.${domain}:80 {
         health_uri /health
         health_interval 30s
+        health_headers {
+            Host ${canonical_host}
+        }
         header_up X-Real-IP {remote_host}
     }
 ${tls_directive}

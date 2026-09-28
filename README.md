@@ -43,6 +43,8 @@ The script will:
 4. Generate secure database passwords
 5. Start all services via Docker Compose
 
+Database, cache and search ports are bound to host loopback; Nginx rejects requests for unknown hosts instead of disclosing the site. See [network exposure and origin protection](docker/SECURITY.md) for the defaults, Cloudflare requirements and deployment checks.
+
 ### Standalone Installation
 
 For traditional bare-metal installation on Debian systems.

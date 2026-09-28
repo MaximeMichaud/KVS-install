@@ -10,9 +10,22 @@ map $uri $kvs_frame_options {
     ~^/player/iframe_embed\.php$ "";
 }
 
+map $host $kvs_known_host {
+    default 0;
+${PUBLIC_HOST_RULES}
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+    return 444;
+}
+
 server {
     listen 80;
     server_name ${PUBLIC_SERVER_NAMES};
+    if ($kvs_known_host = 0) { return 444; }
+    if ($http_host = "") { return 444; }
     set $base ${KVS_ROOT};
     root $base;
 
