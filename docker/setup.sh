@@ -1801,7 +1801,7 @@ import_native_target_supported() {
 }
 
 import_fetch_remote() {
-    local destination="/var/www/$DOMAIN" source dump extension pid
+    local destination="/var/www/$DOMAIN" source dump extension pid transfer_status=0 transfer_logs
 
     source="ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR"
     extension=gz
@@ -1842,10 +1842,14 @@ import_fetch_remote() {
     echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR...${NC}"
     import_destination_ready "$destination" "$source" || exit 1
     import_mark_destination "$destination" "$source" || exit 1
-    if ! import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}"; then
-        echo -e "${RED}ERROR: the file transfer failed; run the same command again to resume it${NC}"
-        exit 1
+    transfer_logs=$(mktemp -d "$LOG_DIR/import-transfer.XXXXXX") || exit 1
+    IMPORT_TRANSFER_LOG_DIR="$transfer_logs" import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}" || transfer_status=$?
+    if [ "$transfer_status" -ne 0 ]; then
+        echo -e "${RED}ERROR: the file transfer failed (status $transfer_status); run the same command again to resume it${NC}"
+        echo "  Transfer diagnostics: $transfer_logs"
+        exit "$transfer_status"
     fi
+    rm -rf -- "$transfer_logs"
     echo -e "  ${GREEN}✓${NC} Site files in $destination"
     import_ssh_close
     IMPORT_DB_DUMP=$dump

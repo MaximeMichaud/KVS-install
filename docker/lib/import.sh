@@ -1653,7 +1653,7 @@ import_rsync_stats_totals() {
         /^Number of (regular )?files transferred: / { files = number($NF); have_files = 1 }
         /^Total file size: / { site_bytes = number($4) }
         /^Total transferred file size: / { bytes = number($5); have_bytes = 1 }
-        END { if (have_files && have_bytes) printf "%d\t%d\t%d\t%d\n", files, bytes, site_files, site_bytes }
+        END { if (have_files && have_bytes) printf "%.0f\t%.0f\t%.0f\t%.0f\n", files, bytes, site_files, site_bytes }
     '
 }
 
@@ -1673,7 +1673,7 @@ import_rsync_totals() {
     if [ -n "${IMPORT_RSYNC_PLAN:-}" ]; then
         listing=(--out-format='KVS-PLAN %i %l %n')
     fi
-    LC_ALL=C timeout "$budget" rsync --dry-run --stats "${listing[@]}" "$@" 2>/dev/null |
+    LC_ALL=C timeout "$budget" rsync --dry-run --stats "${listing[@]}" "$@" 2>"${IMPORT_RSYNC_COUNT_ERROR:-/dev/null}" |
         import_rsync_plan "${IMPORT_RSYNC_PLAN:-}" "${IMPORT_TRANSFER_JOBS:-4}" |
         import_rsync_stats_totals
     statuses=("${PIPESTATUS[@]}")
@@ -1720,6 +1720,7 @@ import_rsync_workers() (
     local plan="$1" jobs="$2" rsh="$3"
     shift 3
     local worker pid active result=0 status bytes files snapshot arg remote_program=rsync
+    local error_dir="${IMPORT_TRANSFER_LOG_DIR:-$plan}"
     local -a pids=() logs=() rsync_args=()
     # Keep the PID returned by $! as the session/process-group leader even
     # when a caller enabled shell job control (otherwise setsid may fork).
@@ -1751,19 +1752,20 @@ import_rsync_workers() (
         # directory. It does not enable mirroring/deletion of sibling files.
         setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
             --files-from="$plan/$worker.list" -e "$rsh" --info=progress2 --outbuf=L \
-            > "$plan/$worker.log" 2> "$plan/$worker.err" < /dev/null &
+            > "$plan/$worker.log" 2> "$error_dir/$worker.err" < /dev/null &
         pids[worker]=$!
         if [ "${IMPORT_RSYNC_SERIAL_AUTH:-no}" = yes ]; then
             while kill -0 "${pids[worker]}" 2>/dev/null &&
-                ! grep -Fxq KVS_IMPORT_SSH_READY "$plan/$worker.err"; do
+                ! grep -Fxq KVS_IMPORT_SSH_READY "$error_dir/$worker.err"; do
                 sleep 0.05
             done
-            if ! grep -Fxq KVS_IMPORT_SSH_READY "$plan/$worker.err"; then
+            if ! grep -Fxq KVS_IMPORT_SSH_READY "$error_dir/$worker.err"; then
                 status=0
                 wait "${pids[worker]}" || status=$?
                 pids[worker]=""
-                cat "$plan/$worker.err" >&2
+                cat "$error_dir/$worker.err" >&2
                 [ "$status" -ne 0 ] || status=1
+                printf '%s\n' "$status" > "$error_dir/$worker.status"
                 echo "ERROR: transfer worker $worker ended before SSH was ready (status $status)" >&2
                 return "$status"
             fi
@@ -1780,7 +1782,8 @@ import_rsync_workers() (
                 status=0
                 wait "$pid" || status=$?
                 pids[worker]=""
-                sed '/^KVS_IMPORT_SSH_READY$/d' "$plan/$worker.err" >&2
+                printf '%s\n' "$status" > "$error_dir/$worker.status"
+                sed '/^KVS_IMPORT_SSH_READY$/d' "$error_dir/$worker.err" >&2
                 case "$status" in
                     0) ;;
                     24) [ "$result" -ne 0 ] || result=24 ;;
@@ -1823,18 +1826,22 @@ import_rsync_workers() (
 # figures mislead here: the line it prints when a file completes carries
 # the time elapsed and the average rate, not an estimate (its code
 # switches to them on that line), and its percentage is relative to the
-# files the scan has found so far. The clock comes from srand(), which
-# mawk and gawk both seed with the time of day.
+# files the scan has found so far. Use seconds from systime(), supported
+# by Debian mawk and gawk. A random seed is not a portable timestamp.
 import_rsync_progress() {
     local total_bytes="${1:-0}" total_files="${2:-0}" terminal="${3:-}"
+    local -a awk_options=()
 
     if [ -z "$terminal" ]; then
         if [ -t 1 ]; then terminal=yes; else terminal=no; fi
     fi
-    awk -v total_bytes="$total_bytes" -v total_files="$total_files" -v terminal="$terminal" '
-        function now(    t) { srand(); t = srand(); return t + 0 }
+    # mawk otherwise waits for a full input buffer. Its interactive mode
+    # requires newline records, so normalize rsync carriage returns first.
+    if awk -W version 2>&1 | grep -q '^mawk '; then awk_options=(-W interactive); fi
+    stdbuf -o0 tr '\r' '\n' | awk "${awk_options[@]}" -v total_bytes="$total_bytes" -v total_files="$total_files" -v terminal="$terminal" '
+        function now() { return systime() }
         function commas(n,    s, r) {
-            s = sprintf("%d", n)
+            s = sprintf("%.0f", int(n))
             r = ""
             while (length(s) > 3) {
                 r = "," substr(s, length(s) - 2) r
@@ -1866,10 +1873,13 @@ import_rsync_progress() {
             }
             shown = t
             elapsed = t - start
+            if (elapsed < 0) elapsed = 0
             seen_bytes[t] = bytes
             seen_files[t] = files
-            delete seen_bytes[t - 61]
-            delete seen_files[t - 61]
+            for (i in seen_bytes) if (i < t - 20 || i > t) {
+                delete seen_bytes[i]
+                delete seen_files[i]
+            }
             o = -1
             for (i = t - 20; i < t; i++) if (i in seen_bytes) { o = i; break }
             if (o >= 0) {
@@ -1926,7 +1936,7 @@ import_rsync_progress() {
             }
             fflush()
         }
-        BEGIN { RS = "\r|\n"; start = now(); shown = -100; bytes = 0; files = 0; found = 0; to_check = 0; scan_done = 0; drawn = 0 }
+        BEGIN { start = now(); shown = -100; bytes = 0; files = 0; found = 0; to_check = 0; scan_done = 0; drawn = 0 }
         /^ *[0-9][0-9,.]* +[0-9]+% +[0-9.]+[kMGT]?B\/s +[0-9]+:[0-9][0-9]:[0-9][0-9]/ {
             b = $1
             gsub(/[,.]/, "", b)
@@ -1976,10 +1986,11 @@ import_remote_files() (
     local use_rsync="$3"
     local status=0
     local pattern totals count_status files=0 bytes=0 site_files site_bytes
-    local jobs="${IMPORT_TRANSFER_JOBS:-4}" worker_rsh worker_auth=no plan=""
+    local jobs="${IMPORT_TRANSFER_JOBS:-4}" worker_rsh worker_auth=no plan="" work error_dir
     local -a independent=(-o ControlMaster=no -o ControlPath=none -o Compression=no)
     local -a rsync_path=()
     local -a rsync_args=()
+    local -a transfer_status=()
     local -a patterns=("${@:4}")
     local -a rsync_excludes=()
     local -a tar_excludes=()
@@ -2002,20 +2013,27 @@ import_remote_files() (
         tar_excludes+=("'--exclude=.$pattern'")
     done
     if [ "$use_rsync" = yes ]; then
+        work=$(mktemp -d) || return 1
+        trap 'rm -rf -- "$work"' EXIT
+        error_dir=${IMPORT_TRANSFER_LOG_DIR:-$work}
+        # The caller owns the private persistent directory when diagnostics
+        # must survive a failure; file lists and progress logs stay temporary.
+        [ -d "$error_dir" ] || return 1
+        umask 077
         if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
             rsync_path=(--rsync-path="sudo -n rsync")
         fi
         rsync_args=(-a -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
             "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/")
         if [ "$jobs" -gt 1 ] && command -v setsid >/dev/null 2>&1; then
-            plan=$(mktemp -d) || return 1
-            trap 'rm -rf -- "$plan"' EXIT
+            plan=$work
         elif [ "$jobs" -gt 1 ]; then
             echo "  setsid is unavailable; using one transfer worker."
         fi
         echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
         count_status=0
-        totals=$(IMPORT_RSYNC_PLAN="$plan" import_rsync_totals "${rsync_args[@]}") || count_status=$?
+        totals=$(IMPORT_RSYNC_PLAN="$plan" IMPORT_RSYNC_COUNT_ERROR="$error_dir/count.err" import_rsync_totals "${rsync_args[@]}") || count_status=$?
+        printf '%s\n' "$count_status" > "$error_dir/count.status"
         if [ -n "$totals" ]; then
             IFS=$'\t' read -r files bytes site_files site_bytes <<< "$totals"
             if [ "$files" -eq 0 ] && [ "$bytes" -eq 0 ]; then
@@ -2049,10 +2067,16 @@ import_remote_files() (
             fi
             IMPORT_RSYNC_SERIAL_AUTH="$worker_auth" import_rsync_workers "$plan" "$jobs" "$worker_rsh" "${rsync_args[@]}" |
                 import_rsync_progress "$bytes" "$files"
-            status=${PIPESTATUS[0]}
+            transfer_status=("${PIPESTATUS[@]}")
+            printf 'rsync=%s progress=%s\n' "${transfer_status[@]}" > "$error_dir/parallel.status"
+            if [ "${transfer_status[1]}" -ne 0 ]; then
+                echo "ERROR: parallel transfer progress failed (status ${transfer_status[1]})" >&2
+                return "${transfer_status[1]}"
+            fi
+            status=${transfer_status[0]}
             case "$status" in
                 0|24) ;;
-                *) return "$status" ;;
+                *) echo "ERROR: parallel file transfer failed (status $status)" >&2; return "$status" ;;
             esac
             echo "  Checking the whole site, catching new changes and applying deletions..."
             # Workers never delete and never recurse into each other's lists.
@@ -2061,16 +2085,25 @@ import_remote_files() (
             bytes=0
             files=0
         fi
-        rsync "${rsync_args[@]}" --info=progress2 | import_rsync_progress "$bytes" "$files"
-        status=${PIPESTATUS[0]}
+        rsync "${rsync_args[@]}" --info=progress2 2> "$error_dir/final-rsync.err" | import_rsync_progress "$bytes" "$files"
+        transfer_status=("${PIPESTATUS[@]}")
+        printf 'rsync=%s progress=%s\n' "${transfer_status[@]}" > "$error_dir/final.status"
+        cat "$error_dir/final-rsync.err" >&2
+        if [ "${transfer_status[1]}" -ne 0 ]; then
+            echo "ERROR: final transfer progress failed (status ${transfer_status[1]})" >&2
+            return "${transfer_status[1]}"
+        fi
+        status=${transfer_status[0]}
         case "$status" in
             24)
                 echo "  Some files vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
                 status=0
                 ;;
             23)
-                echo "ERROR: rsync could not transfer some files (listed above): unreadable by $IMPORT_SSH_TARGET, or symbolic links pointing nowhere; fix them on the old server and run the same command again" >&2
+                echo "ERROR: rsync completed only part of the transfer (status 23); see the errors above, fix the reported cause and run the same command again" >&2
                 ;;
+            0) ;;
+            *) echo "ERROR: final rsync synchronization failed (status $status); see the errors above" >&2 ;;
         esac
         return "$status"
     fi
