@@ -43,6 +43,7 @@ source "$TEST_DIR/setup-functions.sh"
 RED='' NC='' DOMAIN=example.test IMPORT_MODE=true
 IMPORT_STAGING="$TEST_DIR/import" IMPORT_REUSE_SITE_DIR=''
 IMPORT_REMOTE_DIR='' IMPORT_OLD_PATH=/srv/example
+IMPORT_DETECTED_DOMAIN=example.test
 IMPORT_NGINX_CONFIG="$TEST_DIR/source.conf" IMPORT_NGINX_REWRITES=''
 site="$TEST_DIR/site"
 mkdir -p "$TEST_DIR/kvs-archive"
@@ -70,9 +71,11 @@ NGINX
 fi
 {
     printf '# configuration file /etc/nginx/nginx.conf:\n'
-    printf 'server { root /srv/example; include routes.conf; }\n'
+    printf 'server { server_name example.test; root /srv/example; include routes.conf; }\n'
     printf '# configuration file /etc/nginx/routes.conf:\n'
     cat explicit.conf
+    printf '# configuration file /etc/nginx/cdn.conf:\n'
+    printf 'server { server_name cdn.example.test; root /srv/example/contents; location / { rewrite ^ /wrong-cdn last; } }\n'
 } > source.conf
 if (import_ensure_nginx_rewrites "$site") > setup.log 2>&1; then fail 'nested recovery must fail'; fi
 [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail 'nested recovery wrote partial rules'
