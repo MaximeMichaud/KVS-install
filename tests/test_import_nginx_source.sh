@@ -1,6 +1,7 @@
 #!/bin/bash
 # Recover routing from a source report into a fresh destination, using only fixtures.
-# shellcheck disable=SC2034,SC2016,SC2329
+# Domain changes in individual cases must remain inside their test subshell.
+# shellcheck disable=SC2034,SC2016,SC2329,SC2030,SC2031
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TEST_DIR=$(mktemp -d /tmp/kvs-nginx-source.XXXXXX)
@@ -104,6 +105,9 @@ assert_refused() {
 
 sed 's@unix:/run/php/php8.3-fpm.sock@unix:/run/other.sock@' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
 assert_refused 'an unknown upstream'
+grep -Fq '/etc/nginx/snippets/routes.conf:9: fastcgi_pass is not a supported local PHP backend' "$TEST_DIR/error" ||
+    fail 'unsupported backend error must identify its original file and line'
+if grep -Fq '/run/other.sock' "$TEST_DIR/error"; then fail 'diagnostics exposed a directive argument'; fi
 sed 's@fastcgi_param SCRIPT_FILENAME \$document_root/handler.php;@fastcgi_param SCRIPT_FILENAME /srv/example/handler.php;@' \
     "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
 assert_refused 'an absolute script path'
@@ -134,6 +138,61 @@ NGINX
 import_nginx_rewrites_from_config "$TEST_DIR/candidate.conf" /srv/example '' source > "$TEST_DIR/result"
 [ "$(grep -c '^location /private/' "$TEST_DIR/result")" -eq 1 ] || fail 'duplicate server fragments were emitted'
 pass 'identical routing in multiple virtual hosts is emitted once'
+
+# The main site, CDN endpoints and a development vhost may share a root.
+# Only the original site domain and its www alias may contribute routing.
+sed '/listen 443 ssl;/a\    server_name example.test www.example.test;' \
+    "$TEST_DIR/source.conf" > "$TEST_DIR/named-source.conf"
+cat >> "$TEST_DIR/named-source.conf" <<'NGINX'
+# configuration file /etc/nginx/sites-enabled/cdn.conf:
+server {
+    server_name cdn.example.test;
+    root /srv/example/contents;
+    location / { rewrite ^ /cdn last; }
+}
+# configuration file /etc/nginx/sites-enabled/dev.conf:
+server {
+    server_name dev.example.test;
+    root /srv/example;
+    rewrite ^ /development last;
+}
+NGINX
+import_nginx_rewrites_from_config "$TEST_DIR/named-source.conf" /srv/example '' source example.test > "$TEST_DIR/named-result"
+import_nginx_rewrites_from_config "$TEST_DIR/source.conf" /srv/example '' source > "$TEST_DIR/unnamed-result"
+cmp "$TEST_DIR/named-result" "$TEST_DIR/unnamed-result" || fail 'CDN or development routing contaminated the original host'
+pass 'source host excludes CDN and development virtual hosts sharing the site directory'
+(
+    DOMAIN=destination.test IMPORT_DETECTED_DOMAIN=example.test
+    IMPORT_NGINX_CONFIG="$TEST_DIR/named-source.conf"
+    import_prepare_source_nginx_rewrites
+    printf '%s\n' "$IMPORT_NGINX_SOURCE_RULES" > "$TEST_DIR/prepared-result"
+)
+# Command substitution removes the trailing newline, so compare normalized text.
+[ "$(cat "$TEST_DIR/prepared-result")" = "$(cat "$TEST_DIR/unnamed-result")" ] ||
+    fail 'setup selected the destination hostname instead of the source hostname'
+pass 'setup selects the detected source host when the destination domain differs'
+
+sed 's/server_name example.test www.example.test;/server_name www.example.test;/' \
+    "$TEST_DIR/named-source.conf" > "$TEST_DIR/www-source.conf"
+import_nginx_rewrites_from_config "$TEST_DIR/www-source.conf" /srv/example '' source example.test > "$TEST_DIR/named-result"
+cmp "$TEST_DIR/named-result" "$TEST_DIR/unnamed-result" || fail 'the canonical www site was not selected'
+pass 'source domain also selects its canonical www virtual host'
+
+if import_nginx_rewrites_from_config "$TEST_DIR/named-source.conf" /srv/example '' source missing.test \
+    > "$TEST_DIR/named-result" 2> "$TEST_DIR/error"; then fail 'unknown source domain selected another site'; fi
+[ ! -s "$TEST_DIR/named-result" ] || fail 'unknown source domain emitted partial routing'
+grep -q 'no exact source server_name' "$TEST_DIR/error" || fail 'missing source host must be explained'
+pass 'missing source host is refused without falling back to another site'
+
+cat "$TEST_DIR/named-source.conf" > "$TEST_DIR/conflicting-source.conf"
+cat >> "$TEST_DIR/conflicting-source.conf" <<'NGINX'
+# configuration file /etc/nginx/sites-enabled/conflicting.conf:
+server { server_name example.test; root /srv/example; rewrite ^ /different last; }
+NGINX
+if import_nginx_rewrites_from_config "$TEST_DIR/conflicting-source.conf" /srv/example '' source example.test \
+    > "$TEST_DIR/named-result" 2> "$TEST_DIR/error"; then fail 'conflicting original-host routes were accepted'; fi
+[ ! -s "$TEST_DIR/named-result" ] || fail 'conflicting hosts emitted partial routing'
+pass 'different routes for the same original hostname still fail closed'
 
 # The ordinary extraction mode still refuses this configuration.
 if import_nginx_rewrites_from_config "$TEST_DIR/source.conf" /srv/example > "$TEST_DIR/result" 2> "$TEST_DIR/error"; then
@@ -168,14 +227,15 @@ pass 'source recovery is opt-in'
     make_report() {
         printf 'kvs_export=1\nsite_dir=/srv/example\nproject_path=/srv/example\nkvs_version=7.0.2\n'
         printf 'tables_prefix=ktvs_\ndb_ok=yes\ndb_non_transactional=0\nrsync=yes\ncompressor=gzip\n'
+        printf 'domain=example.test\n'
         awk '{ printf "nginx_config_%d=%s\n", NR, $0 }' "$1"
     }
-    sed 's@unix:/run/php/php8.3-fpm.sock@unix:/run/unknown.sock@' source.conf > incompatible.conf
+    sed 's@unix:/run/php/php8.3-fpm.sock@unix:/run/unknown.sock@' named-source.conf > incompatible.conf
     make_report incompatible.conf > ssh-report
     if (import_inspect_remote) > inspection.log 2>&1; then fail 'headless inspection accepted incompatible routing'; fi
     [ ! -e destination-reached ] || fail 'headless inspection prepared the site before refusing routing'
     cmp expected.conf "$IMPORT_STAGING/$DOMAIN.nginx_config.txt" || fail 'failed inspection overwrote saved routing'
-    make_report source.conf > ssh-report
+    make_report named-source.conf > ssh-report
     import_inspect_remote > inspection.log 2>&1
     [ -e destination-reached ] || fail 'compatible routing did not complete headless inspection'
     [[ "$IMPORT_NGINX_SOURCE_RULES" == *'fastcgi_pass php-fpm:9000;'* ]] || fail 'inspection did not prepare the PHP adaptation'

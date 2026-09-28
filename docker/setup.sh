@@ -1644,7 +1644,8 @@ import_prepare_source_nginx_rewrites() {
         exit 1
     fi
     if ! IMPORT_NGINX_SOURCE_RULES=$(import_nginx_rewrites_from_config "$IMPORT_NGINX_CONFIG" \
-        "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH" source) || [ -z "$IMPORT_NGINX_SOURCE_RULES" ]; then
+        "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH" source \
+        "${IMPORT_DETECTED_DOMAIN:-${IMPORT_SOURCE_DOMAIN:-}}") || [ -z "$IMPORT_NGINX_SOURCE_RULES" ]; then
         echo "ERROR: source nginx routing could not be adapted automatically; no rewrite file was replaced." >&2
         echo "Provide IMPORT_NGINX_REWRITES as a complete fragment prepared for Docker." >&2
         exit 1
