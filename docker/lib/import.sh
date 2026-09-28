@@ -1156,13 +1156,13 @@ import_nginx_rewrites_from_config() {
                     if (!n) return 0
                     for (k = 1; k <= n; k++) if (!fragment_file(found[key, k], level + 1)) return 0
                 } else if (name == "access_log" && argument[f, i] != "off") return 0
-                else if (name !~ /^(rewrite|set|return|break|error_page|add_header|expires|default_type|index|try_files|deny|allow|log_not_found|recursive_error_pages|access_log)$/) return 0
+                else if (name !~ /^(rewrite|set|return|break|error_page|add_header|expires|default_type|index|try_files|deny|allow|log_not_found|recursive_error_pages|access_log|auth_request|auth_request_set)$/) return 0
             }
             return 1
         }
         # Render complete blocks, including sibling handlers and access controls.
         # Expand dependencies from the dump, never from the destination filesystem.
-        function render(f, first, last, indent, level,    out, i, name, arg, kind, line, pad, n, k, key, child, backend) {
+        function render(f, first, last, indent, level, location_uri,    out, i, name, arg, kind, line, pad, n, k, key, child, backend, child_uri) {
             if (level > 32) { reject(f, first, "routing nesting exceeds the supported depth"); return "" }
             key = "render" level
             pad = sprintf("%*s", indent * 4, "")
@@ -1176,7 +1176,7 @@ import_nginx_rewrites_from_config() {
                         child = found[key, k]
                         if (rendering[child]) { reject(f, i, "cyclic include"); continue }
                         rendering[child] = 1
-                        out = out render(child, 1, nodes[child], indent, level + 1)
+                        out = out render(child, 1, nodes[child], indent, level + 1, location_uri)
                         delete rendering[child]
                     }
                     continue
@@ -1184,11 +1184,31 @@ import_nginx_rewrites_from_config() {
                 if (kind == "{") {
                     if (name !~ /^(location|if)$/) { reject(f, i, "unsupported routing block: " name); return "" }
                     if (name == "location" && unquote(arg) == "/") reject(f, i, "root location conflicts with the destination vhost")
-                    out = out pad line " {\n" render(f, i + 1, closing[f, i] - 1, indent + 1, level + 1) pad "}\n"
+                    child_uri = location_uri
+                    if (name == "location") {
+                        child_uri = ""
+                        if (arg ~ /^=[[:space:]]+/) {
+                            child_uri = arg
+                            sub(/^=[[:space:]]+/, "", child_uri)
+                            child_uri = unquote(child_uri)
+                            exact_locations[server_key, child_uri]++
+                        }
+                    }
+                    out = out pad line " {\n" render(f, i + 1, closing[f, i] - 1, indent + 1, level + 1, child_uri) pad "}\n"
                     i = closing[f, i]
                     continue
                 }
-                if (name == "fastcgi_pass") {
+                if (name == "auth_request") {
+                    backend = unquote(arg)
+                    if (backend != "off") {
+                        if (backend !~ /^\/[^[:space:]?$\\#]+$/) reject(f, i, "auth_request requires a literal local URI")
+                        auth_uri[++auth_count] = backend
+                        auth_file[auth_count] = f
+                        auth_node[auth_count] = i
+                    }
+                } else if (name == "internal") {
+                    if (location_uri != "") internal_locations[server_key, location_uri] = 1
+                } else if (name == "fastcgi_pass") {
                     backend = unquote(arg)
                     if (backend !~ /^unix:[^[:space:]]*php[^[:space:]]*\.sock$/ &&
                         backend !~ /^(127\.0\.0\.1|localhost|\[::1\]|php-fpm):9000$/) reject(f, i, "fastcgi_pass is not a supported local PHP backend")
@@ -1202,7 +1222,7 @@ import_nginx_rewrites_from_config() {
                     line = "set $base /var/www/kvs"
                 } else if (name == "access_log") {
                     if (arg != "off") reject(f, i, "access_log depends on source-specific logging")
-                } else if (name !~ /^(rewrite|set|return|break|error_page|add_header|expires|default_type|index|try_files|deny|allow|log_not_found|recursive_error_pages|internal|fastcgi_index|fastcgi_read_timeout|fastcgi_send_timeout|fastcgi_connect_timeout|fastcgi_buffering|fastcgi_buffer_size|fastcgi_buffers|fastcgi_request_buffering|fastcgi_intercept_errors|fastcgi_keep_conn|fastcgi_hide_header)$/) reject(f, i, "unsupported routing directive: " name)
+                } else if (name !~ /^(rewrite|set|return|break|error_page|add_header|expires|default_type|index|try_files|deny|allow|log_not_found|recursive_error_pages|auth_request_set|fastcgi_index|fastcgi_read_timeout|fastcgi_send_timeout|fastcgi_connect_timeout|fastcgi_buffering|fastcgi_buffer_size|fastcgi_buffers|fastcgi_request_buffering|fastcgi_pass_request_body|fastcgi_pass_request_headers|fastcgi_intercept_errors|fastcgi_keep_conn|fastcgi_hide_header)$/) reject(f, i, "unsupported routing directive: " name)
                 if (name == "rewrite") routing++
                 out = out pad line ";\n"
             }
@@ -1251,6 +1271,11 @@ import_nginx_rewrites_from_config() {
                     rules[++count] = raw[f, i] ";"
                 } else if (mode == "source" && context == 0 && name == "error_page") {
                     rules[++count] = raw[f, i] ";"
+                } else if (mode == "source" && context == 0 && name ~ /^(auth_request|auth_request_set)$/) {
+                    rules[++count] = render(f, i, i, 0, 0)
+                } else if (name ~ /^(auth_request|auth_request_set)$/) {
+                    control = 1
+                    describe_failure(f, i, "authorization requires its complete routing context")
                 } else if (mode == "source" && context == 0 && name == "set" && arg ~ /^\$base[[:space:]]/) {
                     base_path = arg
                     sub(/^\$base[[:space:]]+/, "", base_path)
@@ -1290,6 +1315,8 @@ import_nginx_rewrites_from_config() {
                 for (entry = 1; entry <= nodes[f]; entry++) {
                     if (command[f, entry] != "server" || ending[f, entry] != "{" || argument[f, entry] != "") continue
                     qualifies = 0; unsafe = 0; control = 0; count = 0; routing = 0; uses_base = 0; base_matches = 0; host_matches = 0; failure = ""
+                    server_key = f SUBSEP entry
+                    auth_count = 0
                     active[f] = 1
                     collect(f, entry + 1, closing[f, entry] - 1, 0, 0)
                     delete active[f]
@@ -1299,6 +1326,12 @@ import_nginx_rewrites_from_config() {
                     if (mode == "source" && source_host != "" && !host_matches) continue
                     matched_servers++
                     if (mode == "source" && !routing) continue
+                    # An omitted authorization endpoint might hit the destination
+                    # front controller and return 200, accidentally granting access.
+                    for (auth_index = 1; auth_index <= auth_count; auth_index++) {
+                        if (exact_locations[server_key, auth_uri[auth_index]] != 1 || !internal_locations[server_key, auth_uri[auth_index]])
+                            reject(auth_file[auth_index], auth_node[auth_index], "auth_request requires an imported exact internal location")
+                    }
                     if (unsafe || (control && count > 0)) {
                         if (failure != "") print "ERROR: " failure > "/dev/stderr"
                         print "ERROR: nginx recovery requires a complete compatible routing fragment; set IMPORT_NGINX_REWRITES to a prepared file." > "/dev/stderr"

@@ -1,9 +1,11 @@
 #!/bin/bash
 # Optional real-nginx routing proof with synthetic data and a local image.
+# Source mode also requires a local PHP-FPM image (PHP_TEST_IMAGE).
 # shellcheck disable=SC2034
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-nginx:alpine}
+PHP_TEST_IMAGE=${PHP_TEST_IMAGE:-php:8.3-fpm-alpine}
 NGINX_IMPORT_TEST_MODE=${NGINX_IMPORT_TEST_MODE:-file}
 case "$NGINX_IMPORT_TEST_MODE" in
     file|source) ;;
@@ -19,11 +21,17 @@ case "$endpoint" in
     *) echo 'ERROR: this integration test requires a local Docker socket' >&2; exit 1 ;;
 esac
 docker image inspect "$NGINX_TEST_IMAGE" >/dev/null
+if [ "$NGINX_IMPORT_TEST_MODE" = source ]; then docker image inspect "$PHP_TEST_IMAGE" >/dev/null; fi
 TEST_DIR=$(mktemp -d /tmp/kvs-nginx-import.XXXXXX)
 container="kvs-nginx-import-$RANDOM-$$"
+php_container="$container-php"
 cleanup() {
     local status=$?
-    if [ "$status" -ne 0 ]; then docker logs "$container" 2>/dev/null >&2 || true; fi
+    if [ "$status" -ne 0 ]; then
+        docker logs "$container" 2>/dev/null >&2 || true
+        docker logs "$php_container" 2>/dev/null >&2 || true
+    fi
+    docker rm -f "$php_container" >/dev/null 2>&1 || true
     docker rm -f "$container" >/dev/null 2>&1 || true
     rm -rf "$TEST_DIR"
 }
@@ -67,6 +75,7 @@ location = /php-check {
     fastcgi_pass unix:/run/php/php8.3-fpm.sock;
     fastcgi_param SCRIPT_FILENAME $document_root/php-check.php;
 }
+include members-area.conf;
 NGINX
 fi
 {
@@ -74,6 +83,7 @@ fi
     printf 'server { server_name example.test; root /srv/example; include routes.conf; }\n'
     printf '# configuration file /etc/nginx/routes.conf:\n'
     cat explicit.conf
+    if [ "$NGINX_IMPORT_TEST_MODE" = source ]; then cat "$ROOT_DIR/tests/fixtures/nginx-auth-request.conf"; fi
     printf '# configuration file /etc/nginx/cdn.conf:\n'
     printf 'server { server_name cdn.example.test; root /srv/example/contents; location / { rewrite ^ /wrong-cdn last; } }\n'
 } > source.conf
@@ -95,6 +105,30 @@ else
     cp explicit.conf expected.conf
 fi
 
+mkdir -p "$site/members/7/thumbs" "$site/members/originals"
+printf 'member photo\n' > "$site/members/7/photo.jpg"
+printf 'public thumbnail\n' > "$site/members/7/thumbs/photo.jpg"
+printf 'original upload\n' > "$site/members/originals/photo.jpg"
+cat > "$site/check_member.php" <<'PHP'
+<?php
+// A synthetic authorizer: no site code, credentials or database connection.
+if (($_SERVER['MEMBER_ALBUM_ID'] ?? '') !== '7') {
+    http_response_code(500);
+    exit;
+}
+header('X-Auth-Check: checked');
+$result = $_SERVER['HTTP_X_FIXTURE_AUTH'] ?? '';
+http_response_code($result === 'allow' ? 204 : ($result === 'error' ? 500 : 403));
+PHP
+cat > php-fpm.conf <<'FPM'
+[global]
+error_log = /proc/self/fd/2
+[www]
+listen = 127.0.0.1:9000
+pm = static
+pm.max_children = 1
+catch_workers_output = yes
+FPM
 cat > nginx.conf <<'NGINX'
 pid /tmp/nginx.pid;
 error_log /dev/stderr notice;
@@ -109,9 +143,14 @@ http {
     server {
         listen 8080;
         server_name example.test;
+        root /fixture/site;
+        error_page 404 /404.php;
         include /fixture/site/_INSTALL/nginx_config.txt;
         location = / { return 200 "home\n"; }
         location = /admin/ { return 200 "admin\n"; }
+        location = /404.php { return 404 "missing\n"; }
+        # The recovered member guards must precede the normal asset handler.
+        location ~* \.(jpg|png)$ { expires 180d; }
         location / { return 404; }
     }
 }
@@ -131,13 +170,30 @@ for ((attempt = 0; attempt < 40; attempt++)); do
     sleep 0.1
 done
 docker exec "$container" nginx -t -c /fixture/nginx.conf > validation.log 2>&1
+if [ "$NGINX_IMPORT_TEST_MODE" = source ]; then
+    # Share only the disposable nginx network namespace. The adapted php-fpm
+    # name resolves to loopback inside it; no PHP port is exposed on the host.
+    docker run -d --name "$php_container" --pull never --read-only \
+        --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges \
+        --network "container:$container" --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+        --memory 64m --pids-limit 32 -v "$TEST_DIR:/fixture:ro" \
+        --entrypoint php-fpm "$PHP_TEST_IMAGE" -n -F -y /fixture/php-fpm.conf >/dev/null
+    for ((attempt = 0; attempt < 40; attempt++)); do
+        if docker logs "$php_container" 2>&1 | grep -q 'ready to handle connections'; then break; fi
+        sleep 0.1
+    done
+    docker logs "$php_container" 2>&1 | grep -q 'ready to handle connections' || fail 'PHP-FPM did not start'
+fi
+checks=0
 assert_http() {
-    local path=$1 expected_status=$2 expected_body=${3:-} status
-    status=$(curl --noproxy '*' -sS --max-time 3 -o response -w '%{http_code}' "$base$path")
+    local path=$1 expected_status=$2 expected_body=${3:-} authorization=${4:-deny} status
+    status=$(curl --noproxy '*' -sS --max-time 3 -D headers -o response -w '%{http_code}' \
+        -H "X-Fixture-Auth: $authorization" "$base$path")
     [ "$status" = "$expected_status" ] || fail "HTTP status for $path: $status"
     if [ -n "$expected_body" ]; then
         [ "$(cat response)" = "$expected_body" ] || fail "HTTP body for $path"
     fi
+    checks=$((checks + 1))
 }
 check_routes() {
     assert_http / 200 home
@@ -147,7 +203,21 @@ check_routes() {
     assert_http '/limited/item?preview=no' 403
     assert_http '/limited/item?preview=yes' 200 preview
     assert_http /missing 404
-    if [ "$NGINX_IMPORT_TEST_MODE" = source ]; then assert_http /php-check 404; fi
+    if [ "$NGINX_IMPORT_TEST_MODE" = source ]; then
+        assert_http /php-check 404
+        assert_http /members/originals/photo.jpg 404
+        assert_http /members/7/thumbs/photo.jpg 200 'public thumbnail'
+        assert_http /members/7/photo.jpg 404 missing
+        cp response denied-response
+        assert_http /members/7/absent.jpg 404 missing
+        cmp response denied-response || fail 'denied and missing member files differ'
+        assert_http /members/7/photo.jpg 200 'member photo' allow
+        grep -qi '^Cache-Control: private, no-store' headers || fail 'an authorized member file can be cached'
+        grep -qi '^X-Member-Check: checked' headers || fail 'authorization result variable was lost'
+        assert_http /members/7/photo.jpg 500 '' error
+        assert_http /_member_check 404 missing allow
+        assert_http /_members_only/members/7/photo.jpg 404 '' allow
+    fi
 }
 check_routes
 # Simulate another transfer replacing _INSTALL, then restore from disk in a
@@ -170,7 +240,10 @@ done
 [ "$workers" -ge 2 ] || fail 'nginx did not reload'
 check_routes
 if [ "$NGINX_IMPORT_TEST_MODE" = source ]; then
-    echo 'PASS: 16 HTTP routing checks, source recovery on a fresh destination, PHP configuration, persistence and reload'
+    docker stop --time 3 "$php_container" >/dev/null
+    assert_http /members/7/photo.jpg 500 '' allow
+    assert_http /members/7/thumbs/photo.jpg 200 'public thumbnail'
+    echo "PASS: $checks HTTP routing checks, PHP authorization, backend failure, persistence and reload"
 else
-    echo 'PASS: 14 HTTP routing checks, nginx validation, persisted override and reload'
+    echo "PASS: $checks HTTP routing checks, nginx validation, persisted override and reload"
 fi
