@@ -33,6 +33,13 @@ if [ "$INCLUDE_WWW" = "true" ]; then
     CERTIFICATE_SAN="${CERTIFICATE_SAN},DNS:www.${DOMAIN}"
 fi
 
+# Keep the HTTP Host allowlist aligned with the certificate and public routes.
+PUBLIC_HOST_RULES="    ${DOMAIN} 1;"
+if [ "$INCLUDE_WWW" = "true" ]; then
+    PUBLIC_HOST_RULES="${PUBLIC_HOST_RULES}
+    www.${DOMAIN} 1;"
+fi
+
 certificate_pair_is_valid() {
     certificate_not_before=''
     certificate_not_before_epoch=''
@@ -136,6 +143,8 @@ if [ "$USE_WWW" = "true" ]; then
     listen 443 ssl;
     http2 on;
     server_name ${DOMAIN};
+    if (\$kvs_known_host = 0) { return 444; }
+    if (\$http_host = \"\") { return 444; }
     ssl_certificate /etc/nginx/ssl/${DOMAIN}/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/${DOMAIN}/key.pem;
     return 301 https://www.${DOMAIN}${HTTPS_PORT_SUFFIX}\$request_uri;
@@ -147,6 +156,8 @@ elif [ "$INCLUDE_WWW" = "true" ]; then
     listen 443 ssl;
     http2 on;
     server_name www.${DOMAIN};
+    if (\$kvs_known_host = 0) { return 444; }
+    if (\$http_host = \"\") { return 444; }
     ssl_certificate /etc/nginx/ssl/${DOMAIN}/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/${DOMAIN}/key.pem;
     return 301 https://${DOMAIN}${HTTPS_PORT_SUFFIX}\$request_uri;
@@ -157,7 +168,7 @@ else
     WWW_REDIRECT_BLOCK=""
 fi
 
-export DOMAIN MAIN_SERVER_NAME PUBLIC_SERVER_NAMES REDIRECT_HOST \
+export DOMAIN MAIN_SERVER_NAME PUBLIC_SERVER_NAMES PUBLIC_HOST_RULES REDIRECT_HOST \
     PROJECT_HTTPS_PORT HTTPS_PORT_SUFFIX WWW_REDIRECT_BLOCK
 
 monitor_certificate_changes() (
@@ -192,7 +203,7 @@ monitor_certificate_changes() (
 # Generate site config from template (before official entrypoint runs)
 if [ -f /etc/nginx/templates/kvs.conf.tpl ]; then
     # shellcheck disable=SC2016
-    envsubst '${DOMAIN} ${MAIN_SERVER_NAME} ${PUBLIC_SERVER_NAMES} ${REDIRECT_HOST} ${PROJECT_HTTPS_PORT} ${HTTPS_PORT_SUFFIX} ${WWW_REDIRECT_BLOCK} ${KVS_ROOT} ${PHP_FPM_UPSTREAM} ${RESOLVER_LINE}' \
+    envsubst '${DOMAIN} ${MAIN_SERVER_NAME} ${PUBLIC_SERVER_NAMES} ${PUBLIC_HOST_RULES} ${REDIRECT_HOST} ${PROJECT_HTTPS_PORT} ${HTTPS_PORT_SUFFIX} ${WWW_REDIRECT_BLOCK} ${KVS_ROOT} ${PHP_FPM_UPSTREAM} ${RESOLVER_LINE}' \
         < /etc/nginx/templates/kvs.conf.tpl \
         > /etc/nginx/conf.d/kvs.conf
     echo "Generated kvs.conf for domain: ${DOMAIN} (USE_WWW=${USE_WWW})"

@@ -40,7 +40,7 @@ services:
           - n.${DOMAIN}
       site-internal:
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      test: ["CMD", "curl", "-fsS", "-H", "Host: ${DOMAIN}", "http://localhost/health"]
       interval: 30s
       timeout: 10s
       retries: 3

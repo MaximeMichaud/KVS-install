@@ -11,6 +11,9 @@ DOMAIN {
         # Health check
         health_uri /health
         health_interval 30s
+        health_headers {
+            Host DOMAIN
+        }
 
         # Headers
         header_up Host {host}

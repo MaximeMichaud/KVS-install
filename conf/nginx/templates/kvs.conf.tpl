@@ -7,11 +7,34 @@ map $uri $kvs_frame_options {
     ~^/player/iframe_embed\.php$ "";
 }
 
+# Unknown hosts must not reveal the site's content or canonical redirect.
+map $host $kvs_known_host {
+    default 0;
+${PUBLIC_HOST_RULES}
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+    return 444;
+}
+
+# Reject unknown/missing SNI before exposing a certificate with the site name.
+server {
+    listen 443 ssl default_server;
+    ssl_reject_handshake on;
+    server_name _;
+    return 444;
+}
+
 # Main KVS site
 server {
     listen                  443 ssl;
     http2                   on;
     server_name             ${MAIN_SERVER_NAME};
+    # SNI may select this server even when HTTP Host is unknown or absent.
+    if ($kvs_known_host = 0) { return 444; }
+    if ($http_host = "") { return 444; }
     set                     $base ${KVS_ROOT};
     root                    $base;
 
@@ -135,6 +158,8 @@ ${WWW_REDIRECT_BLOCK}
 server {
     listen      80;
     server_name ${PUBLIC_SERVER_NAMES};
+    if ($kvs_known_host = 0) { return 444; }
+    if ($http_host = "") { return 444; }
 
     # ACME challenge
     location ^~ /.well-known/acme-challenge/ {
