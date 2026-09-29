@@ -28,6 +28,7 @@ assert 'DELETE FROM' not in re.search(r'^import_verify_database\(\) \{\n.*?^\}',
 PY
 # shellcheck source=/dev/null
 source "$fixture/setup-functions.sh"
+# shellcheck source=/dev/null
 source "$root/docker/lib/database.sh"
 RESUME_IMPORT=true
 cat > "$fixture/lib/import-resume.sh" <<'SH'
