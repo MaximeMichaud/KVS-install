@@ -1503,7 +1503,7 @@ kvs_select_database_format() {
         '' | localhost | localhost:* | 127.0.0.1 | 127.0.0.1:*) ;;
         *) kvs_directory_refuse "the database is not local to the export process"; return $? ;;
     esac
-    if [[ ! "$DB_NAME" =~ ^[A-Za-z0-9_]+$ || ! "$TABLES_PREFIX" =~ ^[A-Za-z0-9_]+$ ]]; then
+    if [[ ! "$DB_NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ || ! "$TABLES_PREFIX" =~ ^[A-Za-z0-9_]+$ ]]; then
         kvs_directory_refuse "the database name or table prefix is not supported by the native bundle"
         return $?
     fi
@@ -1536,7 +1536,13 @@ FROM (
   (SELECT COUNT(*) FROM information_schema.columns c
    WHERE c.table_schema=DATABASE() AND BINARY c.column_name NOT REGEXP '^[A-Za-z0-9_]{1,64}$'
    AND EXISTS (SELECT 1 FROM information_schema.columns g
-    WHERE g.table_schema=c.table_schema AND g.table_name=c.table_name AND g.extra LIKE '%GENERATED%')) +
+    WHERE g.table_schema=c.table_schema AND g.table_name=c.table_name AND (
+     g.extra LIKE '%GENERATED%' OR (g.extra LIKE '%auto_increment%' AND NOT EXISTS (
+      SELECT 1 FROM information_schema.statistics p
+      WHERE p.table_schema=g.table_schema AND p.table_name=g.table_name
+       AND p.index_name='PRIMARY' AND p.seq_in_index=1 AND p.column_name=g.column_name
+     ))
+    ))) +
   (SELECT COUNT(DISTINCT k.table_name, k.constraint_name) FROM information_schema.key_column_usage k
    WHERE k.table_schema=DATABASE() AND k.referenced_table_name IS NOT NULL
    AND (BINARY k.constraint_name NOT REGEXP '^[A-Za-z0-9_]{1,64}$'
@@ -1649,7 +1655,7 @@ SELECT 'instance', CONCAT_WS(':', HEX(@@hostname), @@port, @@server_id, HEX(@@so
 }
 
 kvs_prepare_directory_dump() {
-    local table file owner_uid mysql_uid mysql_gid expected actual
+    local table file owner_uid mysql_uid mysql_gid expected actual database_directory=''
     local native_args=()
 
     [ "$NATIVE_DUMP_READY" != yes ] || return 0
@@ -1686,11 +1692,21 @@ kvs_prepare_directory_dump() {
         kvs_error "native export failed before any bundle was streamed"
         return 1
     fi
-    if [ ! -d "$NATIVE_STAGING_DIR/native/$DB_NAME" ]; then
-        kvs_error "native export did not create the expected database directory"
+    # MariaDB encodes filesystem names (for example a dot as @002e). This
+    # private directory contains exactly one exported database; do not assume
+    # that its filesystem spelling matches the SQL identifier.
+    for file in "$NATIVE_STAGING_DIR/native/"*; do
+        if [ ! -d "$file" ] || [ -L "$file" ] || [ -n "$database_directory" ]; then
+            kvs_error "native export did not create exactly one database directory"
+            return 1
+        fi
+        database_directory=$file
+    done
+    if [ -z "$database_directory" ]; then
+        kvs_error "native export did not create a database directory"
         return 1
     fi
-    mv -- "$NATIVE_STAGING_DIR/native/$DB_NAME" "$NATIVE_STAGING_DIR/bundle/data" || return 1
+    mv -- "$database_directory" "$NATIVE_STAGING_DIR/bundle/data" || return 1
     expected=$((${#DB_DIRECTORY_TABLES[@]} * 2))
     actual=0
     for file in "$NATIVE_STAGING_DIR/bundle/data/"*; do

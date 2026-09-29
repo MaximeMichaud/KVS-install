@@ -207,6 +207,44 @@ database_docker_query() {
     timeout -k 1 3 docker "$@"
 }
 
+# Keep the initial import error visible across the following startup messages.
+# The client may echo the failed SQL between separator lines; omit that SQL
+# and password-bearing log lines instead of exposing imported values.
+database_failure_logs() {
+    echo "  MariaDB initialization log (last 500 lines; SQL statements and password lines omitted):" >&2
+    database_docker_query compose logs --no-color --tail 500 mariadb 2>&1 | awk '
+        {
+            line[NR]=substr($0, 1, 2000)
+            message=$0
+            sub(/^[^|]*[|][[:space:]]?/, "", message)
+            separator[NR]=(message ~ /^[[:space:]]*--------------[[:space:]]*$/)
+            secret[NR]=(tolower(message) ~ /password|passwd|mysql_pwd|mariadb_pwd|identified[[:space:]]+by/)
+            blank[NR]=(message ~ /^[[:space:]]*$/)
+            if (message ~ /^[[:space:]]*ERROR [0-9]+ /) {
+                end=NR-1
+                while (end>0 && blank[end]) end--
+                if (separator[end]) {
+                    start=end-1
+                    while (start>0 && !separator[start]) start--
+                    # If the tail starts inside SQL, omit through its closing
+                    # separator without hiding the error that follows it.
+                    if (start<1) start=1
+                    for (i=start; i<=end; i++) omit[i]=1
+                }
+            }
+        }
+        END {
+            for (i=1; i<=NR; i++) {
+                if (omit[i]) {
+                    if (!omit[i-1]) print "  [SQL statement omitted]"
+                } else if (secret[i]) {
+                    print "  [Password-bearing log line omitted]"
+                } else print line[i]
+            }
+        }
+    ' >&2
+}
+
 # A separate timer keeps status visible while foreground probes are blocked.
 # It reports pending checks, never fabricated SQL progress or a stale sample.
 database_progress_heartbeat() {
@@ -269,7 +307,7 @@ database_wait_ready() (
         fi
         if [[ "$state" != "0 running" && "$state" != "0 created" ]]; then
             echo "ERROR: MariaDB stopped or restarted during initialization ($state)." >&2
-            database_docker_query compose logs --tail 20 mariadb >&2 || true
+            database_failure_logs || true
             return 1
         fi
         elapsed=$((SECONDS - start))

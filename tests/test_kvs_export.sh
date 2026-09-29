@@ -131,7 +131,9 @@ for arg in "$@"; do
                 "select'datadir',hex(@@datadir)" \
                 "select'instance',concat_ws(':',hex(@@hostname),@@port,@@server_id,hex(@@socket),hex(@@datadir),hex(version()))" \
                 "c.table_schema=database()andbinaryc.column_namenotregexp'^[a-za-z0-9_]{1,64}$'" \
-                "g.table_schema=c.table_schemaandg.table_name=c.table_nameandg.extralike'%generated%'" \
+                "g.table_schema=c.table_schemaandg.table_name=c.table_nameand(g.extralike'%generated%'" \
+                "g.extralike'%auto_increment%'andnotexists(" \
+                "p.index_name='primary'andp.seq_in_index=1andp.column_name=g.column_name" \
                 'k.table_schema=database()andk.referenced_table_nameisnotnull' \
                 "binaryk.constraint_namenotregexp'^[a-za-z0-9_]{1,64}$'" \
                 "binaryk.column_namenotregexp'^[a-za-z0-9_]{1,64}$'" \
@@ -166,6 +168,7 @@ for arg in "$@"; do
             add_blocker triggers "${STUB_NATIVE_TRIGGERS:-0}"
             invalid_identifiers=0
             for identifier in "${STUB_NATIVE_GENERATED_TABLE_COLUMN:-value}" \
+                "${STUB_NATIVE_SECONDARY_AI_COLUMN:-value}" \
                 "${STUB_NATIVE_FK_CONSTRAINT:-fk_fixture}" \
                 "${STUB_NATIVE_FK_COLUMN:-parent_id}" \
                 "${STUB_NATIVE_FK_REF_COLUMN:-id}"; do
@@ -251,7 +254,7 @@ for arg in "$@"; do
     case $arg in
         --dir=*)
             [ "${STUB_NATIVE_DUMP_FAIL:-no}" != yes ] || exit 42
-            directory=${arg#*=}/oldsite
+            directory=${arg#*=}/${STUB_NATIVE_DATABASE_DIRECTORY:-oldsite}
             mkdir -p "$directory"
             printf 'CREATE TABLE `ktvs_options` (`variable` varchar(255) PRIMARY KEY, `value` text);\n' > "$directory/ktvs_options.sql"
             printf 'INITIAL_VERSION\t7.0.2\n' > "$directory/ktvs_options.txt"
@@ -907,6 +910,21 @@ EOF
     argv_lines | grep -Fq 'mariadb-dump argv: [--no-defaults]' || fail "native exports must not inherit filtering or formatting options"
     grep -Fq '[--socket=/tmp/fixture.sock]' "$STUB_LOG" || fail "native exports must preserve the resolved local socket"
     argv_lines | grep -Fq '[--default-character-set=binary]' || fail "native data must preserve original character bytes"
+
+    make_site "$TMP_ROOT/native-domain-site" https://source.example localhost
+    sed -i 's/oldsite/source-site.example/' "$TMP_ROOT/native-domain-site/admin/include/setup_db.php"
+    export STUB_NATIVE_DATABASE_DIRECTORY=source@002dsite@002eexample
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory --gzip dump "$TMP_ROOT/native-domain-site" ||
+        fail "native export must accept MariaDB-encoded database directory names: $(cat "$err")"
+    tar -xOf "$out" kvs-native-export.manifest > "$extracted/domain.manifest"
+    assert_key "$extracted/domain.manifest" source_database source-site.example
+    unset STUB_NATIVE_DATABASE_DIRECTORY
+
+    export STUB_NATIVE_SECONDARY_AI_COLUMN='unsupported column'
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail 'native compatibility inspection failed'
+    assert_key "$out" db_dump_format sql
+    grep -Fq 'unsupported_identifiers=1' "$out" || fail 'secondary AUTO_INCREMENT mappings must be checked before export'
+    unset STUB_NATIVE_SECONDARY_AI_COLUMN
 
     export STUB_NATIVE_GENERATED=5 STUB_NATIVE_LOCAL_FKS=17
     run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
