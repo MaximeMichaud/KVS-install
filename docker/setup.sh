@@ -585,7 +585,7 @@ setup_resume_docker_query() {
     local message=$1 status
     shift
     echo "$message" >&2
-    if timeout -k 1 3 docker "$@"; then
+    if database_docker_query "$@"; then
         return 0
     else
         status=$?

@@ -13,6 +13,12 @@ set -euo pipefail
 case "$*" in
     'compose ps -a -q mariadb')
         if [ "${HANG_METADATA:-no}" = yes ]; then exec /usr/bin/sleep 30; fi
+        # A host still loaded by the import answers one check late, as the
+        # lab did when recovery started the runtime services.
+        if [ "${SLOW_METADATA:-no}" = yes ] && grep -Fxq kvs-init "$CALLS" 2>/dev/null && [ ! -e "$CALLS.slow" ]; then
+            : > "$CALLS.slow"
+            /usr/bin/sleep 4
+        fi
         echo 0123456789abcdef ;;
     'inspect --format {{index .Config.Labels '*)
         printf 'kvs-resume\trunning 0 false\tvolume:kvs-resume_mariadb-data:/fixture/volume\t2026-09-26T21:10:43Z\n' ;;
@@ -209,6 +215,17 @@ grep -Fxq $'ktvs_videos\t17' "$fixture/slow-count/logs/import-rows.txt"
 grep -Fxq start-cron "$fixture/slow-count/calls"
 echo 'PASS: slow row counts show periodic status without contaminating the saved row-count report.'
 
+make_case "$fixture/slow-metadata"
+if ! SLOW_METADATA=yes run_case "$fixture/slow-metadata" no; then
+    cat "$fixture/slow-metadata/output.log" >&2
+    echo 'FAIL: a Docker check that answered after four seconds stopped recovery' >&2
+    exit 1
+fi
+[ -e "$fixture/slow-metadata/calls.slow" ]
+grep -q '^KVS_IMPORT_COMPLETED=' "$fixture/slow-metadata/.env"
+grep -Fxq start-cron "$fixture/slow-metadata/calls"
+echo 'PASS: a Docker check that answers late on a loaded host does not stop recovery.'
+
 make_case "$fixture/failure"
 if run_case "$fixture/failure" yes; then
     echo 'FAIL: KVS initialization failure was ignored' >&2
@@ -267,7 +284,7 @@ import sys
 import time
 
 directory = Path(sys.argv[1])
-env = dict(os.environ, CALLS=str(directory / 'calls'), HANG_METADATA='yes',
+env = dict(os.environ, CALLS=str(directory / 'calls'), HANG_METADATA='yes', DOCKER_QUERY_TIMEOUT_SECONDS='2',
            MARKER_FILE=str(directory / 'database-marker'), PATH=sys.argv[2] + ':/usr/bin:/bin')
 env.pop('MARIADB_WAIT_SECONDS', None)
 output = directory / 'output.log'

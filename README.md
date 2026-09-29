@@ -197,7 +197,7 @@ During MariaDB initialization, setup reports its state immediately and keeps a f
 ./reconfigure.sh --import-status --watch
 ```
 
-Imports wait without a deadline by default (`MARIADB_WAIT_SECONDS=0`). Set a positive value to limit the wait, for example `MARIADB_WAIT_SECONDS=7200` for two hours. Connection attempts remain bounded, and stopped or restarted containers are reported. A timeout stops the installer, not the database container. Do not restart MariaDB or repeat the original installation command over an active replay.
+Imports wait without a deadline by default (`MARIADB_WAIT_SECONDS=0`). Set a positive value to limit the wait, for example `MARIADB_WAIT_SECONDS=7200` for two hours. Connection attempts remain bounded, and stopped or restarted containers are reported. Each Docker query gives up after 30 seconds (`DOCKER_QUERY_TIMEOUT_SECONDS`): a daemon that no longer answers stops the setup, a busy one only delays the next check. A timeout stops the installer, not the database container. Do not restart MariaDB or repeat the original installation command over an active replay.
 
 After an import wait times out, update the installer files and resume from the existing `docker` directory:
 
