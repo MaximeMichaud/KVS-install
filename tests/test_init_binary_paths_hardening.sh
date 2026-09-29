@@ -190,4 +190,27 @@ if grep -q "enable_debug\|sql_debug" "$site/admin/include/setup.php"; then
     fail "a debug switch must not be invented"
 fi
 
+# --- .user.ini files naming the old server's directory follow the site -----
+site="$TEST_DIR/userini"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+mkdir -p "$site/admin" "$site/contents/videos"
+printf '%s\n' 'auto_prepend_file=/home/old/www/lib/guard.php' 'error_log = "/home/old/www/admin/logs/php.log"' \
+    'include_path=".:/home/old/www2/lib"' > "$site/.user.ini"
+printf '%s\n' 'auto_prepend_file=/home/old/www/admin/prepend.php' > "$site/admin/.user.ini"
+printf '%s\n' 'auto_prepend_file=/home/old/www/lib/guard.php' > "$site/contents/videos/.user.ini"
+run_config "$site" > "$TEST_DIR/userini.log" 2>&1 || fail "a site with .user.ini files must be configured"
+grep -Fxq "auto_prepend_file=$site/lib/guard.php" "$site/.user.ini" ||
+    fail "the prepend file of the root .user.ini must follow the site (got '$(head -n 1 "$site/.user.ini")')"
+grep -Fxq "error_log = \"$site/admin/logs/php.log\"" "$site/.user.ini" || fail "a quoted path must follow the site"
+grep -Fxq 'include_path=".:/home/old/www2/lib"' "$site/.user.ini" ||
+    fail "a path that only starts like the old directory must stay"
+grep -Fxq "auto_prepend_file=$site/admin/prepend.php" "$site/admin/.user.ini" || fail "a .user.ini below the root must follow too"
+grep -Fxq 'auto_prepend_file=/home/old/www/lib/guard.php' "$site/contents/videos/.user.ini" ||
+    fail "contents/, where PHP does not run, must not be walked"
+grep -Fq ".user.ini: paths under /home/old/www now under $site" "$TEST_DIR/userini.log" || fail "the rewrite must be announced"
+cp "$site/.user.ini" "$TEST_DIR/userini.first"
+run_config "$site" > "$TEST_DIR/userini-again.log" 2>&1 || fail "the second run must succeed"
+cmp -s "$site/.user.ini" "$TEST_DIR/userini.first" || fail "a second run must leave .user.ini unchanged"
+if grep -Fq "now under" "$TEST_DIR/userini-again.log"; then fail "a second run must not announce a rewrite"; fi
+
 echo "PASS: binaries of an imported site point inside the containers"
