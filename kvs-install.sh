@@ -1639,6 +1639,26 @@ update_kvs_install() {
   git pull --ff-only origin "$branch"
 }
 
+# A pull fails when the history of the branch was rewritten upstream or a
+# local edit is in the way. Put the copy on the branch as the repository
+# has it instead of cloning it again: the files git does not track stay
+# (the .env, the archive, the import markers and nginx rules kept for the
+# next pass, a staged dump, the DH parameters, a Compose override, the
+# logs), where a new clone keeps only the .env and the archive. Local edits
+# of tracked files go, as with a new clone; they are named first.
+reset_kvs_install() {
+  local branch="${KVS_INSTALL_BRANCH:-main}"
+  local -a edited
+
+  git fetch origin "$branch" || return $?
+  mapfile -t edited < <(git diff --name-only HEAD 2>/dev/null)
+  if ((${#edited[@]} > 0)); then
+    echo "${yellow}Local changes to these files are replaced by the repository version:${normal}"
+    printf '  %s\n' "${edited[@]}"
+  fi
+  git checkout --force -B "$branch" FETCH_HEAD
+}
+
 backup_user_data() {
   local install_dir="$1"
   local backup_dir="$2"
@@ -1758,6 +1778,11 @@ function dockerInstall() {
     echo "Updating existing installation${KVS_INSTALL_BRANCH:+ (branch $KVS_INSTALL_BRANCH)}..."
     if cd "$INSTALL_DIR" && update_kvs_install; then
       echo "${green}Updated successfully${normal}"
+      if [[ -z "${KVS_BACKUP_DIR:-}" ]]; then
+        rmdir "$BACKUP_DIR" 2>/dev/null || true
+      fi
+    elif cd "$INSTALL_DIR" && reset_kvs_install; then
+      echo "${green}Updated to the repository version of the branch; the files the setup created are kept${normal}"
       if [[ -z "${KVS_BACKUP_DIR:-}" ]]; then
         rmdir "$BACKUP_DIR" 2>/dev/null || true
       fi
