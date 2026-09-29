@@ -534,6 +534,7 @@ done
 echo "target \$1" >> "\$log"
 shift
 echo "command \$*" >> "\$log"
+sleep "\${FAKE_SSH_DELAY:-0}"
 if [ -n "\${FAKE_SSH_FAIL_COMMAND:-}" ] && [[ "\$*" == *"\$FAKE_SSH_FAIL_COMMAND"* ]]; then exit 1; fi
 if [ -n "\${FAKE_SSH_STARTUP_GUARD:-}" ]; then
     mkdir "\$FAKE_SSH_STARTUP_GUARD" 2>/dev/null || exit 255
@@ -1336,6 +1337,41 @@ EOF
     pass "parallel workers read their lists on the old server"
 }
 
+# Ctrl-C in a terminal goes to the foreground process group. A timeout
+# that moved the planning scan into a group of its own kept it running on
+# the old server, and the setup waiting for it, until the scan ended.
+test_interrupt_stops_the_planning_scan() {
+    local bin="$TMP_ROOT/interrupt-bin" site="$TMP_ROOT/interrupt-site" jobs leader start elapsed
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    for jobs in 4 1; do
+        rm -rf "$TMP_ROOT/interrupt-dest"
+        cat > "$TMP_ROOT/interrupt-run.sh" <<EOF
+#!/bin/bash
+source "$REPO_ROOT/docker/lib/import.sh"
+PATH="$bin:\$PATH"
+IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/interrupt-ctl" import_ssh_setup old.example.com 22 root "" yes
+IMPORT_REMOTE_SUDO=no
+IMPORT_TRANSFER_JOBS=$jobs import_remote_files "$site" "$TMP_ROOT/interrupt-dest" yes
+EOF
+        # A job started from a terminal: its own session, SIGINT not ignored.
+        FAKE_SSH_DELAY=15 setsid env --default-signal=INT,QUIT bash "$TMP_ROOT/interrupt-run.sh" > "$TMP_ROOT/interrupt.out" 2>&1 &
+        leader=$!
+        sleep 2
+        kill -INT -- "-$leader"
+        start=$SECONDS
+        while kill -0 "$leader" 2>/dev/null && [ $((SECONDS - start)) -lt 20 ]; do sleep 0.2; done
+        elapsed=$((SECONDS - start))
+        kill -KILL -- "-$leader" 2>/dev/null || true
+        wait "$leader" 2>/dev/null || true
+        [ "$elapsed" -le 5 ] ||
+            fail "Ctrl-C during the planning scan waited $elapsed s for the scan to end (IMPORT_TRANSFER_JOBS=$jobs)"
+        [ ! -e "$TMP_ROOT/interrupt-dest/admin" ] || fail "files were copied after Ctrl-C (IMPORT_TRANSFER_JOBS=$jobs)"
+    done
+    pass "Ctrl-C during the planning scan stops the import at once"
+}
+
 test_parallel_interruption_stops_the_process_groups() {
     local bin="$TMP_ROOT/interrupted-bin" plan="$TMP_ROOT/interrupted-plan" i pid status=0
     mkdir -p "$bin" "$plan"
@@ -1388,6 +1424,7 @@ test_the_tar_stream_reports_what_the_old_server_could_not_read
 test_parallel_transfers_preserve_the_mirror
 test_hard_links_arrive_as_links
 test_parallel_workers_read_their_lists_on_the_old_server
+test_interrupt_stops_the_planning_scan
 test_parallel_interruption_stops_the_process_groups
 
 echo "All $TESTS_RUN import source tests passed."

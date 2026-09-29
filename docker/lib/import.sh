@@ -1675,7 +1675,11 @@ import_rsync_totals() {
         budget=0
         listing=(--out-format='KVS-PLAN %i %l %n')
     fi
-    LC_ALL=C timeout "$budget" rsync --dry-run --stats "${listing[@]}" "$@" 2>"${IMPORT_RSYNC_COUNT_ERROR:-/dev/null}" |
+    # --foreground keeps the scan in the process group of the setup, the one
+    # Ctrl-C reaches: timeout otherwise moves itself, rsync and ssh into a
+    # group of their own, and the setup waited for the whole scan of the
+    # old server, minutes on a large site, before it stopped.
+    LC_ALL=C timeout --foreground "$budget" rsync --dry-run --stats "${listing[@]}" "$@" 2>"${IMPORT_RSYNC_COUNT_ERROR:-/dev/null}" |
         import_rsync_plan "${IMPORT_RSYNC_PLAN:-}" "${IMPORT_TRANSFER_JOBS:-4}" |
         import_rsync_stats_totals
     statuses=("${PIPESTATUS[@]}")
