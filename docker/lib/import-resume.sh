@@ -71,6 +71,8 @@ import_resume_discover() {
 
 # Accept only the exact final statement emitted by import_prepare_dump or
 # native_import_prepare, including the expected options table and token shape.
+# The token pattern is spelled out: the mawk of Debian 12 (1.3.4 20200120)
+# has no interval expressions and reads [0-9]{8} as a digit then "{8}".
 import_resume_parse_marker() {
     awk -v prefix="$1" '
         /[^[:space:]]/ { last=$0 }
@@ -79,7 +81,7 @@ import_resume_parse_marker() {
             n=split(last, part, "\047")
             if (n != 5 || part[1] != "INSERT INTO `" prefix "options` (variable, value) VALUES (" ||
                 part[2] != "KVS_INSTALL_IMPORT" || part[3] != ", " ||
-                part[4] !~ /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/ ||
+                part[4] !~ /^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]$/ ||
                 part[5] != ") ON DUPLICATE KEY UPDATE value = VALUES(value);") exit 1
             print part[4]
         }
