@@ -94,6 +94,17 @@ reject_fixture full_stage
 grep -q 'native import staging needs' "$TEST_DIR/rejected.log" || fail 'missing staging space diagnostic'
 SIMULATE_FULL_STAGE=no
 
+fixture
+sed -i 's/source_database=old_source/source_database=old-site.example/' "$TEST_DIR/source/kvs-native-export.manifest"
+hash_fixture
+pack_fixture
+prepare_fixture domain_source >/dev/null
+for source_name in '..' '.' '../outside' '-options'; do
+    printf 'format=2\ncomplete=yes\nsource_database=%s\ntables_prefix=ktvs_\nkvs_version=7.0.2\ntables=2\n' \
+        "$source_name" > "$TEST_DIR/invalid-source.manifest"
+    if native_import_metadata "$TEST_DIR/invalid-source.manifest" ktvs_; then fail 'unsafe source database name accepted'; fi
+done
+
 printf 'tampered\n' >> "$TEST_DIR/source/data/ktvs_videos.txt"
 pack_fixture
 reject_fixture tampered
@@ -227,10 +238,11 @@ reset_hook() {
     : > "$HOOK_STATE/events"
     : > "$HOOK_STATE/columns"
     : > "$HOOK_STATE/keys"
+    : > "$HOOK_STATE/indexes"
     printf '%s' 'STRICT_TRANS_TABLES' > "$HOOK_STATE/sql-mode"
     LOADER_FAIL=no LOADER_WARNINGS=0 LOADER_SKIPPED=0 RESTORED_TABLES=2 MISSING_CAPABILITY=no
     SPECIAL_SQL_FAIL=no SPECIAL_WARNINGS=0 PRECREATE_FAIL=no COLUMN_MISMATCH=no FK_MISMATCH=no ORPHAN=no
-    MODE_ACTIVATION_FAIL=no MODE_RESTORE_FAIL=no
+    MODE_ACTIVATION_FAIL=no MODE_RESTORE_FAIL=no INDEX_MISMATCH=no
     sed "s|^native_import_root=.*|native_import_root=$TEST_DIR/init/$stage|" \
         "$TEST_DIR/init/$stage.sh" > "$TEST_DIR/hook.sh"
 }
@@ -272,7 +284,13 @@ docker_process_sql() {
     case "$query" in
         *'LOAD DATA INFILE '*)
             printf 'generated-sql\n' >> "$HOOK_STATE/events"
-            count=$(grep -c '^generated-sql$' "$HOOK_STATE/events")
+            # Workers now run concurrently. Name captures by table rather than
+            # racing on a shared event count.
+            case "$query" in
+                *'INTO TABLE `ktvs_plugin_rows`'*) count=1 ;;
+                *'INTO TABLE `ktvs_videos`'*) count=2 ;;
+                *) return 96 ;;
+            esac
             printf '%s\n' "$query" > "$HOOK_STATE/generated.$count.sql"
             printf '%s\n' "${sql_args[@]}" > "$HOOK_STATE/generated.$count.args"
             [ "$SPECIAL_SQL_FAIL" != yes ] || return 9
@@ -305,6 +323,12 @@ docker_process_sql() {
             count=$(grep -c '^keys$' "$HOOK_STATE/events")
             cat "$HOOK_STATE/keys"
             if [ "$FK_MISMATCH" = yes ] && [ "$count" -gt 1 ]; then printf 'changed\n'; fi
+            ;;
+        *'FROM information_schema.STATISTICS'*)
+            printf 'indexes\n' >> "$HOOK_STATE/events"
+            count=$(grep -c '^indexes$' "$HOOK_STATE/events")
+            cat "$HOOK_STATE/indexes"
+            if [ "$INDEX_MISMATCH" = yes ] && [ "$count" -gt 1 ]; then printf 'changed\n'; fi
             ;;
         *'SELECT COUNT(*) FROM information_schema.TABLES'*)
             printf 'count\n' >> "$HOOK_STATE/events"
@@ -437,7 +461,7 @@ grep -Fq 'FROM `ktvs_plugin_rows` c WHERE c.`parent_id` IS NOT NULL AND NOT EXIS
 [ "$(tail -n 1 "$HOOK_STATE/events")" = finalize ] || fail 'special-table marker preceded validation'
 echo 'PASS: format 2, per-table generated/invisible mappings and nullable composite/self foreign keys'
 
-for failure in generated-sql generated-warnings generated-unverified column-mismatch foreign-key-mismatch orphan; do
+for failure in generated-sql generated-warnings generated-unverified column-mismatch foreign-key-mismatch index-mismatch orphan; do
     reset_hook special
     special_metadata
     case "$failure" in
@@ -446,15 +470,13 @@ for failure in generated-sql generated-warnings generated-unverified column-mism
         generated-unverified) SPECIAL_WARNINGS='' ;;
         column-mismatch) COLUMN_MISMATCH=yes ;;
         foreign-key-mismatch) FK_MISMATCH=yes ;;
+        index-mismatch) INDEX_MISMATCH=yes ;;
         orphan) ORPHAN=yes ;;
     esac
     if run_hook > "$TEST_DIR/$failure.log" 2>&1; then fail "$failure was ignored"; fi
     assert_no_marker "$failure"
-    case "$failure" in
-        generated-*) [ ! -e "$HOOK_STATE/generated.2.sql" ] || fail 'loading continued after generated SQL failure' ;;
-    esac
 done
-echo 'PASS: generated SQL failures, warnings, metadata preservation and orphan failures prevent completion'
+echo 'PASS: generated SQL failures, warnings, index/column/FK preservation and orphan failures prevent completion'
 
 for failure in missing-ordinal bad-column unknown-kind repeated-table missing-table fk-ordinal fk-schema fk-column; do
     reset_hook special
@@ -475,4 +497,69 @@ for failure in missing-ordinal bad-column unknown-kind repeated-table missing-ta
     [ ! -e "$HOOK_STATE/generated.1.sql" ] || fail "$failure metadata was rejected only after generated SQL loading"
 done
 echo 'PASS: malformed column and foreign-key metadata is rejected before data loading'
+
+# Real background workers must overlap within the configured bound, drain a
+# failing wave, and never start a later wave after a failure or signal.
+batch_proof() (
+    local outcome=$1 result=0
+    local state="$TEST_DIR/batch-$outcome"
+    mkdir "$state"
+    # shellcheck source=/dev/null
+    source "$ROOT_DIR/docker/lib/native-import-runtime.sh"
+    echo() {
+        builtin echo "$@"
+        if [[ "$*" = *'loading first '* ]]; then printf '%s\n' "$BASHPID" > "$state/batch-pid"; fi
+        case "$outcome:$*" in
+            cancel-first:*'loading first '*|cancel-third:*'loading third '*) kill -TERM "$BASHPID" ;;
+        esac
+    }
+    native_import_load_preserved() {
+        local table=$3 attempt
+        touch "$state/$table.started"
+        case "$table" in
+            first|second)
+                for ((attempt=0; attempt<100; attempt++)); do
+                    [ -f "$state/first.started" ] && [ -f "$state/second.started" ] && break
+                    sleep 0.01
+                done
+                [ -f "$state/first.started" ] && [ -f "$state/second.started" ] || return 98
+                if [ "$table" = first ] && [ "$outcome" = failure ]; then
+                    touch "$state/$table.finished"
+                    return 7
+                fi
+                if [ "$table" = first ] && [[ "$outcome" = cancel-active-* ]]; then
+                    kill -"${outcome##*-}" "$(cat "$state/batch-pid")"
+                fi
+                sleep 0.1
+                ;;
+            third)
+                [ -f "$state/first.finished" ] && [ -f "$state/second.finished" ] || return 99
+                ;;
+        esac
+        touch "$state/$table.finished"
+    }
+    native_import_load_preserved_batch /unused example 2 first mapping second mapping third mapping || result=$?
+    if [ "$outcome" = cancel-first ]; then
+        [ "$result" -eq 143 ] && [ ! -e "$state/first.started" ] || fail 'cancellation started the first worker'
+        return 0
+    fi
+    [ -f "$state/first.finished" ] && [ -f "$state/second.finished" ] || fail 'a protected-table worker was not drained'
+    if [ "$outcome" = failure ]; then
+        [ "$result" -ne 0 ] && [ ! -e "$state/third.started" ] || fail 'a failed batch continued loading'
+    elif [ "$outcome" = cancel-third ]; then
+        [ "$result" -eq 143 ] && [ ! -e "$state/third.started" ] || fail 'cancellation started another wave'
+    elif [[ "$outcome" = cancel-active-* ]]; then
+        local expected_status
+        case "${outcome##*-}" in HUP) expected_status=129 ;; INT) expected_status=130 ;; TERM) expected_status=143 ;; esac
+        [ "$result" -eq "$expected_status" ] && [ ! -e "$state/third.started" ] || fail 'active cancellation was ignored'
+    else
+        [ "$result" -eq 0 ] && [ -f "$state/third.finished" ] || fail 'bounded protected-table loading failed'
+    fi
+)
+batch_proof success > "$TEST_DIR/batch-success.log"
+batch_proof failure > "$TEST_DIR/batch-failure.log"
+batch_proof cancel-first > "$TEST_DIR/batch-cancel-first.log"
+batch_proof cancel-third > "$TEST_DIR/batch-cancel-third.log"
+for signal in HUP INT TERM; do batch_proof "cancel-active-$signal" > "$TEST_DIR/batch-cancel-active-$signal.log"; done
+echo 'PASS: preserved-index workers overlap, respect the bound, drain failures and handle HUP/INT/TERM without another launch'
 echo 'PASS: native bundle integrity, safe extraction, schema mapping, concurrency and completion gates'

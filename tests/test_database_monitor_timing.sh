@@ -22,7 +22,10 @@ case "$*" in
     'compose ps -a -q mariadb')
         if [ "$MONITOR_CASE" = docker-hung ]; then sleep 30; fi
         echo fixture-container ;;
-    'inspect --format '*) echo '0 running' ;;
+    'inspect --format '*)
+        if [ "$MONITOR_CASE" = logs-hung ]; then echo '1 running'; else echo '0 running'; fi ;;
+    'compose logs --no-color --tail 500 mariadb')
+        if [ "$MONITOR_CASE" = logs-hung ]; then sleep 30; fi ;;
     *) echo "Unexpected Docker call: $*" >&2; exit 97 ;;
 esac
 ''')
@@ -100,8 +103,13 @@ database_wait_ready 0 yes
         else:
             assert status != 0 and elapsed < 7, (case, status, elapsed, events)
             assert any('ERROR:' in line for _, line in events), events
-            print(f'PASS: a hung Docker probe is bounded ({elapsed:.2f}s) and reported.')
+            if case == 'logs-hung':
+                assert any('stopped or restarted during initialization' in line for _, line in events), events
+                assert any('last 500 lines' in line for _, line in events), events
+                print(f'PASS: hung failure logs stay bounded ({elapsed:.2f}s) and preserve the failure status.')
+            else:
+                print(f'PASS: a hung Docker probe is bounded ({elapsed:.2f}s) and reported.')
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        list(pool.map(run, ['slow', 'ready', 'docker-hung']))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(run, ['slow', 'ready', 'docker-hung', 'logs-hung']))
 PY

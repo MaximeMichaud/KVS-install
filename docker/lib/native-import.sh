@@ -106,7 +106,7 @@ native_import_metadata() {
         return 1
     }
     value=$(import_kv "$manifest" source_database)
-    [[ "$value" =~ ^[A-Za-z0-9_]{1,64}$ ]] || return 1
+    [[ "$value" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ ]] || return 1
     [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || return 1
     [ "$(import_kv "$manifest" tables_prefix)" = "$prefix" ] || {
         echo "ERROR: native bundle table prefix does not match the site" >&2

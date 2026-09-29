@@ -57,14 +57,14 @@ native_import_load() (
     fi
 )
 
-# Keep the original indexes and constraints on generated-column tables. Native
-# mariadb-import recreates tables and drops their foreign keys; adding those
-# keys again can fail when a referenced base column feeds a stored expression.
-native_import_load_generated() {
+# Preserve indexes required by AUTO_INCREMENT and generated-column constraints.
+# mariadb-import drops every secondary index, including the only valid key for
+# an AUTO_INCREMENT column outside the leading column of the primary key.
+native_import_load_preserved() {
     local root=$1 database=$2 table=$3 mapping=$4 file warnings
     file="$root/data/$database/$table.txt"
     if [[ ! "$file" =~ ^/[A-Za-z0-9_./-]+$ ]] || [ ! -f "$file" ]; then
-        echo 'ERROR: unsupported generated-column data path in native import.' >&2
+        echo 'ERROR: unsupported preserved-index data path in native import.' >&2
         return 1
     fi
     if ! warnings=$(docker_process_sql --batch --skip-column-names --database="$database" -e "
@@ -74,11 +74,11 @@ SET SESSION time_zone='+00:00';
 SET SESSION sql_mode=CONCAT_WS(',', NULLIF(@@SESSION.sql_mode,''), 'NO_AUTO_VALUE_ON_ZERO');
 LOAD DATA INFILE '$file' INTO TABLE \`$table\` CHARACTER SET binary ($mapping);
 SELECT @@warning_count;"); then
-        echo 'ERROR: generated-column data loading failed; the completion marker was not written.' >&2
+        echo "ERROR: data loading failed for $table with its indexes preserved; the completion marker was not written." >&2
         return 1
     fi
     if [ "$warnings" != 0 ]; then
-        echo 'ERROR: generated-column loading reported warnings or could not be verified; the completion marker was not written.' >&2
+        echo "ERROR: loading $table reported warnings or could not be verified; the completion marker was not written." >&2
         return 1
     fi
 }
@@ -93,10 +93,54 @@ SELECT c.TABLE_NAME, c.ORDINAL_POSITION, c.COLUMN_NAME,
 FROM information_schema.COLUMNS c
 WHERE c.TABLE_SCHEMA=DATABASE() AND c.TABLE_NAME IN (
  SELECT s.TABLE_NAME FROM information_schema.COLUMNS s
- WHERE s.TABLE_SCHEMA=DATABASE() AND s.EXTRA REGEXP 'GENERATED|INVISIBLE'
+ WHERE s.TABLE_SCHEMA=DATABASE() AND (
+  s.EXTRA REGEXP 'GENERATED|INVISIBLE'
+  OR (s.EXTRA LIKE '%auto_increment%' AND NOT EXISTS (
+   SELECT 1 FROM information_schema.STATISTICS p
+   WHERE p.TABLE_SCHEMA=s.TABLE_SCHEMA AND p.TABLE_NAME=s.TABLE_NAME
+    AND p.INDEX_NAME='PRIMARY' AND p.SEQ_IN_INDEX=1 AND p.COLUMN_NAME=s.COLUMN_NAME
+  ))
+ )
 )
 ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION;"
 }
+
+native_import_indexes() {
+    docker_process_sql --batch --skip-column-names --database="$1" -e "
+SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
+ COALESCE(COLLATION,''), COALESCE(SUB_PART,0), INDEX_TYPE, HEX(INDEX_COMMENT)
+FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA=DATABASE()
+ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX;"
+}
+
+# Each worker only loads one precreated table with session-local settings.
+# Wait for the entire wave, including after a failure, before returning or
+# starting another wave. Never finalize while a loading session is still active.
+native_import_load_preserved_batch() (
+    local root=$1 database=$2 jobs=$3 table mapping pid status=0
+    local -a workers=()
+    shift 3
+    # Exit from the handler itself so an interrupted launch cannot continue.
+    # wait also drains a child forked just before its PID was recorded.
+    trap 'trap "" HUP INT TERM; wait || true; exit 129' HUP
+    trap 'trap "" HUP INT TERM; wait || true; exit 130' INT
+    trap 'trap "" HUP INT TERM; wait || true; exit 143' TERM
+    while [ "$#" -gt 0 ]; do
+        table=$1 mapping=$2
+        shift 2
+        echo "Native database import: loading $table with its indexes and constraints preserved."
+        native_import_load_preserved "$root" "$database" "$table" "$mapping" &
+        workers+=("$!")
+        if [ "${#workers[@]}" -ge "$jobs" ] || [ "$#" -eq 0 ]; then
+            for pid in "${workers[@]}"; do
+                wait "$pid" || status=1
+            done
+            workers=()
+            [ "$status" -eq 0 ] || return "$status"
+        fi
+    done
+)
 
 native_import_foreign_keys() {
     docker_process_sql --batch --skip-column-names --database="$1" -e "
@@ -168,9 +212,9 @@ native_import_check_foreign_keys() {
 }
 
 native_import_run() {
-    local root=$1 database=$2 tables=$3 jobs=$4 columns before_keys after_keys after_columns
+    local root=$1 database=$2 tables=$3 jobs=$4 columns before_keys after_keys after_columns before_indexes after_indexes
     local table ordinal column kind _details current='' expected=1 count file
-    local -a special=() exclusions=()
+    local -a special=() exclusions=() preserved=()
     local -A mappings=()
 
     if ! mariadb-import --no-defaults --help 2>/dev/null | grep -F -- '--innodb-optimize-keys' >/dev/null; then
@@ -178,8 +222,8 @@ native_import_run() {
         return 1
     fi
     # Create every table first, including both ends of cyclic foreign keys.
-    # The native loader recreates ordinary tables. Generated-column tables keep
-    # their original definitions, indexes and foreign keys throughout loading.
+    # The native loader recreates ordinary tables. Tables requiring preserved
+    # indexes keep their original definitions and foreign keys throughout loading.
     echo 'Native database import: preparing table definitions.'
     if ! (
         set -o pipefail
@@ -196,6 +240,7 @@ native_import_run() {
     fi
     columns=$(native_import_columns "$database") || return 1
     before_keys=$(native_import_foreign_keys "$database") || return 1
+    before_indexes=$(native_import_indexes "$database") || return 1
     native_import_check_foreign_keys "$database" "$before_keys" metadata-only || return 1
     if [ -n "$columns" ]; then
         while IFS=$'\t' read -r table ordinal column kind _details; do
@@ -235,9 +280,9 @@ native_import_run() {
         native_import_load --dir="$root/data" --parallel="$jobs" "${exclusions[@]}" || return 1
     fi
     for table in "${special[@]}"; do
-        echo "Native database import: loading $table with an explicit generated-column mapping."
-        native_import_load_generated "$root" "$database" "$table" "${mappings[$table]}" || return 1
+        preserved+=("$table" "${mappings[$table]}")
     done
+    native_import_load_preserved_batch "$root" "$database" "$jobs" "${preserved[@]}" || return 1
     count=$(docker_process_sql --batch --skip-column-names --database="$database" \
         -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE';") || return 1
     if [ "$count" != "$tables" ]; then
@@ -246,8 +291,9 @@ native_import_run() {
     fi
     after_columns=$(native_import_columns "$database") || return 1
     after_keys=$(native_import_foreign_keys "$database") || return 1
-    if [ "$columns" != "$after_columns" ] || [ "$before_keys" != "$after_keys" ]; then
-        echo 'ERROR: native loading changed column definitions or foreign keys; the completion marker was not written.' >&2
+    after_indexes=$(native_import_indexes "$database") || return 1
+    if [ "$columns" != "$after_columns" ] || [ "$before_keys" != "$after_keys" ] || [ "$before_indexes" != "$after_indexes" ]; then
+        echo 'ERROR: native loading changed column definitions, indexes or foreign keys; the completion marker was not written.' >&2
         return 1
     fi
     native_import_check_foreign_keys "$database" "$after_keys" || return 1

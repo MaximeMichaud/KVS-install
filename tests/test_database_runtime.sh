@@ -33,7 +33,12 @@ docker() {
             ' "$TEST_DIR/compose.yml" ;;
         'compose ps -a -q mariadb') echo test-container ;;
         inspect*) echo "${CONTAINER_STATE:-0 running}" ;;
-        'compose logs --tail 20 mariadb') echo 'fixture startup failure' ;;
+        'compose logs --no-color --tail 500 mariadb')
+            if [ -n "${DATABASE_LOG_FIXTURE:-}" ]; then
+                tail -n 500 "$DATABASE_LOG_FIXTURE"
+            else
+                echo 'fixture startup failure'
+            fi ;;
         *) fail "Unexpected Docker call: $*" ;;
     esac
 }
@@ -114,6 +119,46 @@ grep -q 'TCP connection is unavailable' "$TEST_DIR/progress.log" || fail 'TCP fa
 if grep -q private-value "$TEST_DIR/progress.log"; then fail 'TCP diagnostic reveals raw output'; fi
 if CONTAINER_STATE='1 running' database_wait_ready 60 yes > "$TEST_DIR/restart.log" 2>&1; then fail 'restart was accepted'; fi
 if CONTAINER_STATE='0 exited' database_wait_ready 60 yes > "$TEST_DIR/stopped.log" 2>&1; then fail 'stopped container was accepted'; fi
+# An import failure can precede dozens of fresh startup messages. Keep its
+# error and context, but do not print the client SQL echo or credentials.
+{
+    for ((i=0; i<550; i++)); do printf 'mariadb-1 | old-log-outside-window-%s\n' "$i"; done
+    printf '%s\n' \
+        'mariadb-1 | [Entrypoint]: running /docker-entrypoint-initdb.d/10-kvs-import-native.sh' \
+        'mariadb-1 | --------------' \
+        'mariadb-1 | CREATE TABLE private_sql_sentinel (id INT AUTO_INCREMENT)' \
+        'mariadb-1 | --------------' \
+        'mariadb-1 | ' \
+        'mariadb-1 | ERROR 1075 (42000) at line 18: Incorrect table definition; there can be only one auto column and it must be defined as a key' \
+        'mariadb-1 | [Entrypoint]: GENERATED ROOT PASSWORD: private_password_sentinel'
+    for ((i=0; i<60; i++)); do printf 'mariadb-1 | [Note] restart startup message %s\n' "$i"; done
+} > "$TEST_DIR/initial-failure.log"
+for state in '1 running' '0 exited'; do
+    if DATABASE_LOG_FIXTURE="$TEST_DIR/initial-failure.log" CONTAINER_STATE="$state" \
+        database_wait_ready 60 yes > "$TEST_DIR/initial-cause.log" 2>&1; then
+        fail 'initial import failure was accepted after a restart or stop'
+    fi
+    grep -Fq 'ERROR 1075 (42000) at line 18: Incorrect table definition' "$TEST_DIR/initial-cause.log" || fail 'initial SQL cause was hidden by restart logs'
+    grep -Fq '[Entrypoint]: running /docker-entrypoint-initdb.d/10-kvs-import-native.sh' "$TEST_DIR/initial-cause.log" || fail 'initial import context missing'
+    grep -Fq 'restart startup message 59' "$TEST_DIR/initial-cause.log" || fail 'latest restart context missing'
+    if grep -Eq 'private_sql_sentinel|private_password_sentinel|old-log-outside-window-0$' "$TEST_DIR/initial-cause.log"; then
+        fail 'failure logs exposed SQL, credentials, or lines outside their bounded window'
+    fi
+done
+# A large SQL statement may start before the 500-line window. Its closing
+# separator must hide the partial SQL without swallowing the error itself.
+{
+    printf 'mariadb-1 | --------------\n'
+    for ((i=0; i<510; i++)); do printf 'mariadb-1 | private_sql_sentinel_%s\n' "$i"; done
+    printf '%s\n' 'mariadb-1 | --------------' 'mariadb-1 | ERROR 1075 (42000): Incorrect table definition'
+} > "$TEST_DIR/truncated-sql.log"
+if DATABASE_LOG_FIXTURE="$TEST_DIR/truncated-sql.log" CONTAINER_STATE='1 running' \
+    database_wait_ready 60 yes > "$TEST_DIR/truncated-cause.log" 2>&1; then
+    fail 'restart with truncated SQL was accepted'
+fi
+grep -Fq 'ERROR 1075 (42000): Incorrect table definition' "$TEST_DIR/truncated-cause.log" || fail 'SQL truncation hid the error'
+if grep -q private_sql_sentinel "$TEST_DIR/truncated-cause.log"; then fail 'truncated SQL was exposed'; fi
+echo 'PASS: bounded MariaDB failure logs retain the initial error across restarts without SQL or password lines'
 if database_wait_ready invalid >/dev/null 2>&1; then fail 'invalid timeout accepted'; fi
 if database_wait_ready -1 >/dev/null 2>&1; then fail 'negative timeout accepted'; fi
 # A long replay must survive its old one-hour deadline, while an explicit
