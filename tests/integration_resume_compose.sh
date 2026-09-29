@@ -53,7 +53,9 @@ assert {name for _, name in commands} == {'phpmyadmin-init', 'kvs-init'}
 assert len(commands) == 2, 'ambiguous init run commands'
 with pathlib.Path(sys.argv[2]).open('w') as output:
     output.write(flags[0] + '\n')
-    for name in ('setup_resume_docker_query', 'setup_resume_require_init_image'):
+    for name in ('setup_resume_docker_query', 'setup_resume_require_init_image',
+                 'setup_resume_database_snapshot', 'setup_resume_assert_database',
+                 'setup_start_runtime_services', 'setup_start_cron'):
         helper = re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)
         assert helper, 'missing init image guard helper: ' + name
         output.write(helper[0] + '\n')
@@ -73,7 +75,7 @@ services:
     network_mode: none
     mem_limit: 32m
     command: [sh, -c, "echo started > /output/database-started; sleep 60"]
-    volumes: ["./output:/output"]
+    volumes: ["./output:/output", "./output:/var/lib/mysql"]
   phpmyadmin-init:
     image: ${COMPOSE_TEST_IMAGE}
     pull_policy: always
@@ -92,6 +94,20 @@ services:
     volumes: ["./output:/output"]
     depends_on: [mariadb]
     profiles: [setup]
+  php-fpm: &runtime
+    image: ${COMPOSE_TEST_IMAGE}
+    network_mode: none
+    mem_limit: 32m
+    command: [sleep, "120"]
+    depends_on: [mariadb]
+  nginx:
+    <<: *runtime
+    depends_on: [php-fpm]
+  cron:
+    <<: *runtime
+    command: [sh, -c, "test -f /output/import-complete || exit 98; echo started >> /output/cron-started; exec sleep 120"]
+    volumes: ["./output:/output"]
+    depends_on: [php-fpm, mariadb]
 YAML
 # Even a pull regression can only contact loopback, never an external registry.
 docker image tag "$source_image" "$COMPOSE_TEST_IMAGE"
@@ -132,3 +148,35 @@ if docker image inspect "$build_image" >/dev/null 2>&1; then
     fail 'the failed guard recreated the missing initialization image'
 fi
 echo 'PASS: the actual preflight guard refuses a missing KVS image without building or running another service.'
+
+# Verify both normal and resume startup against real container identities.
+# The tiny database stand-in records its first start on the bind mount.
+log_command() { "$@"; }
+run_step() { shift; "$@"; }
+docker compose up -d --no-deps --pull never mariadb > "$fixture/database.log" 2>&1
+IMPORT_RESUME_CONTAINER=$(docker compose ps -a -q mariadb)
+# shellcheck disable=SC2034  # Read by the extracted setup helpers.
+IMPORT_RESUME_STARTED_AT=$(docker inspect --format '{{.State.StartedAt}}' "$IMPORT_RESUME_CONTAINER")
+# shellcheck disable=SC2034  # Read by the extracted setup helpers.
+IMPORT_RESUME_MOUNT="bind::$fixture/output"
+# shellcheck disable=SC2034  # Read by the extracted setup helpers.
+IMPORT_MODE=true
+for RESUME_IMPORT in false true; do
+    rm -f "$fixture/output/import-complete" "$fixture/output/cron-started"
+    setup_start_runtime_services > "$fixture/runtime-$RESUME_IMPORT.log" 2>&1
+    setup_resume_assert_database > "$fixture/identity-$RESUME_IMPORT.log" 2>&1
+    cron_id=$(docker compose ps -a -q cron)
+    if [ -n "$cron_id" ]; then
+        [ "$(docker inspect --format '{{.State.Running}}' "$cron_id")" = false ] || fail 'cron ran before verification'
+    fi
+    [ ! -e "$fixture/output/cron-started" ] || fail 'cron started during verification'
+    echo verified > "$fixture/output/import-complete"
+    setup_start_cron > "$fixture/cron-$RESUME_IMPORT.log" 2>&1
+    for ((attempt=0; attempt<30; attempt++)); do
+        [ ! -s "$fixture/output/cron-started" ] || break
+        sleep 0.1
+    done
+    [ "$(cat "$fixture/output/cron-started")" = started ] || fail 'cron did not start after verification'
+    setup_resume_assert_database > "$fixture/after-cron-$RESUME_IMPORT.log" 2>&1
+done
+echo 'PASS: normal and resume startup preserve the running database and defer cron until verification, including an already-running cron container.'

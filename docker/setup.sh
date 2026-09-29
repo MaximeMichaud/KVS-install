@@ -204,7 +204,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
-PROGRESS_TOTAL=11
+PROGRESS_TOTAL=12
 PROGRESS_CURRENT=0
 
 log_command() {
@@ -617,19 +617,42 @@ setup_resume_assert_database() {
     fi
 }
 
-setup_resume_runtime_services() {
+setup_start_runtime_services() {
     local service configured
     local -a services=()
 
+    SETUP_CRON_PENDING=false
+    SETUP_RUNTIME_FLAGS=(-d --no-deps)
+    if [ "$RESUME_IMPORT" = true ]; then
+        SETUP_RUNTIME_FLAGS+=(--no-recreate)
+    fi
+    SETUP_RUNTIME_FLAGS+=(--no-build --pull missing)
     configured=$(setup_resume_docker_query "Reading the saved runtime service configuration..." compose config --services) || return 1
     while IFS= read -r service; do
-        case "$service" in mariadb|phpmyadmin-init|kvs-init|'') continue ;; esac
+        case "$service" in
+            mariadb|phpmyadmin-init|kvs-init|'') continue ;;
+            cron) SETUP_CRON_PENDING=true; continue ;;
+        esac
         [[ "$service" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
         services+=("$service")
     done <<< "$configured"
     [ "${#services[@]}" -gt 0 ] || return 1
-    setup_resume_assert_database || return 1
-    log_command docker compose up -d --no-deps --no-recreate --no-build --pull missing "${services[@]}"
+    if [ "$RESUME_IMPORT" = true ]; then
+        setup_resume_assert_database || return 1
+    fi
+    # A previous attempt may already have started cron. Keep background jobs
+    # out of the final row counts, including during recovery of older setups.
+    if [ "$IMPORT_MODE" = true ] && [ "$SETUP_CRON_PENDING" = true ]; then
+        echo "  Keeping cron stopped until import verification completes..."
+        log_command docker compose stop cron || return 1
+    fi
+    # MariaDB was started and verified earlier. Never recreate it here.
+    log_command docker compose up "${SETUP_RUNTIME_FLAGS[@]}" "${services[@]}"
+}
+
+setup_start_cron() {
+    [ "$SETUP_CRON_PENDING" = true ] || return 0
+    run_step "Starting cron" docker compose up "${SETUP_RUNTIME_FLAGS[@]}" cron
 }
 
 # KVS initialization was built before the SQL import started. Compose run
@@ -2186,7 +2209,7 @@ install_gum() {
 #################################################################
 # Progress Tracking
 #################################################################
-PROGRESS_TOTAL=11
+PROGRESS_TOTAL=12
 PROGRESS_CURRENT=0
 
 
@@ -3292,9 +3315,9 @@ configure_mode() {
     configure_direct_tls_profile || return $?
 
     if [ "$MODE" = "multi" ]; then
-        PROGRESS_TOTAL=12
+        PROGRESS_TOTAL=13
     else
-        PROGRESS_TOTAL=11
+        PROGRESS_TOTAL=12
     fi
 }
 
@@ -4196,6 +4219,10 @@ database_verify_running_resources || exit 1
 import_verify_database
 else
     setup_resume_import
+    PROGRESS_TOTAL=7
+    if [ "$MODE" = multi ]; then
+        PROGRESS_TOTAL=8
+    fi
 fi
 
 # Older installations may still contain the archive's default admin account.
@@ -4287,6 +4314,17 @@ if [ "${KEEP_EXISTING_DB:-false}" = "true" ]; then
     echo -e "${YELLOW}Note: Keeping existing database - KVS settings will be updated but data preserved${NC}"
 fi
 
+import_count_rows() (
+    local heartbeat_pid=''
+    trap 'if [ -n "$heartbeat_pid" ]; then kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true; fi' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    database_progress_heartbeat "$SECONDS" "import row counts are still running" &
+    heartbeat_pid=$!
+    run_root_mariadb -u root -N "$DOMAIN" -e "$1"
+)
+
 # Record the import in .env, drop the staged dump and write the row counts
 # of every table so they can be compared with the old server.
 import_finish() {
@@ -4294,6 +4332,7 @@ import_finish() {
 
     [ "$IMPORT_MODE" = true ] || return 0
     report="$LOG_DIR/import-rows.txt"
+    echo "  MariaDB: listing imported tables for row-count verification..."
     if ! table_list=$(run_root_mariadb -u root -N -e \
         "SELECT table_name FROM information_schema.tables WHERE table_schema='$DOMAIN' ORDER BY table_name;"); then
         echo -e "${RED}ERROR: could not list the imported tables${NC}"
@@ -4305,7 +4344,8 @@ import_finish() {
         [ -n "$table_name" ] || continue
         query="${query:+$query UNION ALL }SELECT '${table_name}', COUNT(*) FROM \`${table_name}\`"
     done <<< "$table_list"
-    if ! rows=$(run_root_mariadb -u root -N "$DOMAIN" -e "${query};"); then
+    echo "  MariaDB: Counting imported rows in every table. Large databases can take several minutes; status is reported every 5 seconds."
+    if ! rows=$(import_count_rows "${query};"); then
         echo -e "${RED}ERROR: could not count the imported rows; the completion marker and staged dump are preserved.${NC}"
         exit 1
     fi
@@ -4318,12 +4358,14 @@ import_finish() {
         exit 1
     }
     completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    echo "  Saving the import report and completion receipt..."
     set_env_value KVS_IMPORT_COMPLETED "$completed_at" || exit 1
     if [ "$(grep -Fxc "KVS_IMPORT_COMPLETED=$completed_at" .env)" -ne 1 ]; then
         echo "ERROR: the import completion receipt was not persisted; the marker and staged dump are preserved." >&2
         exit 1
     fi
     run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';" || exit 1
+    echo "  Removing temporary import files..."
     [ -n "$IMPORT_STAGED_DUMP" ] && rm -f "$IMPORT_STAGED_DUMP"
     [ -n "$IMPORT_NATIVE_STAGE" ] && rm -rf -- "$IMPORT_NATIVE_STAGE"
     # The raw dump served its purpose; the old server keeps the original.
@@ -4587,16 +4629,14 @@ else
     configure_direct_acme_certificate || exit $?
 fi
 
-# Step 6: Pull images and start all services
-progress_bar "Starting all services"
+# Step 6: Start runtime services without restarting MariaDB or starting cron.
+progress_bar "Starting runtime services"
 # Don't use gum spin for docker compose up - it can timeout on slow operations
-echo -n "  Starting all services..."
-if [ "$RESUME_IMPORT" = true ]; then
-    setup_resume_runtime_services || exit 1
-else
+echo "  Starting runtime services..."
+if [ "$RESUME_IMPORT" != true ]; then
     log_command docker compose pull --quiet || true
 fi
-if [ "$RESUME_IMPORT" = true ] || log_command docker compose up -d --force-recreate; then
+if setup_start_runtime_services; then
     echo -e " ${GREEN}✓${NC}"
 else
     echo -e " ${RED}✗${NC}"
@@ -4606,12 +4646,14 @@ else
 fi
 
 progress_bar "Reloading Nginx"
-run_step "Reloading Nginx" docker compose exec nginx nginx -s reload
+run_step "Reloading Nginx" docker compose exec -T nginx nginx -s reload </dev/null
 
 if [ "$RESUME_IMPORT" = true ]; then
     setup_resume_assert_database
 fi
+progress_bar "Finalizing setup"
 import_finish
+setup_start_cron
 
 # Done
 progress_success "KVS Docker Setup Complete!"

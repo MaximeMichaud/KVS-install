@@ -14,20 +14,22 @@ from pathlib import Path
 source = Path(sys.argv[1]).read_text()
 names = ('validate_domain', 'parse_publish_endpoint',
          'resolve_public_port_configuration', 'setup_resume_import',
-         'setup_resume_assert_database', 'setup_resume_runtime_services',
+         'setup_resume_assert_database', 'setup_start_runtime_services', 'setup_start_cron', 'import_count_rows',
          'setup_resume_docker_query', 'setup_resume_database_snapshot', 'import_finish')
 with open(sys.argv[2], 'w') as target:
     for name in names:
-        match = re.search(r'^' + name + r'\(\) \{\n.*?^\}\n', source, re.M | re.S)
+        match = re.search(r'^' + name + r'\(\) [\{(]\n.*?^[\})]\n', source, re.M | re.S)
         assert match, name
         target.write(match.group() + '\n')
 assert source.index('if [ "$RESUME_IMPORT" != true ]; then') < source.index('export VOLUME_CHOICE=1')
-assert source.index('else\n    setup_resume_import\nfi') > source.index('import_verify_database\n')
+assert source.index('else\n    setup_resume_import\n') > source.index('import_verify_database\n')
 assert source.rindex('\nimport_finish\n') > source.index('run_step "Reloading Nginx"')
 assert 'DELETE FROM' not in re.search(r'^import_verify_database\(\) \{\n.*?^\}', source, re.M | re.S).group()
 PY
 # shellcheck source=/dev/null
 source "$fixture/setup-functions.sh"
+source "$root/docker/lib/database.sh"
+RESUME_IMPORT=true
 cat > "$fixture/lib/import-resume.sh" <<'SH'
 import_resume_discover() {
     printf 'discover\n' >> "$CALLS"
@@ -88,7 +90,7 @@ docker() {
         'inspect --format {{index .Config.Labels '*)
             printf 'kvs-resume\trunning 0 false\tvolume:kvs-resume_mariadb-data:/fixture/volume\t%s\n' \
                 "${STARTED_AT:-2026-09-26T21:10:43Z}" ;;
-        'compose up '*) printf 'runtime:%s\n' "$*" >> "$CALLS" ;;
+        'compose stop cron'|'compose up '*) printf 'runtime:%s\n' "$*" >> "$CALLS" ;;
         *) printf 'Unexpected Docker mutation: %s\n' "$*" >&2; return 1 ;;
     esac
 }
@@ -114,8 +116,8 @@ expected=$'discover\nwait:0\nmarker\ntoken\nverify'
 [ "$(grep -c '^docker compose ps ' "$METADATA_CALLS")" = 3 ]
 [ "$(grep -c '^docker inspect ' "$METADATA_CALLS")" = 3 ]
 grep -Fxq 'Inspecting the saved import configuration and existing MariaDB container...' "$fixture/startup.log"
-setup_resume_runtime_services
-grep -Fxq 'runtime:compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm nginx cron memcached custom-worker' "$CALLS"
+setup_start_runtime_services
+grep -Fxq 'runtime:compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm nginx memcached custom-worker' "$CALLS"
 if STARTED_AT=changed setup_resume_assert_database 2>/dev/null; then
     echo 'FAIL: a manual MariaDB restart must invalidate recovery'; exit 1
 fi

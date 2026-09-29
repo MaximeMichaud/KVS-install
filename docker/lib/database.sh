@@ -248,7 +248,7 @@ database_failure_logs() {
 # A separate timer keeps status visible while foreground probes are blocked.
 # It reports pending checks, never fabricated SQL progress or a stale sample.
 database_progress_heartbeat() {
-    local started="$1" timer='' stopping=no
+    local started="$1" activity="${2:-readiness/activity checks are still in progress}" timer='' stopping=no
     trap 'if [ -n "$timer" ]; then kill "$timer" 2>/dev/null || true; wait "$timer" 2>/dev/null || true; fi' EXIT
     # Finish assigning the timer PID before exiting if a signal arrives
     # between starting sleep and storing $!. Otherwise sleep could be orphaned.
@@ -261,7 +261,7 @@ database_progress_heartbeat() {
         wait "$timer" || exit 0
         timer=''
         [ "$stopping" != yes ] || exit 0
-        printf '  MariaDB: %ss elapsed; readiness/activity checks are still in progress.\n' "$((SECONDS - started))" >&2
+        printf '  MariaDB: %ss elapsed; %s.\n' "$((SECONDS - started))" "$activity" >&2
     done
 }
 

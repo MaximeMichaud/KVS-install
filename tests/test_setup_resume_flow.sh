@@ -30,9 +30,15 @@ case "$*" in
         ;;
     'compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm'|\
         'compose up -d --no-deps --no-recreate --no-build --pull missing nginx'|\
-        'compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm nginx cron memcached')
+        'compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm nginx memcached')
         printf 'runtime:%s\n' "$*" >> "$CALLS" ;;
-    'compose exec nginx nginx -s reload') echo reload-nginx >> "$CALLS" ;;
+    'compose stop cron') echo stop-cron >> "$CALLS" ;;
+    'compose up -d --no-deps --no-recreate --no-build --pull missing cron')
+        [ ! -e "$MARKER_FILE" ] || exit 98
+        [ ! -e mariadb/init/10-kvs-import.sql ] || exit 98
+        grep -q '^KVS_IMPORT_COMPLETED=' .env || exit 98
+        echo start-cron >> "$CALLS" ;;
+    'compose exec -T nginx nginx -s reload') echo reload-nginx >> "$CALLS" ;;
     'compose exec -T mariadb sh -c '*)
         query=${!#}
         case "$query" in
@@ -45,6 +51,8 @@ case "$*" in
             'SELECT table_name FROM information_schema.tables '*) printf 'ktvs_options\nktvs_videos\n' ;;
             "SELECT 'ktvs_options', COUNT(*) FROM "*)
                 echo count-rows >> "$CALLS"
+                if [ "${SLOW_ROW_COUNT:-no}" = yes ]; then /usr/bin/sleep 6; fi
+                [ "${FAIL_ROW_COUNT:-no}" != yes ] || exit 9
                 printf 'ktvs_options\t2\nktvs_videos\t17\n' ;;
             "DELETE FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';")
                 grep -q '^KVS_IMPORT_COMPLETED=' .env || exit 9
@@ -76,7 +84,7 @@ printf 'unexpected:%s\n' "$0" >> "$CALLS"
 exit 97
 SH
 chmod +x "$fixture/bin/"*
-for tool in curl wget ssh scp rsync sudo apt apt-get pacman systemctl openssl sleep; do
+for tool in curl wget ssh scp rsync sudo apt apt-get pacman systemctl openssl; do
     ln -s blocked "$fixture/bin/$tool"
 done
 
@@ -94,7 +102,8 @@ text = text.replace('/var/www/', sys.argv[3] + '/site/')
 Path(sys.argv[2]).write_text(text)
 PY
     cp "$root/docker/lib/import.sh" "$directory/lib/import.sh"
-    cat > "$directory/lib/database.sh" <<'SH'
+    cp "$root/docker/lib/database.sh" "$directory/lib/database.sh"
+    cat >> "$directory/lib/database.sh" <<'SH'
 database_wait_ready() {
     [ "$1" = 0 ] || return 97
     echo wait >> "$CALLS"
@@ -166,7 +175,7 @@ if ! run_case "$fixture/success" no; then
 fi
 grep -Fxq phpmyadmin-init "$fixture/success/calls"
 grep -Fxq kvs-init "$fixture/success/calls"
-grep -Fxq 'runtime:compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm nginx cron memcached' "$fixture/success/calls"
+grep -Fxq 'runtime:compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm nginx memcached' "$fixture/success/calls"
 grep -Fxq reload-nginx "$fixture/success/calls"
 grep -Fxq delete-marker "$fixture/success/calls"
 if grep -q '^unexpected:' "$fixture/success/calls"; then
@@ -182,11 +191,23 @@ from pathlib import Path
 import sys
 calls = Path(sys.argv[1]).read_text().splitlines()
 expected = ['discover', 'wait', 'marker', 'token', 'verify', 'check-init-image', 'phpmyadmin-init',
-            'kvs-init', 'reload-nginx', 'count-rows', 'delete-marker']
+            'kvs-init', 'stop-cron', 'reload-nginx', 'count-rows', 'delete-marker', 'start-cron']
 positions = [calls.index(item) for item in expected]
 assert positions == sorted(positions), calls
 PY
 echo 'PASS: full --resume-import runs both initializers, preserves MariaDB, starts runtime services and records completion before cleanup.'
+
+make_case "$fixture/slow-count"
+if ! SLOW_ROW_COUNT=yes run_case "$fixture/slow-count" no; then
+    cat "$fixture/slow-count/output.log" >&2
+    exit 1
+fi
+grep -q 'Counting imported rows in every table' "$fixture/slow-count/output.log"
+grep -Eq 'MariaDB: [5-9][0-9]*s elapsed; import row counts are still running' "$fixture/slow-count/output.log"
+[ "$(grep -vc '^#' "$fixture/slow-count/logs/import-rows.txt")" = 2 ]
+grep -Fxq $'ktvs_videos\t17' "$fixture/slow-count/logs/import-rows.txt"
+grep -Fxq start-cron "$fixture/slow-count/calls"
+echo 'PASS: slow row counts show periodic status without contaminating the saved row-count report.'
 
 make_case "$fixture/failure"
 if run_case "$fixture/failure" yes; then
@@ -204,6 +225,23 @@ if grep -q '^KVS_IMPORT_COMPLETED=' "$fixture/failure/.env" ||
     exit 1
 fi
 echo 'PASS: full --resume-import preserves the staged dump and database marker when KVS initialization fails.'
+
+make_case "$fixture/count-failure"
+if FAIL_ROW_COUNT=yes run_case "$fixture/count-failure" no; then
+    echo 'FAIL: row-count failure was ignored' >&2
+    exit 1
+fi
+grep -Fxq stop-cron "$fixture/count-failure/calls"
+grep -Fxq count-rows "$fixture/count-failure/calls"
+grep -q 'could not count the imported rows' "$fixture/count-failure/output.log"
+[ -s "$fixture/count-failure/mariadb/init/10-kvs-import.sql" ]
+[ "$(cat "$fixture/count-failure/database-marker")" = 20260926T211043Z-1234abcd ]
+if grep -q '^KVS_IMPORT_COMPLETED=' "$fixture/count-failure/.env" ||
+    grep -Eq '^(delete-marker|start-cron|unexpected:)' "$fixture/count-failure/calls"; then
+    echo 'FAIL: failed row counts started cron or discarded recovery state' >&2
+    exit 1
+fi
+echo 'PASS: failed row counts preserve recovery state and keep cron stopped.'
 
 make_case "$fixture/missing-init-image"
 if run_case "$fixture/missing-init-image" no yes; then
