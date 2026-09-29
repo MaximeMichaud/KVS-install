@@ -1419,6 +1419,7 @@ kvs_directory_refuse() {
 
 kvs_select_database_format() {
     local help metadata kind value extra directory_hex="unread" directory="" unsupported="" table_count=""
+    local unsupported_details=""
     local mysql_uid mysql_gid owner_uid escaped_path sentinel socket_hex="" socket_path=""
 
     DB_DUMP_FORMAT=sql
@@ -1462,13 +1463,26 @@ kvs_select_database_format() {
         return $?
     fi
     if ! metadata=$(kvs_directory_query "
-SELECT 'unsupported',
- (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND (table_type<>'BASE TABLE' OR engine NOT IN ('InnoDB','MyISAM','Aria') OR create_options LIKE '%SYSTEM VERSIONING%')) +
- (SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE()) +
- (SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema=DATABASE()) +
- (SELECT COUNT(*) FROM information_schema.events WHERE event_schema=DATABASE()) +
- (SELECT COUNT(*) FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND constraint_type='FOREIGN KEY') +
- (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND extra REGEXP 'GENERATED|INVISIBLE');
+SELECT 'unsupported', SUM(total),
+ COALESCE(GROUP_CONCAT(IF(total>0, CONCAT(kind, '=', total), NULL) ORDER BY kind SEPARATOR ', '), '')
+FROM (
+ SELECT 'nonstandard_tables' AS kind, COUNT(*) AS total FROM information_schema.tables WHERE table_schema=DATABASE() AND (table_type<>'BASE TABLE' OR engine NOT IN ('InnoDB','MyISAM','Aria') OR create_options LIKE '%SYSTEM VERSIONING%')
+ UNION ALL SELECT 'triggers', COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE()
+ UNION ALL SELECT 'routines', COUNT(*) FROM information_schema.routines WHERE routine_schema=DATABASE()
+ UNION ALL SELECT 'events', COUNT(*) FROM information_schema.events WHERE event_schema=DATABASE()
+ UNION ALL SELECT 'external_foreign_keys', COUNT(DISTINCT table_name, constraint_name) FROM information_schema.key_column_usage WHERE table_schema=DATABASE() AND referenced_table_schema<>DATABASE()
+ UNION ALL SELECT 'invisible_columns', COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND extra LIKE '%INVISIBLE%'
+ UNION ALL SELECT 'unsupported_identifiers',
+  (SELECT COUNT(*) FROM information_schema.columns c
+   WHERE c.table_schema=DATABASE() AND BINARY c.column_name NOT REGEXP '^[A-Za-z0-9_]{1,64}$'
+   AND EXISTS (SELECT 1 FROM information_schema.columns g
+    WHERE g.table_schema=c.table_schema AND g.table_name=c.table_name AND g.extra LIKE '%GENERATED%')) +
+  (SELECT COUNT(DISTINCT k.table_name, k.constraint_name) FROM information_schema.key_column_usage k
+   WHERE k.table_schema=DATABASE() AND k.referenced_table_name IS NOT NULL
+   AND (BINARY k.constraint_name NOT REGEXP '^[A-Za-z0-9_]{1,64}$'
+    OR BINARY k.column_name NOT REGEXP '^[A-Za-z0-9_]{1,64}$'
+    OR BINARY k.referenced_column_name NOT REGEXP '^[A-Za-z0-9_]{1,64}$'))
+) AS blockers;
 SELECT 'count', COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();
 SELECT 'table', table_name FROM information_schema.tables WHERE table_schema=DATABASE() ORDER BY table_name;
 SELECT 'directory', COALESCE(HEX(@@secure_file_priv),'');
@@ -1478,7 +1492,7 @@ SELECT 'socket', HEX(@@socket);" 2>/dev/null); then
     fi
     while IFS=$'\t' read -r kind value extra; do
         case $kind in
-            unsupported) unsupported=$value ;;
+            unsupported) unsupported=$value; unsupported_details=$extra ;;
             count) table_count=$value ;;
             table)
                 if [[ ! "$value" =~ ^[A-Za-z0-9_]+$ || -n "$extra" ]]; then
@@ -1491,8 +1505,12 @@ SELECT 'socket', HEX(@@socket);" 2>/dev/null); then
             socket) socket_hex=$value ;;
         esac
     done <<< "$metadata"
+    if [[ ! "$unsupported" =~ ^[0-9]+$ ]]; then
+        kvs_directory_refuse "the source schema compatibility counts could not be verified"
+        return $?
+    fi
     if [ "$unsupported" != 0 ]; then
-        kvs_directory_refuse "views, triggers, routines, events, foreign keys, generated columns or special table engines require SQL format"
+        kvs_directory_refuse "SQL format required by source schema: ${unsupported_details:-$unsupported unsupported objects}"
         return $?
     fi
     if [[ ! "$table_count" =~ ^[1-9][0-9]*$ ]] || [ "$table_count" -ne "${#DB_DIRECTORY_TABLES[@]}" ]; then
@@ -1615,7 +1633,9 @@ kvs_prepare_directory_dump() {
         fi
     done
     {
-        printf 'format=1\ncomplete=yes\nsource_database=%s\ntables_prefix=%s\nkvs_version=%s\ntables=%s\n' \
+        # Version 2 requires generated-column mappings and internal foreign-key
+        # restoration support; older importers must refuse this payload.
+        printf 'format=2\ncomplete=yes\nsource_database=%s\ntables_prefix=%s\nkvs_version=%s\ntables=%s\n' \
             "$DB_NAME" "$TABLES_PREFIX" "$KVS_VERSION" "${#DB_DIRECTORY_TABLES[@]}"
     } > "$NATIVE_STAGING_DIR/bundle/kvs-native-export.manifest" || return 1
     (

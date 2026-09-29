@@ -100,7 +100,7 @@ native_import_metadata() {
             return 1
         fi
     done
-    [ "$(import_kv "$manifest" format)" = 1 ] &&
+    [[ "$(import_kv "$manifest" format)" =~ ^[12]$ ]] &&
         [ "$(import_kv "$manifest" complete)" = yes ] || {
         echo "ERROR: native bundle is incomplete or uses an unsupported format" >&2
         return 1
@@ -172,14 +172,14 @@ native_import_verify_hashes() {
     }
 }
 
-# The directory format currently supports plain tables only. Refuse schema
+# Generated columns and unqualified foreign keys are supported. Refuse schema
 # constructs which cannot be safely moved to a different database name.
 native_import_validate_schema() {
-    local directory="$1" file table
+    local directory="$1" file table references reference
     for file in "$directory"/data/*.sql; do
         table=${file##*/}
         table=${table%.sql}
-        awk -v table="$table" '
+        if ! references=$(awk -v table="$table" '
             # Remove string literals and ordinary comments before looking for
             # SQL structure. Keep quoted identifiers and executable comments.
             function structure(line,    i, c, next_c, result) {
@@ -226,9 +226,26 @@ native_import_validate_schema() {
                 code = structure($0)
                 upper = toupper(code)
                 gsub(/`([^`]|``)*`/, "`identifier`", upper)
-                if (upper ~ /(^|[^A-Z_])(VIEW|TRIGGER|PROCEDURE|FUNCTION|EVENT|REFERENCES|USE)([[:space:]]|$)/ ||
+                if (upper ~ /(^|[^A-Z_])(VIEW|TRIGGER|PROCEDURE|FUNCTION|EVENT|USE)([[:space:]]|$)/ ||
                     code ~ /`[^`]+`[[:space:]]*\.[[:space:]]*`/ ||
                     upper ~ /CREATE[[:space:]]+DATABASE/) bad = 1
+                if (upper ~ /(^|[^A-Z_])REFERENCES[[:space:]]/) {
+                    remaining = upper; expected_refs = 0; parsed_refs = 0
+                    while (match(remaining, /(^|[^A-Z_])REFERENCES[[:space:]]/)) {
+                        expected_refs++
+                        remaining = substr(remaining, RSTART + RLENGTH)
+                    }
+                    remaining = code
+                    while (match(remaining, /(^|[^A-Za-z_])[Rr][Ee][Ff][Ee][Rr][Ee][Nn][Cc][Ee][Ss][[:space:]]+`[A-Za-z0-9_]+`[[:space:]]*\(/)) {
+                        reference = substr(remaining, RSTART, RLENGTH)
+                        remaining = substr(remaining, RSTART + RLENGTH)
+                        parsed_refs++
+                        sub(/^[^`]*`/, "", reference)
+                        sub(/`.*/, "", reference)
+                        print reference
+                    }
+                    if (parsed_refs != expected_refs) bad = 1
+                }
                 if (upper ~ /^[[:space:]]*CREATE[[:space:]]+TABLE[[:space:]]/) {
                     definitions++
                     name = code
@@ -237,10 +254,17 @@ native_import_validate_schema() {
                 }
             }
             END { if (bad || definitions != 1 || quote != "" || comment || identifier) exit 1 }
-        ' "$file" || {
-            echo "ERROR: native import requires unqualified plain table definitions ($table); use SQL format for complex schemas" >&2
+        ' "$file"); then
+            echo "ERROR: native import requires unqualified table definitions and internal foreign keys ($table); use SQL format for unsupported schemas" >&2
             return 1
-        }
+        fi
+        while IFS= read -r reference; do
+            [ -n "$reference" ] || continue
+            if [ ! -f "$directory/data/$reference.sql" ] || [ ! -f "$directory/data/$reference.txt" ]; then
+                echo "ERROR: native foreign key in $table references a table missing from the bundle: $reference" >&2
+                return 1
+            fi
+        done <<< "$references"
     done
 }
 
@@ -250,7 +274,7 @@ native_import_validate_schema() {
 native_import_prepare() (
     local archive="$1" prefix="$2" version="$3" old_path="$4" new_path="$5"
     local stage="$6" token="$7" database="$8" requested="${9:-auto}"
-    local parent work jobs tables total sql escaped_database
+    local parent work jobs tables total sql runtime
     [[ "$database" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || { echo "ERROR: invalid destination database name" >&2; return 1; }
     [ "$database" != . ] && [ "$database" != .. ] || { echo "ERROR: invalid destination database name" >&2; return 1; }
     jobs=$(native_import_jobs "$requested") || return 1
@@ -275,7 +299,8 @@ native_import_prepare() (
         echo "ERROR: native bundle has an incorrect table count or no options table" >&2
         return 1
     fi
-    escaped_database=$(import_sql_escape "$database")
+    runtime="$(dirname -- "${BASH_SOURCE[0]}")/native-import-runtime.sh"
+    cp -- "$runtime" "$work/payload/runtime.sh" || return 1
     sql="$work/payload/finalize.sql"
     {
         echo 'SET autocommit=1;'
@@ -293,37 +318,11 @@ native_import_prepare() (
         echo '# Sourced by the official MariaDB entrypoint during initialization.'
         printf 'native_import_root=/docker-entrypoint-initdb.d/%q\n' "$(basename -- "$stage")"
         printf 'native_import_database=%q\nnative_import_tables=%q\nnative_import_jobs=%q\n' "$database" "$tables" "$jobs"
-        printf 'native_import_count_sql=%q\n' "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$escaped_database' AND TABLE_TYPE='BASE TABLE';"
         cat <<'HOOK'
-echo "Native database import: loading $native_import_tables tables with $native_import_jobs workers."
-if ! mariadb-import --no-defaults --help 2>/dev/null | grep -F -- '--innodb-optimize-keys' >/dev/null; then
-    echo 'ERROR: native imports require mariadb-import 11.8 or newer.' >&2
-    return 1
-fi
-native_import_log=$(mktemp /tmp/kvs-native-import.XXXXXX) || return 1
-if ! (set -o pipefail; MYSQL_PWD="${MARIADB_ROOT_PASSWORD:-}" mariadb-import --no-defaults \
-    --protocol=socket --socket="${SOCKET:-/run/mysqld/mysqld.sock}" --user=root \
-    --dir="$native_import_root/data" --parallel="$native_import_jobs" \
-    --innodb-optimize-keys --verbose 2>&1 | tee "$native_import_log"); then
-    rm -f "$native_import_log"
-    echo 'ERROR: native database import failed; the completion marker was not written.' >&2
-    return 1
-fi
-if grep -Eq '(Warnings|Skipped):[[:space:]]*[1-9][0-9]*' "$native_import_log"; then
-    rm -f "$native_import_log"
-    echo 'ERROR: native database import reported warnings or skipped rows; the completion marker was not written.' >&2
-    return 1
-fi
-rm -f "$native_import_log"
-echo 'Native database import: validating tables and applying site settings.'
-native_import_count=$(docker_process_sql --batch --skip-column-names --database="$native_import_database" -e "$native_import_count_sql") || return 1
-if [ "$native_import_count" != "$native_import_tables" ]; then
-    echo 'ERROR: restored table count does not match the native bundle; the completion marker was not written.' >&2
-    return 1
-fi
-docker_process_sql --database="$native_import_database" < "$native_import_root/finalize.sql" || return 1
-echo 'Native database import: data, indexes and site settings completed.'
-unset native_import_root native_import_database native_import_tables native_import_jobs native_import_count_sql native_import_log native_import_count
+# shellcheck source=/dev/null
+source "$native_import_root/runtime.sh" || return 1
+native_import_run "$native_import_root" "$native_import_database" "$native_import_tables" "$native_import_jobs" || return 1
+unset native_import_root native_import_database native_import_tables native_import_jobs
 HOOK
     } > "$work/hook.sh" || return 1
     find "$work/payload" -type d -exec chmod 755 {} + || return 1

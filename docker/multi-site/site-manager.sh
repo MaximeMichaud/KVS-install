@@ -514,6 +514,9 @@ TABLES_PREFIX=${tables_prefix}
 
 # Database
 MARIADB_VERSION=12.3
+# Per-site budgets; adjust before start instead of claiming half the host per site.
+MARIADB_BUFFER_POOL_SIZE=128M
+MARIADB_REDO_LOG_SIZE=128M
 MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
 MARIADB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
 

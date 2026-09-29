@@ -1128,8 +1128,10 @@ for arg in "$@"; do
 done
 if [ "$dry" = yes ] && [ "${PARALLEL_SHORT_PLAN:-}" = yes ]; then
     printf 'KVS-PLAN >f+++++++++ 1 contents/screens/one/0.jpg\n'
-    exit 124
+    echo 'fixture: interrupted or failed planning' >&2
+    exit "${PARALLEL_PLAN_STATUS:-124}"
 fi
+if [ "$dry" = yes ]; then sleep "${PARALLEL_PLAN_DELAY:-0}"; fi
 if [ -n "$worker" ]; then
     printf '%s\n' "$*" > "$PARALLEL_BIN/worker-$worker"
     touch "$PARALLEL_BIN/started-$worker"
@@ -1161,7 +1163,9 @@ EOF
         PATH="$bin:$PATH"
         IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/parallel-ctl" import_ssh_setup old.example.com 2222 root "" yes
         IMPORT_REMOTE_SUDO=no
-        IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel.out" 2>&1 || {
+        # Exceed the optional size-count budget. Every regular file must
+        # still reach a parallel worker, not a serial fallback at the end.
+        PARALLEL_PLAN_DELAY=2 IMPORT_SIZE_TIMEOUT=1 IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel.out" 2>&1 || {
             cat "$TMP_ROOT/parallel.out"; exit 1;
         }
         grep -q '4 workers on separate SSH connections' "$TMP_ROOT/parallel.out" || exit 2
@@ -1186,11 +1190,19 @@ EOF
         [ "$status" -eq 23 ] && [ -e "$destination/stale.txt" ] || exit 11
         IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > /dev/null || exit 12
         diff -r --no-dereference "$reference" "$destination" || exit 13
-        # Incomplete plans and vanished files still need the final pass.
+        # Never copy or delete from a failed plan. Connection and permission
+        # errors must propagate too, not hide behind a serial fallback.
         rm -rf "$destination/contents/screens"
-        PARALLEL_SHORT_PLAN=yes IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > /dev/null || exit 16
-        diff -r --no-dereference "$reference" "$destination" || exit 17
-        rm -rf "$destination/contents/screens"
+        echo stale > "$destination/stale.txt"
+        for plan_status in 124 12 23; do
+            status=0
+            PARALLEL_PLAN_STATUS="$plan_status" PARALLEL_SHORT_PLAN=yes IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-plan-fail.out" 2>&1 || status=$?
+            [ "$status" -eq "$plan_status" ] || exit 16
+            [ ! -e "$destination/contents/screens" ] && [ -f "$destination/stale.txt" ] || exit 17
+            grep -q 'parallel transfer planning failed' "$TMP_ROOT/parallel-plan-fail.out" || exit 29
+            grep -q 'fixture: interrupted or failed planning' "$TMP_ROOT/parallel-plan-fail.out" || exit 30
+        done
+        # A live source may still change after a complete plan.
         PARALLEL_VANISH=2 IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > /dev/null || exit 18
         diff -r --no-dereference "$reference" "$destination" || exit 19
         rm "$destination/contents/screens/one/0.jpg"

@@ -7,7 +7,7 @@ source "$ROOT_DIR/docker/lib/database.sh"
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf "$TEST_DIR"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-for pair in '256 128M' '512 128M' '1024 256M' '2048 512M' '8192 2048M' '24576 4096M'; do
+for pair in '256 128M' '512 256M' '1024 512M' '2048 1024M' '8192 4096M' '24576 12288M'; do
     read -r available expected <<< "$pair"
     [ "$(database_buffer_pool_for_host "$available")" = "$expected" ] || fail "RAM budget $pair"
 done
@@ -19,9 +19,18 @@ done
 if database_import_jobs 33 >/dev/null 2>&1; then fail 'excessive native concurrency accepted'; fi
 
 database_available_memory_mb() { echo 24576; }
+database_capacity_memory_mb() { echo 24576; }
 docker() {
     case "$*" in
-        'compose config') cat "$TEST_DIR/compose.yml" ;;
+        'compose config')
+            awk -v pool="${MARIADB_BUFFER_POOL_SIZE:-128M}" -v redo="${MARIADB_REDO_LOG_SIZE:-128M}" '
+                { print }
+                /^  mariadb:$/ {
+                    print "    command:"
+                    print "      - --innodb-buffer-pool-size=" pool
+                    print "      - --innodb-log-file-size=" redo
+                }
+            ' "$TEST_DIR/compose.yml" ;;
         'compose ps -a -q mariadb') echo test-container ;;
         inspect*) echo "${CONTAINER_STATE:-0 running}" ;;
         'compose logs --tail 20 mariadb') echo 'fixture startup failure' ;;
@@ -29,7 +38,12 @@ docker() {
     esac
 }
 database_docker_query() { docker "$@"; }
-set_env_value() { printf '%s=%s\n' "$1" "$2" > "$TEST_DIR/persisted.env"; }
+set_env_value() {
+    touch "$TEST_DIR/persisted.env"
+    sed "/^$1=/d" "$TEST_DIR/persisted.env" > "$TEST_DIR/new.env"
+    printf '%s=%s\n' "$1" "$2" >> "$TEST_DIR/new.env"
+    mv "$TEST_DIR/new.env" "$TEST_DIR/persisted.env"
+}
 cat > "$TEST_DIR/compose.yml" <<'YAML'
 services:
   mariadb:
@@ -46,20 +60,23 @@ YAML
 [ "$(database_compose_memory_limit)" = 536870912 ] || fail 'Docker memory limit parsing'
 MARIADB_BUFFER_POOL_SIZE=''
 MARIADB_BUFFER_POOL_SIZE_REQUEST=''
-database_configure_buffer_pool > "$TEST_DIR/sizing.log"
-grep -Fxq 'MARIADB_BUFFER_POOL_SIZE=128M' "$TEST_DIR/persisted.env" || fail 'capped automatic pool persistence'
+MARIADB_REDO_LOG_SIZE=''
+MARIADB_REDO_LOG_SIZE_REQUEST=''
+database_configure_resources > "$TEST_DIR/sizing.log"
+grep -Fxq 'MARIADB_BUFFER_POOL_SIZE=256M' "$TEST_DIR/persisted.env" || fail 'capped automatic pool persistence'
+grep -Fxq 'MARIADB_REDO_LOG_SIZE=128M' "$TEST_DIR/persisted.env" || fail 'automatic redo persistence'
 MARIADB_BUFFER_POOL_SIZE_REQUEST=1G
-if database_configure_buffer_pool > "$TEST_DIR/rejected.log" 2>&1; then fail 'pool exceeding container limit accepted'; fi
-grep -Fxq 'MARIADB_BUFFER_POOL_SIZE=128M' "$TEST_DIR/persisted.env" || fail 'rejected pool changed saved value'
+if database_configure_resources > "$TEST_DIR/rejected.log" 2>&1; then fail 'pool exceeding container limit accepted'; fi
+grep -Fxq 'MARIADB_BUFFER_POOL_SIZE=256M' "$TEST_DIR/persisted.env" || fail 'rejected pool changed saved value'
 printf 'services:\n  mariadb:\n    image: mariadb\n' > "$TEST_DIR/compose.yml"
 MARIADB_BUFFER_POOL_SIZE_REQUEST=2G
-database_configure_buffer_pool >/dev/null
+database_configure_resources >/dev/null
 grep -Fxq 'MARIADB_BUFFER_POOL_SIZE=2G' "$TEST_DIR/persisted.env" || fail 'explicit pool persistence'
 MARIADB_BUFFER_POOL_SIZE_REQUEST=''
-database_configure_buffer_pool >/dev/null
+database_configure_resources >/dev/null
 grep -Fxq 'MARIADB_BUFFER_POOL_SIZE=2G' "$TEST_DIR/persisted.env" || fail 'saved pool was overwritten'
 MARIADB_BUFFER_POOL_SIZE_REQUEST='2G;echo unsafe'
-if database_configure_buffer_pool >/dev/null 2>&1; then fail 'malformed size accepted'; fi
+if database_configure_resources >/dev/null 2>&1; then fail 'malformed size accepted'; fi
 cat > "$TEST_DIR/compose.yml" <<'YAML'
 services:
   mariadb:
