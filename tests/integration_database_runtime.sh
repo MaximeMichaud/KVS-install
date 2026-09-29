@@ -9,7 +9,8 @@ export DATABASE_TEST_IMAGE="${DATABASE_TEST_IMAGE:-mariadb:$default_version}"
 export DATABASE_TEST_ROOT_PASSWORD
 DATABASE_TEST_ROOT_PASSWORD=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 export DATABASE_TEST_POOL="${DATABASE_TEST_POOL:-256M}"
-docker image inspect "$DATABASE_TEST_IMAGE" >/dev/null
+export DATABASE_TEST_REDO="${DATABASE_TEST_REDO:-128M}"
+umask 077
 test_dir=$(mktemp -d /tmp/kvs-db-integration.XXXXXX)
 export COMPOSE_PROJECT_NAME="kvs-db-runtime-$RANDOM"
 cleanup() {
@@ -17,23 +18,52 @@ cleanup() {
     rm -rf "$test_dir"
 }
 trap cleanup EXIT
-mkdir "$test_dir/init"
-cat > "$test_dir/compose.yml" <<'YAML'
-services:
-  mariadb:
-    image: ${DATABASE_TEST_IMAGE}
-    network_mode: none
-    mem_limit: 1g
-    command: ["--innodb-buffer-pool-size=${DATABASE_TEST_POOL}"]
-    environment:
-      MARIADB_ROOT_PASSWORD: ${DATABASE_TEST_ROOT_PASSWORD}
-      MARIADB_DATABASE: fixture
-    volumes:
-      - ./init:/docker-entrypoint-initdb.d:ro
-      - data:/var/lib/mysql
-volumes:
-  data:
-YAML
+mkdir -m 755 "$test_dir/init"
+printf '%s\n' \
+    'DOMAIN=fixture.example' \
+    "MARIADB_ROOT_PASSWORD=$DATABASE_TEST_ROOT_PASSWORD" \
+    "MARIADB_PASSWORD=$DATABASE_TEST_ROOT_PASSWORD" \
+    "MARIADB_BUFFER_POOL_SIZE=$DATABASE_TEST_POOL" \
+    "MARIADB_REDO_LOG_SIZE=$DATABASE_TEST_REDO" > "$test_dir/.env"
+# Render the real service command from a fresh environment-file read. Only
+# its argument list leaves the pipe; the full configuration is never saved.
+production_command=$(
+    (
+        unset DOMAIN MARIADB_ROOT_PASSWORD MARIADB_PASSWORD
+        unset MARIADB_BUFFER_POOL_SIZE MARIADB_REDO_LOG_SIZE
+        docker compose --env-file "$test_dir/.env" \
+            -f "$root/docker/docker-compose.yml" config --format json
+    ) | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["services"]["mariadb"]["command"]))'
+)
+python3 - "$production_command" "$test_dir/compose.yml" "$DATABASE_TEST_POOL" "$DATABASE_TEST_REDO" <<'PY'
+import json
+import sys
+
+command = json.loads(sys.argv[1])
+assert isinstance(command, list), "MariaDB command must be an argument list"
+assert f"--innodb-buffer-pool-size={sys.argv[3]}" in command, "Production Compose lost the buffer pool setting"
+assert f"--innodb-log-file-size={sys.argv[4]}" in command, "Production Compose lost the redo setting"
+fixture = {
+    "services": {
+        "mariadb": {
+            "image": "${DATABASE_TEST_IMAGE}",
+            "network_mode": "none",
+            "mem_limit": "1g",
+            "command": command,
+            "environment": {
+                "MARIADB_ROOT_PASSWORD": "${DATABASE_TEST_ROOT_PASSWORD}",
+                "MARIADB_DATABASE": "fixture",
+            },
+            "volumes": ["./init:/docker-entrypoint-initdb.d:ro", "data:/var/lib/mysql"],
+        },
+    },
+    "volumes": {"data": {}},
+}
+with open(sys.argv[2], "w") as output:
+    json.dump(fixture, output, indent=2)
+    output.write("\n")
+PY
+docker image inspect "$DATABASE_TEST_IMAGE" >/dev/null
 python3 - "$test_dir/source.sql" <<'PY'
 import sys
 with open(sys.argv[1], 'w') as f:
@@ -52,6 +82,8 @@ else
     import_prepare_dump "$test_dir/source.sql" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$test_dir/init/10-kvs-import.sql" runtime-roundtrip >/dev/null
     gzip "$test_dir/init/10-kvs-import.sql"
 fi
+# The official entrypoint reads this synthetic fixture as its mysql user.
+chmod 644 "$test_dir/init/"*
 cd "$test_dir"
 export COMPOSE_FILE="$test_dir/compose.yml"
 # shellcheck source=/dev/null
@@ -74,12 +106,33 @@ fi
 position=$(database_dump_position)
 database_progress_line 0 "$snapshot" "$position"
 expected_pool=$(numfmt --from=iec "$DATABASE_TEST_POOL")
+expected_redo=$(numfmt --from=iec "$DATABASE_TEST_REDO")
 [[ "$snapshot" == *$'pool\t'"$expected_pool"* ]]
+initial_settings=$(database_root_query --batch --skip-column-names \
+    -e 'SELECT @@GLOBAL.innodb_buffer_pool_size, @@GLOBAL.innodb_log_file_size, @@GLOBAL.innodb_flush_log_at_trx_commit;')
+[ "$initial_settings" = "$(printf '%s\t%s\t1' "$expected_pool" "$expected_redo")" ]
 [ -n "$position" ]
 database_wait_ready 120
-marker=$(database_root_query --batch --skip-column-names --database=fixture -e "SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT';")
-[ "$marker" = runtime-roundtrip ]
-rows=$(database_root_query --batch --skip-column-names --database=fixture -e 'SELECT COUNT(*) FROM ktvs_videos;')
-[ "$rows" = 20000 ]
+verify_database_state() {
+    local actual expected
+    actual=$(database_root_query --batch --skip-column-names --database=fixture -e "
+SELECT @@GLOBAL.innodb_buffer_pool_size,
+       @@GLOBAL.innodb_log_file_size,
+       @@GLOBAL.innodb_flush_log_at_trx_commit,
+       (SELECT value FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT'),
+       (SELECT COUNT(*) FROM ktvs_videos),
+       (SELECT title FROM ktvs_videos WHERE id=0);")
+    expected=$(printf '%s\t%s\t1\truntime-roundtrip\t20000\truntime sentinel' "$expected_pool" "$expected_redo")
+    [ "$actual" = "$expected" ] || {
+        printf 'FAIL: Runtime settings or persisted import data differ: %s\n' "$actual" >&2
+        return 1
+    }
+}
+verify_database_state
 version=$(database_root_query --batch --skip-column-names -e 'SELECT VERSION();')
-echo "PASS: MariaDB $version replay, authenticated socket monitoring, compressed reader position, $DATABASE_TEST_POOL pool, TCP readiness and persisted completion marker ($rows rows)."
+# A real restart discards runtime SET GLOBAL values. Read all settings and
+# imported data through a new client after bounded TCP readiness succeeds.
+docker compose restart --timeout 30 mariadb >/dev/null
+database_wait_ready 120
+verify_database_state
+echo "PASS: MariaDB $version uses the production Compose command during replay and after restart: $DATABASE_TEST_POOL pool, $DATABASE_TEST_REDO redo, durable commits, completion marker and 20,000 rows with the sentinel preserved."

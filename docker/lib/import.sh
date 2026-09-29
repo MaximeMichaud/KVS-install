@@ -1661,16 +1661,18 @@ import_rsync_stats_totals() {
 # The dry run of the transfer, its statistics reduced by
 # import_rsync_stats_totals: a scan of the old server without a byte
 # moved, its memory bounded by the incremental recursion as for the
-# transfer itself. It gets IMPORT_SIZE_TIMEOUT seconds (300; 0 for no
-# limit), the budget of the size measurement: a site of millions of
-# files is not scanned twice for a figure. Prints nothing when rsync
-# gave no statistics; returns 124 when the budget ran out.
+# transfer itself. An optional count gets IMPORT_SIZE_TIMEOUT seconds
+# (300; 0 for no limit). A parallel worker plan must scan the whole tree:
+# truncating it would leave all undiscovered files to the single final
+# mirror. Prints nothing when rsync gave no statistics; returns 124 when
+# the optional count ran out of time.
 import_rsync_totals() {
     local budget="${IMPORT_SIZE_TIMEOUT:-300}"
     local -a listing=() statuses=()
 
     [[ "$budget" =~ ^[0-9]+$ ]] || budget=300
     if [ -n "${IMPORT_RSYNC_PLAN:-}" ]; then
+        budget=0
         listing=(--out-format='KVS-PLAN %i %l %n')
     fi
     LC_ALL=C timeout "$budget" rsync --dry-run --stats "${listing[@]}" "$@" 2>"${IMPORT_RSYNC_COUNT_ERROR:-/dev/null}" |
@@ -1707,6 +1709,13 @@ import_rsync_plan() {
             for (i = 2; i <= jobs; i++) if (weight[i] + 0 < weight[worker] + 0) worker = i
             printf "./%s%c", name, 0 > (directory "/" worker ".list")
             weight[worker] += size + 65536
+            files++
+            bytes += size
+            if (systime() - reported >= 10) {
+                printf "  Planning parallel transfer: %.0f files to copy, %.2f GiB discovered; scan running.\n", files, bytes / 1073741824 > "/dev/stderr"
+                fflush("/dev/stderr")
+                reported = systime()
+            }
             next
         }
         !/^KVS-PLAN / { print }
@@ -1750,8 +1759,11 @@ import_rsync_workers() (
         logs+=("$plan/$worker.log")
         # --force permits a planned file to replace an obsolete nonempty
         # directory. It does not enable mirroring/deletion of sibling files.
+        # A live site can remove a file after the plan was built. Missing
+        # --files-from entries otherwise return 23 instead of vanished-file
+        # status 24. The final whole-site pass still reconciles these paths.
         setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
-            --files-from="$plan/$worker.list" -e "$rsh" --info=progress2 --outbuf=L \
+            --ignore-missing-args --files-from="$plan/$worker.list" -e "$rsh" --info=progress2 --outbuf=L \
             > "$plan/$worker.log" 2> "$error_dir/$worker.err" < /dev/null &
         pids[worker]=$!
         if [ "${IMPORT_RSYNC_SERIAL_AUTH:-no}" = yes ]; then
@@ -1970,7 +1982,7 @@ import_rsync_progress() {
 # stream otherwise. The transfer is counted first, a dry run, and shown
 # against that count by import_rsync_progress. Counting and the final
 # mirror use incremental recursion. Parallel workers take disjoint lists
-# from the count, stored on disk, and only handle their listed files. The
+# from a complete count, stored on disk, and only handle their listed files. The
 # patterns are the exporter's exclude_N lines, anchored at the site
 # directory (/tmp/*, /backup): what stays behind. rsync takes them as they
 # are; the tar on the old server gets them under its ./ prefix, which
@@ -2030,10 +2042,24 @@ import_remote_files() (
         elif [ "$jobs" -gt 1 ]; then
             echo "  setsid is unavailable; using one transfer worker."
         fi
-        echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
+        if [ -n "$plan" ]; then
+            echo "  Planning all files for $jobs parallel workers (complete scan; no size-count timeout)..."
+        else
+            echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
+        fi
         count_status=0
         totals=$(IMPORT_RSYNC_PLAN="$plan" IMPORT_RSYNC_COUNT_ERROR="$error_dir/count.err" import_rsync_totals "${rsync_args[@]}") || count_status=$?
         printf '%s\n' "$count_status" > "$error_dir/count.status"
+        if [ -n "$plan" ]; then
+            case "$count_status" in
+                0|24) ;;
+                *)
+                    cat "$error_dir/count.err" >&2
+                    echo "ERROR: parallel transfer planning failed (status $count_status); no partial plan or final mirror was started" >&2
+                    return "$count_status"
+                    ;;
+            esac
+        fi
         if [ -n "$totals" ]; then
             IFS=$'\t' read -r files bytes site_files site_bytes <<< "$totals"
             if [ "$files" -eq 0 ] && [ "$bytes" -eq 0 ]; then
@@ -2081,7 +2107,7 @@ import_remote_files() (
             echo "  Checking the whole site, catching new changes and applying deletions..."
             # Workers never delete and never recurse into each other's lists.
             # This ordinary mirror restores directory metadata and links,
-            # handles an incomplete timed-out plan, and removes stale files.
+            # catches changes since planning, and removes stale files.
             bytes=0
             files=0
         fi

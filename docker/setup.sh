@@ -34,6 +34,8 @@ DOCKER_BUILD_FLAGS=""
 SETUP_RUN_FLAGS=()
 # shellcheck disable=SC2034  # Read by lib/database.sh after .env is loaded.
 MARIADB_BUFFER_POOL_SIZE_REQUEST="${MARIADB_BUFFER_POOL_SIZE:-}"
+# shellcheck disable=SC2034  # Read by lib/database.sh after .env is loaded.
+MARIADB_REDO_LOG_SIZE_REQUEST="${MARIADB_REDO_LOG_SIZE:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -98,9 +100,11 @@ ENVIRONMENT VARIABLES:
                           size (300); past that the import goes on with what
                           was counted and the space used on the old server's
                           filesystem as the upper bound. 0 measures it all.
+                          Parallel file planning always scans the whole site.
     IMPORT_TRANSFER_JOBS=N Concurrent rsync file transfers (4, range 1-32).
                           1 keeps a single stream. Separate SSH connections
-                          are used when authentication allows it; a final
+                          are used when authentication allows it. All files
+                          are planned before workers start; a final
                           pass reconciles the site and removes stale files.
     IMPORT_DATABASE_FORMAT=auto|sql|directory
                           Remote database export format. Auto uses native
@@ -111,9 +115,13 @@ ENVIRONMENT VARIABLES:
                           CPU and available memory, at most 8 connections.
                           Independent of IMPORT_TRANSFER_JOBS.
     MARIADB_BUFFER_POOL_SIZE=SIZE
-                          InnoDB cache, for example 2G. On first setup the
-                          default is 25% of available RAM, capped at 4G.
-                          The selected value is kept in .env.
+                          InnoDB cache, for example 2G or auto. The automatic
+                          value is 50% of available RAM within host/container
+                          limits. The selected value is kept in .env.
+    MARIADB_REDO_LOG_SIZE=SIZE
+                          Redo size on disk, for example 2G or auto. The
+                          automatic value is half the selected buffer pool,
+                          bounded to 128M..2G and kept in .env.
     IMPORT_EXCLUDE=PATHS  Directories left behind, space separated, relative
                           to the site directory (contents/videos_sources
                           backup). Temporary files, compiled templates,
@@ -3849,8 +3857,8 @@ if [ "$MODE" = "single" ] && [ "$SSL_PROVIDER" != "selfsigned" ] &&
     exit 1
 fi
 
-# Validate and persist the database memory budget before replacing any volume.
-database_configure_buffer_pool || exit 1
+# Validate and persist both sizes before replacing any database volume.
+database_configure_resources || exit 1
 if [ "$IMPORT_MODE" = true ]; then
     IMPORT_DATABASE_JOBS=$(database_import_jobs "$IMPORT_DATABASE_JOBS_REQUEST") || exit 1
     echo "  Native database import connections: $IMPORT_DATABASE_JOBS (file transfers use IMPORT_TRANSFER_JOBS separately)."
@@ -4183,6 +4191,7 @@ else
     MARIADB_WAIT_SECONDS=${MARIADB_WAIT_SECONDS:-180}
 fi
 database_wait_ready "$MARIADB_WAIT_SECONDS" || exit 1
+database_verify_running_resources || exit 1
 
 import_verify_database
 else

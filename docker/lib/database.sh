@@ -1,6 +1,6 @@
 #!/bin/bash
 # shellcheck disable=SC2016  # Shell snippets are expanded inside the container.
-# Read-only MariaDB startup/import monitoring, shared by setup and reconfigure.
+# MariaDB sizing, persistent configuration and read-only import monitoring.
 
 database_root_query() {
     local arg
@@ -306,16 +306,36 @@ database_wait_ready() (
     done
 )
 
-# Reserve most memory for the rest of this shared KVS host. Explicit sizes
-# persist unchanged. The automatic value is 25% of available RAM, bounded
-# to 128 MiB..4 GiB, rather than MariaDB's fixed 128 MiB default.
+# Keep half the available budget for MariaDB overhead, PHP, search and the OS.
+# Persist the result once; do not resize an existing database on each restart.
 database_buffer_pool_for_host() {
     local available_mb="$1" size
-    [[ "$available_mb" =~ ^[1-9][0-9]*$ ]] || available_mb=512
-    size=$((available_mb / 4 / 128 * 128))
+    if [[ ! "$available_mb" =~ ^[0-9]+$ ]] || [ "$available_mb" -lt 256 ]; then
+        echo "ERROR: at least 256 MiB of available memory is required to size MariaDB." >&2
+        return 1
+    fi
+    size=$((available_mb / 2 / 128 * 128))
     [ "$size" -ge 128 ] || size=128
-    [ "$size" -le 4096 ] || size=4096
     printf '%sM\n' "$size"
+}
+
+# Redo occupies disk, not an equivalent RAM allocation. This bounded default
+# reduces checkpoint pressure during imports without an unbounded disk cost.
+database_redo_for_pool() {
+    local pool_mb="$1" size
+    size=$((pool_mb / 2 / 64 * 64))
+    [ "$size" -ge 128 ] || size=128
+    [ "$size" -le 2048 ] || size=2048
+    printf '%sM\n' "$size"
+}
+
+# Bound the decimal input before arithmetic; shell expressions are not sizes.
+database_size_mb() {
+    local value="$1" size
+    [[ "$value" =~ ^[1-9][0-9]{0,8}[MmGg]$ ]] || return 1
+    size=${value%?}
+    [[ "$value" != *[Gg] ]] || size=$((size * 1024))
+    printf '%s\n' "$size"
 }
 
 # Compose normalizes memory limits to bytes in its canonical YAML output.
@@ -343,9 +363,11 @@ database_compose_memory_limit() {
 
 # Account for an installer running inside an LXC/container or constrained
 # systemd slice as well as the memory available to the rest of the host.
-database_available_memory_mb() {
-    local available path relative limit usage remaining root file
-    available=$(awk '/^MemAvailable:/ { print int($2/1024) }' /proc/meminfo)
+database_memory_budget_mb() {
+    local measure="${1:-available}" available path relative limit usage remaining root file key
+    key=MemAvailable:
+    [ "$measure" != capacity ] || key=MemTotal:
+    available=$(awk -v key="$key" '$1==key { print int($2/1024) }' /proc/meminfo)
     [[ "$available" =~ ^[0-9]+$ ]] || available=512
     if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
         root=/sys/fs/cgroup
@@ -362,10 +384,12 @@ database_available_memory_mb() {
         if [ -r "$path/$file" ]; then
             read -r limit < "$path/$file"
             usage=0
-            if [ "$file" = memory.max ]; then
-                read -r usage < "$path/memory.current" || true
-            else
-                read -r usage < "$path/memory.usage_in_bytes" || true
+            if [ "$measure" != capacity ]; then
+                if [ "$file" = memory.max ]; then
+                    read -r usage < "$path/memory.current" || true
+                else
+                    read -r usage < "$path/memory.usage_in_bytes" || true
+                fi
             fi
             if [[ "$limit" =~ ^[0-9]+$ && "$usage" =~ ^[0-9]+$ ]]; then
                 remaining=$(((limit - usage) / 1048576))
@@ -379,29 +403,93 @@ database_available_memory_mb() {
     printf '%s\n' "$available"
 }
 
-database_configure_buffer_pool() {
-    local available limit size_mb value
+database_available_memory_mb() { database_memory_budget_mb available; }
+database_capacity_memory_mb() { database_memory_budget_mb capacity; }
+
+# An override can replace services.mariadb.command entirely. Check the rendered
+# command before saving settings or replacing a database volume.
+database_verify_compose_resources() {
+    local config
+    config=$(docker compose config) || return 1
+    if ! printf '%s\n' "$config" | awk -v pool="$1" -v redo="$2" '
+        /^  mariadb:$/ { db=1; next }
+        db && /^  [^ ]/ { db=0 }
+        db && /^    command:$/ { command=1; next }
+        command && /^    [^ ]/ { command=0 }
+        db && command {
+            line=$0
+            sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+            gsub(/["\047]/, "", line)
+            if (line == "--innodb-buffer-pool-size=" pool) p++
+            if (line == "--innodb-log-file-size=" redo) r++
+            # MariaDB also recognizes loose/maximum prefixes. A later such
+            # argument must not silently override the validated memory budget.
+            sub(/^--loose[-_]/, "--", line)
+            sub(/^--maximum[-_]/, "--", line)
+            if (line ~ /^--innodb[-_]buffer[-_]pool[-_]size([=[:space:]]|$)/) pc++
+            if (line ~ /^--innodb[-_]log[-_]file[-_]size([=[:space:]]|$)/) rc++
+        }
+        END { exit !(p==1 && r==1 && pc==1 && rc==1) }
+    '; then
+        echo "ERROR: the rendered MariaDB command does not use the selected buffer pool and redo sizes. Update the MariaDB command override to use MARIADB_BUFFER_POOL_SIZE and MARIADB_REDO_LOG_SIZE." >&2
+        return 1
+    fi
+}
+
+database_configure_resources() {
+    local available capacity limit pool redo pool_mb redo_mb reserve
     available=$(database_available_memory_mb)
+    capacity=$(database_capacity_memory_mb)
     limit=$(database_compose_memory_limit) || return 1
     if [ "$limit" -gt 0 ] && [ "$((limit / 1048576))" -lt "$available" ]; then
         available=$((limit / 1048576))
     fi
-    value=${MARIADB_BUFFER_POOL_SIZE_REQUEST:-${MARIADB_BUFFER_POOL_SIZE:-}}
-    if [ -z "$value" ]; then
-        value=$(database_buffer_pool_for_host "$available")
+    if [ "$limit" -gt 0 ] && [ "$((limit / 1048576))" -lt "$capacity" ]; then
+        capacity=$((limit / 1048576))
     fi
-    if [[ ! "$value" =~ ^[1-9][0-9]*[MmGg]$ ]]; then
-        echo "ERROR: MARIADB_BUFFER_POOL_SIZE must be a size in M or G, for example 512M or 2G" >&2
+    pool=${MARIADB_BUFFER_POOL_SIZE_REQUEST:-${MARIADB_BUFFER_POOL_SIZE:-auto}}
+    if [ "$pool" = auto ]; then
+        pool=$(database_buffer_pool_for_host "$available") || return 1
+    fi
+    if ! pool_mb=$(database_size_mb "$pool") || [ "$pool_mb" -lt 5 ]; then
+        echo "ERROR: MARIADB_BUFFER_POOL_SIZE must be auto or a size of at least 5M, for example 512M or 2G." >&2
         return 1
     fi
-    size_mb=${value%?}
-    [[ "$value" != *[Gg] ]] || size_mb=$((size_mb * 1024))
-    if [ "$limit" -gt 0 ] && [ "$size_mb" -ge "$((limit / 1048576))" ]; then
-        echo "ERROR: the $value buffer pool leaves no memory for MariaDB inside its Docker memory limit. Lower MARIADB_BUFFER_POOL_SIZE." >&2
+    # Saved pools already consume memory and must not be compared with free
+    # memory again. Validate them against capacity, including cgroup/Compose.
+    reserve=$((pool_mb / 8))
+    [ "$reserve" -ge 128 ] || reserve=128
+    if [ "$((pool_mb + reserve))" -gt "$capacity" ]; then
+        echo "ERROR: the $pool buffer pool needs at least $reserve MiB of additional headroom within the $capacity MiB host/container capacity. Lower MARIADB_BUFFER_POOL_SIZE." >&2
         return 1
     fi
-    set_env_value MARIADB_BUFFER_POOL_SIZE "$value" || return 1
-    MARIADB_BUFFER_POOL_SIZE=$value
-    export MARIADB_BUFFER_POOL_SIZE
-    echo "  MariaDB InnoDB buffer pool: $value (kept in .env; automatic budget: 25% of $available MiB, at most 4 GiB)."
+    redo=${MARIADB_REDO_LOG_SIZE_REQUEST:-${MARIADB_REDO_LOG_SIZE:-auto}}
+    if [ "$redo" = auto ]; then redo=$(database_redo_for_pool "$pool_mb"); fi
+    if ! redo_mb=$(database_size_mb "$redo") || [ "$redo_mb" -lt 4 ] || [ "$redo_mb" -gt 524288 ]; then
+        echo "ERROR: MARIADB_REDO_LOG_SIZE must be auto or a size from 4M to 512G." >&2
+        return 1
+    fi
+    MARIADB_BUFFER_POOL_SIZE="$pool" MARIADB_REDO_LOG_SIZE="$redo" \
+        database_verify_compose_resources "$pool" "$redo" || return 1
+    # Both values and the effective command passed validation before any write.
+    set_env_value MARIADB_BUFFER_POOL_SIZE "$pool" || return 1
+    set_env_value MARIADB_REDO_LOG_SIZE "$redo" || return 1
+    MARIADB_BUFFER_POOL_SIZE=$pool
+    MARIADB_REDO_LOG_SIZE=$redo
+    export MARIADB_BUFFER_POOL_SIZE MARIADB_REDO_LOG_SIZE
+    echo "  MariaDB buffer pool: $pool; redo log: $redo on disk (saved in .env for initial startup and subsequent restarts)."
+}
+
+database_verify_running_resources() {
+    local actual pool redo expected_pool expected_redo
+    expected_pool=$(database_size_mb "$MARIADB_BUFFER_POOL_SIZE") || return 1
+    expected_redo=$(database_size_mb "$MARIADB_REDO_LOG_SIZE") || return 1
+    actual=$(database_root_query --batch --skip-column-names -e \
+        'SELECT @@GLOBAL.innodb_buffer_pool_size, @@GLOBAL.innodb_log_file_size;') || return 1
+    read -r pool redo <<< "$actual"
+    if [ "$pool" != "$((expected_pool * 1048576))" ] || [ "$redo" != "$((expected_redo * 1048576))" ]; then
+        echo "ERROR: running MariaDB buffer pool or redo size differs from the saved configuration. Inspect its command and custom configuration." >&2
+        return 1
+    fi
+    echo "  MariaDB buffer pool and redo size verified through a new SQL connection."
 }

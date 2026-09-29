@@ -100,7 +100,61 @@ fi
 for arg in "$@"; do
     case "$arg" in
         *"SELECT 'unsupported'"*)
-            printf 'unsupported\t%s\ncount\t1\ntable\tktvs_options\ndirectory\t\nsocket\t2F746D702F666978747572652E736F636B\n' "${STUB_NATIVE_UNSUPPORTED:-0}"
+            # Interpret the compatibility predicates against fixture metadata.
+            # In particular, an old blanket GENERATED or FOREIGN KEY check
+            # must report the positive fixture counts instead of canned zero.
+            query=${arg,,}
+            query=${query//[$' \t\r\n']/}
+            for predicate in \
+                "table_type<>'basetable'" \
+                "enginenotin('innodb','myisam','aria')" \
+                "create_optionslike'%systemversioning%'" \
+                'frominformation_schema.triggerswheretrigger_schema=database()' \
+                'frominformation_schema.routineswhereroutine_schema=database()' \
+                'frominformation_schema.eventswhereevent_schema=database()' \
+                "c.table_schema=database()andbinaryc.column_namenotregexp'^[a-za-z0-9_]{1,64}$'" \
+                "g.table_schema=c.table_schemaandg.table_name=c.table_nameandg.extralike'%generated%'" \
+                'k.table_schema=database()andk.referenced_table_nameisnotnull' \
+                "binaryk.constraint_namenotregexp'^[a-za-z0-9_]{1,64}$'" \
+                "binaryk.column_namenotregexp'^[a-za-z0-9_]{1,64}$'" \
+                "binaryk.referenced_column_namenotregexp'^[a-za-z0-9_]{1,64}$'"; do
+                [[ "$query" == *"$predicate"* ]] || exit 91
+            done
+            unsupported=0
+            details=''
+            add_blocker() {
+                [ "$2" -gt 0 ] || return 0
+                unsupported=$((unsupported + $2))
+                details+="${details:+, }$1=$2"
+            }
+            add_blocker events "${STUB_NATIVE_EVENTS:-0}"
+            if [[ "$query" == *'frominformation_schema.key_column_usagewheretable_schema=database()andreferenced_table_schema<>database()'* ]]; then
+                [[ "$query" == *'count(distincttable_name,constraint_name)'* ]] || exit 94
+                add_blocker external_foreign_keys "${STUB_NATIVE_EXTERNAL_FKS:-0}"
+            elif [[ "$query" == *"constraint_type='foreignkey'"* ]]; then
+                add_blocker foreign_keys "$((${STUB_NATIVE_LOCAL_FKS:-0} + ${STUB_NATIVE_EXTERNAL_FKS:-0}))"
+            else
+                exit 92
+            fi
+            if [[ "$query" == *"extraregexp'generated|invisible'"* ]]; then
+                add_blocker generated_or_invisible_columns "$((${STUB_NATIVE_GENERATED:-0} + ${STUB_NATIVE_INVISIBLE:-0}))"
+            elif [[ "$query" == *"frominformation_schema.columnswheretable_schema=database()andextralike'%invisible%'"* ]]; then
+                add_blocker invisible_columns "${STUB_NATIVE_INVISIBLE:-0}"
+            else
+                exit 93
+            fi
+            add_blocker nonstandard_tables "${STUB_NATIVE_NONSTANDARD:-0}"
+            add_blocker routines "${STUB_NATIVE_ROUTINES:-0}"
+            add_blocker triggers "${STUB_NATIVE_TRIGGERS:-0}"
+            invalid_identifiers=0
+            for identifier in "${STUB_NATIVE_GENERATED_TABLE_COLUMN:-value}" \
+                "${STUB_NATIVE_FK_CONSTRAINT:-fk_fixture}" \
+                "${STUB_NATIVE_FK_COLUMN:-parent_id}" \
+                "${STUB_NATIVE_FK_REF_COLUMN:-id}"; do
+                [[ "$identifier" =~ ^[A-Za-z0-9_]{1,64}$ ]] || invalid_identifiers=$((invalid_identifiers + 1))
+            done
+            add_blocker unsupported_identifiers "$invalid_identifiers"
+            printf 'unsupported\t%s\t%s\ncount\t1\ntable\tktvs_options\ndirectory\t\nsocket\t2F746D702F666978747572652E736F636B\n' "${STUB_NATIVE_UNSUPPORTED:-$unsupported}" "$details"
             exit 0
             ;;
         *'INTO OUTFILE'*)
@@ -760,7 +814,7 @@ test_the_dump_uses_the_compressor_that_is_installed() {
 test_native_format_selection_and_bundle_integrity() {
     local site="$TMP_ROOT/native-site" out="$TMP_ROOT/native.out" err="$TMP_ROOT/native.err"
     local native_bin="$TMP_ROOT/native-bin" extracted="$TMP_ROOT/native-extracted"
-    local test_uid test_gid
+    local test_uid test_gid category
 
     make_site "$site"
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "auto detection must succeed with an older dump tool"
@@ -793,6 +847,7 @@ EOF
         fail "native export must produce a bundle: $(cat "$err")"
     tar -xzf "$out" -C "$extracted"
     (cd "$extracted" && sha256sum -c SHA256SUMS >/dev/null) || fail "native checksums must verify after extraction"
+    assert_key "$extracted/kvs-native-export.manifest" format 2
     assert_key "$extracted/kvs-native-export.manifest" complete yes
     assert_key "$extracted/kvs-native-export.manifest" source_database oldsite
     assert_key "$extracted/kvs-native-export.manifest" tables 1
@@ -801,6 +856,18 @@ EOF
     argv_lines | grep -Fq 'mariadb-dump argv: [--no-defaults]' || fail "native exports must not inherit filtering or formatting options"
     grep -Fq '[--socket=/tmp/fixture.sock]' "$STUB_LOG" || fail "native exports must preserve the resolved local socket"
     argv_lines | grep -Fq '[--default-character-set=binary]' || fail "native data must preserve original character bytes"
+
+    export STUB_NATIVE_GENERATED=5 STUB_NATIVE_LOCAL_FKS=17
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+        fail "generated columns and internal foreign keys must retain native export: $(cat "$err")"
+    assert_key "$out" db_dump_format directory
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory --gzip dump "$site" ||
+        fail "supported extended schema metadata must allow native export: $(cat "$err")"
+    tar -xOf "$out" kvs-native-export.manifest > "$extracted/extended.manifest"
+    assert_key "$extracted/extended.manifest" format 2
+    argv_lines | grep -Fq '[--single-transaction]' || fail "extended native schemas must keep one source transaction"
+    argv_lines | grep -Fq '[--parallel=0]' || fail "extended native schemas must not split source snapshots"
+    unset STUB_NATIVE_GENERATED STUB_NATIVE_LOCAL_FKS
 
     run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory --gzip -y \
         -o "$TMP_ROOT/native-archive.tar" archive "$site" || fail "native data must also work inside a full archive: $(cat "$err")"
@@ -824,9 +891,52 @@ EOF
     assert_key "$out" db_dump_format sql
     grep -q 'FILE access' "$out" || fail "the fallback must explain unavailable FILE access"
     unset STUB_NATIVE_FILE_ACCESS
-    export STUB_NATIVE_UNSUPPORTED=1
+    export STUB_NATIVE_TRIGGERS=1
     run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "auto must preserve unsupported schema with SQL format"
     assert_key "$out" db_dump_format sql
+    assert_key "$out" db_directory_reason 'SQL format required by source schema: triggers=1'
+    argv_lines | grep -Fq 'INTO OUTFILE' && fail "unsupported schemas must not start native filesystem probes"
+    unset STUB_NATIVE_TRIGGERS
+    export STUB_NATIVE_EXTERNAL_FKS=2 STUB_NATIVE_ROUTINES=1
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "multiple unsupported schema kinds must retain SQL fallback"
+    assert_key "$out" db_directory_reason 'SQL format required by source schema: external_foreign_keys=2, routines=1'
+    if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$site"; then
+        fail "explicit native export must not bypass unsupported schema checks"
+    fi
+    [ ! -s "$out" ] || fail "a schema refusal must not emit an incomplete dump"
+    unset STUB_NATIVE_EXTERNAL_FKS STUB_NATIVE_ROUTINES
+
+    export STUB_NATIVE_INVISIBLE=1 STUB_NATIVE_GENERATED=5 STUB_NATIVE_LOCAL_FKS=17
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "invisible columns must retain SQL fallback"
+    assert_key "$out" db_dump_format sql
+    assert_key "$out" db_directory_reason 'SQL format required by source schema: invisible_columns=1'
+    unset STUB_NATIVE_INVISIBLE STUB_NATIVE_GENERATED STUB_NATIVE_LOCAL_FKS
+
+    export STUB_NATIVE_GENERATED=5 STUB_NATIVE_LOCAL_FKS=17
+    for category in GENERATED_TABLE_COLUMN FK_CONSTRAINT FK_COLUMN FK_REF_COLUMN; do
+        export "STUB_NATIVE_$category=not-supported"
+        run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "unsupported $category metadata must fall back before dumping"
+        assert_key "$out" db_dump_format sql
+        assert_key "$out" db_directory_reason 'SQL format required by source schema: unsupported_identifiers=1'
+        argv_lines | grep -Fq 'INTO OUTFILE' && fail "unsupported identifiers must be rejected before filesystem probes"
+        if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$site"; then
+            fail "explicit native export must refuse unsupported $category identifiers"
+        fi
+        [ ! -s "$out" ] || fail "unsupported identifiers must not emit an incomplete dump"
+        unset "STUB_NATIVE_$category"
+    done
+    unset STUB_NATIVE_GENERATED STUB_NATIVE_LOCAL_FKS
+
+    export STUB_NATIVE_NONSTANDARD=1 STUB_NATIVE_EVENTS=1
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "unsupported table kinds and events must retain SQL fallback"
+    assert_key "$out" db_dump_format sql
+    assert_key "$out" db_directory_reason 'SQL format required by source schema: events=1, nonstandard_tables=1'
+    unset STUB_NATIVE_NONSTANDARD STUB_NATIVE_EVENTS
+
+    export STUB_NATIVE_UNSUPPORTED=invalid
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "an invalid schema count must fall back safely"
+    assert_key "$out" db_dump_format sql
+    assert_key "$out" db_directory_reason 'the source schema compatibility counts could not be verified'
     unset STUB_NATIVE_UNSUPPORTED
 
     export STUB_NATIVE_DUMP_FAIL=yes
