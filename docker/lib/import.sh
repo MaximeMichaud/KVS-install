@@ -2076,7 +2076,7 @@ import_remote_files() (
     local use_rsync="$3"
     local status=0
     local pattern totals count_status files=0 bytes=0 site_files site_bytes
-    local jobs="${IMPORT_TRANSFER_JOBS:-4}" worker_rsh worker_auth=no plan="" work error_dir remote_plan=""
+    local jobs="${IMPORT_TRANSFER_JOBS:-4}" worker_rsh worker_auth=no plan="" work error_dir remote_plan="" rsync_host
     local -a independent=(-o ControlMaster=no -o ControlPath=none -o Compression=no)
     local -a rsync_path=()
     local -a rsync_args=()
@@ -2113,12 +2113,18 @@ import_remote_files() (
         if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
             rsync_path=(--rsync-path="sudo -n rsync")
         fi
+        # rsync reads host:path up to the first colon, so an IPv6 address
+        # goes in brackets; ssh takes it without them.
+        rsync_host=$IMPORT_SSH_TARGET
+        case "$rsync_host" in
+            *@*:*) rsync_host="${rsync_host%%@*}@[${rsync_host#*@}]" ;;
+        esac
         # -H keeps a file linked under several names as one file: copied
         # once per name it would take more room than the site measured
         # and the free space checked. The plan leaves the other names of
         # a group to the final mirror, which links them without data.
         rsync_args=(-a -H -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
-            "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/")
+            "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$rsync_host:$dir/" "$destination/")
         if [ "$jobs" -gt 1 ] && command -v setsid >/dev/null 2>&1; then
             plan=$work
         elif [ "$jobs" -gt 1 ]; then

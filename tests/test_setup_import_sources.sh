@@ -1337,6 +1337,31 @@ EOF
     pass "parallel workers read their lists on the old server"
 }
 
+# An old server given by its IPv6 address: ssh takes the address as it
+# is, rsync reads host:path and took the host up to the first colon.
+test_ipv6_address_of_the_old_server() {
+    local bin="$TMP_ROOT/ipv6-bin" site="$TMP_ROOT/ipv6-site" jobs
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    for jobs in 4 1; do
+        rm -rf "$TMP_ROOT/ipv6-dest"
+        : > "$bin/ssh.log"
+        (
+            PATH="$bin:$PATH"
+            IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/ipv6-ctl" import_ssh_setup 2001:db8::7 22 root "" yes
+            IMPORT_REMOTE_SUDO=no
+            IMPORT_TRANSFER_JOBS=$jobs import_remote_files "$site" "$TMP_ROOT/ipv6-dest" yes > "$TMP_ROOT/ipv6.out" 2>&1 || exit 1
+            diff -r "$site" "$TMP_ROOT/ipv6-dest" > /dev/null || exit 2
+            # rsync opened its connections to the address, not to "2001".
+            grep -q '^target 2001:db8::7$' "$bin/ssh.log" || exit 3
+            grep -q '^target 2001$' "$bin/ssh.log" && exit 4
+            exit 0
+        ) || fail "the files of an old server given by its IPv6 address must arrive with $jobs worker(s) (case $?): $(tail -n 5 "$TMP_ROOT/ipv6.out")"
+    done
+    pass "the files of an old server given by its IPv6 address arrive"
+}
+
 # Ctrl-C in a terminal goes to the foreground process group. A timeout
 # that moved the planning scan into a group of its own kept it running on
 # the old server, and the setup waiting for it, until the scan ended.
@@ -1424,6 +1449,7 @@ test_the_tar_stream_reports_what_the_old_server_could_not_read
 test_parallel_transfers_preserve_the_mirror
 test_hard_links_arrive_as_links
 test_parallel_workers_read_their_lists_on_the_old_server
+test_ipv6_address_of_the_old_server
 test_interrupt_stops_the_planning_scan
 test_parallel_interruption_stops_the_process_groups
 
