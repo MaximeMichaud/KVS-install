@@ -1233,6 +1233,55 @@ EOF
     pass "parallel transfers preserve the mirror and resume after a worker failure"
 }
 
+# A site can hold the same file under several names (a video linked into
+# several folders). Copied as separate files, a group of links takes its
+# size once per name on the new server, beyond the size the exporter
+# measured and the free space checked for it.
+test_hard_links_arrive_as_links() {
+    local bin="$TMP_ROOT/links-bin" site="$TMP_ROOT/links-site" destination jobs
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    mkdir -p "$site/contents/videos/0/1" "$site/contents/videos/0/2" "$site/contents/videos_screenshots/0/1"
+    head -c 65536 /dev/urandom > "$site/contents/videos/0/1/1.mp4"
+    ln "$site/contents/videos/0/1/1.mp4" "$site/contents/videos/0/2/2.mp4"
+    ln "$site/contents/videos/0/1/1.mp4" "$site/contents/videos_screenshots/0/1/1.mp4"
+    echo screenshot > "$site/contents/videos_screenshots/0/1/preview.jpg"
+    ln "$site/contents/videos_screenshots/0/1/preview.jpg" "$site/contents/videos_screenshots/0/1/preview.mp4.jpg"
+    (
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/links-ctl" import_ssh_setup old.example.com 22 root "" yes
+        IMPORT_REMOTE_SUDO=no
+        links_kept() {
+            local dir="$1"
+            [ "$(stat -c '%h' "$dir/contents/videos/0/1/1.mp4")" -eq 3 ] &&
+                [ "$(stat -c '%i' "$dir/contents/videos/0/2/2.mp4")" = "$(stat -c '%i' "$dir/contents/videos/0/1/1.mp4")" ] &&
+                [ "$(stat -c '%i' "$dir/contents/videos_screenshots/0/1/1.mp4")" = "$(stat -c '%i' "$dir/contents/videos/0/1/1.mp4")" ] &&
+                [ "$(stat -c '%i' "$dir/contents/videos_screenshots/0/1/preview.mp4.jpg")" = "$(stat -c '%i' "$dir/contents/videos_screenshots/0/1/preview.jpg")" ]
+        }
+        for jobs in 1 4; do
+            destination="$TMP_ROOT/links-dest-$jobs"
+            IMPORT_TRANSFER_JOBS=$jobs import_remote_files "$site" "$destination" yes > "$TMP_ROOT/links-$jobs.out" 2>&1 || exit 1
+            links_kept "$destination" || exit 2
+        done
+        # A copy an earlier pass made without the links gets them back.
+        destination="$TMP_ROOT/links-earlier"
+        cp -a "$site/." "$destination"
+        for name in contents/videos/0/2/2.mp4 contents/videos_screenshots/0/1/1.mp4 contents/videos_screenshots/0/1/preview.mp4.jpg; do
+            cp -p "$destination/$name" "$destination/$name.copy"
+            mv "$destination/$name.copy" "$destination/$name"
+        done
+        links_kept "$destination" && exit 3
+        IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes > "$TMP_ROOT/links-earlier.out" 2>&1 || exit 4
+        links_kept "$destination" || exit 5
+        destination="$TMP_ROOT/links-tar"
+        import_remote_files "$site" "$destination" no > /dev/null 2>&1 || exit 6
+        links_kept "$destination" || exit 7
+        exit 0
+    ) || fail "hard links of the site must arrive as links, in parallel, serial, repeated and tar transfers (case $?)"
+    pass "hard links of the site arrive as links"
+}
+
 test_parallel_interruption_stops_the_process_groups() {
     local bin="$TMP_ROOT/interrupted-bin" plan="$TMP_ROOT/interrupted-plan" i pid status=0
     mkdir -p "$bin" "$plan"
@@ -1283,6 +1332,7 @@ test_password_protected_archives_are_refused_with_a_reason
 test_links_leaving_the_site_are_listed_and_the_copy_follows_them
 test_the_tar_stream_reports_what_the_old_server_could_not_read
 test_parallel_transfers_preserve_the_mirror
+test_hard_links_arrive_as_links
 test_parallel_interruption_stops_the_process_groups
 
 echo "All $TESTS_RUN import source tests passed."
