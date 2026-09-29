@@ -78,6 +78,9 @@ DB_DUMP_FORMAT="sql"
 DB_DIRECTORY_REASON="not checked"
 DB_DIRECTORY_TABLES=()
 DB_DIRECTORY_CONN_ARGS=()
+DB_DIRECTORY_PASSWORD=""
+DB_DIRECTORY_AUTH="site"
+DB_DIRECTORY_ROOT_REASON=""
 SITE_SIZE_MB="0"
 SITE_SIZE_STATUS="skipped"
 SITE_SIZE_SECONDS="0"
@@ -166,8 +169,9 @@ Environment
   KVS_EXPORT_SIZE_JOBS      How many du measure the site at once (default:
                             the CPU count, at most 4)
   TMPDIR                    Where the dump is staged while the archive is
-                            written. Native export needs uncompressed data
-                            space and honors secure_file_priv when set.
+                            written. Native export uses secure_file_priv
+                            when set, otherwise the database data directory,
+                            and needs space for the uncompressed data.
 
 Exit codes
   0 success, 1 error, 2 no site found or several found,
@@ -1397,10 +1401,62 @@ kvs_stream_dump() {
 kvs_directory_query() {
     (
         # shellcheck disable=SC2030,SC2031  # Keep the password in this client subprocess only.
-        export MYSQL_PWD="$DB_PASSWORD"
+        if [ "$DB_DIRECTORY_AUTH" = root-socket ]; then
+            unset MYSQL_PWD
+        else
+            export MYSQL_PWD="$DB_DIRECTORY_PASSWORD"
+        fi
         kvs_ignore_user_option_files
-        "$DB_CLIENT" --connect-timeout=10 "${DB_CONN_ARGS[@]}" --batch --skip-column-names --raw "$DB_NAME" -e "$1" < /dev/null
+        local defaults=()
+        if [ "$DB_DIRECTORY_AUTH" = root-socket ]; then defaults=(--no-defaults); fi
+        "$DB_CLIENT" "${defaults[@]}" --connect-timeout=10 "${DB_DIRECTORY_CONN_ARGS[@]}" \
+            --batch --skip-column-names --raw "$DB_NAME" -e "$1" < /dev/null
     )
+}
+
+# Keep diagnostic errors useful without leaking a password echoed by a client.
+kvs_directory_error() {
+    local message=$1
+    if [ -n "$DB_PASSWORD" ]; then message=${message//"$DB_PASSWORD"/<redacted>}; fi
+    message=$(kvs_one_line "$message")
+    printf '%s' "${message:0:900}"
+}
+
+kvs_directory_decode_path() {
+    local encoded=$1 decoded
+    [[ -n "$encoded" && "$encoded" != *[!A-Fa-f0-9]* && $((${#encoded} % 2)) = 0 ]] || return 1
+    decoded=$(printf '%b' "$(printf '%s' "$encoded" | sed 's/../\\x&/g')")
+    [[ "$decoded" == /* && "$decoded" != *[$'\n\r\t']* ]] || return 1
+    printf '%s' "$decoded"
+}
+
+# Root over SSH is not the site's SQL account. Use an existing local socket
+# login only when it sees exactly the same server and complete schema metadata.
+# Never grant FILE to the site account or read root passwords from option files.
+kvs_directory_try_root() {
+    local query=$1 expected=$2 socket_path=$3 actual
+    local saved_args=("${DB_DIRECTORY_CONN_ARGS[@]}")
+
+    DB_DIRECTORY_ROOT_REASON=""
+    if [ "$(id -u)" != 0 ] || [ -z "$socket_path" ]; then
+        DB_DIRECTORY_ROOT_REASON="local root socket access requires the root OS user and a valid source socket"
+        return 1
+    fi
+    DB_DIRECTORY_CONN_ARGS=(--protocol=socket --socket="$socket_path" -u root --skip-password)
+    DB_DIRECTORY_PASSWORD=""
+    DB_DIRECTORY_AUTH="root-socket"
+    if ! actual=$(kvs_directory_query "$query" 2>&1); then
+        DB_DIRECTORY_ROOT_REASON="local root socket login failed: $(kvs_directory_error "$actual")"
+    elif [ "$actual" != "$expected" ]; then
+        DB_DIRECTORY_ROOT_REASON="local root socket metadata differs from the inspected server or schema; refusing to change database connections"
+    else
+        kvs_say "Native export uses the existing local root socket login; source server and schema verified."
+        return 0
+    fi
+    DB_DIRECTORY_CONN_ARGS=("${saved_args[@]}")
+    DB_DIRECTORY_PASSWORD=$DB_PASSWORD
+    DB_DIRECTORY_AUTH=site
+    return 1
 }
 
 kvs_directory_refuse() {
@@ -1418,13 +1474,17 @@ kvs_directory_refuse() {
 }
 
 kvs_select_database_format() {
-    local help metadata kind value extra directory_hex="unread" directory="" unsupported="" table_count=""
+    local help metadata metadata_query kind value extra directory_hex="unread" directory="" unsupported="" table_count=""
     local unsupported_details=""
-    local mysql_uid mysql_gid owner_uid escaped_path sentinel socket_hex="" socket_path=""
+    local mysql_uid mysql_gid owner_uid escaped_path sentinel socket_hex="" socket_path="" datadir_hex=""
+    local probe_query probe_error root_probe_error
 
     DB_DUMP_FORMAT=sql
     DB_DIRECTORY_TABLES=()
     DB_DIRECTORY_CONN_ARGS=("${DB_CONN_ARGS[@]}")
+    DB_DIRECTORY_PASSWORD=$DB_PASSWORD
+    DB_DIRECTORY_AUTH=site
+    DB_DIRECTORY_ROOT_REASON=""
     NATIVE_DUMP_READY=no
     if [ "$OPT_DATABASE_FORMAT" = sql ]; then
         DB_DIRECTORY_REASON="SQL format requested"
@@ -1462,7 +1522,7 @@ kvs_select_database_format() {
         kvs_directory_refuse "run the exporter as root or the local mysql OS user to create private server-writable files"
         return $?
     fi
-    if ! metadata=$(kvs_directory_query "
+    metadata_query="
 SELECT 'unsupported', SUM(total),
  COALESCE(GROUP_CONCAT(IF(total>0, CONCAT(kind, '=', total), NULL) ORDER BY kind SEPARATOR ', '), '')
 FROM (
@@ -1486,7 +1546,10 @@ FROM (
 SELECT 'count', COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();
 SELECT 'table', table_name FROM information_schema.tables WHERE table_schema=DATABASE() ORDER BY table_name;
 SELECT 'directory', COALESCE(HEX(@@secure_file_priv),'');
-SELECT 'socket', HEX(@@socket);" 2>/dev/null); then
+SELECT 'socket', HEX(@@socket);
+SELECT 'datadir', HEX(@@datadir);
+SELECT 'instance', CONCAT_WS(':', HEX(@@hostname), @@port, @@server_id, HEX(@@socket), HEX(@@datadir), HEX(VERSION()));"
+    if ! metadata=$(kvs_directory_query "$metadata_query" 2>/dev/null); then
         kvs_directory_refuse "the source metadata or secure_file_priv could not be inspected"
         return $?
     fi
@@ -1503,6 +1566,7 @@ SELECT 'socket', HEX(@@socket);" 2>/dev/null); then
                 ;;
             directory) directory_hex=$value ;;
             socket) socket_hex=$value ;;
+            datadir) datadir_hex=$value ;;
         esac
     done <<< "$metadata"
     if [[ ! "$unsupported" =~ ^[0-9]+$ ]]; then
@@ -1520,15 +1584,11 @@ SELECT 'socket', HEX(@@socket);" 2>/dev/null); then
     # Preserve the successful connection without importing unrelated dump
     # options from my.cnf. A bare localhost used the configured socket; TCP
     # and explicitly named sockets already have complete connection args.
+    socket_path=$(kvs_directory_decode_path "$socket_hex") || socket_path=""
     case $DB_HOST_RAW in
         '' | localhost)
-            if [[ -z "$socket_hex" || "$socket_hex" == *[!A-Fa-f0-9]* ]]; then
+            if [ -z "$socket_path" ]; then
                 kvs_directory_refuse "the local database socket could not be determined"
-                return $?
-            fi
-            socket_path=$(printf '%b' "$(printf '%s' "$socket_hex" | sed 's/../\\x&/g')")
-            if [[ "$socket_path" != /* || "$socket_path" == *[$'\n\r\t']* ]]; then
-                kvs_directory_refuse "the local database socket path is not supported"
                 return $?
             fi
             DB_DIRECTORY_CONN_ARGS+=(--socket="$socket_path")
@@ -1539,15 +1599,17 @@ SELECT 'socket', HEX(@@socket);" 2>/dev/null); then
         return $?
     fi
     if [ -n "$directory_hex" ]; then
-        directory=$(printf '%b' "$(printf '%s' "$directory_hex" | sed 's/../\\x&/g')")
+        directory=$(kvs_directory_decode_path "$directory_hex") || directory=""
     else
-        directory=${TMPDIR:-/tmp}
+        # systemd PrivateTmp commonly gives MariaDB a different /tmp. The
+        # server's own data filesystem also avoids staging large data in RAM.
+        directory=$(kvs_directory_decode_path "$datadir_hex") || directory=""
     fi
     if [[ "$directory" != /* || "$directory" == *[$'\n\r\t']* ]] || [ ! -d "$directory" ]; then
         kvs_directory_refuse "the allowed export directory is not available locally"
         return $?
     fi
-    NATIVE_STAGING_DIR=$(mktemp -d "$directory/kvs-native-export.XXXXXX" 2>/dev/null) || NATIVE_STAGING_DIR=""
+    NATIVE_STAGING_DIR=$(mktemp -d "${directory%/}/.kvs-native-export.XXXXXX" 2>/dev/null) || NATIVE_STAGING_DIR=""
     if [ -z "$NATIVE_STAGING_DIR" ] || ! chmod 700 "$NATIVE_STAGING_DIR" ||
         { [ "$owner_uid" = 0 ] && ! chown "$mysql_uid:$mysql_gid" "$NATIVE_STAGING_DIR"; }; then
         kvs_directory_refuse "a private mysql-owned export directory could not be created"
@@ -1556,9 +1618,21 @@ SELECT 'socket', HEX(@@socket);" 2>/dev/null); then
     escaped_path="$NATIVE_STAGING_DIR/access-probe"
     escaped_path=${escaped_path//\\/\\\\}
     escaped_path=${escaped_path//\'/\\\'}
-    if ! kvs_directory_query "SELECT 'kvs-native-export-probe' INTO OUTFILE '$escaped_path';" >/dev/null 2>&1 ||
+    probe_query="SELECT 'kvs-native-export-probe' INTO OUTFILE '$escaped_path';"
+    if ! probe_error=$(kvs_directory_query "$probe_query" 2>&1 >/dev/null); then
+        if kvs_directory_try_root "$metadata_query" "$metadata" "$socket_path"; then
+            if ! root_probe_error=$(kvs_directory_query "$probe_query" 2>&1 >/dev/null); then
+                kvs_directory_refuse "native FILE/write probe failed in $directory: $(kvs_directory_error "$probe_error"); local root probe failed: $(kvs_directory_error "$root_probe_error")"
+                return $?
+            fi
+        else
+            kvs_directory_refuse "native FILE/write probe failed in $directory: $(kvs_directory_error "$probe_error"); $DB_DIRECTORY_ROOT_REASON"
+            return $?
+        fi
+    fi
+    if [ ! -f "$NATIVE_STAGING_DIR/access-probe" ] ||
         ! read -r sentinel < "$NATIVE_STAGING_DIR/access-probe" || [ "$sentinel" != kvs-native-export-probe ]; then
-        kvs_directory_refuse "FILE access or a private directory shared with MariaDB is unavailable (check secure_file_priv and the server sandbox)"
+        kvs_directory_refuse "MariaDB wrote the probe but the exporter cannot read it in $directory; check the server filesystem namespace and directory permissions"
         return $?
     fi
     rm -f -- "$NATIVE_STAGING_DIR/access-probe"
@@ -1601,7 +1675,11 @@ kvs_prepare_directory_dump() {
     kvs_say "Exporting $DB_NAME in native MariaDB format (one consistent source connection; parallel restoration)..."
     if ! (
         # shellcheck disable=SC2030,SC2031  # Keep the password in this client subprocess only.
-        export MYSQL_PWD="$DB_PASSWORD"
+        if [ "$DB_DIRECTORY_AUTH" = root-socket ]; then
+            unset MYSQL_PWD
+        else
+            export MYSQL_PWD="$DB_DIRECTORY_PASSWORD"
+        fi
         kvs_ignore_user_option_files
         "$DB_DUMP_TOOL" --no-defaults "${native_args[@]}" "${DB_DIRECTORY_CONN_ARGS[@]}" "$DB_NAME" < /dev/null
     ) >&2; then

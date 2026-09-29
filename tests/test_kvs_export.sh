@@ -18,6 +18,8 @@ STUB_LOG="$TMP_ROOT/stub.log"
 export STUB_LOG
 # Keep the staging directory of the archive inside the fixtures.
 export TMPDIR="$TMP_ROOT"
+export STUB_NATIVE_DATADIR_HEX
+STUB_NATIVE_DATADIR_HEX=$(printf '%s' "$TMP_ROOT" | od -An -tx1 | tr -d ' \n')
 # The nginx probe looks for a binary and reads /etc/nginx otherwise; the
 # tests point it at nothing unless they test it.
 export KVS_EXPORT_NGINX_BIN="$TMP_ROOT/no-nginx"
@@ -97,6 +99,20 @@ if [ "${STUB_DB_FAIL:-no}" = yes ]; then
     echo "ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)" >&2
     exit 1
 fi
+native_root=no
+previous=''
+for arg in "$@"; do
+    if [ "$previous" = -u ] && [ "$arg" = root ]; then native_root=yes; fi
+    previous=$arg
+done
+if [ "$native_root" = yes ]; then
+    [[ "$1" = --no-defaults && " $* " == *' --protocol=socket '* && " $* " == *' --skip-password '* ]] || exit 95
+    [ -z "${MYSQL_PWD:-}" ] || exit 96
+    if [ "${STUB_NATIVE_ROOT_ACCESS:-no}" != yes ]; then
+        printf '%s\n' 'ERROR 1045 (28000): Access denied for user root (using password: NO)' >&2
+        exit 1
+    fi
+fi
 for arg in "$@"; do
     case "$arg" in
         *"SELECT 'unsupported'"*)
@@ -112,6 +128,8 @@ for arg in "$@"; do
                 'frominformation_schema.triggerswheretrigger_schema=database()' \
                 'frominformation_schema.routineswhereroutine_schema=database()' \
                 'frominformation_schema.eventswhereevent_schema=database()' \
+                "select'datadir',hex(@@datadir)" \
+                "select'instance',concat_ws(':',hex(@@hostname),@@port,@@server_id,hex(@@socket),hex(@@datadir),hex(version()))" \
                 "c.table_schema=database()andbinaryc.column_namenotregexp'^[a-za-z0-9_]{1,64}$'" \
                 "g.table_schema=c.table_schemaandg.table_name=c.table_nameandg.extralike'%generated%'" \
                 'k.table_schema=database()andk.referenced_table_nameisnotnull' \
@@ -154,13 +172,39 @@ for arg in "$@"; do
                 [[ "$identifier" =~ ^[A-Za-z0-9_]{1,64}$ ]] || invalid_identifiers=$((invalid_identifiers + 1))
             done
             add_blocker unsupported_identifiers "$invalid_identifiers"
-            printf 'unsupported\t%s\t%s\ncount\t1\ntable\tktvs_options\ndirectory\t\nsocket\t2F746D702F666978747572652E736F636B\n' "${STUB_NATIVE_UNSUPPORTED:-$unsupported}" "$details"
+            if [ "$native_root" = yes ]; then
+                add_blocker triggers "${STUB_NATIVE_ROOT_HIDDEN_TRIGGERS:-0}"
+            fi
+            printf 'unsupported\t%s\t%s\ncount\t1\ntable\tktvs_options\ndirectory\t%s\nsocket\t2F746D702F666978747572652E736F636B\ndatadir\t%s\n' \
+                "${STUB_NATIVE_UNSUPPORTED:-$unsupported}" "$details" "${STUB_NATIVE_DIRECTORY_HEX:-}" "$STUB_NATIVE_DATADIR_HEX"
+            instance=fixture
+            if [ "$native_root" = yes ]; then instance=${STUB_NATIVE_ROOT_INSTANCE:-fixture}; fi
+            printf 'instance\t%s\n' "$instance"
             exit 0
             ;;
         *'INTO OUTFILE'*)
-            [ "${STUB_NATIVE_FILE_ACCESS:-yes}" = yes ] || exit 1
             path=${arg#*INTO OUTFILE \'}
             path=${path%%\'*}
+            if [ "${STUB_NATIVE_PARTIAL_PROBE:-no}" = yes ]; then
+                if [ "$native_root" = yes ]; then
+                    printf '%s\n' 'ERROR 1086 (HY000): File already exists' >&2
+                else
+                    : > "$path"
+                    printf '%s\n' 'ERROR 1 (HY000): No space left on device' >&2
+                fi
+                exit 1
+            fi
+            file_access=${STUB_NATIVE_FILE_ACCESS:-yes}
+            if [ "$native_root" = yes ]; then file_access=${STUB_NATIVE_ROOT_FILE_ACCESS:-yes}; fi
+            if [ "$file_access" != yes ]; then
+                printf '%s\n' 'ERROR 1045 (28000): FILE access denied for the fixture account' >&2
+                exit 1
+            fi
+            if [ -n "${STUB_NATIVE_PROBE_ERROR:-}" ]; then
+                printf '%s\n' "$STUB_NATIVE_PROBE_ERROR" >&2
+                exit 1
+            fi
+            [ "${STUB_NATIVE_PROBE_INVISIBLE:-no}" != yes ] || exit 0
             printf 'kvs-native-export-probe\n' > "$path"
             exit 0
             ;;
@@ -833,12 +877,19 @@ test_native_format_selection_and_bundle_integrity() {
     cat > "$native_bin/id" <<EOF
 #!/bin/bash
 case \$1 in
-    -u) printf '%s\\n' '$test_uid' ;;
+    -u)
+        if [ "\${2:-}" = mysql ]; then printf '%s\\n' '$test_uid'
+        else printf '%s\\n' "\${STUB_NATIVE_OWNER_UID:-$test_uid}"; fi
+        ;;
     -g) printf '%s\\n' '$test_gid' ;;
     *) exit 1 ;;
 esac
 EOF
-    chmod +x "$native_bin/id"
+    cat > "$native_bin/chown" <<'EOF'
+#!/bin/bash
+printf 'chown argv:%s\n' "$*" >> "$STUB_LOG"
+EOF
+    chmod +x "$native_bin/id" "$native_bin/chown"
     export STUB_NATIVE_CAPABLE=yes
     run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
         fail "native prerequisites must be checked: $(cat "$err")"
@@ -890,7 +941,72 @@ EOF
     run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "auto must fall back without FILE access"
     assert_key "$out" db_dump_format sql
     grep -q 'FILE access' "$out" || fail "the fallback must explain unavailable FILE access"
+    export STUB_NATIVE_OWNER_UID=0 STUB_NATIVE_ROOT_ACCESS=yes
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory --gzip dump "$site" ||
+        fail "root socket access must support native export without granting FILE to the site: $(cat "$err")"
+    grep -Fq '[--protocol=socket] [--socket=/tmp/fixture.sock] [-u] [root] [--skip-password] [oldsite]' "$STUB_LOG" ||
+        fail "the dump must use the verified native root socket connection"
+    grep -Fq 'mariadb-dump env: MYSQL_PWD=[]' "$STUB_LOG" || fail "root dumps must not inherit the site password"
+    argv_lines | grep -Eq 'GRANT |ALTER USER' && fail "native exports must not change grants or authentication"
+
+    export STUB_NATIVE_ROOT_INSTANCE=another-instance
+    if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$site"; then
+        fail "root socket access must refuse a different instance"
+    fi
+    grep -Fq 'metadata differs' "$err" || fail "instance mismatch must be diagnosed"
+    [ ! -s "$out" ] || fail "an instance mismatch must not stream data"
+    unset STUB_NATIVE_ROOT_INSTANCE
+    export STUB_NATIVE_ROOT_HIDDEN_TRIGGERS=1
+    if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$site"; then
+        fail "root must not export objects missing from site metadata"
+    fi
+    grep -Fq 'metadata differs' "$err" || fail "root schema visibility mismatch must be diagnosed"
+    unset STUB_NATIVE_ROOT_HIDDEN_TRIGGERS
+
+    export STUB_NATIVE_PARTIAL_PROBE=yes
+    if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$site"; then
+        fail "a failed partial probe must stop native export"
+    fi
+    grep -Fq 'No space left on device' "$err" || fail "a root retry must not mask the original failure"
+    grep -Fq 'File already exists' "$err" || fail "a failed root retry must retain its own diagnostic"
+    unset STUB_NATIVE_PARTIAL_PROBE
+
+    export STUB_NATIVE_ROOT_ACCESS=no
+    if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$site"; then
+        fail "forced native export must fail when neither account can export"
+    fi
+    grep -Fq 'ERROR 1045' "$err" || fail "native failures must retain the database error"
+    grep -Fq 'local root socket login failed' "$err" || fail "unavailable root authentication must be explicit"
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --gzip dump "$site" || fail "auto must preserve SQL fallback with the site account"
+    argv_lines | grep -F 'mariadb-dump argv:' | grep -Fq '[-u] [kvs]' || fail "SQL fallback must retain the original site account"
+    grep -Fq "mariadb-dump env: MYSQL_PWD=[$REAL_PASSWORD]" "$STUB_LOG" || fail "SQL fallback must retain the original site password"
+    unset STUB_NATIVE_OWNER_UID STUB_NATIVE_ROOT_ACCESS
     unset STUB_NATIVE_FILE_ACCESS
+
+    mkdir "$TMP_ROOT/native-datadir" "$TMP_ROOT/native-allowed"
+    STUB_NATIVE_DATADIR_HEX=$(printf '%s' "$TMP_ROOT/native-datadir" | od -An -tx1 | tr -d ' \n')
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory detect "$site" || fail "native export must use the actual datadir"
+    argv_lines | grep -Fq "$TMP_ROOT/native-datadir/.kvs-native-export." || fail "the native probe must avoid the general TMPDIR"
+    export STUB_NATIVE_DIRECTORY_HEX
+    STUB_NATIVE_DIRECTORY_HEX=$(printf '%s' "$TMP_ROOT/native-allowed" | od -An -tx1 | tr -d ' \n')
+    run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory detect "$site" || fail "secure_file_priv must remain supported"
+    argv_lines | grep -Fq "$TMP_ROOT/native-allowed/.kvs-native-export." || fail "secure_file_priv must take precedence over datadir"
+    unset STUB_NATIVE_DIRECTORY_HEX
+
+    export STUB_NATIVE_PROBE_ERROR="ERROR 1 (HY000): Can't create/write to file (Errcode: 13 Permission denied); $REAL_PASSWORD"
+    if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$site"; then
+        fail "native export must refuse a server filesystem write failure"
+    fi
+    grep -Fq 'Permission denied' "$err" || fail "filesystem failures must retain the precise cause"
+    grep -Fq "$REAL_PASSWORD" "$err" && fail "native diagnostics must redact credentials"
+    unset STUB_NATIVE_PROBE_ERROR
+    export STUB_NATIVE_PROBE_INVISIBLE=yes
+    if run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory dump "$site"; then
+        fail "server-only files must not pass the shared-directory check"
+    fi
+    grep -Fq 'exporter cannot read' "$err" || fail "namespace mismatch must be distinct from FILE denial"
+    unset STUB_NATIVE_PROBE_INVISIBLE
+    STUB_NATIVE_DATADIR_HEX=$(printf '%s' "$TMP_ROOT" | od -An -tx1 | tr -d ' \n')
     export STUB_NATIVE_TRIGGERS=1
     run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "auto must preserve unsupported schema with SQL format"
     assert_key "$out" db_dump_format sql
@@ -945,7 +1061,7 @@ EOF
     fi
     [ ! -s "$out" ] || fail "the native dump must finish before streaming starts"
     unset STUB_NATIVE_DUMP_FAIL STUB_NATIVE_CAPABLE
-    [ -z "$(find "$TMP_ROOT" -maxdepth 1 -name 'kvs-native-export.*' -print -quit)" ] || fail "private native staging must be removed after success and failure"
+    [ -z "$(find "$TMP_ROOT" -name '.kvs-native-export.*' -print -quit)" ] || fail "private native staging must be removed after success and failure"
     pass "native selection validates prerequisites and streams only a complete checksummed bundle"
 }
 
