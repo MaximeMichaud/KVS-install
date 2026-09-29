@@ -823,18 +823,18 @@ test_the_transfer_is_counted_first_and_shown_against_the_count() {
     # end summed up.
     out=$(printf '\r              0   0%%    0.00kB/s    0:00:00 (xfr#0, ir-chk=1000/3012)\r        4000000  10%%    4.03MB/s    0:00:00 (xfr#1, ir-chk=1007/3012)\rskipping non-regular file "x"\n       32042000  84%%    3.91MB/s    0:00:07 (xfr#2029, ir-chk=979/3012)\r       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' |
         import_rsync_progress 38000000 3008 no)
-    grep -q '^  0 B of 36.2 MB (0%), 0 of 3,008 files, ? left, 0 B/s, 0 files/s, 2,012 of 3,012 entries checked, scan running, 0:00:00 elapsed$' <<< "$out" ||
+    grep -q '^  0 B of 36.2 MB (0%), 0 of 3,008 files, ? left, Copy: 0 B/s, 0 files/s; check: ? entries/s, 2,012 of 3,012 discovered entries checked, scan running, 0:00:00 elapsed$' <<< "$out" ||
         fail "the first record is shown against the totals, the scan counted: $out"
     grep -q '^skipping non-regular file "x"$' <<< "$out" || fail "what else rsync prints passes through: $out"
-    grep -q '^  Transferred 3,008 files, 36.2 MB in 0:00:0[0-9] (.* files/s)$' <<< "$out" || fail "the end is summed up: $out"
+    grep -q '^  Transferred 3,008 files, 36.2 MB in 0:00:0[0-9] (.* files/s); 3,012 entries checked$' <<< "$out" || fail "the end is summed up: $out"
     # Without totals the counts show alone, the scan still counted.
     out=$(printf '       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' | import_rsync_progress 0 0 no)
-    grep -q '^  36.2 MB, 3,008 files, .* files/s, 3,012 of 3,012 entries checked, scan done, 0:00:0[0-9] elapsed$' <<< "$out" ||
+    grep -q '^  36.2 MB, 3,008 files, Copy: .* files/s; check: .* entries/s, 3,012 of 3,012 discovered entries checked, scan done, 0:00:0[0-9] elapsed$' <<< "$out" ||
         fail "without totals the counts show alone: $out"
     # Without a scan figure (a record inside a file) the rates and the
     # time stand alone.
     out=$(printf '       32768   0%%    0.00kB/s    0:00:00  \n' | import_rsync_progress 0 0 no)
-    grep -q '^  32 kB, 0 files, 0 B/s, 0 files/s, 0:00:0[0-9] elapsed$' <<< "$out" || fail "a record without a scan figure: $out"
+    grep -q '^  32 kB, 0 files, Copy: 0 B/s, 0 files/s, 0:00:0[0-9] elapsed$' <<< "$out" || fail "a record without a scan figure: $out"
     # On a terminal two lines are rewritten in place (cursor up one line)
     # and the end replaces them with its summary.
     out=$(printf '       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' | import_rsync_progress 38000000 3008 yes | tr '\r\033' '|^')
