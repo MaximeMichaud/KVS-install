@@ -54,6 +54,10 @@ for arg in "$@"; do
         exit 0
     fi
 done
+if [ -n "${FIXTURE_LOG_READY:-}" ]; then
+    while [ ! -f "$FIXTURE_LOG_READY" ]; do sleep 0.01; done
+    printf 'KVS_IMPORT_SSH_READY\n' >&2
+fi
 printf ' 1024 100%% 1.00kB/s 0:00:01 (xfr#1)\n'
 if [ "${FIXTURE_RSYNC_STATUS:-0}" -ne 0 ]; then
     echo 'rsync: fixture connection unexpectedly closed' >&2
@@ -93,6 +97,35 @@ rm -rf "$TEST_DIR/plan"
 grep -q 'fixture connection unexpectedly closed' "$TEST_DIR/worker-logs/1.err" || fail 'worker cleanup lost its diagnostics'
 grep -Fxq 12 "$TEST_DIR/worker-logs/1.status" || fail 'worker exit code was not saved'
 echo 'PASS: worker diagnostics survive temporary file-list cleanup'
+
+# Delay opening a worker's stdout, before its stderr redirection can run.
+# This makes the child-startup race deterministic: readiness must never try
+# to read a diagnostics file that the parent has not opened yet.
+mkdir -p "$TEST_DIR/startup-plan" "$TEST_DIR/startup-logs"
+printf 'file\0' > "$TEST_DIR/startup-plan/1.list"
+mkfifo "$TEST_DIR/startup-plan/1.log"
+(
+    sleep 0.25
+    exec 3< "$TEST_DIR/startup-plan/1.log"
+    rm "$TEST_DIR/startup-plan/1.log"
+    : > "$TEST_DIR/startup-plan/1.log"
+    : > "$TEST_DIR/startup-plan/reader-ready"
+    cat <&3 >> "$TEST_DIR/startup-plan/1.log"
+) &
+reader_pid=$!
+status=0
+LC_ALL=C PATH="$TEST_DIR/bin:$PATH" FIXTURE_RSYNC_STATUS=0 \
+    FIXTURE_LOG_READY="$TEST_DIR/startup-plan/reader-ready" \
+    IMPORT_RSYNC_SERIAL_AUTH=yes IMPORT_TRANSFER_LOG_DIR="$TEST_DIR/startup-logs" \
+    import_rsync_workers "$TEST_DIR/startup-plan" 1 unused > "$TEST_DIR/startup-output" 2>&1 || status=$?
+wait "$reader_pid"
+[ "$status" -eq 0 ] || fail "delayed worker startup returned $status"
+if grep -q 'No such file or directory' "$TEST_DIR/startup-output"; then
+    fail 'SSH readiness polled diagnostics before the log existed'
+fi
+grep -Fxq KVS_IMPORT_SSH_READY "$TEST_DIR/startup-logs/1.err" || fail 'the SSH readiness marker was lost'
+grep -Fxq 0 "$TEST_DIR/startup-logs/1.status" || fail 'delayed worker status was not saved'
+echo 'PASS: delayed child startup cannot race diagnostic-file creation'
 
 # Exercise the setup caller without touching /var/www or contacting SSH.
 awk '
