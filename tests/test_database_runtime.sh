@@ -32,6 +32,7 @@ docker() {
                 }
             ' "$TEST_DIR/compose.yml" ;;
         'compose ps -a -q mariadb') echo test-container ;;
+        'inspect --format {{if .State.Health}}{{.State.Health.Status}}{{end}} test-container') database_health_fixture ;;
         inspect*) echo "${CONTAINER_STATE:-0 running}" ;;
         'compose logs --no-color --tail 500 mariadb')
             if [ -n "${DATABASE_LOG_FIXTURE:-}" ]; then
@@ -43,6 +44,18 @@ docker() {
     esac
 }
 database_docker_query() { docker "$@"; }
+# Health states answered in turn from $TEST_DIR/health, the last one for
+# good; each answer is logged. Healthy without a fixture.
+database_health_fixture() {
+    local answer=healthy
+
+    if [ -s "$TEST_DIR/health" ]; then
+        answer=$(head -n 1 "$TEST_DIR/health")
+        if [ "$(wc -l < "$TEST_DIR/health")" -gt 1 ]; then sed -i 1d "$TEST_DIR/health"; fi
+    fi
+    echo "$answer" >> "$TEST_DIR/health.answers"
+    echo "$answer"
+}
 set_env_value() {
     touch "$TEST_DIR/persisted.env"
     sed "/^$1=/d" "$TEST_DIR/persisted.env" > "$TEST_DIR/new.env"
@@ -179,7 +192,7 @@ if database_wait_ready -1 >/dev/null 2>&1; then fail 'negative timeout accepted'
 )
 grep -q 'accepts TCP connections after 720' "$TEST_DIR/unlimited.log" || fail 'long replay was not observed'
 (
-    # shellcheck disable=SC2031  # A separate test deliberately has its own clock.
+    # shellcheck disable=SC2030,SC2031  # A separate test deliberately has its own clock.
     sleep() { SECONDS=$((SECONDS + 7200)); }
     if database_wait_ready 10 > "$TEST_DIR/timeout.log" 2>&1; then fail 'explicit deadline ignored'; fi
 )
@@ -188,4 +201,29 @@ if CONTAINER_STATE='1 running' database_wait_ready 0 yes >/dev/null 2>&1; then f
 database_root_query() { return 0; }
 database_wait_ready 60 > "$TEST_DIR/ready.log"
 grep -q 'This alone does not verify an import' "$TEST_DIR/ready.log" || fail 'TCP readiness claims import completion'
+# A replay longer than the retries of the health check leaves MariaDB
+# unhealthy for up to one interval after TCP opens, and Compose refuses to
+# start the services that depend on it meanwhile: readiness waits for it.
+printf '%s\n' unhealthy unhealthy healthy > "$TEST_DIR/health"
+rm -f "$TEST_DIR/health.answers"
+(
+    # shellcheck disable=SC2030,SC2031  # Each health test advances only its own clock.
+    sleep() { SECONDS=$((SECONDS + 1)); }
+    database_wait_ready 60 > "$TEST_DIR/health.log"
+)
+[ "$(tail -n 1 "$TEST_DIR/health.answers" 2>/dev/null)" = healthy ] || fail 'readiness returned while Docker still reported MariaDB unhealthy'
+[ "$(wc -l < "$TEST_DIR/health.answers")" -eq 3 ] || fail 'readiness did not follow the health states in turn'
+grep -q 'Docker reports MariaDB unhealthy' "$TEST_DIR/health.log" || fail 'the wait for the health check is not reported'
+printf '%s\n' unhealthy > "$TEST_DIR/health"
+(
+    # shellcheck disable=SC2030,SC2031  # Each health test advances only its own clock.
+    sleep() { SECONDS=$((SECONDS + 1)); }
+    if DATABASE_HEALTH_WAIT_SECONDS=5 database_wait_ready 60 > "$TEST_DIR/health-stuck.log" 2>&1; then
+        fail 'a MariaDB that never became healthy was accepted'
+    fi
+)
+grep -q 'the services that depend on it cannot start' "$TEST_DIR/health-stuck.log" || fail 'a stuck health check is not explained'
+rm -f "$TEST_DIR/health" "$TEST_DIR/health.answers"
+database_wait_ready 60 yes > /dev/null || fail 'the one-shot status probe must not wait for the health check'
+[ ! -e "$TEST_DIR/health.answers" ] || fail 'the one-shot status probe asked for the health check'
 echo 'PASS: MariaDB memory sizing, persistence and import monitoring'

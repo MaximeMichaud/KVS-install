@@ -270,6 +270,34 @@ database_wait_timeout() {
     echo "The database container is left running. Inspect it with ./reconfigure.sh --import-status or docker compose logs mariadb." >&2
 }
 
+# Compose starts PHP-FPM, nginx and the other services on a healthy MariaDB
+# only, and refuses at once while Docker reports it unhealthy. The health
+# check fails for as long as the image replays an import (its temporary
+# server has no health check account yet): a replay longer than the five
+# retries leaves the container marked unhealthy until the first check after
+# the real server opened TCP, up to one interval later.
+database_wait_healthy() {
+    local container="$1" budget="${DATABASE_HEALTH_WAIT_SECONDS:-120}" start=$SECONDS health shown=no
+
+    while :; do
+        health=$(database_docker_query inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container" 2>/dev/null) ||
+            health=unknown
+        case "$health" in
+            healthy | '') return 0 ;;
+        esac
+        if [ "$((SECONDS - start))" -ge "$budget" ]; then
+            echo "ERROR: MariaDB answers SQL, but Docker still reports it $health after $((SECONDS - start)) seconds; the services that depend on it cannot start." >&2
+            echo "Inspect its health check with: docker inspect --format '{{json .State.Health}}' $container" >&2
+            return 1
+        fi
+        if [ "$shown" = no ]; then
+            echo "  Docker reports MariaDB $health (its health check failed during the import); waiting for the next check before starting the services that depend on it."
+            shown=yes
+        fi
+        sleep 1
+    done
+}
+
 # Wait against wall time, not an assumed two seconds per iteration. A socket
 # accepts SQL during the init replay, but readiness still requires TCP and
 # setup separately verifies its unique final SQL completion marker.
@@ -318,6 +346,7 @@ database_wait_ready() (
         if tcp_output=$(database_root_query -h 127.0.0.1 --protocol=tcp -e 'SELECT 1' 2>&1); then
             elapsed=$((SECONDS - start))
             echo "  MariaDB accepts TCP connections after $elapsed seconds. This alone does not verify an import; setup checks its completion marker separately."
+            [ "$once" = yes ] || database_wait_healthy "$container" || return 1
             return 0
         else
             tcp_status=$?
