@@ -128,7 +128,7 @@ EOF
     MODE_CHOICE=2
     configure_mode >/dev/null
     [ "$MODE" = multi ] || fail "MODE_CHOICE=2 did not select multi mode"
-    [ "$PROGRESS_TOTAL" = 12 ] || fail "multi mode retained the single-site progress total"
+    [ "$PROGRESS_TOTAL" = 13 ] || fail "multi mode retained the single-site progress total"
     grep -Fxq 'MODE=multi' .env || fail "multi mode was not persisted"
     grep -Fxq 'COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.multi.yml' .env ||
         fail "the multi-site hardening override was not persisted last"
@@ -162,7 +162,7 @@ EOF
     export MOCK_PRIMARY_REMOVE_STATUS
     configure_mode >/dev/null
     [ "$MODE" = single ] || fail "MODE_CHOICE=1 did not restore single mode"
-    [ "$PROGRESS_TOTAL" = 11 ] || fail "single mode retained the multi-site progress total"
+    [ "$PROGRESS_TOTAL" = 12 ] || fail "single mode retained the multi-site progress total"
     if grep -q '^COMPOSE_FILE=' .env; then
         fail "single mode retained the multi-site Compose override"
     fi
@@ -212,7 +212,7 @@ EOF
     MOCK_COMPOSE_VERSION=2.35.0
     configure_mode >/dev/null
     [ "$MODE" = multi ] || fail "headless re-run changed a persisted multi mode"
-    [ "$PROGRESS_TOTAL" = 12 ] || fail "headless multi re-run used the wrong progress total"
+    [ "$PROGRESS_TOTAL" = 13 ] || fail "headless multi re-run used the wrong progress total"
 )
 unset -f docker
 

@@ -782,7 +782,7 @@ test_final_compose_failure_is_fatal() {
     local output="$TMP_ROOT/compose-up-output.log"
 
     awk '
-        /^if .*log_command docker compose up -d --force-recreate; then$/ { capture = 1 }
+        /^if setup_start_runtime_services; then$/ { capture = 1 }
         capture { print }
         capture && /^fi$/ { exit }
     ' "$REPO_ROOT/docker/setup.sh" > "$block_file"
@@ -802,7 +802,7 @@ test_final_compose_failure_is_fatal() {
         # shellcheck disable=SC2034
         RESUME_IMPORT=false
         # shellcheck disable=SC2329
-        log_command() { return 1; }
+        setup_start_runtime_services() { return 1; }
         # shellcheck source=/dev/null
         source "$block_file"
         echo "unexpected continuation"
