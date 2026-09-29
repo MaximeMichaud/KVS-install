@@ -1637,14 +1637,24 @@ import_confirm() {
     fi
 }
 
-# The source is materialized before anything is built: a failed transfer
-# or extraction then costs nothing else. The directory source is copied
-# later, while MariaDB replays the dump.
+# The source is materialized before anything is built: a failed transfer,
+# extraction or copy then costs nothing else. A site directory is copied
+# here too: the nginx rewrites are looked for right after in
+# /var/www/<domain>, where its _INSTALL lands, and rules written there
+# before the copy left a directory the copy refused as not empty.
 import_fetch_source() {
     [ "$IMPORT_MODE" = true ] || return 0
     case "$IMPORT_SOURCE" in
         archive) import_fetch_archive ;;
         remote) import_fetch_remote ;;
+        directory)
+            echo "  Placing the imported site files..."
+            if ! import_place_site "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
+                echo -e "${RED}ERROR: could not place the site files${NC}"
+                exit 1
+            fi
+            return 0
+            ;;
         *) return 0 ;;
     esac
     echo ""
@@ -4172,11 +4182,12 @@ import_replace_database_volume() {
     fi
 }
 
-# Copy the imported site into the bind-mounted directory while MariaDB
-# replays the dump. Not a run_step: with gum, run_step executes its command
-# in a separate shell where functions do not exist.
+# The imported site in the bind-mounted directory, while MariaDB replays
+# the dump; a site directory was copied before the build. Not a run_step:
+# with gum, run_step executes its command in a separate shell where
+# functions do not exist.
 import_place_site_files() {
-    [ "$IMPORT_MODE" = true ] || return 0
+    [ "$IMPORT_MODE" = true ] && [ "$IMPORT_SOURCE" != directory ] || return 0
     echo "  Placing the imported site files..."
     if ! import_place_site "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
         echo -e "${RED}ERROR: could not place the site files${NC}"
