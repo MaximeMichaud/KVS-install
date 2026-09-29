@@ -52,7 +52,8 @@ database_wait_ready 0 yes
 '''
 
     def run(case):
-        env = dict(os.environ, MONITOR_CASE=case,
+        # The hung cases stop at the Docker query limit, set short here.
+        env = dict(os.environ, MONITOR_CASE=case, DOCKER_QUERY_TIMEOUT_SECONDS='3',
                    MONITOR_LIBRARY=str(root / 'docker/lib/database.sh'),
                    PATH=str(fixture) + ':' + os.environ['PATH'])
         start = time.monotonic()

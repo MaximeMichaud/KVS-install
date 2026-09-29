@@ -203,8 +203,15 @@ database_import_jobs() {
 
 # Docker metadata requests also need a deadline: the daemon may be slow even
 # before a SQL connection is attempted. Do not hide a timeout as a missing DB.
+# The deadline is for a daemon that no longer answers. A host busy with the
+# import answers late at times, and one answer later than the three seconds
+# allowed before stopped a setup during the replay or a recovery after the
+# KVS initialization. DOCKER_QUERY_TIMEOUT_SECONDS changes it.
 database_docker_query() {
-    timeout -k 1 3 docker "$@"
+    local limit="${DOCKER_QUERY_TIMEOUT_SECONDS:-30}"
+
+    [[ "$limit" =~ ^[1-9][0-9]*$ ]] || limit=30
+    timeout -k 1 "$limit" docker "$@"
 }
 
 # Keep the initial import error visible across the following startup messages.

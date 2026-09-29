@@ -78,7 +78,7 @@ database_wait_ready() {
     [ "${FAIL_WAIT:-no}" != yes ]
 }
 timeout() {
-    [ "$1" = -k ] && [ "$2" = 1 ] && [ "$3" = 3 ] || return 97
+    [ "$1" = -k ] && [ "$2" = 1 ] && [ "$3" = 30 ] || return 97
     shift 3
     printf '%s\n' "$*" >> "$METADATA_CALLS"
     [ "${FAIL_METADATA:-no}" != yes ] || return 124
