@@ -1770,7 +1770,8 @@ import_ensure_nginx_rewrites() {
         return 0
     fi
     if [ -n "$IMPORT_NGINX_CONFIG" ] && [ -s "$IMPORT_NGINX_CONFIG" ]; then
-        if ! rules=$(import_nginx_rewrites_from_config "$IMPORT_NGINX_CONFIG" "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH"); then
+        if ! rules=$(import_nginx_rewrites_from_config "$IMPORT_NGINX_CONFIG" "${IMPORT_REMOTE_DIR:-$IMPORT_OLD_PATH}" "$IMPORT_OLD_PATH" \
+            plain "${IMPORT_DETECTED_DOMAIN:-${IMPORT_SOURCE_DOMAIN:-}}"); then
             echo "ERROR: automatic nginx rewrite recovery is unsafe; no rewrite file was written." >&2
             echo "Set IMPORT_NGINX_REWRITES to a complete server-context fragment adapted for Docker, then run the same command again." >&2
             exit 1

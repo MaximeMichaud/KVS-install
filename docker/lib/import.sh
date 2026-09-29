@@ -1260,6 +1260,8 @@ import_nginx_rewrites_from_config() {
                         hostname = tolower(unquote(names[k]))
                         sub(/\.$/, "", hostname)
                         if (hostname == source_host || hostname == "www." source_host) host_matches = 1
+                        else if (hostname ~ /^[a-z0-9][a-z0-9.-]*$/) other_host = 1
+                        else any_host = 1
                     }
                 } else if (name == "root" && context == 0 && serves_site(unquote(arg))) {
                     qualifies = 1
@@ -1310,11 +1312,27 @@ import_nginx_rewrites_from_config() {
                 print "ERROR: nginx configuration syntax cannot be recovered safely; use IMPORT_NGINX_REWRITES." > "/dev/stderr"
                 exit 1
             }
+            # Whether a vhost named after the site serves its files: a vhost of
+            # another host sharing them (a CDN origin) is then left out below.
+            if (mode != "source" && source_host != "") {
+                for (file_index = 1; file_index <= nfiles; file_index++) {
+                    f = files[file_index]
+                    for (entry = 1; entry <= nodes[f]; entry++) {
+                        if (command[f, entry] != "server" || ending[f, entry] != "{" || argument[f, entry] != "") continue
+                        qualifies = 0; host_matches = 0
+                        active[f] = 1
+                        collect(f, entry + 1, closing[f, entry] - 1, 0, 0)
+                        delete active[f]
+                        if (qualifies && host_matches) site_served = 1
+                    }
+                }
+            }
             for (file_index = 1; file_index <= nfiles; file_index++) {
                 f = files[file_index]
                 for (entry = 1; entry <= nodes[f]; entry++) {
                     if (command[f, entry] != "server" || ending[f, entry] != "{" || argument[f, entry] != "") continue
                     qualifies = 0; unsafe = 0; control = 0; count = 0; routing = 0; uses_base = 0; base_matches = 0; host_matches = 0; failure = ""
+                    other_host = 0; any_host = 0
                     server_key = f SUBSEP entry
                     auth_count = 0
                     active[f] = 1
@@ -1322,8 +1340,10 @@ import_nginx_rewrites_from_config() {
                     delete active[f]
                     if (!qualifies && !(mode == "source" && uses_base && base_matches)) continue
                     # A CDN or development vhost can share the same filesystem.
-                    # Never import its routing into the original public host.
-                    if (mode == "source" && source_host != "" && !host_matches) continue
+                    # Never import its routing into the original public host. A
+                    # catch-all, wildcard or regex name, or a site no vhost is
+                    # named after, keeps the plain mode as it was.
+                    if (source_host != "" && !host_matches && (mode == "source" || (site_served && other_host && !any_host))) continue
                     matched_servers++
                     if (mode == "source" && !routing) continue
                     # An omitted authorization endpoint might hit the destination
