@@ -1722,13 +1722,47 @@ import_rsync_plan() {
     '
 }
 
+# import_remote_plan_upload <plan directory> <jobs>
+# rsync relays a --files-from list read on this side to the sender on the
+# old server, and that relay grows with the square of the list: with the
+# rsync of Debian 13, 50,000 names kept one worker from copying anything
+# for 30 s where the same list read on the old server took 3 s, and the
+# 2.6 million names of each of four workers on a site of ten million
+# files held the transfer at 0 B for hours. Copies the worker lists to a
+# new private directory of the old server, where each worker reads its
+# own, and prints that directory.
+import_remote_plan_upload() {
+    local plan="$1" jobs="$2" remote worker
+
+    # shellcheck disable=SC2016  # TMPDIR is the old server's.
+    remote=$(import_ssh 'umask 077 && mktemp -d "${TMPDIR:-/var/tmp}/kvs-import-plan.XXXXXX"' < /dev/null 2>/dev/null) || return 1
+    [[ "$remote" =~ ^/[A-Za-z0-9._/-]+/kvs-import-plan\.[A-Za-z0-9]+$ ]] || return 1
+    for ((worker = 1; worker <= jobs; worker++)); do
+        [ -s "$plan/$worker.list" ] || continue
+        if ! import_ssh "cat > '$remote/$worker.list'" < "$plan/$worker.list" 2>/dev/null; then
+            import_remote_plan_remove "$remote"
+            return 1
+        fi
+    done
+    printf '%s\n' "$remote"
+}
+
+# import_remote_plan_remove <directory>: the directory
+# import_remote_plan_upload made on the old server goes, and nothing else.
+import_remote_plan_remove() {
+    [[ "$1" =~ ^/[A-Za-z0-9._/-]+/kvs-import-plan\.[A-Za-z0-9]+$ ]] || return 0
+    import_ssh "rm -rf -- '$1'" < /dev/null > /dev/null 2>&1 || true
+}
+
 # A separate process group per rsync lets interruption stop its SSH child
 # as well. Logs stay private; a bounded tail of each supplies one aggregate
-# progress record per second to the existing progress renderer.
+# progress record per second to the existing progress renderer. With
+# IMPORT_RSYNC_REMOTE_PLAN, each worker reads its list in that directory of
+# the old server instead of having rsync relay it.
 import_rsync_workers() (
     local plan="$1" jobs="$2" rsh="$3"
     shift 3
-    local worker pid active result=0 status bytes files snapshot arg remote_program=rsync
+    local worker pid active result=0 status bytes files snapshot arg remote_program=rsync files_from
     local error_dir="${IMPORT_TRANSFER_LOG_DIR:-$plan}"
     local -a pids=() logs=() rsync_args=()
     # Keep the PID returned by $! as the session/process-group leader even
@@ -1765,9 +1799,13 @@ import_rsync_workers() (
         # Open both logs in the parent before forking. Redirections on the
         # background command itself run in the child, so readiness polling
         # can otherwise reach grep before the diagnostics file exists.
+        files_from="$plan/$worker.list"
+        if [ -n "${IMPORT_RSYNC_REMOTE_PLAN:-}" ]; then
+            files_from=":$IMPORT_RSYNC_REMOTE_PLAN/$worker.list"
+        fi
         if ! {
             setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
-                --ignore-missing-args --files-from="$plan/$worker.list" -e "$rsh" --info=progress2 --outbuf=L \
+                --ignore-missing-args --files-from="$files_from" -e "$rsh" --info=progress2 --outbuf=L \
                 < /dev/null &
             pids[worker]=$!
         } > "$plan/$worker.log" 2> "$error_dir/$worker.err"; then
@@ -2014,7 +2052,7 @@ import_remote_files() (
     local use_rsync="$3"
     local status=0
     local pattern totals count_status files=0 bytes=0 site_files site_bytes
-    local jobs="${IMPORT_TRANSFER_JOBS:-4}" worker_rsh worker_auth=no plan="" work error_dir
+    local jobs="${IMPORT_TRANSFER_JOBS:-4}" worker_rsh worker_auth=no plan="" work error_dir remote_plan=""
     local -a independent=(-o ControlMaster=no -o ControlPath=none -o Compression=no)
     local -a rsync_path=()
     local -a rsync_args=()
@@ -2042,7 +2080,7 @@ import_remote_files() (
     done
     if [ "$use_rsync" = yes ]; then
         work=$(mktemp -d) || return 1
-        trap 'rm -rf -- "$work"' EXIT
+        trap 'rm -rf -- "$work"; import_remote_plan_remove "$remote_plan"' EXIT
         error_dir=${IMPORT_TRANSFER_LOG_DIR:-$work}
         # The caller owns the private persistent directory when diagnostics
         # must survive a failure; file lists and progress logs stay temporary.
@@ -2111,9 +2149,18 @@ import_remote_files() (
                 fi
                 echo "  Transferring with up to $jobs workers sharing the authenticated SSH connection."
             fi
-            IMPORT_RSYNC_SERIAL_AUTH="$worker_auth" import_rsync_workers "$plan" "$jobs" "$worker_rsh" "${rsync_args[@]}" |
+            if remote_plan=$(import_remote_plan_upload "$plan" "$jobs"); then
+                echo "  Worker lists copied to $remote_plan on the old server, where each worker reads its own."
+            else
+                remote_plan=""
+                echo "  The worker lists could not be copied to the old server; rsync relays them, which delays the first copies on a large site."
+            fi
+            IMPORT_RSYNC_REMOTE_PLAN="$remote_plan" IMPORT_RSYNC_SERIAL_AUTH="$worker_auth" \
+                import_rsync_workers "$plan" "$jobs" "$worker_rsh" "${rsync_args[@]}" |
                 import_rsync_progress "$bytes" "$files"
             transfer_status=("${PIPESTATUS[@]}")
+            import_remote_plan_remove "$remote_plan"
+            remote_plan=""
             printf 'rsync=%s progress=%s\n' "${transfer_status[@]}" > "$error_dir/parallel.status"
             if [ "${transfer_status[1]}" -ne 0 ]; then
                 echo "ERROR: parallel transfer progress failed (status ${transfer_status[1]})" >&2
