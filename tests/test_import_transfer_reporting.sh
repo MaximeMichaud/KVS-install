@@ -179,3 +179,48 @@ import_fetch_remote > "$TEST_DIR/fetch-success"
 mapfile -t remaining < <(find "$LOG_DIR" -mindepth 1 -maxdepth 1 -type d)
 [ "${#remaining[@]}" -eq 1 ] && [ "${remaining[0]}" = "$saved" ] || fail 'success removed previous errors or left a new diagnostics directory'
 echo 'PASS: setup preserves failed diagnostics across processes and cleans successful attempts'
+
+# The size of the dump is redrawn in place while the old server reports on
+# stderr: each of its messages keeps a line of its own on the terminal
+# instead of following the size ("  Received 0 MBDumping ..."), and the
+# size is gone once the dump is in.
+screen() {
+    python3 -c '
+import sys
+data = sys.stdin.read()
+lines, line, col, i = [], [], 0, 0
+while i < len(data):
+    if data.startswith("\033[K", i):
+        del line[col:]
+        i += 3
+        continue
+    c = data[i]
+    if c == "\r":
+        col = 0
+    elif c == "\n":
+        lines.append("".join(line))
+        line, col = [], 0
+    else:
+        if col < len(line):
+            line[col] = c
+        else:
+            line.append(c)
+        col += 1
+    i += 1
+lines.append("".join(line))
+print("\n".join(lines))
+'
+}
+: > "$TEST_DIR/dump.sql.zst"
+{
+    (sleep 1; echo 'Dumping kvs with mariadb-dump, compressed with zstd' >&2; sleep 1) &
+    import_watch_file_size "$TEST_DIR/dump.sql.zst" "$!" Received
+    echo '  Dump in'
+} > "$TEST_DIR/dump-screen.raw" 2>&1
+screen < "$TEST_DIR/dump-screen.raw" > "$TEST_DIR/dump-screen"
+grep -Fxq 'Dumping kvs with mariadb-dump, compressed with zstd' "$TEST_DIR/dump-screen" ||
+    fail "the old server's message shares its line with the dump size: $(cat "$TEST_DIR/dump-screen")"
+if grep -q 'Received' "$TEST_DIR/dump-screen"; then
+    fail "the dump size stayed on the terminal after the dump: $(cat "$TEST_DIR/dump-screen")"
+fi
+echo 'PASS: the old server messages keep their own line under the dump size'

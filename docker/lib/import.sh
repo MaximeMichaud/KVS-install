@@ -2230,7 +2230,10 @@ import_remote_files() (
 
 # import_watch_file_size <file> <pid> <label>
 # Print the growing size of a file every few seconds while a process
-# runs, on one line, so a long transfer shows it is alive.
+# runs, on one line, so a long transfer shows it is alive. The cursor goes
+# back to the start of that line after each redraw: a message the process
+# prints meanwhile (the old server's "Dumping ...") covers the size and
+# keeps its own line instead of following it ("Received 0 MBDumping ...").
 import_watch_file_size() {
     local file="$1"
     local pid="$2"
@@ -2239,8 +2242,8 @@ import_watch_file_size() {
 
     while kill -0 "$pid" 2>/dev/null; do
         size=$(du -m -- "$file" 2>/dev/null | awk '{print $1}')
-        printf '\r  %s %s MB' "$label" "${size:-0}"
+        printf '\033[K  %s %s MB\r' "$label" "${size:-0}"
         sleep 3
     done
-    printf '\r'
+    printf '\033[K'
 }
