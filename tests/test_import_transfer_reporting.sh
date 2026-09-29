@@ -41,6 +41,23 @@ wait "$progress_pid"
 [ "$live" = yes ] || fail 'progress waited for a full input buffer or EOF'
 echo 'PASS: progress is displayed before the next record or EOF'
 
+# An unchanged mirror can check thousands of entries without copying data.
+# Growing incremental totals are discovered entries, not a whole-site total.
+out=$(
+    {
+        printf ' 0 0%% 0.00B/s 0:00:00 (xfr#0, ir-chk=1000/2000)\r'
+        sleep 2
+        printf ' 0 0%% 0.00B/s 0:00:02 (xfr#0, ir-chk=1000/42000)\r'
+        sleep 1
+        printf ' 0 0%% 0.00B/s 0:00:03 (xfr#0, to-chk=0/43000)\n'
+    } | import_rsync_progress 0 0 yes
+)
+grep -Eq 'Copy: 0 B/s, 0 files/s; check: [1-9][0-9,]* entries/s, 41,000 of 42,000 discovered entries checked, scan running' <<< "$out" ||
+    fail "a progressing scan with no copies must report its own rate: $out"
+grep -Eq 'Transferred 0 files, 0 B .*; 43,000 entries checked' <<< "$out" ||
+    fail "a scan-only final summary must retain the checked-entry count: $out"
+echo 'PASS: scan throughput and completion remain visible without copying files'
+
 out=$(printf 'Number of files: 5000000000\nNumber of regular files transferred: 4000000000\nTotal file size: 12000000000 bytes\nTotal transferred file size: 11000000000 bytes\n' | import_rsync_stats_totals)
 [ "$out" = $'4000000000\t11000000000\t5000000000\t12000000000' ] || fail "large totals overflowed: $out"
 echo 'PASS: totals above 32-bit integer limits'

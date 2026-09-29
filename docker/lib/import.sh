@@ -1885,7 +1885,7 @@ import_rsync_progress() {
         # the end. The rates are those of the last twenty seconds (the
         # average since the start before that); the time left is the longer
         # of the two they give.
-        function report(final,    t, elapsed, i, o, byte_rate, file_rate, left, left_files, first, second, pct) {
+        function report(final,    t, elapsed, i, o, byte_rate, file_rate, check_rate, checked, left, left_files, first, second, pct) {
             t = now()
             if (!final) {
                 if (terminal == "yes" && t == shown) return
@@ -1894,30 +1894,38 @@ import_rsync_progress() {
             shown = t
             elapsed = t - start
             if (elapsed < 0) elapsed = 0
+            checked = found - to_check
             seen_bytes[t] = bytes
             seen_files[t] = files
+            seen_checked[t] = checked
             for (i in seen_bytes) if (i < t - 20 || i > t) {
                 delete seen_bytes[i]
                 delete seen_files[i]
+                delete seen_checked[i]
             }
             o = -1
             for (i = t - 20; i < t; i++) if (i in seen_bytes) { o = i; break }
             if (o >= 0) {
                 byte_rate = (bytes - seen_bytes[o]) / (t - o)
                 file_rate = (files - seen_files[o]) / (t - o)
+                check_rate = (checked - seen_checked[o]) / (t - o)
             } else if (elapsed > 0) {
                 byte_rate = bytes / elapsed
                 file_rate = files / elapsed
+                check_rate = checked / elapsed
             } else {
                 byte_rate = 0
                 file_rate = 0
+                check_rate = 0
             }
+            if (check_rate < 0) check_rate = 0
             if (final) {
                 if (elapsed > 0) {
                     byte_rate = bytes / elapsed
                     file_rate = files / elapsed
                 }
                 first = sprintf("  Transferred %s files, %s in %s (%s/s, %s files/s)", commas(files), size(bytes), clock(elapsed), size(byte_rate), commas(file_rate))
+                if (found > 0) first = first sprintf("; %s entries checked", commas(checked))
                 if (terminal == "yes") {
                     if (drawn) printf "\r\033[1A"
                     printf "%s\033[K\n\033[K", first
@@ -1943,9 +1951,9 @@ import_rsync_progress() {
                 first = sprintf("  %s, %s files", size(bytes), commas(files))
             }
             if (found > 0) {
-                second = sprintf("  %s/s, %s files/s, %s of %s entries checked, scan %s, %s elapsed", size(byte_rate), commas(file_rate), commas(found - to_check), commas(found), (scan_done ? "done" : "running"), clock(elapsed))
+                second = sprintf("  Copy: %s/s, %s files/s; check: %s entries/s, %s of %s discovered entries checked, scan %s, %s elapsed", size(byte_rate), commas(file_rate), (elapsed > 0 ? commas(check_rate) : "?"), commas(checked), commas(found), (scan_done ? "done" : "running"), clock(elapsed))
             } else {
-                second = sprintf("  %s/s, %s files/s, %s elapsed", size(byte_rate), commas(file_rate), clock(elapsed))
+                second = sprintf("  Copy: %s/s, %s files/s, %s elapsed", size(byte_rate), commas(file_rate), clock(elapsed))
             }
             if (terminal == "yes") {
                 if (drawn) printf "\r\033[1A"
@@ -2112,7 +2120,7 @@ import_remote_files() (
                 0|24) ;;
                 *) echo "ERROR: parallel file transfer failed (status $status)" >&2; return "$status" ;;
             esac
-            echo "  Checking the whole site, catching new changes and applying deletions..."
+            echo "  Checking the whole site with one rsync, catching new changes and applying deletions..."
             # Workers never delete and never recurse into each other's lists.
             # This ordinary mirror restores directory metadata and links,
             # catches changes since planning, and removes stale files.
