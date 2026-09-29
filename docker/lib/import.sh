@@ -1762,10 +1762,18 @@ import_rsync_workers() (
         # A live site can remove a file after the plan was built. Missing
         # --files-from entries otherwise return 23 instead of vanished-file
         # status 24. The final whole-site pass still reconciles these paths.
-        setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
-            --ignore-missing-args --files-from="$plan/$worker.list" -e "$rsh" --info=progress2 --outbuf=L \
-            > "$plan/$worker.log" 2> "$error_dir/$worker.err" < /dev/null &
-        pids[worker]=$!
+        # Open both logs in the parent before forking. Redirections on the
+        # background command itself run in the child, so readiness polling
+        # can otherwise reach grep before the diagnostics file exists.
+        if ! {
+            setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
+                --ignore-missing-args --files-from="$plan/$worker.list" -e "$rsh" --info=progress2 --outbuf=L \
+                < /dev/null &
+            pids[worker]=$!
+        } > "$plan/$worker.log" 2> "$error_dir/$worker.err"; then
+            echo "ERROR: could not open logs for transfer worker $worker" >&2
+            return 1
+        fi
         if [ "${IMPORT_RSYNC_SERIAL_AUTH:-no}" = yes ]; then
             while kill -0 "${pids[worker]}" 2>/dev/null &&
                 ! grep -Fxq KVS_IMPORT_SSH_READY "$error_dir/$worker.err"; do
