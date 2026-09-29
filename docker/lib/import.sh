@@ -2051,7 +2051,11 @@ import_remote_files() (
         if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
             rsync_path=(--rsync-path="sudo -n rsync")
         fi
-        rsync_args=(-a -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
+        # -H keeps a file linked under several names as one file: copied
+        # once per name it would take more room than the site measured
+        # and the free space checked. The plan leaves the other names of
+        # a group to the final mirror, which links them without data.
+        rsync_args=(-a -H -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
             "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$IMPORT_SSH_TARGET:$dir/" "$destination/")
         if [ "$jobs" -gt 1 ] && command -v setsid >/dev/null 2>&1; then
             plan=$work
