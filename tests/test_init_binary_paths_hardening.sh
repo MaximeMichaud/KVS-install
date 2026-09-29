@@ -213,4 +213,38 @@ run_config "$site" > "$TEST_DIR/userini-again.log" 2>&1 || fail "the second run 
 cmp -s "$site/.user.ini" "$TEST_DIR/userini.first" || fail "a second run must leave .user.ini unchanged"
 if grep -Fq "now under" "$TEST_DIR/userini-again.log"; then fail "a second run must not announce a rewrite"; fi
 
+# --- plugin settings naming the old server's directory follow the site -----
+site="$TEST_DIR/plugins"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+mkdir -p "$site/admin/data/plugins/backup" "$site/admin/data/plugins/mapper" "$site/admin/data/plugins/other"
+# shellcheck disable=SC2016  # PHP code.
+php -r '
+file_put_contents($argv[1] . "/backup/data.dat", serialize(["backup_folder" => "/home/old/www/admin/data/backup",
+    "auto_backup_daily" => 1, "tod" => 0]));
+file_put_contents($argv[1] . "/mapper/data.dat", serialize(["map" => ["from" => "/home/old/www", "to" => "/srv/elsewhere"],
+    "near" => "/home/old/www2/data", "title" => "moved from /home/old/www"]));
+file_put_contents($argv[1] . "/other/data.dat", "not serialized /home/old/www/admin");
+' "$site/admin/data/plugins"
+cp "$site/admin/data/plugins/other/data.dat" "$TEST_DIR/other.dat"
+run_config "$site" > "$TEST_DIR/plugins.log" 2>&1 || fail "a site with plugin settings must be configured"
+# shellcheck disable=SC2016  # PHP code.
+php -r '
+$backup = unserialize(file_get_contents($argv[1] . "/backup/data.dat"));
+$mapper = unserialize(file_get_contents($argv[1] . "/mapper/data.dat"));
+$expected = [
+    [$backup["backup_folder"], $argv[2] . "/admin/data/backup"], [$backup["auto_backup_daily"], 1],
+    [$mapper["map"]["from"], $argv[2]], [$mapper["map"]["to"], "/srv/elsewhere"],
+    [$mapper["near"], "/home/old/www2/data"], [$mapper["title"], "moved from /home/old/www"],
+];
+foreach ($expected as [$got, $want]) {
+    if ($got !== $want) { fwrite(STDERR, "plugin setting " . var_export($got, true) . " instead of " . var_export($want, true) . "\n"); exit(1); }
+}
+' "$site/admin/data/plugins" "$site" || fail "plugin settings under the old directory must follow the site, the others stay"
+cmp -s "$site/admin/data/plugins/other/data.dat" "$TEST_DIR/other.dat" || fail "a file that is not a serialized array must stay as it is"
+grep -Fq "admin/data/plugins/backup/data.dat: settings under /home/old/www now under $site" "$TEST_DIR/plugins.log" ||
+    fail "the plugin settings rewrite must be announced"
+cp "$site/admin/data/plugins/backup/data.dat" "$TEST_DIR/backup.first"
+run_config "$site" > "$TEST_DIR/plugins-again.log" 2>&1 || fail "the second run must succeed"
+cmp -s "$site/admin/data/plugins/backup/data.dat" "$TEST_DIR/backup.first" || fail "a second run must leave the plugin settings unchanged"
+
 echo "PASS: binaries of an imported site point inside the containers"

@@ -91,6 +91,50 @@ adopt_user_ini_paths() {
     done < <(find "$KVS_PATH" -path "$KVS_PATH/contents" -prune -o -name .user.ini -type f -print0)
 }
 
+# adopt_plugin_setting_paths <old project path>
+# KVS plugins keep their settings as a serialized PHP array in
+# admin/data/plugins/<plugin>/data.dat, absolute paths included: the backup
+# plugin its backup directory, which would still name the old server's and
+# list none of the backups the site brought along. Settings naming a path
+# under the old project directory move under KVS_PATH; a file that is not a
+# plain serialized array stays as it is.
+adopt_plugin_setting_paths() {
+    local old="$1" file result
+
+    for file in "$KVS_PATH"/admin/data/plugins/*/data.dat; do
+        [ -f "$file" ] || continue
+        grep -Fq "$old" "$file" || continue
+        # shellcheck disable=SC2016  # PHP code.
+        if ! result=$(php -r '
+            [, $file, $old, $new] = $argv;
+            $data = @unserialize(file_get_contents($file), ["allowed_classes" => false]);
+            if (!is_array($data)) {
+                exit(0);
+            }
+            $changed = false;
+            $plain = true;
+            array_walk_recursive($data, function (&$value) use ($old, $new, &$changed, &$plain) {
+                if (is_object($value)) {
+                    $plain = false;
+                } elseif (is_string($value) && ($value === $old || strncmp($value, "$old/", strlen($old) + 1) === 0)) {
+                    $value = $new . substr($value, strlen($old));
+                    $changed = true;
+                }
+            });
+            if ($changed && $plain) {
+                if (file_put_contents("$file.kvs-install", serialize($data)) === false || !rename("$file.kvs-install", $file)) {
+                    exit(1);
+                }
+                echo "changed";
+            }
+        ' "$file" "$old" "$KVS_PATH"); then
+            log_warn "${file#"$KVS_PATH"/}: could not move its settings under $old to $KVS_PATH"
+            continue
+        fi
+        [ "$result" != changed ] || log_info "${file#"$KVS_PATH"/}: settings under $old now under $KVS_PATH"
+    done
+}
+
 # The single-quoted text of a define in setup_db.php, escapes included, as
 # the first line that defines the name carries it, with any spacing after
 # the comma.
@@ -115,6 +159,7 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     log_info "Project path: $KVS_PATH"
     if [ -n "$old_project_path" ] && [ "$old_project_path" != "$KVS_PATH" ]; then
         adopt_user_ini_paths "$old_project_path"
+        adopt_plugin_setting_paths "$old_project_path"
     fi
 
     # Update project title with domain
