@@ -88,6 +88,49 @@ for label in "php path: /opt/alt/php74/usr/bin/php" "ffmpeg path: /home/old/bin/
 done
 [ "$(config_value "$setup_php" project_path)" = "$site" ] || fail "project_path must still be adopted"
 
+# --- ordinary PHP spacing and either quote style survive migration ----------
+site="$TEST_DIR/quoted"
+write_site "$site" /opt/old/php /opt/old/ffmpeg /opt/old/convert /opt/old/mysqldump
+python3 - "$site/admin/include/setup.php" <<'PYFIX'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text().replace(']=', '] = ').replace('"', "'").replace('https://example.com', 'https://old.example')
+p.write_text(s)
+PYFIX
+run_config "$site" > "$TEST_DIR/quoted.log" 2>&1 || fail "single-quoted settings must migrate"
+# shellcheck disable=SC2016  # Execute the synthetic fixture as PHP.
+php -r '
+require $argv[1];
+$expected = ["project_path" => $argv[2], "project_url" => "https://example.com",
+    "memcache_server" => "127.0.0.1", "php_path" => "/usr/local/bin/php",
+    "ffmpeg_path" => "/usr/bin/ffmpeg", "image_magick_path" => "/usr/bin/convert",
+    "mysqldump_path" => "/usr/bin/mysqldump"];
+foreach ($expected as $key => $value) {
+    if (($config[$key] ?? null) !== $value) {
+        fwrite(STDERR, "Incorrect migrated setting: $key\n"); exit(1);
+    }
+}
+' "$site/admin/include/setup.php" "$site" || fail "PHP must read migrated paths and URL"
+cp "$site/admin/include/setup.php" "$TEST_DIR/quoted.first"
+run_config "$site" > /dev/null 2>&1 || fail "quoted settings must support a second run"
+cmp -s "$site/admin/include/setup.php" "$TEST_DIR/quoted.first" || fail "quoted migration must be idempotent"
+
+# A computed value cannot be rewritten safely and must not report success.
+site="$TEST_DIR/computed"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+python3 - "$site/admin/include/setup.php" <<'PYFIX'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text().replace('"/home/old/www"', '"' + str(p.parents[2]) + '" . "/wrong"')
+p.write_text(s)
+PYFIX
+if run_config "$site" > "$TEST_DIR/computed.log" 2>&1; then
+    fail "a computed project_path must stop initialization"
+fi
+grep -Fq 'Could not configure project_path' "$TEST_DIR/computed.log" || fail "missing project_path diagnostic"
+
 # --- paths the images ship, at either of their locations, are kept ---------
 site="$TEST_DIR/container"
 write_site "$site" /usr/bin/php /usr/local/bin/ffmpeg /usr/local/bin/convert /usr/bin/mariadb-dump

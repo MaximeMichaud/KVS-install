@@ -5,14 +5,14 @@ set -e
 # shellcheck disable=SC1091
 source /init/lib/common.sh
 
-# The double-quoted value of a $config key in setup.php, from the first
+# The literal value of a $config key in setup.php, from the first
 # line that sets it, with any spacing around the brackets and the equal
 # sign.
 setup_php_value() {
     local key="$1"
 
     # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
-    sed -n -E "s/^[[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p" \
+    sed -n -E "s/^[[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"][[:space:]]*;.*/\\1/p" \
         "$KVS_PATH/admin/include/setup.php" | head -n 1
 }
 
@@ -35,13 +35,7 @@ adopt_setup_php_binary() {
     for known in "$container_path" "$@"; do
         [ "$current" != "$known" ] || return 0
     done
-    # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
-    sed -E -i "s#^([[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*)\"[^\"]*\"#\\1\"$(escape_sed_replacement "$container_path")\"#" \
-        "$KVS_PATH/admin/include/setup.php"
-    if [ "$(setup_php_value "$key")" != "$container_path" ]; then
-        log_error "Could not point $key at $container_path in setup.php"
-        return 1
-    fi
+    set_setup_php_value "$key" "$container_path" || return 1
     log_info "${key%_path} path: $current is not in the container, set to $container_path"
 }
 
@@ -62,6 +56,23 @@ escape_sed_replacement() {
     printf '%s' "$value"
 }
 
+# Rewrite literal settings without evaluating the imported PHP file.
+# Keep unsupported expressions unchanged and fail before claiming success.
+set_setup_php_value() {
+    local key="$1" value="$2" encoded
+    encoded=${value//\\/\\\\}
+    encoded=${encoded//\"/\\\"}
+    encoded=${encoded//\$/\\\$}
+    encoded=$(escape_sed_replacement "$encoded")
+    # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
+    sed -E -i "s#^([[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*)(\"[^\"]*\"|'[^']*')([[:space:]]*;)#\\1\"${encoded}\"\\3#" \
+        "$KVS_PATH/admin/include/setup.php"
+    if [ "$(setup_php_value "$key")" != "$value" ]; then
+        log_error "Could not configure $key in setup.php"
+        return 1
+    fi
+}
+
 # The single-quoted text of a define in setup_db.php, escapes included, as
 # the first line that defines the name carries it, with any spacing after
 # the comma.
@@ -79,9 +90,8 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     # Replace /PATH placeholder (fresh archives)
     sed -i "s|/PATH|$KVS_PATH|g" "$KVS_PATH/admin/include/setup.php"
 
-    # Fix project_path if it was already configured for a different path
-    sed -i "s|\$config\['project_path'\]=\"[^\"]*\"|\$config['project_path']=\"$KVS_PATH\"|" \
-        "$KVS_PATH/admin/include/setup.php"
+    # Imported files can use either quote style and ordinary PHP spacing.
+    set_setup_php_value project_path "$KVS_PATH"
     log_info "Project path: $KVS_PATH"
 
     # Update project title with domain
@@ -91,15 +101,15 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
 
     # Configure project_url based on USE_WWW
     PROJECT_URL=$(get_project_url)
-    sed -i "s|\$config\['project_url'\]=\"[^\"]*\"|\$config['project_url']=\"${PROJECT_URL}\"|" \
-        "$KVS_PATH/admin/include/setup.php"
+    set_setup_php_value project_url "$PROJECT_URL"
     log_info "Project URL: $PROJECT_URL"
 
     # Keep KVS configured with localhost. Its audit plugin checks Memcached from
     # the PHP runtime as 127.0.0.1:11211; PHP and cron containers expose that
     # loopback via socat to the Docker cache service.
-    sed -i "s|\$config\['memcache_server'\]=\"[^\"]*\"|\$config['memcache_server']=\"127.0.0.1\"|" \
-        "$KVS_PATH/admin/include/setup.php"
+    if [ -n "$(setup_php_value memcache_server)" ]; then
+        set_setup_php_value memcache_server 127.0.0.1
+    fi
     log_info "Memcache: 127.0.0.1:11211 via container loopback"
 
     # The binaries as the PHP and cron images ship them (docker/php and
