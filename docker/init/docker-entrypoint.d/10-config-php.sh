@@ -73,6 +73,24 @@ set_setup_php_value() {
     fi
 }
 
+# adopt_user_ini_paths <old project path>
+# PHP-FPM applies the .user.ini files of the site on every request. One that
+# names a file under the directory the site had on the old server (an
+# auto_prepend_file above all) fails every page once the site lives at
+# KVS_PATH: point those paths at KVS_PATH. contents/ is not walked, PHP does
+# not run there and it holds most of the files.
+adopt_user_ini_paths() {
+    local old="$1" old_pattern new file
+
+    old_pattern=$(printf '%s' "$old" | sed -e 's/[][\\.^$*+?(){}|#]/\\&/g')
+    new=$(escape_sed_replacement "$KVS_PATH")
+    while IFS= read -r -d '' file; do
+        grep -Eq "${old_pattern}([/\"' ;]|\$)" "$file" || continue
+        sed -E -i "s#${old_pattern}([/\"' ;]|\$)#${new}\\1#g" "$file"
+        log_info "${file#"$KVS_PATH"/}: paths under $old now under $KVS_PATH"
+    done < <(find "$KVS_PATH" -path "$KVS_PATH/contents" -prune -o -name .user.ini -type f -print0)
+}
+
 # The single-quoted text of a define in setup_db.php, escapes included, as
 # the first line that defines the name carries it, with any spacing after
 # the comma.
@@ -91,8 +109,13 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     sed -i "s|/PATH|$KVS_PATH|g" "$KVS_PATH/admin/include/setup.php"
 
     # Imported files can use either quote style and ordinary PHP spacing.
+    old_project_path=$(setup_php_value project_path)
+    old_project_path=${old_project_path%/}
     set_setup_php_value project_path "$KVS_PATH"
     log_info "Project path: $KVS_PATH"
+    if [ -n "$old_project_path" ] && [ "$old_project_path" != "$KVS_PATH" ]; then
+        adopt_user_ini_paths "$old_project_path"
+    fi
 
     # Update project title with domain
     if [ -n "$DOMAIN" ]; then
