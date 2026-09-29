@@ -534,6 +534,7 @@ done
 echo "target \$1" >> "\$log"
 shift
 echo "command \$*" >> "\$log"
+if [ -n "\${FAKE_SSH_FAIL_COMMAND:-}" ] && [[ "\$*" == *"\$FAKE_SSH_FAIL_COMMAND"* ]]; then exit 1; fi
 if [ -n "\${FAKE_SSH_STARTUP_GUARD:-}" ]; then
     mkdir "\$FAKE_SSH_STARTUP_GUARD" 2>/dev/null || exit 255
     sleep 0.02
@@ -1282,6 +1283,59 @@ test_hard_links_arrive_as_links() {
     pass "hard links of the site arrive as links"
 }
 
+# rsync relays a --files-from list given on its side to the sender on the
+# old server, a relay that grows with the square of the list: the workers
+# of a site of several million files can copy nothing for hours. They read their
+# lists in a temporary directory of the old server, which goes afterwards;
+# when it cannot be made there, rsync relays them as before.
+test_parallel_workers_read_their_lists_on_the_old_server() {
+    local bin="$TMP_ROOT/lists-bin" site="$TMP_ROOT/lists-site" remote_tmp="$TMP_ROOT/lists-remote-tmp" i uploads
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    mkdir -p "$site/contents/screens/one" "$site/contents/screens/two" "$remote_tmp"
+    for ((i = 0; i < 12; i++)); do
+        printf 'screen %s\n' "$i" > "$site/contents/screens/one/$i.jpg"
+        printf 'screen %s\n' "$i" > "$site/contents/screens/two/$i.jpg"
+    done
+    # The --files-from each worker's rsync is given, on this side.
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+server=no
+for arg in "$@"; do [ "$arg" != --server ] || server=yes; done
+if [ "$server" = no ]; then
+    for arg in "$@"; do
+        case "$arg" in --files-from=*) printf '%s\n' "${arg#--files-from=}" >> "$LISTS_BIN/files-from.log" ;; esac
+    done
+fi
+exec "$REAL_RSYNC" "$@"
+EOF
+    chmod +x "$bin/rsync"
+    (
+        export REAL_RSYNC LISTS_BIN="$bin" TMPDIR="$remote_tmp"
+        REAL_RSYNC=$(command -v rsync)
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/lists-ctl" import_ssh_setup old.example.com 22 root "" yes
+        IMPORT_REMOTE_SUDO=no
+        IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$TMP_ROOT/lists-dest" yes > "$TMP_ROOT/lists.out" 2>&1 || exit 1
+        grep -q 'Worker lists copied to .*/kvs-import-plan\.[A-Za-z0-9]* on the old server' "$TMP_ROOT/lists.out" || exit 2
+        uploads=$(grep -c "^command cat > '$remote_tmp/kvs-import-plan\.[A-Za-z0-9]*/[1-4]\.list'$" "$bin/ssh.log")
+        [ "$uploads" -eq 4 ] || exit 3
+        [ "$(grep -c "^:$remote_tmp/kvs-import-plan\.[A-Za-z0-9]*/[1-4]\.list$" "$bin/files-from.log")" -eq 4 ] || exit 4
+        [ -z "$(ls -A "$remote_tmp")" ] || exit 5
+        diff -r "$site" "$TMP_ROOT/lists-dest" || exit 6
+        # No temporary directory on the old server: the lists are relayed.
+        rm "$bin/files-from.log"
+        FAKE_SSH_FAIL_COMMAND=mktemp IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$TMP_ROOT/lists-relayed" yes > "$TMP_ROOT/lists-relayed.out" 2>&1 || exit 7
+        grep -q 'rsync relays them' "$TMP_ROOT/lists-relayed.out" || exit 8
+        grep -q '^:' "$bin/files-from.log" && exit 9
+        [ "$(grep -c '/[1-4]\.list$' "$bin/files-from.log")" -eq 4 ] || exit 10
+        diff -r "$site" "$TMP_ROOT/lists-relayed" || exit 11
+        exit 0
+    ) || fail "parallel workers must read their lists on the old server and leave nothing there (case $?)"
+    pass "parallel workers read their lists on the old server"
+}
+
 test_parallel_interruption_stops_the_process_groups() {
     local bin="$TMP_ROOT/interrupted-bin" plan="$TMP_ROOT/interrupted-plan" i pid status=0
     mkdir -p "$bin" "$plan"
@@ -1333,6 +1387,7 @@ test_links_leaving_the_site_are_listed_and_the_copy_follows_them
 test_the_tar_stream_reports_what_the_old_server_could_not_read
 test_parallel_transfers_preserve_the_mirror
 test_hard_links_arrive_as_links
+test_parallel_workers_read_their_lists_on_the_old_server
 test_parallel_interruption_stops_the_process_groups
 
 echo "All $TESTS_RUN import source tests passed."
