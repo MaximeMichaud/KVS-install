@@ -1564,7 +1564,11 @@ import_inspect_remote() {
         echo -e "${RED}ERROR: the database of the old server does not answer; fix the access there, or dump it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP${NC}"
         exit 1
     fi
-    if [ -n "$IMPORT_REUSE_SITE_DIR" ]; then
+    # A run that stopped after the take-over is repeated with the same
+    # command: the files are then in place, recorded as imported from this
+    # source, and the directory they came from is gone.
+    if [ -n "$IMPORT_REUSE_SITE_DIR" ] && [ "$(cat "$(import_marker_file "/var/www/$DOMAIN")" 2>/dev/null)" != \
+        "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" ]; then
         import_take_over_site "$IMPORT_REUSE_SITE_DIR" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
     fi
     import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
