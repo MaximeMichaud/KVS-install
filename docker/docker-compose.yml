@@ -63,6 +63,9 @@ services:
     command:
       - "--innodb-buffer-pool-size=${MARIADB_BUFFER_POOL_SIZE:-128M}"
       - "--innodb-log-file-size=${MARIADB_REDO_LOG_SIZE:-128M}"
+      # kvs-export.sh dumps rows up to 512M; replaying one of more than
+      # 16M, the default, stopped the import with "Server has gone away".
+      - "--max-allowed-packet=1G"
     container_name: ${SITE_PREFIX:-kvs}-mariadb
     restart: unless-stopped
     ports:
