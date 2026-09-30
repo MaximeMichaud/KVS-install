@@ -593,7 +593,21 @@ fi
 [ "\$1" != -n ] || shift
 exec "\$@"
 EOF
-    chmod +x "$bin/id" "$bin/sudo"
+    # df -Pk, the free space of the old server's temporary directory, finds
+    # FAKE_DF_AVAILABLE kB there (a roomy disk by default), or no answer
+    # with FAKE_DF_FAIL; other uses of df get the real one.
+    cat > "$bin/df" <<EOF
+#!/bin/bash
+if [ "\${1:-}" = -Pk ]; then
+    [ -z "\${FAKE_DF_FAIL:-}" ] || exit 1
+    echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+    echo "fake 2147483648 1 \${FAKE_DF_AVAILABLE:-1073741824} 1% /"
+    exit 0
+fi
+PATH=\${PATH//$bin:/}
+exec df "\$@"
+EOF
+    chmod +x "$bin/id" "$bin/sudo" "$bin/df"
 }
 
 make_fake_exporter() {
@@ -1402,6 +1416,49 @@ EOF
     pass "parallel workers read their lists on the old server"
 }
 
+# The old server still runs the live site: the chunk lists only go to its
+# temporary directory when that keeps 1 GB free once they are stored.
+# Otherwise, or when df cannot tell, nothing is written there and rsync
+# relays the lists.
+test_chunk_lists_stay_off_an_old_server_short_of_room() {
+    local bin="$TMP_ROOT/room-bin" site="$TMP_ROOT/room-site" remote_tmp="$TMP_ROOT/room-tmp"
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    mkdir -p "$remote_tmp"
+    (
+        export TMPDIR="$remote_tmp" IMPORT_TRANSFER_CHUNK=2
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/room-ctl" import_ssh_setup old.example.com 22 root "" yes
+        IMPORT_REMOTE_SUDO=no
+        # Just under 1 GB free: nothing is left for the lists.
+        FAKE_DF_AVAILABLE=1048575 IMPORT_TRANSFER_JOBS=4 \
+            import_remote_files "$site" "$TMP_ROOT/room-short" yes > "$TMP_ROOT/room-short.out" 2>&1 || exit 1
+        grep -q '^  The temporary directory of the old server has [0-9.]* [MG]B free, too little for the chunk lists ([0-9]* kB) and the 1 GB its live site keeps: rsync relays each list from here' \
+            "$TMP_ROOT/room-short.out" || exit 2
+        grep -q 'Copying the chunk lists' "$TMP_ROOT/room-short.out" && exit 3
+        grep -E -q '^command .*(mktemp|tar -x)' "$bin/ssh.log" && exit 3
+        [ -z "$(ls -A "$remote_tmp")" ] || exit 4
+        diff -r "$site" "$TMP_ROOT/room-short" || exit 5
+        # df gives no answer: nothing is known, nothing goes there.
+        : > "$bin/ssh.log"
+        FAKE_DF_FAIL=yes IMPORT_TRANSFER_JOBS=4 \
+            import_remote_files "$site" "$TMP_ROOT/room-unknown" yes > "$TMP_ROOT/room-unknown.out" 2>&1 || exit 6
+        grep -q '^  The free space of the temporary directory of the old server is unknown, so the chunk lists ([0-9]* kB) stay here: rsync relays each list from here' \
+            "$TMP_ROOT/room-unknown.out" || exit 7
+        grep -E -q '^command .*(mktemp|tar -x)' "$bin/ssh.log" && exit 8
+        diff -r "$site" "$TMP_ROOT/room-unknown" || exit 9
+        # 2 GB free: the lists go there, and leave at the end.
+        FAKE_DF_AVAILABLE=2097152 IMPORT_TRANSFER_JOBS=4 \
+            import_remote_files "$site" "$TMP_ROOT/room-enough" yes > "$TMP_ROOT/room-enough.out" 2>&1 || exit 10
+        grep -q '^  Chunk lists copied to .*/kvs-import-plan\.[A-Za-z0-9]* on the old server' "$TMP_ROOT/room-enough.out" || exit 11
+        [ -z "$(ls -A "$remote_tmp")" ] || exit 12
+        diff -r "$site" "$TMP_ROOT/room-enough" || exit 13
+        exit 0
+    ) || fail "the chunk lists must stay off an old server short of room (case $?): $(tail -n 5 "$TMP_ROOT"/room-*.out)"
+    pass "the chunk lists stay off an old server short of room"
+}
+
 # An old server given by its IPv6 address: ssh takes the address as it
 # is, rsync reads host:path and took the host up to the first colon.
 test_ipv6_address_of_the_old_server() {
@@ -1876,6 +1933,7 @@ test_the_tar_stream_reports_what_the_old_server_could_not_read
 test_parallel_transfers_preserve_the_mirror
 test_hard_links_arrive_as_links
 test_parallel_workers_read_their_lists_on_the_old_server
+test_chunk_lists_stay_off_an_old_server_short_of_room
 test_ipv6_address_of_the_old_server
 test_interrupt_stops_the_planning_scan
 test_parallel_interruption_stops_the_process_groups

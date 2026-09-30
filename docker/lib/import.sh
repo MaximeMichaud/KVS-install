@@ -1881,6 +1881,20 @@ import_rsync_rechunk() {
     echo "$count"
 }
 
+# import_remote_plan_room <bytes>: whether the temporary directory of the
+# old server takes chunk lists of that size and keeps 1 GB free: the old
+# server still runs the live site, which must not run out of room because
+# of an import. Prints the free space found there, in kB, when df tells it.
+import_remote_plan_room() {
+    local free
+
+    # shellcheck disable=SC2016  # TMPDIR is the old server's.
+    free=$(import_ssh 'df -Pk "${TMPDIR:-/var/tmp}"' < /dev/null 2>/dev/null | awk 'NR == 2 { print $4 }')
+    [[ "$free" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$free"
+    [ "$free" -ge $(($1 / 1024 + 1048576)) ]
+}
+
 # import_remote_plan_dir: a new private directory on the old server for
 # the chunk lists, printed.
 import_remote_plan_dir() {
@@ -2294,7 +2308,7 @@ import_remote_files() (
     local pattern totals count_status files=0 bytes=0 site_files site_bytes
     local jobs="${IMPORT_TRANSFER_JOBS:-4}" chunk="${IMPORT_TRANSFER_CHUNK:-20000}" chunks
     local worker_rsh worker_auth=no plan="" work error_dir remote_plan="" masters="" rsync_host
-    local lists_size started relay="${IMPORT_RSYNC_RELAY_FILES:-5000}"
+    local lists_size started relay="${IMPORT_RSYNC_RELAY_FILES:-5000}" remote_free relayed
     local -a independent=(-o ControlMaster=auto -o ControlPersist=300 -o Compression=no)
     local -a rsync_path=()
     local -a rsync_args=()
@@ -2419,13 +2433,24 @@ import_remote_files() (
             # The directory is known before the upload starts, so that an
             # interruption during the upload still removes it.
             lists_size=$(du -cb -- "$plan"/*.list 2>/dev/null | awk 'END { print $1 + 0 }')
-            echo "  Copying the chunk lists ($(import_bytes_text "$lists_size")) to the old server in one stream..."
-            started=$SECONDS
-            if remote_plan=$(import_remote_plan_dir) && import_remote_plan_upload "$plan" "$remote_plan"; then
-                echo "  Chunk lists copied to $remote_plan on the old server in $((SECONDS - started)) s; the workers read them there."
+            if ! remote_free=$(import_remote_plan_room "$lists_size"); then
+                if [ -n "$remote_free" ]; then
+                    relayed="The temporary directory of the old server has $(import_bytes_text "$((remote_free * 1024))") free, too little for the chunk lists ($(import_bytes_text "$lists_size")) and the 1 GB its live site keeps"
+                else
+                    relayed="The free space of the temporary directory of the old server is unknown, so the chunk lists ($(import_bytes_text "$lists_size")) stay here"
+                fi
             else
-                import_remote_plan_remove "$remote_plan"
-                remote_plan=""
+                echo "  Copying the chunk lists ($(import_bytes_text "$lists_size")) to the old server in one stream..."
+                started=$SECONDS
+                if remote_plan=$(import_remote_plan_dir) && import_remote_plan_upload "$plan" "$remote_plan"; then
+                    echo "  Chunk lists copied to $remote_plan on the old server in $((SECONDS - started)) s; the workers read them there."
+                else
+                    import_remote_plan_remove "$remote_plan"
+                    remote_plan=""
+                    relayed="The chunk lists could not be copied to the old server"
+                fi
+            fi
+            if [ -z "$remote_plan" ]; then
                 # A relayed list delays its chunk by a time that grows with
                 # the square of its length: about 0.15 s for 5,000 names,
                 # 2.4 s for 20,000, 15 s for 50,000. Lists of 5,000 names
@@ -2440,7 +2465,7 @@ import_remote_files() (
                     fi
                     chunk=$relay
                 fi
-                echo "  The chunk lists could not be copied to the old server: rsync relays each list from here, at a cost that grows with the square of its length, so a chunk holds $(import_count_text "$chunk") files at most ($(import_count_text "$chunks") chunks)."
+                echo "  $relayed: rsync relays each list from here, at a cost that grows with the square of its length, so a chunk holds $(import_count_text "$chunk") files at most ($(import_count_text "$chunks") chunks)."
             fi
             echo "  Each rsync lists its chunk of up to $(import_count_text "$chunk") files on the old server before copying it; the first bytes follow the listing of the first chunks."
             IMPORT_RSYNC_CONTROL_DIR="$masters" IMPORT_RSYNC_REMOTE_PLAN="$remote_plan" IMPORT_RSYNC_SERIAL_AUTH="$worker_auth" \
