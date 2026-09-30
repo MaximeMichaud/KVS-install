@@ -215,6 +215,27 @@ test_prepared_dump_loads_into_the_container_database() {
     grep -q 'DEFINER=`kvs`' "$TMP_ROOT/prepared-definers.sql" && fail "the DEFINER clauses of views and triggers must be dropped"
     grep -Fq '/*!50013  SQL SECURITY DEFINER */' "$TMP_ROOT/prepared-definers.sql" || fail "the view must keep its SQL SECURITY clause"
     grep -Fq "DEFINER=\`keep\`@\`me\` in a value" "$TMP_ROOT/prepared-definers.sql" || fail "row data must never be rewritten"
+
+    # An InnoDB table converted from MyISAM on a lenient server keeps
+    # ROW_FORMAT=FIXED, which a strict MariaDB refuses to create. MyISAM
+    # keeps it, and neither a comment nor row data is touched.
+    {
+        cat "$dump"
+        printf 'CREATE TABLE `ktvs_flags_videos` (\n  `id` int(10) unsigned NOT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=FIXED;\n'
+        printf 'CREATE TABLE `ktvs_noted` (\n  `id` int(10) unsigned NOT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=FIXED COMMENT=%s;\n' "'was ROW_FORMAT=FIXED'"
+        printf 'CREATE TABLE `ktvs_legacy` (\n  `id` int(10) unsigned NOT NULL\n) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 ROW_FORMAT=FIXED;\n'
+        printf "INSERT INTO \`ktvs_options\` VALUES ('NOTE',') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=FIXED');\n"
+    } > "$TMP_ROOT/row-format.sql"
+    import_prepare_dump "$TMP_ROOT/row-format.sql" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/prepared-row-format.sql" token-5 >/dev/null ||
+        fail "a dump with ROW_FORMAT=FIXED tables must be prepared"
+    grep -Fxq ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;' "$TMP_ROOT/prepared-row-format.sql" ||
+        fail "an InnoDB table must lose ROW_FORMAT=FIXED"
+    grep -Fxq ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='was ROW_FORMAT=FIXED';" "$TMP_ROOT/prepared-row-format.sql" ||
+        fail "an InnoDB table must lose ROW_FORMAT=FIXED and keep its comment"
+    grep -Fxq ') ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 ROW_FORMAT=FIXED;' "$TMP_ROOT/prepared-row-format.sql" ||
+        fail "a MyISAM table must keep its row format"
+    grep -Fq "('NOTE',') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=FIXED')" "$TMP_ROOT/prepared-row-format.sql" ||
+        fail "row data must never be rewritten"
     pass "prepared dump loads into the container database"
 }
 

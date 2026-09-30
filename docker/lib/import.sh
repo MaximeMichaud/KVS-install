@@ -263,6 +263,22 @@ import_path_rewrite_sql() {
     done
 }
 
+# import_innodb_row_format <-|file...>: drop ROW_FORMAT=FIXED from the
+# InnoDB table definitions of a dump, on stdin (-) or in the files given.
+# A MyISAM table converted to InnoDB on a server with innodb_strict_mode off
+# keeps the clause in its definition, with a warning, and is DYNAMIC all
+# the same; the MariaDB of the stack is strict and refuses to create it
+# ("Wrong create options"), which stopped the import. MyISAM keeps it.
+import_innodb_row_format() {
+    local expression="s/^(\\) ENGINE=InnoDB( [^']*)?) ROW_FORMAT=FIXED/\\1/"
+
+    if [ "$1" = - ]; then
+        sed -E "$expression"
+    else
+        sed -E -i "$expression" "$@"
+    fi
+}
+
 # import_dump_write <output>: write stdin to the output, zstd-compressed
 # when the name ends in .zst.
 import_dump_write() {
@@ -306,7 +322,8 @@ import_prepare_dump() {
     fi
     {
         # shellcheck disable=SC2016  # The backticks are SQL quoting inside the sed program.
-        import_dump_cat "$dump" | sed -E '/^(CREATE DATABASE|USE )/d; /^SET @@(GLOBAL|SESSION)\.(GTID_PURGED|SQL_LOG_BIN)/d; /^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g'
+        import_dump_cat "$dump" | sed -E '/^(CREATE DATABASE|USE )/d; /^SET @@(GLOBAL|SESSION)\.(GTID_PURGED|SQL_LOG_BIN)/d; /^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
+            import_innodb_row_format -
         echo
         echo "-- kvs-install import"
         # --no-autocommit dumps can leave this session in manual commit mode.
