@@ -1351,9 +1351,11 @@ import_remote_load_excludes() {
 # does not fit stops the import. A size cut short or skipped is checked
 # through its upper bound, the usage of the old server's filesystem: when
 # even that fits, fine; otherwise nothing is known, so the import goes on
-# with a warning rather than refusing a site that may well fit. When the
-# destination already holds the files of an earlier pass from the same
-# source, only the changes travel: the dump alone has to fit.
+# with a warning rather than refusing a site that may well fit. When an
+# earlier pass from the same source wrote under the destination, possibly
+# cut short, the dump alone is checked here: what is left of the files is
+# only known once the transfer is planned, and import_remote_files checks
+# it then.
 import_remote_free_space_check() {
     local report="$1"
     local destination="$2"
@@ -1372,7 +1374,7 @@ import_remote_free_space_check() {
             echo -e "${RED}ERROR: not enough free space for the dump under $destination${NC}"
             return 1
         fi
-        echo "  Free space:      the files are already under $destination (earlier pass), only the changes and the dump travel"
+        echo "  Free space:      an earlier pass from the same source wrote under $destination: the dump is checked now, the files left to copy once the transfer is planned"
         return 0
     fi
     case "$status" in
@@ -1864,7 +1866,7 @@ import_native_target_supported() {
 }
 
 import_fetch_remote() {
-    local destination="/var/www/$DOMAIN" source dump extension pid transfer_status=0 transfer_logs
+    local destination="/var/www/$DOMAIN" source dump extension pid transfer_status=0 transfer_logs reserve
 
     source="ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR"
     extension=gz
@@ -1906,7 +1908,11 @@ import_fetch_remote() {
     import_destination_ready "$destination" "$source" || exit 1
     import_mark_destination "$destination" "$source" || exit 1
     transfer_logs=$(mktemp -d "$LOG_DIR/import-transfer.XXXXXX") || exit 1
-    IMPORT_TRANSFER_LOG_DIR="$transfer_logs" import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}" || transfer_status=$?
+    # The database is loaded after the files, under the same disk as in the
+    # free space check of the inspection.
+    reserve=$(import_kv "${IMPORT_REMOTE_REPORT:-}" db_size_mb) || reserve=0
+    IMPORT_TRANSFER_LOG_DIR="$transfer_logs" IMPORT_TRANSFER_RESERVE_MB="$reserve" \
+        import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}" || transfer_status=$?
     if [ "$transfer_status" -ne 0 ]; then
         echo -e "${RED}ERROR: the file transfer failed (status $transfer_status); run the same command again to resume it${NC}"
         echo "  Transfer diagnostics: $transfer_logs"

@@ -2309,6 +2309,7 @@ import_remote_files() (
     local jobs="${IMPORT_TRANSFER_JOBS:-4}" chunk="${IMPORT_TRANSFER_CHUNK:-20000}" chunks
     local worker_rsh worker_auth=no plan="" work error_dir remote_plan="" masters="" rsync_host
     local lists_size started relay="${IMPORT_RSYNC_RELAY_FILES:-5000}" remote_free relayed
+    local reserve="${IMPORT_TRANSFER_RESERVE_MB:-0}" free_mb left
     local -a independent=(-o ControlMaster=auto -o ControlPersist=300 -o Compression=no)
     local -a rsync_path=()
     local -a rsync_args=()
@@ -2395,6 +2396,19 @@ import_remote_files() (
                 echo "  To transfer:     nothing, the site's $(import_count_text "$site_files") files ($(import_bytes_text "$site_bytes")) are already here; rsync checks them"
             else
                 echo "  To transfer:     $(import_count_text "$files") files, $(import_bytes_text "$bytes") of the site's $(import_count_text "$site_files") files, $(import_bytes_text "$site_bytes")"
+                # The same command again after an interrupted transfer
+                # checked the room of the database alone, the files of the
+                # earlier pass being there: what is left to copy is only
+                # known here, and has to fit with the database loaded next
+                # before a byte is copied.
+                [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=0
+                if ! import_free_space_mb_ok "$(((bytes + 1048575) / 1048576 + reserve))" "$destination"; then
+                    free_mb=$(df -Pm -- "$destination" 2>/dev/null | awk 'NR == 2 { print $4 }')
+                    left="the transfer still copies $(import_bytes_text "$bytes")"
+                    [ "$reserve" -eq 0 ] || left="$left and the database takes about $(import_mb_text "$reserve")"
+                    echo "ERROR: not enough free space under $destination: $left, with a tenth of margin, and $(import_mb_text "$free_mb") is free; free some room, then run the same command again" >&2
+                    return 1
+                fi
             fi
         elif [ "$count_status" -eq 124 ]; then
             echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the transfer shows its counts without a whole"
