@@ -44,6 +44,8 @@ echo 'PASS: the final mirror copies regenerated files and removes paths that rem
 if [ "$EUID" -ne 0 ]; then
     printf 'restricted content\n' > "$TEST_DIR/source/restricted.txt"
     chmod 000 "$TEST_DIR/source/restricted.txt"
+    # Every list of the plan is a chunk to copy: this case has one.
+    rm -f "$TEST_DIR/plan/2.list"
     printf './restricted.txt\0' > "$TEST_DIR/plan/1.list"
     status=0
     import_rsync_workers "$TEST_DIR/plan" 1 unused -a \

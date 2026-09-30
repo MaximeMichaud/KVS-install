@@ -509,7 +509,13 @@ test_url_domain_and_key_value_helpers() {
 }
 
 # A fake ssh: records its options, ignores the target and runs the remote
-# command locally with the same stdin and stdout.
+# command locally with the same stdin and stdout. Connection sharing is
+# played with a file: a connection that finds none at its control socket
+# (-S, or the first ControlPath) authenticates ("auth" in the log) and,
+# with ControlPersist, leaves one for the next to reuse ("mux"); -O exit
+# removes it ("closed"). FAKE_SSH_INDEPENDENT_FAIL refuses a new
+# connection of its own (-S or ControlPath=none), as a server wanting a
+# password nobody gives.
 make_fake_ssh() {
     local bin="$1"
 
@@ -517,16 +523,28 @@ make_fake_ssh() {
     cat > "$bin/ssh" <<EOF
 #!/bin/bash
 log="$bin/ssh.log"
+socket="" master="" persist="" own=""
 while [ \$# -gt 0 ]; do
     case "\$1" in
         -o)
             echo "opt \$2" >> "\$log"
-            if [ "\$2" = ControlPath=none ] && [ "\${FAKE_SSH_INDEPENDENT_FAIL:-}" = yes ]; then exit 255; fi
+            case "\$2" in
+                ControlPath=*) [ -n "\$socket" ] || socket=\${2#ControlPath=} ;;
+                ControlMaster=*) [ -n "\$master" ] || master=\${2#ControlMaster=} ;;
+                ControlPersist=*) [ -n "\$persist" ] || persist=\${2#ControlPersist=} ;;
+            esac
             shift 2 ;;
+        -S) echo "socket \$2" >> "\$log"; socket=\$2; own=yes; shift 2 ;;
         -p) echo "port \$2" >> "\$log"; shift 2 ;;
         -i) echo "key \$2" >> "\$log"; shift 2 ;;
         -l) echo "login \$2" >> "\$log"; shift 2 ;;
-        -O) echo "control \$2" >> "\$log"; exit 0 ;;
+        -O)
+            echo "control \$2" >> "\$log"
+            if [ "\$2" = exit ] && [ -f "\$socket" ]; then
+                rm -f "\$socket"
+                echo "closed \$socket" >> "\$log"
+            fi
+            exit 0 ;;
         -*) echo "flag \$1" >> "\$log"; shift ;;
         *) break ;;
     esac
@@ -536,10 +554,19 @@ shift
 echo "command \$*" >> "\$log"
 sleep "\${FAKE_SSH_DELAY:-0}"
 if [ -n "\${FAKE_SSH_FAIL_COMMAND:-}" ] && [[ "\$*" == *"\$FAKE_SSH_FAIL_COMMAND"* ]]; then exit 1; fi
-if [ -n "\${FAKE_SSH_STARTUP_GUARD:-}" ]; then
-    mkdir "\$FAKE_SSH_STARTUP_GUARD" 2>/dev/null || exit 255
-    sleep 0.02
-    rmdir "\$FAKE_SSH_STARTUP_GUARD"
+if [ -n "\$socket" ] && [ "\$socket" != none ] && [ -f "\$socket" ]; then
+    echo "mux \$socket" >> "\$log"
+else
+    if [ "\${FAKE_SSH_INDEPENDENT_FAIL:-}" = yes ] && { [ -n "\$own" ] || [ "\$socket" = none ]; }; then exit 255; fi
+    echo "auth \${socket:-none}" >> "\$log"
+    if [ -n "\${FAKE_SSH_STARTUP_GUARD:-}" ]; then
+        mkdir "\$FAKE_SSH_STARTUP_GUARD" 2>/dev/null || exit 255
+        sleep 0.02
+        rmdir "\$FAKE_SSH_STARTUP_GUARD"
+    fi
+    if [ -n "\$socket" ] && [ "\$socket" != none ] && [ -n "\$persist" ] && [ "\${master:-no}" != no ]; then
+        : > "\$socket"
+    fi
 fi
 # A real sshd hands the command line to the login shell, which splits it.
 exec bash -c "\$*"
@@ -1116,8 +1143,8 @@ test_parallel_transfers_preserve_the_mirror() {
     echo literal > "$site/;leading-semicolon"
     mkdir -p "$destination"
     echo stale > "$destination/stale.txt"
-    # A wrapper around real rsync requires all four workers to have started
-    # before allowing any to finish. Serial execution cannot pass it.
+    # A wrapper around real rsync requires the first four chunks to have
+    # started before allowing any to finish. Serial execution cannot pass it.
     cat > "$bin/rsync" <<'EOF'
 #!/bin/bash
 worker=""; dry=no; server=no
@@ -1162,6 +1189,8 @@ EOF
         export REAL_RSYNC
         REAL_RSYNC=$(command -v rsync)
         export PARALLEL_BIN="$bin"
+        # Five files a chunk: the workers take several chunks each.
+        export IMPORT_TRANSFER_CHUNK=5
         PATH="$bin:$PATH"
         IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/parallel-ctl" import_ssh_setup old.example.com 2222 root "" yes
         IMPORT_REMOTE_SUDO=no
@@ -1171,7 +1200,8 @@ EOF
             cat "$TMP_ROOT/parallel.out"; exit 1;
         }
         grep -q '4 workers on separate SSH connections' "$TMP_ROOT/parallel.out" || exit 2
-        grep -q 'ControlPath=none' "$bin/worker-1" || exit 3
+        grep -q -- "-S '$TMP_ROOT/parallel-ctl/xfer\.[A-Za-z0-9]*/1'" "$bin/worker-1" || exit 3
+        [ -e "$bin/worker-5" ] || exit 3
         grep -q -- '--no-recursive --dirs --from0' "$bin/worker-1" || exit 4
         grep -q -- '--delete' "$bin/worker-1" && exit 4
         grep -q '^FINAL >f' "$TMP_ROOT/parallel.out" && exit 15
@@ -1219,16 +1249,21 @@ EOF
         # Even a server accepting just one unauthenticated connection can
         # run 32 established transfers: the remote readiness marker gates
         # the next startup while the server-side transfer barrier proves
-        # copying still overlaps.
+        # copying still overlaps. One file a chunk makes more chunks than
+        # workers, so the workers reuse their connections too.
         rm "$bin"/worker-* "$bin"/started-*
-        FAKE_SSH_STARTUP_GUARD="$TMP_ROOT/auth-guard" IMPORT_TRANSFER_JOBS=32 import_remote_files "$site" "$TMP_ROOT/parallel-32" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-32.out" 2>&1 || {
+        FAKE_SSH_STARTUP_GUARD="$TMP_ROOT/auth-guard" IMPORT_TRANSFER_CHUNK=1 IMPORT_TRANSFER_JOBS=32 import_remote_files "$site" "$TMP_ROOT/parallel-32" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-32.out" 2>&1 || {
             cat "$TMP_ROOT/parallel-32.out"; exit 25;
         }
-        [ -f "$bin/started-32" ] || exit 26
+        [ -f "$bin/started-33" ] || exit 26
         diff -r --no-dereference "$reference" "$TMP_ROOT/parallel-32" || exit 27
         grep -q KVS_IMPORT_SSH_READY "$TMP_ROOT/parallel-32.out" && exit 28
         for jobs in 0 33 -1 04 invalid; do
             IMPORT_TRANSFER_JOBS="$jobs" import_remote_files "$site" "$destination" yes > /dev/null 2>&1 && exit 14
+        done
+        for chunk in 0 1000001 -5 05 invalid; do
+            IMPORT_TRANSFER_CHUNK="$chunk" IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes > "$TMP_ROOT/chunk-invalid.out" 2>&1 && exit 31
+            grep -q 'IMPORT_TRANSFER_CHUNK must be an integer from 1 to 1000000' "$TMP_ROOT/chunk-invalid.out" || exit 32
         done
         exit 0
     ) || fail "parallel copies must match a single mirror, resume and propagate failures (case $?)"
@@ -1287,10 +1322,11 @@ test_hard_links_arrive_as_links() {
 # rsync relays a --files-from list given on its side to the sender on the
 # old server, a relay that grows with the square of the list: the workers
 # of a site of ten million files copied nothing for hours. They read their
-# lists in a temporary directory of the old server, which goes afterwards;
-# when it cannot be made there, rsync relays them as before.
+# chunk lists in a temporary directory of the old server, all copied there
+# in one stream, which goes afterwards; when it cannot be made there,
+# rsync relays them, cut into short lists whose relay stays quick.
 test_parallel_workers_read_their_lists_on_the_old_server() {
-    local bin="$TMP_ROOT/lists-bin" site="$TMP_ROOT/lists-site" remote_tmp="$TMP_ROOT/lists-remote-tmp" i uploads
+    local bin="$TMP_ROOT/lists-bin" site="$TMP_ROOT/lists-site" remote_tmp="$TMP_ROOT/lists-remote-tmp" i uploads chunks names
 
     make_fake_ssh "$bin"
     make_site "$site" "$site"
@@ -1299,39 +1335,68 @@ test_parallel_workers_read_their_lists_on_the_old_server() {
         printf 'screen %s\n' "$i" > "$site/contents/screens/one/$i.jpg"
         printf 'screen %s\n' "$i" > "$site/contents/screens/two/$i.jpg"
     done
-    # The --files-from each worker's rsync is given, on this side.
+    # The --files-from each worker's rsync is given, on this side, and the
+    # number of names in that list when the rsync starts.
     cat > "$bin/rsync" <<'EOF'
 #!/bin/bash
 server=no
 for arg in "$@"; do [ "$arg" != --server ] || server=yes; done
 if [ "$server" = no ]; then
     for arg in "$@"; do
-        case "$arg" in --files-from=*) printf '%s\n' "${arg#--files-from=}" >> "$LISTS_BIN/files-from.log" ;; esac
+        case "$arg" in
+            --files-from=*)
+                list=${arg#--files-from=}
+                printf '%s\n' "$list" >> "$LISTS_BIN/files-from.log"
+                tr -cd '\0' < "${list#:}" | wc -c >> "$LISTS_BIN/names.log"
+                ;;
+        esac
     done
 fi
 exec "$REAL_RSYNC" "$@"
 EOF
     chmod +x "$bin/rsync"
     (
-        export REAL_RSYNC LISTS_BIN="$bin" TMPDIR="$remote_tmp"
+        export REAL_RSYNC LISTS_BIN="$bin" TMPDIR="$remote_tmp" IMPORT_TRANSFER_CHUNK=5
         REAL_RSYNC=$(command -v rsync)
         PATH="$bin:$PATH"
         IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/lists-ctl" import_ssh_setup old.example.com 22 root "" yes
         IMPORT_REMOTE_SUDO=no
         IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$TMP_ROOT/lists-dest" yes > "$TMP_ROOT/lists.out" 2>&1 || exit 1
-        grep -q 'Worker lists copied to .*/kvs-import-plan\.[A-Za-z0-9]* on the old server' "$TMP_ROOT/lists.out" || exit 2
-        uploads=$(grep -c "^command cat > '$remote_tmp/kvs-import-plan\.[A-Za-z0-9]*/[1-4]\.list'$" "$bin/ssh.log")
-        [ "$uploads" -eq 4 ] || exit 3
-        [ "$(grep -c "^:$remote_tmp/kvs-import-plan\.[A-Za-z0-9]*/[1-4]\.list$" "$bin/files-from.log")" -eq 4 ] || exit 4
+        # The upload and the listing of the first chunks say what they wait for.
+        grep -q '^  Copying the chunk lists ([0-9]* kB) to the old server in one stream\.\.\.$' "$TMP_ROOT/lists.out" || exit 2
+        grep -q 'Chunk lists copied to .*/kvs-import-plan\.[A-Za-z0-9]* on the old server in [0-9]* s; the workers read them there' "$TMP_ROOT/lists.out" || exit 2
+        grep -q '^  Each rsync lists its chunk of up to 5 files on the old server before copying it' "$TMP_ROOT/lists.out" || exit 2
+        chunks=$(sed -n 's/^  Transferring \([0-9]*\) chunks .*/\1/p' "$TMP_ROOT/lists.out")
+        [ "${chunks:-0}" -gt 4 ] || exit 3
+        # One SSH session carries every list, whatever the number of chunks.
+        uploads=$(grep -c "^command tar -xmf - -C '$remote_tmp/kvs-import-plan\.[A-Za-z0-9]*'$" "$bin/ssh.log")
+        [ "$uploads" -eq 1 ] || exit 3
+        grep -q '^command cat > ' "$bin/ssh.log" && exit 3
+        [ "$(grep -c "^:$remote_tmp/kvs-import-plan\.[A-Za-z0-9]*/[0-9]*\.list$" "$bin/files-from.log")" -eq "$chunks" ] || exit 4
+        [ "$(sort -u "$bin/files-from.log" | wc -l)" -eq "$chunks" ] || exit 4
         [ -z "$(ls -A "$remote_tmp")" ] || exit 5
         diff -r "$site" "$TMP_ROOT/lists-dest" || exit 6
-        # No temporary directory on the old server: the lists are relayed.
-        rm "$bin/files-from.log"
-        FAKE_SSH_FAIL_COMMAND=mktemp IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$TMP_ROOT/lists-relayed" yes > "$TMP_ROOT/lists-relayed.out" 2>&1 || exit 7
-        grep -q 'rsync relays them' "$TMP_ROOT/lists-relayed.out" || exit 8
+        names=$(awk '{ total += $1 } END { print total + 0 }' "$bin/names.log")
+        # No temporary directory on the old server: rsync relays the lists,
+        # cut shorter first.
+        rm "$bin/files-from.log" "$bin/names.log"
+        FAKE_SSH_FAIL_COMMAND=mktemp IMPORT_RSYNC_RELAY_FILES=2 IMPORT_TRANSFER_JOBS=4 \
+            import_remote_files "$site" "$TMP_ROOT/lists-relayed" yes > "$TMP_ROOT/lists-relayed.out" 2>&1 || exit 7
+        chunks=$(sed -n 's/^  The chunk lists could not be copied to the old server: rsync relays each list from here, .*, so a chunk holds 2 files at most (\([0-9]*\) chunks)\.$/\1/p' "$TMP_ROOT/lists-relayed.out")
+        [ "${chunks:-0}" -ge $(((names + 1) / 2)) ] || exit 8
         grep -q '^:' "$bin/files-from.log" && exit 9
-        [ "$(grep -c '/[1-4]\.list$' "$bin/files-from.log")" -eq 4 ] || exit 10
+        [ "$(grep -c '/[0-9]*\.list$' "$bin/files-from.log")" -eq "$chunks" ] || exit 10
+        [ "$(sort -n "$bin/names.log" | tail -n 1)" -le 2 ] || exit 10
+        [ "$(awk '{ total += $1 } END { print total + 0 }' "$bin/names.log")" -eq "$names" ] || exit 10
         diff -r "$site" "$TMP_ROOT/lists-relayed" || exit 11
+        # A failed upload leaves nothing on the old server either. Lists
+        # already short enough are relayed as they are.
+        rm "$bin/files-from.log" "$bin/names.log"
+        FAKE_SSH_FAIL_COMMAND='tar -xmf' IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$TMP_ROOT/lists-failed-upload" yes > "$TMP_ROOT/lists-failed-upload.out" 2>&1 || exit 12
+        grep -q 'rsync relays each list from here, .*, so a chunk holds 5 files at most' "$TMP_ROOT/lists-failed-upload.out" || exit 13
+        grep -q '^:' "$bin/files-from.log" && exit 14
+        [ -z "$(ls -A "$remote_tmp")" ] || exit 15
+        diff -r "$site" "$TMP_ROOT/lists-failed-upload" || exit 16
         exit 0
     ) || fail "parallel workers must read their lists on the old server and leave nothing there (case $?)"
     pass "parallel workers read their lists on the old server"
@@ -1415,13 +1480,375 @@ EOF
     [ "$status" -eq 143 ] || fail "interruption must return TERM, got $status"
     [ "$(wc -l < "$plan/pids")" -eq 8 ] || fail "four rsync workers and their children must have started"
     while read -r pid; do
-        # A reparented child can briefly be a zombie until init reaps it;
-        # it must not be running after the scheduler returns.
-        if kill -0 "$pid" 2>/dev/null; then
-            [ "$(ps -o stat= -p "$pid" | cut -c1)" = Z ] || fail "worker child $pid survived interruption"
-        fi
+        # timeout returns once the shell it started is gone, a millisecond
+        # or so before the exit trap of the scheduler has stopped the
+        # process groups. A reparented child can briefly be a zombie until
+        # init reaps it; it must not be running once that trap is done.
+        for ((i = 0; i < 50; i++)); do
+            if ! kill -0 "$pid" 2>/dev/null || [ "$(ps -o stat= -p "$pid" | cut -c1)" = Z ]; then
+                break
+            fi
+            sleep 0.1
+        done
+        [ "$i" -lt 50 ] || fail "worker child $pid survived interruption"
     done < "$plan/pids"
     pass "interruption stops every worker and its SSH process group"
+}
+
+# The plan keeps the order of the scan and cuts it into chunks of at most
+# IMPORT_TRANSFER_CHUNK files and 1 GB of data, the size of the file list
+# each rsync builds before it copies anything, keeping directories
+# together. Toward the end the chunks shrink, so the workers finish
+# together.
+test_the_plan_cuts_the_scan_into_bounded_chunks() {
+    local plan="$TMP_ROOT/chunk-plan" chunks i names previous videos
+
+    mkdir -p "$plan"
+    {
+        for ((i = 0; i < 1000; i++)); do
+            printf 'KVS-PLAN >f+++++++++ 100 d%d/f%03d.jpg\n' $((i / 100)) "$i"
+        done
+        printf 'KVS-PLAN hf+++++++++ 100 d0/linked.jpg => d0/f000.jpg\n'
+        for ((i = 0; i < 8; i++)); do
+            printf 'KVS-PLAN >f+++++++++ 629145600 videos/v%d.mp4\n' "$i"
+        done
+        printf 'Number of files: 1009\n'
+    } | import_rsync_plan "$plan" 50 > "$TMP_ROOT/chunk-plan.out" 2>/dev/null || fail "the plan must succeed"
+    grep -qx 'Number of files: 1009' "$TMP_ROOT/chunk-plan.out" || fail "the other lines of the dry run pass through"
+    chunks=$(import_rsync_chunks "$plan" 2 50) || fail "the chunks must be written"
+    [ "$chunks" -gt 20 ] || fail "1,000 files in chunks of 50 at most make more than 20 chunks, got $chunks"
+    [ ! -e "$plan/pieces" ] && [ -z "$(find "$plan" -name '*.piece')" ] || fail "the pieces go once grouped"
+    for ((i = 1; i <= chunks; i++)); do
+        names=$(tr -cd '\0' < "$plan/$i.list" | wc -c)
+        [ "$names" -ge 1 ] && [ "$names" -le 50 ] || fail "chunk $i holds $names files, not 1 to 50"
+        videos=$(tr '\0' '\n' < "$plan/$i.list" | grep -c '^\./videos/' || true)
+        [ "$videos" -le 1 ] || fail "chunk $i holds $videos videos of 600 MB, more than 1 GB"
+    done
+    # One after the other, the chunks give the order of the scan back, and
+    # only the files needing data: the other name of a hard link is left to
+    # the final mirror.
+    {
+        for ((i = 0; i < 1000; i++)); do printf './d%d/f%03d.jpg\0' $((i / 100)) "$i"; done
+        for ((i = 0; i < 8; i++)); do printf './videos/v%d.mp4\0' "$i"; done
+    } > "$TMP_ROOT/chunk-plan.expected"
+    for ((i = 1; i <= chunks; i++)); do cat "$plan/$i.list"; done | cmp -s - "$TMP_ROOT/chunk-plan.expected" ||
+        fail "the chunks must keep the order of the scan"
+
+    # A chunk is made of whole pieces, a sixteenth of a chunk each that ends
+    # with its directory, twice that inside a large one: 6 names here. The
+    # chunks shrink toward the end, never growing again by more than one
+    # piece, down to a single piece.
+    rm -rf "$plan"
+    mkdir -p "$plan"
+    for ((i = 0; i < 1000; i++)); do
+        printf 'KVS-PLAN >f+++++++++ 100 d%d/f%03d.jpg\n' $((i / 100)) "$i"
+    done | import_rsync_plan "$plan" 48 > /dev/null 2>&1 || fail "the plan of small files must succeed"
+    chunks=$(import_rsync_chunks "$plan" 4 48)
+    [ "$(tr -cd '\0' < "$plan/1.list" | wc -c)" -eq 48 ] || fail "the first chunks are full"
+    previous=48
+    for ((i = 1; i <= chunks; i++)); do
+        names=$(tr -cd '\0' < "$plan/$i.list" | wc -c)
+        [ "$names" -le 48 ] || fail "chunk $i holds $names files, more than 48"
+        [ "$names" -le $((previous + 6)) ] || fail "chunk $i ($names files) grows by more than a piece on the one before ($previous)"
+        previous=$names
+    done
+    [ "$previous" -le 6 ] || fail "the last chunk is one piece, got $previous files"
+
+    # rsync lists the parent directories of every name, in each list that
+    # holds one: a directory smaller than a piece stays in one chunk.
+    rm -rf "$plan"
+    mkdir -p "$plan"
+    for ((i = 0; i < 1000; i++)); do
+        printf 'KVS-PLAN >f+++++++++ 100 s%03d/f%d.jpg\n' $((i / 5)) $((i % 5))
+    done | import_rsync_plan "$plan" 48 > /dev/null 2>&1 || fail "the plan of small directories must succeed"
+    chunks=$(import_rsync_chunks "$plan" 4 48)
+    for ((i = 1; i <= chunks; i++)); do
+        tr '\0' '\n' < "$plan/$i.list" | sed 's|/[^/]*$||' | sort -u
+    done | sort | uniq -d > "$TMP_ROOT/chunk-plan.split"
+    [ ! -s "$TMP_ROOT/chunk-plan.split" ] || fail "directories of 5 files spread over several chunks: $(head -n 3 "$TMP_ROOT/chunk-plan.split" | tr '\n' ' ')"
+
+    rm -rf "$plan"
+    mkdir -p "$plan"
+    printf 'Number of files: 0\n' | import_rsync_plan "$plan" 50 > /dev/null || fail "an empty plan must succeed"
+    [ "$(import_rsync_chunks "$plan" 4 50)" = 0 ] || fail "nothing to copy makes no chunk"
+    pass "the plan cuts the scan into bounded chunks in its order"
+}
+
+# When rsync has to relay the lists, whose relay grows with the square of
+# their length, they are cut shorter and keep their order.
+test_relayed_lists_are_cut_short_in_order() {
+    local plan="$TMP_ROOT/rechunk-plan" chunks i sizes=""
+
+    mkdir -p "$plan"
+    for ((i = 0; i < 7; i++)); do printf './a/%d\0' "$i"; done > "$plan/1.list"
+    for ((i = 0; i < 3; i++)); do printf './b/%d\0' "$i"; done > "$plan/2.list"
+    for ((i = 0; i < 12; i++)); do printf './c/%d\0' "$i"; done > "$plan/3.list"
+    cat "$plan/1.list" "$plan/2.list" "$plan/3.list" > "$TMP_ROOT/rechunk.expected"
+    chunks=$(import_rsync_rechunk "$plan" 5) || fail "the lists must be cut"
+    for ((i = 1; i <= chunks; i++)); do sizes+="$(tr -cd '\0' < "$plan/$i.list" | wc -c) "; done
+    [ "$sizes" = "5 2 3 5 5 2 " ] || fail "lists of 7, 3 and 12 names cut to 5 must give 5 2 3 5 5 2, got $sizes"
+    for ((i = 1; i <= chunks; i++)); do cat "$plan/$i.list"; done | cmp -s - "$TMP_ROOT/rechunk.expected" ||
+        fail "the cut lists must keep the order"
+    [ "$(find "$plan" -type f | wc -l)" -eq 6 ] || fail "only the cut lists remain"
+    pass "relayed lists are cut short in their order"
+}
+
+# Every rsync of a worker builds the file list of one chunk before it
+# copies anything, never the list of all the files of the worker: copying
+# starts once the first chunk is listed, and the next chunks are listed
+# while the first files are already there.
+test_every_rsync_copies_one_chunk_at_most() {
+    local bin="$TMP_ROOT/bounded-bin" site="$TMP_ROOT/bounded-site" destination="$TMP_ROOT/bounded-dest"
+    local i directory chunks names total=0 copied_before=0 runs
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    for directory in a b c; do
+        mkdir -p "$site/contents/screens/$directory"
+        for ((i = 0; i < 8; i++)); do
+            printf '%s %s\n' "$directory" "$i" > "$site/contents/screens/$directory/$i.jpg"
+        done
+    done
+    # A wrapper around real rsync keeps each chunk list, the local one or
+    # the one read on the old server, with the files the destination held
+    # when the rsync started.
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    case "$arg" in
+        --files-from=*)
+            list=${arg#--files-from=}
+            list=${list#:}
+            chunk=${list##*/}
+            chunk=${chunk%.list}
+            cp "$list" "$BOUNDED_BIN/list-$chunk"
+            printf '%s %s\n' "$chunk" "$(find "$BOUNDED_DEST" -type f -name '*.jpg' 2>/dev/null | wc -l)" >> "$BOUNDED_BIN/starts"
+            ;;
+    esac
+done
+exec "$REAL_RSYNC" "$@"
+EOF
+    chmod +x "$bin/rsync"
+    (
+        export REAL_RSYNC BOUNDED_BIN="$bin" BOUNDED_DEST="$destination"
+        REAL_RSYNC=$(command -v rsync)
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/bounded-ctl" import_ssh_setup old.example.com 22 root "" yes
+        IMPORT_REMOTE_SUDO=no
+        IMPORT_TRANSFER_CHUNK=4 IMPORT_TRANSFER_JOBS=2 import_remote_files "$site" "$destination" yes > "$TMP_ROOT/bounded.out" 2>&1 || exit 1
+        diff -r "$site" "$destination" > /dev/null || exit 2
+        exit 0
+    ) || fail "a transfer in chunks must copy the site (case $?): $(tail -n 5 "$TMP_ROOT/bounded.out")"
+    chunks=$(sed -n 's/^  Transferring \([0-9]*\) chunks .*/\1/p' "$TMP_ROOT/bounded.out")
+    [ "${chunks:-0}" -gt 2 ] || fail "two workers must take more than two chunks, got '${chunks:-}': $(cat "$TMP_ROOT/bounded.out")"
+    runs=$(wc -l < "$bin/starts")
+    [ "$runs" -eq "$chunks" ] || fail "one rsync a chunk: $runs runs for $chunks chunks"
+    for ((i = 1; i <= chunks; i++)); do
+        names=$(tr -cd '\0' < "$bin/list-$i" | wc -c)
+        [ "$names" -ge 1 ] && [ "$names" -le 4 ] || fail "the rsync of chunk $i was given $names files, not 1 to 4"
+        total=$((total + names))
+    done
+    [ "$total" -eq 29 ] || fail "the chunks must hold the 29 files of the site once each, got $total"
+    # A directory is not spread over the chunks: its files follow each
+    # other in the chunk lists taken in order.
+    for ((i = 1; i <= chunks; i++)); do cat "$bin/list-$i"; done | tr '\0' '\n' |
+        sed -n 's|^\./contents/screens/\([abc]\)/.*|\1|p' | uniq | tr -d '\n' | grep -qx abc ||
+        fail "the files of a directory must stay together in the chunks"
+    # Chunk 1 started on an empty destination; a later one found files the
+    # workers had already copied.
+    [ "$(awk '$1 == 1 { print $2 }' "$bin/starts")" -eq 0 ] || fail "chunk 1 must start first"
+    copied_before=$(awk -v last="$chunks" '$1 == last { print $2 }' "$bin/starts")
+    [ "${copied_before:-0}" -gt 0 ] || fail "the last chunk must be listed after the first files were copied: $(cat "$bin/starts")"
+    pass "every rsync copies one chunk at most, and copying starts with the first"
+}
+
+# Workers take the chunks in turn: while one works on a long chunk, the
+# other takes all the rest. The aggregate record adds the finished chunks
+# to the progress of the running ones and never goes back.
+test_progress_never_goes_back_across_chunks() {
+    local bin="$TMP_ROOT/turns-bin" plan="$TMP_ROOT/turns-plan" control="$TMP_ROOT/turns-ctl" i j total=0 status=0 out
+
+    mkdir -p "$bin" "$plan" "$control"
+    for ((i = 1; i <= 7; i++)); do
+        : > "$plan/$i.list"
+        for ((j = 1; j <= i; j++)); do printf './f%s-%s\0' "$i" "$j" >> "$plan/$i.list"; done
+        total=$((total + i))
+    done
+    # A stand-in for rsync: a record within each file (no file count) and
+    # one at its end, 1000 bytes a file. The rsync of chunk 1 lasts until
+    # chunk 7 has started, which the other worker reaches alone.
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+previous=""
+for arg in "$@"; do
+    case "$arg" in
+        --files-from=*) list=${arg#--files-from=} ;;
+    esac
+    # The remote shell ends with the socket of the worker's master.
+    [ "$previous" != -e ] || rsh=$arg
+    previous=$arg
+done
+chunk=${list##*/}
+chunk=${chunk%.list}
+worker=${rsh##*/}
+worker=${worker%\'}
+printf '%s %s\n' "$chunk" "$worker" >> "$TURNS_BIN/turns"
+touch "$TURNS_BIN/started-$chunk"
+if [ "$chunk" = 1 ]; then
+    for ((attempt = 0; attempt < 200; attempt++)); do
+        [ ! -e "$TURNS_BIN/started-7" ] || break
+        sleep 0.05
+    done
+fi
+names=$(tr -cd '\0' < "$list" | wc -c)
+for ((n = 1; n <= names; n++)); do
+    printf ' %d 50%% 1.00MB/s 0:00:01\r' $(((n - 1) * 1000 + 500))
+    sleep 0.2
+    printf ' %d %d%% 1.00MB/s 0:00:01 (xfr#%d, to-chk=%d/%d)\r' $((n * 1000)) $((100 * n / names)) "$n" $((names - n)) "$names"
+done
+printf ' %d 100%% 1.00MB/s 0:00:02 (xfr#%d, to-chk=0/%d)\n' $((names * 1000)) "$names" "$names"
+EOF
+    chmod +x "$bin/rsync"
+    out=$(TURNS_BIN="$bin" PATH="$bin:$PATH" IMPORT_RSYNC_CONTROL_DIR="$control" import_rsync_workers "$plan" 2 unused 2>/dev/null) || status=$?
+    [ "$status" -eq 0 ] || fail "the chunks must be copied, status $status"
+    [ "$(wc -l < "$bin/turns")" -eq 7 ] || fail "every chunk must run once: $(cat "$bin/turns")"
+    awk '$1 == 1 && $2 != 1 { bad = 1 } $1 != 1 && $2 != 2 { bad = 1 } END { exit bad }' "$bin/turns" ||
+        fail "worker 2 must take chunks 2 to 7 while worker 1 works on chunk 1: $(cat "$bin/turns")"
+    printf '%s\n' "$out" | awk -v total="$total" '
+        {
+            if (!match($0, /^ [0-9]+ 0% 0\.00B\/s 0:00:00 \(xfr#[0-9]+\)$/)) { print "not a record: " $0; bad = 1; next }
+            bytes = $1 + 0
+            files = substr($NF, 6) + 0
+            if (bytes < last_bytes || files < last_files) { print "back from " last_bytes "/" last_files " to " bytes "/" files; bad = 1 }
+            last_bytes = bytes
+            last_files = files
+            records++
+        }
+        END {
+            if (records < 4) { print "too few records: " records; bad = 1 }
+            if (last_bytes != total * 1000 || last_files != total) { print "the last record is " last_bytes "/" last_files; bad = 1 }
+            exit bad
+        }
+    ' > "$TMP_ROOT/turns.check" || fail "the aggregate progress must only grow up to the whole: $(cat "$TMP_ROOT/turns.check")"
+    printf '%s\n' "$out" | import_rsync_progress $((total * 1000)) "$total" no > "$TMP_ROOT/turns.render"
+    grep -q "^  Transferred $total files, 27 kB in " "$TMP_ROOT/turns.render" ||
+        fail "the renderer must sum up every chunk: $(cat "$TMP_ROOT/turns.render")"
+    pass "workers take the chunks in turn and the progress never goes back"
+}
+
+# With a password (sshpass), every new SSH connection authenticates, and
+# many at once meet the MaxStartups limit of sshd. Each worker keeps a
+# master connection of its own: it authenticates once, however many chunks
+# it copies, and the masters are closed at the end.
+test_a_password_run_authenticates_once_per_worker() {
+    local bin="$TMP_ROOT/auth-bin" site="$TMP_ROOT/auth-site" i chunks
+
+    make_fake_ssh "$bin"
+    cat > "$bin/sshpass" <<EOF
+#!/bin/bash
+echo "sshpass \$1" >> "$bin/sshpass.log"
+[ "\$1" != -e ] || shift
+exec "\$@"
+EOF
+    chmod +x "$bin/sshpass"
+    make_site "$site" "$site"
+    mkdir -p "$site/contents/screens"
+    for ((i = 0; i < 24; i++)); do printf 'screen %s\n' "$i" > "$site/contents/screens/$i.jpg"; done
+    (
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/auth-ctl" import_ssh_setup old.example.com 22 root "" no no "s3cret" || exit 1
+        IMPORT_REMOTE_SUDO=no
+        IMPORT_TRANSFER_CHUNK=3 IMPORT_TRANSFER_JOBS=2 import_remote_files "$site" "$TMP_ROOT/auth-dest" yes > "$TMP_ROOT/auth.out" 2>&1 || exit 2
+        diff -r "$site" "$TMP_ROOT/auth-dest" > /dev/null || exit 3
+        grep -q '2 workers on separate SSH connections' "$TMP_ROOT/auth.out" || exit 4
+        chunks=$(sed -n 's/^  Transferring \([0-9]*\) chunks .*/\1/p' "$TMP_ROOT/auth.out")
+        [ "${chunks:-0}" -gt 4 ] || exit 5
+        # Two masters, each authenticated once; every chunk but the first
+        # of worker 2 went over an open one (worker 1 took over the
+        # connection that tested the password).
+        [ "$(grep -c "^auth $TMP_ROOT/auth-ctl/xfer\.[A-Za-z0-9]*/[12]$" "$bin/ssh.log")" -eq 2 ] || exit 6
+        [ "$(grep "^auth $TMP_ROOT/auth-ctl/xfer\." "$bin/ssh.log" | sort -u | wc -l)" -eq 2 ] || exit 7
+        [ "$(grep -c "^mux $TMP_ROOT/auth-ctl/xfer\.[A-Za-z0-9]*/[12]$" "$bin/ssh.log")" -eq $((chunks - 1)) ] || exit 8
+        grep -q '^auth none$' "$bin/ssh.log" && exit 9
+        [ "$(grep -c "^closed $TMP_ROOT/auth-ctl/xfer\.[A-Za-z0-9]*/[12]$" "$bin/ssh.log")" -eq 2 ] || exit 10
+        [ -z "$(find "$TMP_ROOT/auth-ctl" -name 'xfer.*')" ] || exit 11
+        grep -q 'opt BatchMode=yes' "$bin/ssh.log" && exit 12
+        [ "$(grep -c '^sshpass -e$' "$bin/sshpass.log")" -gt "$chunks" ] || exit 13
+        exit 0
+    ) || fail "a password run must authenticate once per worker and close the masters (case $?): $(grep -E '^(auth|mux|closed) ' "$bin/ssh.log" | sort | uniq -c)"
+    pass "a password run authenticates once per worker"
+}
+
+# Ctrl-C while the workers are on a later chunk: the rsync of every worker
+# stops with its children, the SSH masters of the workers close, and the
+# chunk lists leave the old server.
+test_interruption_during_a_later_chunk_leaves_nothing_behind() {
+    local bin="$TMP_ROOT/later-bin" site="$TMP_ROOT/later-site" remote_tmp="$TMP_ROOT/later-remote-tmp"
+    local i leader start elapsed pid
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    mkdir -p "$site/contents/screens" "$remote_tmp"
+    for ((i = 0; i < 24; i++)); do printf 'screen %s\n' "$i" > "$site/contents/screens/$i.jpg"; done
+    # The rsync of chunk 5 hangs with a child, as a long transfer does.
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+chunk=""
+for arg in "$@"; do
+    case "$arg" in
+        --files-from=*) chunk=${arg##*/}; chunk=${chunk%.list} ;;
+    esac
+done
+if [ "$chunk" = 5 ]; then
+    echo "$$" >> "$LATER_BIN/pids"
+    sleep 60 &
+    echo "$!" >> "$LATER_BIN/pids"
+    touch "$LATER_BIN/hung"
+    wait
+fi
+exec "$REAL_RSYNC" "$@"
+EOF
+    chmod +x "$bin/rsync"
+    cat > "$TMP_ROOT/later-run.sh" <<EOF
+#!/bin/bash
+source "$REPO_ROOT/docker/lib/import.sh"
+export REAL_RSYNC="$(command -v rsync)" LATER_BIN="$bin" TMPDIR="$remote_tmp"
+PATH="$bin:\$PATH"
+IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/later-ctl" import_ssh_setup old.example.com 22 root "" yes
+IMPORT_REMOTE_SUDO=no
+IMPORT_TRANSFER_CHUNK=3 IMPORT_TRANSFER_JOBS=2 import_remote_files "$site" "$TMP_ROOT/later-dest" yes
+EOF
+    # A job started from a terminal: its own session, SIGINT not ignored.
+    setsid env --default-signal=INT,QUIT bash "$TMP_ROOT/later-run.sh" > "$TMP_ROOT/later.out" 2>&1 &
+    leader=$!
+    start=$SECONDS
+    while [ ! -e "$bin/hung" ] && kill -0 "$leader" 2>/dev/null && [ $((SECONDS - start)) -lt 30 ]; do sleep 0.1; done
+    if [ ! -e "$bin/hung" ]; then
+        kill -KILL -- "-$leader" 2>/dev/null || true
+        wait "$leader" 2>/dev/null || true
+        fail "the transfer never reached chunk 5: $(tail -n 5 "$TMP_ROOT/later.out")"
+    fi
+    grep -q "^  Chunk lists copied to $remote_tmp/kvs-import-plan\." "$TMP_ROOT/later.out" ||
+        fail "the chunk lists must be on the old server during the transfer: $(cat "$TMP_ROOT/later.out")"
+    kill -INT -- "-$leader"
+    start=$SECONDS
+    while kill -0 "$leader" 2>/dev/null && [ $((SECONDS - start)) -lt 20 ]; do sleep 0.2; done
+    elapsed=$((SECONDS - start))
+    kill -KILL -- "-$leader" 2>/dev/null || true
+    wait "$leader" 2>/dev/null || true
+    [ "$elapsed" -le 5 ] || fail "Ctrl-C during chunk 5 waited $elapsed s"
+    while read -r pid; do
+        if kill -0 "$pid" 2>/dev/null; then
+            [ "$(ps -o stat= -p "$pid" | cut -c1)" = Z ] || fail "the rsync of chunk 5 or its child $pid survived Ctrl-C"
+        fi
+    done < "$bin/pids"
+    pgrep -f -- "$site/" > /dev/null && fail "an rsync of the transfer survived Ctrl-C: $(pgrep -af -- "$site/")"
+    [ -z "$(ls -A "$remote_tmp")" ] || fail "the chunk lists or the work files stayed behind: $(ls -A "$remote_tmp")"
+    [ "$(grep -c "^closed $TMP_ROOT/later-ctl/xfer\.[A-Za-z0-9]*/[12]$" "$bin/ssh.log")" -eq 2 ] ||
+        fail "the SSH masters of the two workers must close: $(grep -E '^(auth|closed) ' "$bin/ssh.log")"
+    [ -z "$(find "$TMP_ROOT/later-ctl" -name 'xfer.*')" ] || fail "the socket directory of the workers must go"
+    grep -q 'Checking the whole site' "$TMP_ROOT/later.out" && fail "the final mirror must not start after Ctrl-C"
+    pass "Ctrl-C during a later chunk stops everything and leaves nothing on the old server"
 }
 
 test_archive_names_map_to_kinds_tools_and_packages
@@ -1452,5 +1879,11 @@ test_parallel_workers_read_their_lists_on_the_old_server
 test_ipv6_address_of_the_old_server
 test_interrupt_stops_the_planning_scan
 test_parallel_interruption_stops_the_process_groups
+test_the_plan_cuts_the_scan_into_bounded_chunks
+test_relayed_lists_are_cut_short_in_order
+test_every_rsync_copies_one_chunk_at_most
+test_progress_never_goes_back_across_chunks
+test_a_password_run_authenticates_once_per_worker
+test_interruption_during_a_later_chunk_leaves_nothing_behind
 
 echo "All $TESTS_RUN import source tests passed."
