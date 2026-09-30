@@ -2184,7 +2184,7 @@ import_rsync_workers() (
     return "$result"
 )
 
-# import_rsync_progress <bytes to transfer> <files to transfer> [terminal yes|no]
+# import_rsync_progress <bytes to transfer> <files to transfer> [terminal yes|no] [state file]
 # Reads the output of rsync --info=progress2 and shows the transfer
 # against the totals of its dry run: bytes and files done out of the
 # whole and the time left that follows the slower of the two, since the
@@ -2201,8 +2201,10 @@ import_rsync_workers() (
 # switches to them on that line), and its percentage is relative to the
 # files the scan has found so far. Use seconds from systime(), supported
 # by Debian mawk and gawk. A random seed is not a portable timestamp.
+# With a state file, the figures of the last record go there at the end,
+# "<bytes> <files>", for a new attempt to count what is left.
 import_rsync_progress() {
-    local total_bytes="${1:-0}" total_files="${2:-0}" terminal="${3:-}"
+    local total_bytes="${1:-0}" total_files="${2:-0}" terminal="${3:-}" state="${4:-}"
     local -a awk_options=()
 
     if [ -z "$terminal" ]; then
@@ -2211,7 +2213,7 @@ import_rsync_progress() {
     # mawk otherwise waits for a full input buffer. Its interactive mode
     # requires newline records, so normalize rsync carriage returns first.
     if awk -W version 2>&1 | grep -q '^mawk '; then awk_options=(-W interactive); fi
-    stdbuf -o0 tr '\r' '\n' | awk "${awk_options[@]}" -v total_bytes="$total_bytes" -v total_files="$total_files" -v terminal="$terminal" '
+    stdbuf -o0 tr '\r' '\n' | awk "${awk_options[@]}" -v total_bytes="$total_bytes" -v total_files="$total_files" -v terminal="$terminal" -v state="$state" '
         function now() { return systime() }
         function commas(n,    s, r) {
             s = sprintf("%.0f", int(n))
@@ -2341,7 +2343,10 @@ import_rsync_progress() {
             print
             fflush()
         }
-        END { report(1) }
+        END {
+            report(1)
+            if (state != "") printf "%.0f %.0f\n", bytes, files > state
+        }
     '
 }
 
@@ -2353,7 +2358,10 @@ import_rsync_progress() {
 # mirror use incremental recursion. Parallel workers take the chunks of a
 # complete count, stored on disk in the order of the scan, one after the
 # other, and only handle their listed files (IMPORT_TRANSFER_CHUNK files at
-# most in a chunk, 20,000 by default). The patterns are the exporter's
+# most in a chunk, 20,000 by default). A lost connection to the old server
+# starts the scan of a plan again from its beginning and the final mirror
+# again from what arrived, after the pauses a chunk gets (see
+# import_rsync_workers). The patterns are the exporter's
 # exclude_N lines, anchored at the site directory (/tmp/*, /backup): what
 # stays behind. rsync takes them as they are; the tar on the old server
 # gets them under its ./ prefix, which anchors them too, quoted for the
@@ -2373,6 +2381,7 @@ import_remote_files() (
     local worker_rsh worker_auth=no plan="" work error_dir remote_plan="" masters="" rsync_host
     local lists_size started relay="${IMPORT_RSYNC_RELAY_FILES:-5000}" remote_free relayed
     local reserve="${IMPORT_TRANSFER_RESERVE_MB:-0}" free_mb left
+    local retries="${IMPORT_TRANSFER_RETRIES:-8}" pause="${IMPORT_TRANSFER_RETRY_PAUSE:-15}" attempt delay tries done_bytes done_files
     local -a independent=(-o ControlMaster=auto -o ControlPersist=300 -o Compression=no)
     local -a rsync_path=()
     local -a rsync_args=()
@@ -2390,6 +2399,8 @@ import_remote_files() (
         return 1
     fi
     [[ "$relay" =~ ^[1-9][0-9]{0,6}$ ]] || relay=5000
+    [[ "$retries" =~ ^[0-9]{1,3}$ ]] || retries=8
+    [[ "$pause" =~ ^[0-9]{1,3}$ ]] || pause=15
     import_remote_path_check "$dir" || return 1
     mkdir -p "$destination" || return 1
     for pattern in "${patterns[@]}"; do
@@ -2440,19 +2451,32 @@ import_remote_files() (
         else
             echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
         fi
-        count_status=0
-        totals=$(IMPORT_RSYNC_PLAN="$plan" IMPORT_RSYNC_COUNT_ERROR="$error_dir/count.err" import_rsync_totals "${rsync_args[@]}") || count_status=$?
-        printf '%s\n' "$count_status" > "$error_dir/count.status"
-        if [ -n "$plan" ]; then
+        # The scan of a plan reads the whole site on the old server, long
+        # enough on millions of files to lose the connection on the way;
+        # running the import again would take a new dump first. It starts
+        # again after a pause, with an empty plan: a scan that ended early
+        # leaves pieces a shorter one would not overwrite.
+        attempt=1
+        while :; do
+            count_status=0
+            totals=$(IMPORT_RSYNC_PLAN="$plan" IMPORT_RSYNC_COUNT_ERROR="$error_dir/count.err" import_rsync_totals "${rsync_args[@]}") || count_status=$?
+            printf '%s\n' "$count_status" > "$error_dir/count.status"
+            [ -n "$plan" ] || break
             case "$count_status" in
-                0|24) ;;
-                *)
-                    cat "$error_dir/count.err" >&2
-                    echo "ERROR: parallel transfer planning failed (status $count_status); no partial plan or final mirror was started" >&2
-                    return "$count_status"
-                    ;;
+                0|24) break ;;
             esac
-        fi
+            cat "$error_dir/count.err" >&2
+            if ! delay=$(import_rsync_retry_delay "$count_status" "$attempt" "$retries" "$pause"); then
+                tries=""
+                [ "$attempt" -le 1 ] || tries=" after $attempt attempts"
+                echo "ERROR: parallel transfer planning failed (status $count_status)$tries; no partial plan or final mirror was started" >&2
+                return "$count_status"
+            fi
+            echo "  The planning scan lost its connection to the old server (rsync status $count_status); attempt $((attempt + 1)) of $((retries + 1)) in $delay s." >&2
+            rm -f -- "$plan"/*.piece "$plan/pieces"
+            sleep "$delay"
+            attempt=$((attempt + 1))
+        done
         if [ -n "$totals" ]; then
             IFS=$'\t' read -r files bytes site_files site_bytes <<< "$totals"
             if [ "$files" -eq 0 ] && [ "$bytes" -eq 0 ]; then
@@ -2570,15 +2594,36 @@ import_remote_files() (
             bytes=0
             files=0
         fi
-        rsync "${rsync_args[@]}" --info=progress2 2> "$error_dir/final-rsync.err" | import_rsync_progress "$bytes" "$files"
-        transfer_status=("${PIPESTATUS[@]}")
-        printf 'rsync=%s progress=%s\n' "${transfer_status[@]}" > "$error_dir/final.status"
-        cat "$error_dir/final-rsync.err" >&2
-        if [ "${transfer_status[1]}" -ne 0 ]; then
-            echo "ERROR: final transfer progress failed (status ${transfer_status[1]})" >&2
-            return "${transfer_status[1]}"
-        fi
-        status=${transfer_status[0]}
+        # With one worker this rsync is the whole transfer, and after the
+        # workers it checks every file of the site, both long on a large
+        # site. A lost connection starts it again after a pause: what
+        # arrived stays, a file cut short too (the partial directory), and
+        # the count goes on with what is left.
+        attempt=1
+        while :; do
+            rm -f -- "$work/final.progress"
+            rsync "${rsync_args[@]}" --info=progress2 2> "$error_dir/final-rsync.err" |
+                import_rsync_progress "$bytes" "$files" "" "$work/final.progress"
+            transfer_status=("${PIPESTATUS[@]}")
+            printf 'rsync=%s progress=%s\n' "${transfer_status[@]}" > "$error_dir/final.status"
+            cat "$error_dir/final-rsync.err" >&2
+            if [ "${transfer_status[1]}" -ne 0 ]; then
+                echo "ERROR: final transfer progress failed (status ${transfer_status[1]})" >&2
+                return "${transfer_status[1]}"
+            fi
+            status=${transfer_status[0]}
+            delay=$(import_rsync_retry_delay "$status" "$attempt" "$retries" "$pause") || break
+            echo "  The final rsync lost its connection to the old server (rsync status $status); attempt $((attempt + 1)) of $((retries + 1)) in $delay s, from what already arrived." >&2
+            if [ -s "$work/final.progress" ] && read -r done_bytes done_files < "$work/final.progress" &&
+                [[ "$done_bytes" =~ ^[0-9]+$ ]] && [[ "$done_files" =~ ^[0-9]+$ ]]; then
+                bytes=$((bytes > done_bytes ? bytes - done_bytes : 0))
+                files=$((files > done_files ? files - done_files : 0))
+            fi
+            sleep "$delay"
+            attempt=$((attempt + 1))
+        done
+        tries=""
+        [ "$attempt" -le 1 ] || tries=" after $attempt attempts"
         case "$status" in
             24)
                 echo "  Some files vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
@@ -2588,7 +2633,7 @@ import_remote_files() (
                 echo "ERROR: rsync completed only part of the transfer (status 23); see the errors above, fix the reported cause and run the same command again" >&2
                 ;;
             0) ;;
-            *) echo "ERROR: final rsync synchronization failed (status $status); see the errors above" >&2 ;;
+            *) echo "ERROR: final rsync synchronization failed (status $status)$tries; see the errors above" >&2 ;;
         esac
         return "$status"
     fi

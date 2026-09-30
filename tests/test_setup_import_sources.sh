@@ -1248,7 +1248,7 @@ EOF
         echo stale > "$destination/stale.txt"
         for plan_status in 124 12 23; do
             status=0
-            PARALLEL_PLAN_STATUS="$plan_status" PARALLEL_SHORT_PLAN=yes IMPORT_TRANSFER_JOBS=4 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-plan-fail.out" 2>&1 || status=$?
+            PARALLEL_PLAN_STATUS="$plan_status" PARALLEL_SHORT_PLAN=yes IMPORT_TRANSFER_JOBS=4 IMPORT_TRANSFER_RETRIES=0 import_remote_files "$site" "$destination" yes '/tmp/*' '/backup' > "$TMP_ROOT/parallel-plan-fail.out" 2>&1 || status=$?
             [ "$status" -eq "$plan_status" ] || exit 16
             [ ! -e "$destination/contents/screens" ] && [ -f "$destination/stale.txt" ] || exit 17
             grep -q 'parallel transfer planning failed' "$TMP_ROOT/parallel-plan-fail.out" || exit 29
@@ -1852,6 +1852,71 @@ EOF
     pass "a lost connection starts the chunk again"
 }
 
+# The planning scan of a site of millions of files takes long enough to
+# lose the old server on the way, and the import stopped there: the same
+# command again meant a new dump before a new scan. The scan now starts
+# again with an empty plan; a scan that keeps failing, or another status,
+# still stops the import before a file is copied.
+test_a_lost_connection_starts_the_planning_scan_again() {
+    local bin="$TMP_ROOT/replan-bin" site="$TMP_ROOT/replan-site" destination="$TMP_ROOT/replan-dest"
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    # The first REPLAN_DROPS scans find two files the site does not have,
+    # then lose the old server.
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+dry=no
+for arg in "$@"; do
+    [ "$arg" != --dry-run ] || dry=yes
+done
+if [ "$dry" = yes ]; then
+    echo scan >> "$REPLAN_BIN/scans"
+    if [ "$(wc -l < "$REPLAN_BIN/scans")" -le "$REPLAN_DROPS" ]; then
+        printf 'KVS-PLAN >f+++++++++ 5 gone/one.jpg\nKVS-PLAN >f+++++++++ 5 gone/two.jpg\n'
+        echo 'rsync: connection unexpectedly closed (0 bytes received so far) [Receiver]' >&2
+        exit "$REPLAN_STATUS"
+    fi
+fi
+exec "$REAL_RSYNC" "$@"
+EOF
+    chmod +x "$bin/rsync"
+    (
+        export REAL_RSYNC REPLAN_BIN="$bin" IMPORT_TRANSFER_RETRY_PAUSE=0 IMPORT_TRANSFER_JOBS=4
+        REAL_RSYNC=$(command -v rsync)
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/replan-ctl" import_ssh_setup old.example.com 22 root "" yes
+        IMPORT_REMOTE_SUDO=no
+        : > "$bin/scans"
+        REPLAN_DROPS=1 REPLAN_STATUS=255 import_remote_files "$site" "$destination" yes > "$TMP_ROOT/replan.out" 2>&1 || exit 1
+        [ "$(wc -l < "$bin/scans")" -eq 2 ] || exit 2
+        grep -q '^  The planning scan lost its connection to the old server (rsync status 255); attempt 2 of 9 in 0 s\.$' "$TMP_ROOT/replan.out" || exit 3
+        grep -q 'connection unexpectedly closed' "$TMP_ROOT/replan.out" || exit 4
+        diff -r "$site" "$destination" || exit 5
+        # Everything is here now: nothing of the lost scan may be copied.
+        : > "$bin/scans"
+        REPLAN_DROPS=1 REPLAN_STATUS=12 import_remote_files "$site" "$destination" yes > "$TMP_ROOT/replan.out" 2>&1 || exit 6
+        grep -q '^  To transfer:     nothing' "$TMP_ROOT/replan.out" || exit 7
+        grep -q 'Transferring' "$TMP_ROOT/replan.out" && exit 8
+        # A scan that keeps failing stops the import before a file is copied.
+        rm -rf "$destination"
+        : > "$bin/scans"
+        status=0
+        REPLAN_DROPS=99 REPLAN_STATUS=12 IMPORT_TRANSFER_RETRIES=2 import_remote_files "$site" "$destination" yes > "$TMP_ROOT/replan.out" 2>&1 || status=$?
+        [ "$status" -eq 12 ] || exit 9
+        [ "$(wc -l < "$bin/scans")" -eq 3 ] || exit 10
+        grep -q '^ERROR: parallel transfer planning failed (status 12) after 3 attempts; no partial plan or final mirror was started$' "$TMP_ROOT/replan.out" || exit 11
+        [ -z "$(find "$destination" -type f)" ] || exit 12
+        # Another status is no lost connection.
+        : > "$bin/scans"
+        status=0
+        REPLAN_DROPS=1 REPLAN_STATUS=23 import_remote_files "$site" "$destination" yes > "$TMP_ROOT/replan.out" 2>&1 || status=$?
+        [ "$status" -eq 23 ] && [ "$(wc -l < "$bin/scans")" -eq 1 ] || exit 13
+        exit 0
+    ) || fail "a planning scan that lost the old server must start again (case $?): $(tail -n 5 "$TMP_ROOT/replan.out")"
+    pass "a lost connection starts the planning scan again"
+}
+
 # Workers take the chunks in turn: while one works on a long chunk, the
 # other takes all the rest. The aggregate record adds the finished chunks
 # to the progress of the running ones and never goes back.
@@ -2076,6 +2141,7 @@ test_relayed_lists_are_cut_short_in_order
 test_every_rsync_copies_one_chunk_at_most
 test_progress_never_goes_back_across_chunks
 test_a_lost_connection_starts_the_chunk_again
+test_a_lost_connection_starts_the_planning_scan_again
 test_a_password_run_authenticates_once_per_worker
 test_interruption_during_a_later_chunk_leaves_nothing_behind
 
