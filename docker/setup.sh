@@ -112,6 +112,12 @@ ENVIRONMENT VARIABLES:
                           are used when authentication allows it. All files
                           are planned before workers start; a final
                           pass reconciles the site and removes stale files.
+    IMPORT_TRANSFER_CHUNK=N Files a worker's rsync copies at a time (20000,
+                          range 1-1000000; 1 GB of data at most). The
+                          workers take the chunks in the order of the scan:
+                          copying starts with the first chunk, not after
+                          the list of every file, and the memory of each
+                          rsync stays bounded.
     IMPORT_DATABASE_FORMAT=auto|sql|directory
                           Remote database export format. Auto uses native
                           MariaDB bulk loading when the source supports it,
@@ -841,6 +847,7 @@ fi
 IMPORT_REUSE_SITE_DIR="${IMPORT_REUSE_SITE_DIR:-}"
 IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
 IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-4}"
+IMPORT_TRANSFER_CHUNK="${IMPORT_TRANSFER_CHUNK:-20000}"
 IMPORT_DATABASE_FORMAT="${IMPORT_DATABASE_FORMAT:-auto}"
 IMPORT_DATABASE_FORMAT_REQUEST=$IMPORT_DATABASE_FORMAT
 IMPORT_DATABASE_JOBS="${IMPORT_DATABASE_JOBS:-auto}"
@@ -1393,6 +1400,10 @@ import_inspect_remote() {
 
     if [[ ! "$IMPORT_TRANSFER_JOBS" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
         echo "ERROR: IMPORT_TRANSFER_JOBS must be an integer from 1 to 32" >&2
+        exit 1
+    fi
+    if [[ ! "${IMPORT_TRANSFER_CHUNK:-20000}" =~ ^[1-9][0-9]{0,6}$ ]] || [ "${IMPORT_TRANSFER_CHUNK:-20000}" -gt 1000000 ]; then
+        echo "ERROR: IMPORT_TRANSFER_CHUNK must be an integer from 1 to 1000000" >&2
         exit 1
     fi
     if [ ! -f "$IMPORT_EXPORTER" ]; then

@@ -1406,6 +1406,9 @@ IMPORT_SSH_TARGET=""
 IMPORT_SSH_OPTS=()
 # ssh, or sshpass in front of it when the old server takes a password.
 IMPORT_SSH_COMMAND=(ssh)
+# The private directory of the control socket, where the transfer workers
+# keep theirs too: a socket path must stay short.
+IMPORT_SSH_SOCKET_DIR=""
 # shellcheck disable=SC2034  # Read by docker/setup.sh.
 IMPORT_REMOTE_PRIVILEGES=none
 IMPORT_REMOTE_SUDO_ERROR=""
@@ -1467,6 +1470,7 @@ import_ssh_setup() {
         return 1
     fi
     mkdir -p "$control_dir" && chmod 700 "$control_dir" || return 1
+    IMPORT_SSH_SOCKET_DIR=$control_dir
     IMPORT_SSH_TARGET="${user}@${host}"
     IMPORT_SSH_OPTS=(
         -o ControlMaster=auto
@@ -1717,7 +1721,7 @@ import_rsync_totals() {
     # group of their own, and the setup waited for the whole scan of the
     # old server, minutes on a large site, before it stopped.
     LC_ALL=C timeout --foreground "$budget" rsync --dry-run --stats "${listing[@]}" "$@" 2>"${IMPORT_RSYNC_COUNT_ERROR:-/dev/null}" |
-        import_rsync_plan "${IMPORT_RSYNC_PLAN:-}" "${IMPORT_TRANSFER_JOBS:-4}" |
+        import_rsync_plan "${IMPORT_RSYNC_PLAN:-}" "${IMPORT_TRANSFER_CHUNK:-20000}" |
         import_rsync_stats_totals
     statuses=("${PIPESTATUS[@]}")
     [ "${statuses[1]}" -eq 0 ] || return "${statuses[1]}"
@@ -1725,12 +1729,20 @@ import_rsync_totals() {
     return "${statuses[0]}"
 }
 
-# Split only the regular files needing data, using rsync's own exclusions
-# and link traversal. Decode its documented octal filename escapes in the
-# C locale, then write NUL-delimited lists. Each shard keeps traversal order
-# and balances bytes plus a per-file cost without retaining names in RAM.
+# import_rsync_plan <directory> <chunk files>
+# Keeps the regular files needing data, using rsync's own exclusions and
+# link traversal, and decodes its documented octal filename escapes in the
+# C locale. Their names go, NUL-delimited and in the order of the scan,
+# into pieces with a "<files> <bytes>" line for each in <directory>/pieces;
+# no name stays in memory. A piece holds a sixteenth of a chunk or 64 MB of
+# data, then ends where the directory changes, so that a directory stays
+# in one chunk when it can: rsync lists the parent directories of every
+# name it is given, and a directory spread over several lists is listed
+# in each. Inside a large directory a piece stops at twice that size. Once
+# the scan is complete, import_rsync_chunks groups the pieces into the
+# chunks the workers copy. The other lines of the dry run pass through.
 import_rsync_plan() {
-    LC_ALL=C awk -v directory="$1" -v jobs="$2" '
+    LC_ALL=C awk -v directory="$1" -v chunk="$2" '
         function decode(s,    result, code) {
             result = ""
             while (match(s, /\\#[0-7][0-7][0-7]/)) {
@@ -1740,16 +1752,46 @@ import_rsync_plan() {
             }
             return result s
         }
+        function close_piece() {
+            close(piece)
+            printf "%.0f %.0f\n", piece_files, piece_bytes > (directory "/pieces")
+            piece = ""
+            full = 0
+        }
+        BEGIN {
+            piece_limit = int(chunk / 16)
+            if (piece_limit < 1) piece_limit = 1
+            piece_cap = 2 * piece_limit
+            if (piece_cap > chunk) piece_cap = chunk
+        }
         directory != "" && /^KVS-PLAN (<|>)f[^ ]* [0-9]+ / {
             size = $3 + 0
             name = $0
             sub(/^KVS-PLAN [^ ]+ [0-9]+ /, "", name)
             name = decode(name)
-            if (name == "" || name ~ /^\// || name ~ /(^|\/)\.\.(\/|$)/) exit 1
-            worker = 1
-            for (i = 2; i <= jobs; i++) if (weight[i] + 0 < weight[worker] + 0) worker = i
-            printf "./%s%c", name, 0 > (directory "/" worker ".list")
-            weight[worker] += size + 65536
+            if (name == "" || name ~ /^\// || name ~ /(^|\/)\.\.(\/|$)/) {
+                failed = 1
+                exit 1
+            }
+            # Only a full piece looks at directories: the one it ends in.
+            if (full) {
+                folder = name
+                if (!sub(/\/[^\/]*$/, "", folder)) folder = ""
+            }
+            if (piece != "" && ((full && folder != piece_folder) || piece_files >= piece_cap || piece_bytes + size > 134217728)) close_piece()
+            if (piece == "") {
+                piece = directory "/" (++pieces) ".piece"
+                piece_files = 0
+                piece_bytes = 0
+            }
+            printf "./%s%c", name, 0 > piece
+            piece_files++
+            piece_bytes += size
+            if (!full && (piece_files >= piece_limit || piece_bytes >= 67108864)) {
+                full = 1
+                piece_folder = name
+                if (!sub(/\/[^\/]*$/, "", piece_folder)) piece_folder = ""
+            }
             files++
             bytes += size
             if (systime() - reported >= 10) {
@@ -1760,52 +1802,176 @@ import_rsync_plan() {
             next
         }
         !/^KVS-PLAN / { print }
+        END {
+            if (failed) exit 1
+            if (piece != "") close_piece()
+        }
     '
 }
 
-# import_remote_plan_upload <plan directory> <jobs>
-# rsync relays a --files-from list read on this side to the sender on the
-# old server, and that relay grows with the square of the list: with the
-# rsync of Debian 13, 50,000 names kept one worker from copying anything
-# for 30 s where the same list read on the old server took 3 s, and the
-# names of each worker on a site of several million files can hold
-# the transfer at 0 B for hours. Copies the worker lists to a
-# new private directory of the old server, where each worker reads its
-# own, and prints that directory.
-import_remote_plan_upload() {
-    local plan="$1" jobs="$2" remote worker
+# import_rsync_chunks <plan directory> <jobs> <chunk files>
+# Groups the pieces of import_rsync_plan, in the order of the scan, into
+# the chunk lists 1.list, 2.list... the workers take in turn, and prints
+# how many there are. rsync builds the whole file list of a --files-from
+# before it copies a byte, and keeps it in memory on both sides: a chunk
+# holds at most <chunk files> files and 1 GB of data. Each chunk is also
+# at most a (2 x jobs)th of the work left, counted as its data plus 64 kB
+# a file, so the chunks shrink toward the end of the plan and the workers
+# finish close together instead of waiting on a last large one.
+import_rsync_chunks() {
+    local plan="$1" jobs="$2" chunk="$3" number first last i count=0
+    local -a pieces=()
+
+    if [ -s "$plan/pieces" ]; then
+        LC_ALL=C awk -v jobs="$jobs" -v chunk="$chunk" '
+            { files[NR] = $1; bytes[NR] = $2; left += $2 + 65536 * $1 }
+            END {
+                i = 1
+                while (i <= NR) {
+                    target = left / (2 * jobs)
+                    first = i
+                    n = 0
+                    b = 0
+                    do {
+                        n += files[i]
+                        b += bytes[i]
+                        i++
+                    } while (i <= NR && b + 65536 * n < target && n + files[i] <= chunk && b + bytes[i] <= 1073741824)
+                    left -= b + 65536 * n
+                    printf "%d %d %d\n", ++count, first, i - 1
+                }
+            }
+        ' "$plan/pieces" > "$plan/chunks" || return 1
+        while read -r number first last; do
+            pieces=()
+            for ((i = first; i <= last; i++)); do
+                pieces+=("$plan/$i.piece")
+            done
+            cat -- "${pieces[@]}" > "$plan/$number.list" || return 1
+            rm -f -- "${pieces[@]}"
+            count=$number
+        done < "$plan/chunks"
+        rm -f -- "$plan/pieces" "$plan/chunks"
+    fi
+    echo "$count"
+}
+
+# import_rsync_rechunk <plan directory> <files>
+# Cuts the chunk lists of the plan, in order, into lists of at most <files>
+# names, numbered from 1 again, and prints how many there are.
+import_rsync_rechunk() {
+    local plan="$1" files="$2" chunk=1 count=0 part
+    local -a parts=()
+
+    while [ -e "$plan/$chunk.list" ]; do
+        mv -- "$plan/$chunk.list" "$plan/$chunk.whole" || return 1
+        chunk=$((chunk + 1))
+    done
+    for ((chunk = 1; ; chunk++)); do
+        [ -e "$plan/$chunk.whole" ] || break
+        split -t '\0' -l "$files" -a 7 -d -- "$plan/$chunk.whole" "$plan/part." || return 1
+        parts=("$plan"/part.*)
+        for part in "${parts[@]}"; do
+            [ -e "$part" ] || continue
+            count=$((count + 1))
+            mv -- "$part" "$plan/$count.list" || return 1
+        done
+        rm -f -- "$plan/$chunk.whole"
+    done
+    echo "$count"
+}
+
+# import_remote_plan_dir: a new private directory on the old server for
+# the chunk lists, printed.
+import_remote_plan_dir() {
+    local remote
 
     # shellcheck disable=SC2016  # TMPDIR is the old server's.
     remote=$(import_ssh 'umask 077 && mktemp -d "${TMPDIR:-/var/tmp}/kvs-import-plan.XXXXXX"' < /dev/null 2>/dev/null) || return 1
     [[ "$remote" =~ ^/[A-Za-z0-9._/-]+/kvs-import-plan\.[A-Za-z0-9]+$ ]] || return 1
-    for ((worker = 1; worker <= jobs; worker++)); do
-        [ -s "$plan/$worker.list" ] || continue
-        if ! import_ssh "cat > '$remote/$worker.list'" < "$plan/$worker.list" 2>/dev/null; then
-            import_remote_plan_remove "$remote"
-            return 1
-        fi
-    done
     printf '%s\n' "$remote"
 }
 
+# import_remote_plan_upload <plan directory> <remote directory>
+# rsync relays a --files-from list read on this side to the sender on the
+# old server, and that relay grows with the square of the list: with the
+# rsync of Debian 13, 50,000 names kept one worker from copying anything
+# for 30 s where the same list read on the old server took 3 s. The chunk
+# lists go to the directory import_remote_plan_dir made there, in one tar
+# stream over one SSH session, and the workers read them there.
+import_remote_plan_upload() {
+    local plan="$1" remote="$2"
+    local -a statuses=()
+
+    [[ "$remote" =~ ^/[A-Za-z0-9._/-]+/kvs-import-plan\.[A-Za-z0-9]+$ ]] || return 1
+    (cd "$plan" && exec tar -cf - -- *.list) 2>/dev/null |
+        import_ssh "tar -xmf - -C '$remote'" > /dev/null 2>&1
+    statuses=("${PIPESTATUS[@]}")
+    [ "${statuses[0]}" -eq 0 ] && [ "${statuses[1]}" -eq 0 ]
+}
+
 # import_remote_plan_remove <directory>: the directory
-# import_remote_plan_upload made on the old server goes, and nothing else.
+# import_remote_plan_dir made on the old server goes, and nothing else.
 import_remote_plan_remove() {
     [[ "$1" =~ ^/[A-Za-z0-9._/-]+/kvs-import-plan\.[A-Za-z0-9]+$ ]] || return 0
     import_ssh "rm -rf -- '$1'" < /dev/null > /dev/null 2>&1 || true
 }
 
-# A separate process group per rsync lets interruption stop its SSH child
-# as well. Logs stay private; a bounded tail of each supplies one aggregate
-# progress record per second to the existing progress renderer. With
-# IMPORT_RSYNC_REMOTE_PLAN, each worker reads its list in that directory of
-# the old server instead of having rsync relay it.
+# import_rsync_masters_close <directory>: the SSH masters the transfer
+# workers kept in that directory end, and the directory goes.
+import_rsync_masters_close() {
+    local socket
+
+    [ -n "$1" ] && [ -d "$1" ] || return 0
+    for socket in "$1"/*; do
+        [ -e "$socket" ] || continue
+        "${IMPORT_SSH_COMMAND[@]}" -S "$socket" -O exit "$IMPORT_SSH_TARGET" < /dev/null > /dev/null 2>&1 || true
+    done
+    rm -rf -- "$1"
+}
+
+# import_rsync_log_progress <log> [bytes] [files]
+# The bytes and files of the last progress record in the bounded tail of
+# an rsync --info=progress2 log, or the given figures where they are
+# larger: a record without a file count (inside a large file) or a log cut
+# short never takes the count back.
+import_rsync_log_progress() {
+    tail -c 8192 -- "$1" 2>/dev/null | LC_ALL=C awk -v b="${2:-0}" -v f="${3:-0}" '
+        BEGIN { RS = "\r|\n" }
+        /^ *[0-9][0-9,.]* +[0-9]+% / {
+            n = $1
+            gsub(/[,.]/, "", n)
+            if (n + 0 > b + 0) b = n
+            if (match($0, /xfr#[0-9]+/) && substr($0, RSTART + 4, RLENGTH - 4) + 0 > f + 0) f = substr($0, RSTART + 4, RLENGTH - 4)
+        }
+        END { printf "%.0f %.0f\n", b, f }
+    '
+}
+
+# import_rsync_workers <plan directory> <jobs> <remote shell> <rsync arguments...>
+# Up to <jobs> workers copy the chunk lists 1.list, 2.list... of the plan
+# in turn: when the rsync of a worker ends, the worker takes the next chunk
+# nobody took, so a slow chunk holds no other back. A list goes once its
+# chunk is copied. Each rsync runs in a process group of its own, which
+# interruption stops with its SSH child. Every worker keeps one private
+# log, started again for each chunk, whose bounded tail supplies one
+# aggregate progress record per second to the existing progress renderer:
+# the finished chunks plus the progress of the running ones, which never
+# goes back. The messages of the chunks of worker <n> stay in <n>.err,
+# the status of its last chunk in <n>.status. With IMPORT_RSYNC_REMOTE_PLAN,
+# the lists are read in that directory of the old server instead of being
+# relayed by rsync. With IMPORT_RSYNC_CONTROL_DIR, worker <n> reaches the
+# old server through its own SSH master, socket <n> in that directory,
+# which its first chunk opens and its later chunks reuse without
+# authenticating again; the caller closes the masters
+# (import_rsync_masters_close).
 import_rsync_workers() (
     local plan="$1" jobs="$2" rsh="$3"
     shift 3
-    local worker pid active result=0 status bytes files snapshot arg remote_program=rsync files_from
-    local error_dir="${IMPORT_TRANSFER_LOG_DIR:-$plan}"
-    local -a pids=() logs=() rsync_args=()
+    local worker pid active result=0 status bytes files arg remote_program=rsync files_from worker_rsh
+    local chunk last=0 next=1 shown=-1 done_bytes=0 done_files=0 markers offset
+    local error_dir="${IMPORT_TRANSFER_LOG_DIR:-$plan}" control="${IMPORT_RSYNC_CONTROL_DIR:-}"
+    local -a pids=() chunks=() seen_bytes=() seen_files=() offsets=() connected=() rsync_args=()
     # Keep the PID returned by $! as the session/process-group leader even
     # when a caller enabled shell job control (otherwise setsid may fork).
     set +m
@@ -1829,84 +1995,115 @@ import_rsync_workers() (
     trap 'for pid in "${pids[@]}"; do [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true; done; wait' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    for ((worker = 1; worker <= jobs; worker++)); do
-        [ -s "$plan/$worker.list" ] || continue
-        logs+=("$plan/$worker.log")
-        # --force permits a planned file to replace an obsolete nonempty
-        # directory. It does not enable mirroring/deletion of sibling files.
-        # A live site can remove a file after the plan was built. Missing
-        # --files-from entries otherwise return 23 instead of vanished-file
-        # status 24. The final whole-site pass still reconciles these paths.
-        # Open both logs in the parent before forking. Redirections on the
-        # background command itself run in the child, so readiness polling
-        # can otherwise reach grep before the diagnostics file exists.
-        files_from="$plan/$worker.list"
-        if [ -n "${IMPORT_RSYNC_REMOTE_PLAN:-}" ]; then
-            files_from=":$IMPORT_RSYNC_REMOTE_PLAN/$worker.list"
-        fi
-        if ! {
-            setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
-                --ignore-missing-args --files-from="$files_from" -e "$rsh" --info=progress2 --outbuf=L \
-                < /dev/null &
-            pids[worker]=$!
-        } > "$plan/$worker.log" 2> "$error_dir/$worker.err"; then
-            echo "ERROR: could not open logs for transfer worker $worker" >&2
-            return 1
-        fi
-        if [ "${IMPORT_RSYNC_SERIAL_AUTH:-no}" = yes ]; then
-            while kill -0 "${pids[worker]}" 2>/dev/null &&
-                ! grep -Fxq KVS_IMPORT_SSH_READY "$error_dir/$worker.err"; do
-                sleep 0.05
-            done
-            if ! grep -Fxq KVS_IMPORT_SSH_READY "$error_dir/$worker.err"; then
-                status=0
-                wait "${pids[worker]}" || status=$?
-                pids[worker]=""
-                cat "$error_dir/$worker.err" >&2
-                [ "$status" -ne 0 ] || status=1
-                printf '%s\n' "$status" > "$error_dir/$worker.status"
-                echo "ERROR: transfer worker $worker ended before SSH was ready (status $status)" >&2
-                return "$status"
-            fi
-        fi
+    while [ -e "$plan/$((last + 1)).list" ]; do
+        last=$((last + 1))
     done
     while :; do
         active=0
-        for worker in "${!pids[@]}"; do
-            pid=${pids[worker]}
-            [ -n "$pid" ] || continue
-            if kill -0 "$pid" 2>/dev/null; then
+        for ((worker = 1; worker <= jobs; worker++)); do
+            pid=${pids[worker]:-}
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 active=$((active + 1))
-            else
+                continue
+            fi
+            if [ -n "$pid" ]; then
+                chunk=${chunks[worker]}
                 status=0
                 wait "$pid" || status=$?
                 pids[worker]=""
                 printf '%s\n' "$status" > "$error_dir/$worker.status"
-                sed '/^KVS_IMPORT_SSH_READY$/d' "$error_dir/$worker.err" >&2
+                tail -c +$((offsets[worker] + 1)) -- "$error_dir/$worker.err" | sed '/^KVS_IMPORT_SSH_READY$/d' >&2
                 case "$status" in
                     0) ;;
                     24) [ "$result" -ne 0 ] || result=24 ;;
-                    *) echo "ERROR: transfer worker $worker failed (rsync status $status)" >&2; return "$status" ;;
+                    *) echo "ERROR: transfer worker $worker failed on chunk $chunk of $last (rsync status $status)" >&2; return "$status" ;;
                 esac
+                # Its final record joins the count of the finished chunks.
+                read -r bytes files <<< "$(import_rsync_log_progress "$plan/$worker.log" "${seen_bytes[worker]}" "${seen_files[worker]}")"
+                done_bytes=$((done_bytes + bytes))
+                done_files=$((done_files + files))
+                rm -f -- "$plan/$chunk.list"
+            fi
+            while [ "$next" -le "$last" ] && [ ! -s "$plan/$next.list" ]; do
+                next=$((next + 1))
+            done
+            [ "$next" -le "$last" ] || continue
+            chunk=$next
+            next=$((next + 1))
+            worker_rsh=$rsh
+            if [ -n "$control" ]; then
+                # -S names the socket whatever ControlPath the options give.
+                worker_rsh="$rsh -S '${control//\'/\'\'}/$worker'"
+            fi
+            files_from="$plan/$chunk.list"
+            if [ -n "${IMPORT_RSYNC_REMOTE_PLAN:-}" ]; then
+                files_from=":$IMPORT_RSYNC_REMOTE_PLAN/$chunk.list"
+            fi
+            if [ -z "${offsets[worker]:-}" ]; then
+                : > "$error_dir/$worker.err" || return 1
+            fi
+            offset=$(wc -c < "$error_dir/$worker.err")
+            offsets[worker]=$offset
+            markers=$(grep -cFx KVS_IMPORT_SSH_READY -- "$error_dir/$worker.err" || true)
+            # --force permits a planned file to replace an obsolete nonempty
+            # directory. It does not enable mirroring/deletion of sibling files.
+            # A live site can remove a file after the plan was built. Missing
+            # --files-from entries otherwise return 23 instead of vanished-file
+            # status 24. The final whole-site pass still reconciles these paths.
+            # Open both logs in the parent before forking. Redirections on the
+            # background command itself run in the child, so readiness polling
+            # can otherwise reach grep before the diagnostics file exists.
+            if ! {
+                setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
+                    --ignore-missing-args --files-from="$files_from" -e "$worker_rsh" --info=progress2 --outbuf=L \
+                    < /dev/null &
+                pids[worker]=$!
+            } > "$plan/$worker.log" 2>> "$error_dir/$worker.err"; then
+                echo "ERROR: could not open logs for transfer worker $worker" >&2
+                return 1
+            fi
+            chunks[worker]=$chunk
+            seen_bytes[worker]=0
+            seen_files[worker]=0
+            active=$((active + 1))
+            # A worker with a master of its own authenticates once, on its
+            # first chunk; without one, every chunk opens a new connection.
+            if [ "${IMPORT_RSYNC_SERIAL_AUTH:-no}" = yes ] && [ -z "${connected[worker]:-}" ]; then
+                while kill -0 "${pids[worker]}" 2>/dev/null &&
+                    [ "$(grep -cFx KVS_IMPORT_SSH_READY -- "$error_dir/$worker.err" || true)" -le "$markers" ]; do
+                    sleep 0.05
+                done
+                if [ "$(grep -cFx KVS_IMPORT_SSH_READY -- "$error_dir/$worker.err" || true)" -le "$markers" ]; then
+                    status=0
+                    wait "${pids[worker]}" || status=$?
+                    pids[worker]=""
+                    tail -c +$((offsets[worker] + 1)) -- "$error_dir/$worker.err" >&2
+                    [ "$status" -ne 0 ] || status=1
+                    printf '%s\n' "$status" > "$error_dir/$worker.status"
+                    echo "ERROR: transfer worker $worker ended before SSH was ready (status $status)" >&2
+                    return "$status"
+                fi
+                [ -z "$control" ] || connected[worker]=yes
             fi
         done
-        snapshot=$(
-            for worker in "${logs[@]}"; do
-                tail -c 8192 "$worker" | LC_ALL=C awk '
-                    BEGIN { RS = "\r|\n" }
-                    /^ *[0-9][0-9,.]* +[0-9]+% / {
-                        b = $1; gsub(/[,.]/, "", b)
-                        if (match($0, /xfr#[0-9]+/)) f = substr($0, RSTART + 4, RLENGTH - 4)
-                    }
-                    END { printf "%.0f %.0f\n", b, f }
-                '
-            done | awk '{ bytes += $1; files += $2 } END { printf "%.0f %.0f\n", bytes, files }'
-        )
-        read -r bytes files <<< "$snapshot"
-        printf ' %s 0%% 0.00B/s 0:00:00 (xfr#%s)\n' "$bytes" "$files"
         [ "$active" -gt 0 ] || break
-        sleep 1
+        if [ "$SECONDS" -ne "$shown" ]; then
+            shown=$SECONDS
+            bytes=$done_bytes
+            files=$done_files
+            for ((worker = 1; worker <= jobs; worker++)); do
+                [ -n "${pids[worker]:-}" ] || continue
+                read -r "seen_bytes[$worker]" "seen_files[$worker]" <<< "$(import_rsync_log_progress "$plan/$worker.log" "${seen_bytes[worker]}" "${seen_files[worker]}")"
+                bytes=$((bytes + seen_bytes[worker]))
+                files=$((files + seen_files[worker]))
+            done
+            printf ' %s 0%% 0.00B/s 0:00:00 (xfr#%s)\n' "$bytes" "$files"
+        fi
+        # A worker whose chunk ended waits for this poll before it takes
+        # the next one: short, since the last chunks are small.
+        sleep 0.05
     done
+    printf ' %s 0%% 0.00B/s 0:00:00 (xfr#%s)\n' "$done_bytes" "$done_files"
     return "$result"
 )
 
@@ -2076,12 +2273,14 @@ import_rsync_progress() {
 # the partial directory, a repeat only transfers the changes), a tar
 # stream otherwise. The transfer is counted first, a dry run, and shown
 # against that count by import_rsync_progress. Counting and the final
-# mirror use incremental recursion. Parallel workers take disjoint lists
-# from a complete count, stored on disk, and only handle their listed files. The
-# patterns are the exporter's exclude_N lines, anchored at the site
-# directory (/tmp/*, /backup): what stays behind. rsync takes them as they
-# are; the tar on the old server gets them under its ./ prefix, which
-# anchors them too, quoted for the shell that splits its command line.
+# mirror use incremental recursion. Parallel workers take the chunks of a
+# complete count, stored on disk in the order of the scan, one after the
+# other, and only handle their listed files (IMPORT_TRANSFER_CHUNK files at
+# most in a chunk, 20,000 by default). The patterns are the exporter's
+# exclude_N lines, anchored at the site directory (/tmp/*, /backup): what
+# stays behind. rsync takes them as they are; the tar on the old server
+# gets them under its ./ prefix, which anchors them too, quoted for the
+# shell that splits its command line.
 # Symbolic links that leave the site (a contents directory on another
 # disk) come as their targets, since the container only mounts the site;
 # links inside it stay links. Files that vanish during the transfer are
@@ -2093,8 +2292,10 @@ import_remote_files() (
     local use_rsync="$3"
     local status=0
     local pattern totals count_status files=0 bytes=0 site_files site_bytes
-    local jobs="${IMPORT_TRANSFER_JOBS:-4}" worker_rsh worker_auth=no plan="" work error_dir remote_plan="" rsync_host
-    local -a independent=(-o ControlMaster=no -o ControlPath=none -o Compression=no)
+    local jobs="${IMPORT_TRANSFER_JOBS:-4}" chunk="${IMPORT_TRANSFER_CHUNK:-20000}" chunks
+    local worker_rsh worker_auth=no plan="" work error_dir remote_plan="" masters="" rsync_host
+    local lists_size started relay="${IMPORT_RSYNC_RELAY_FILES:-5000}"
+    local -a independent=(-o ControlMaster=auto -o ControlPersist=300 -o Compression=no)
     local -a rsync_path=()
     local -a rsync_args=()
     local -a transfer_status=()
@@ -2106,6 +2307,11 @@ import_remote_files() (
         echo "ERROR: IMPORT_TRANSFER_JOBS must be an integer from 1 to 32" >&2
         return 1
     fi
+    if [[ ! "$chunk" =~ ^[1-9][0-9]{0,6}$ ]] || [ "$chunk" -gt 1000000 ]; then
+        echo "ERROR: IMPORT_TRANSFER_CHUNK must be an integer from 1 to 1000000" >&2
+        return 1
+    fi
+    [[ "$relay" =~ ^[1-9][0-9]{0,6}$ ]] || relay=5000
     import_remote_path_check "$dir" || return 1
     mkdir -p "$destination" || return 1
     for pattern in "${patterns[@]}"; do
@@ -2120,8 +2326,12 @@ import_remote_files() (
         tar_excludes+=("'--exclude=.$pattern'")
     done
     if [ "$use_rsync" = yes ]; then
-        work=$(mktemp -d) || return 1
-        trap 'rm -rf -- "$work"; import_remote_plan_remove "$remote_plan"' EXIT
+        # The chunk lists take about 55 bytes a file, 0.6 GB for ten million
+        # files: on disk, not in the RAM of a tmpfs /tmp.
+        work=$(mktemp -d "${TMPDIR:-/var/tmp}/kvs-import-transfer.XXXXXX" 2>/dev/null || mktemp -d) || return 1
+        # Interrupted or not, the SSH masters of the workers end and the
+        # chunk lists leave the old server.
+        trap 'import_rsync_masters_close "$masters"; import_remote_plan_remove "$remote_plan"; rm -rf -- "$work"' EXIT
         error_dir=${IMPORT_TRANSFER_LOG_DIR:-$work}
         # The caller owns the private persistent directory when diagnostics
         # must survive a failure; file lists and progress logs stay temporary.
@@ -2148,7 +2358,7 @@ import_remote_files() (
             echo "  setsid is unavailable; using one transfer worker."
         fi
         if [ -n "$plan" ]; then
-            echo "  Planning all files for $jobs parallel workers (complete scan; no size-count timeout)..."
+            echo "  Planning all files for $jobs parallel workers, in chunks of at most $(import_count_text "$chunk") files (complete scan; no size-count timeout)..."
         else
             echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
         fi
@@ -2175,18 +2385,28 @@ import_remote_files() (
         elif [ "$count_status" -eq 124 ]; then
             echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the transfer shows its counts without a whole"
         fi
-        if [ -n "$plan" ] && [ -s "$plan/1.list" ]; then
+        if [ -n "$plan" ] && [ -s "$plan/pieces" ]; then
+            if ! chunks=$(import_rsync_chunks "$plan" "$jobs" "$chunk"); then
+                echo "ERROR: the chunk lists of the parallel transfer could not be written in $plan" >&2
+                return 1
+            fi
             # New SSH connections spread encryption across cores. A password
             # typed into the original master cannot be replayed unattended:
             # probe without prompts, then reuse that master when necessary.
+            # Each worker keeps a master of its own, one TCP stream its
+            # chunks share: it authenticates once, not once a chunk, and
+            # the probe opens the master of the first worker.
             if [ "${IMPORT_SSH_COMMAND[0]}" != sshpass ]; then
                 independent+=(-o BatchMode=yes)
             fi
-            if "${IMPORT_SSH_COMMAND[@]}" "${independent[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" true < /dev/null 2>/dev/null; then
+            masters=$(mktemp -d "${IMPORT_SSH_SOCKET_DIR:-$work}/xfer.XXXXXX") || return 1
+            if "${IMPORT_SSH_COMMAND[@]}" "${independent[@]}" -S "$masters/1" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" true < /dev/null 2>/dev/null; then
                 worker_rsh=$(import_ssh_rsh "${independent[@]}")
                 worker_auth=yes
-                echo "  Transferring with up to $jobs workers on separate SSH connections."
+                echo "  Transferring $(import_count_text "$chunks") chunks with up to $jobs workers on separate SSH connections."
             else
+                import_rsync_masters_close "$masters"
+                masters=""
                 # OpenSSH normally allows ten sessions per master. Refuse
                 # a larger shared pool instead of dropping planned shards.
                 worker_rsh=$(import_ssh_rsh)
@@ -2194,18 +2414,41 @@ import_remote_files() (
                     echo "ERROR: separate SSH authentication is unavailable; set IMPORT_TRANSFER_JOBS to 8 or less, or provide a key or IMPORT_REMOTE_PASSWORD" >&2
                     return 1
                 fi
-                echo "  Transferring with up to $jobs workers sharing the authenticated SSH connection."
+                echo "  Transferring $(import_count_text "$chunks") chunks with up to $jobs workers sharing the authenticated SSH connection."
             fi
-            if remote_plan=$(import_remote_plan_upload "$plan" "$jobs"); then
-                echo "  Worker lists copied to $remote_plan on the old server, where each worker reads its own."
+            # The directory is known before the upload starts, so that an
+            # interruption during the upload still removes it.
+            lists_size=$(du -cb -- "$plan"/*.list 2>/dev/null | awk 'END { print $1 + 0 }')
+            echo "  Copying the chunk lists ($(import_bytes_text "$lists_size")) to the old server in one stream..."
+            started=$SECONDS
+            if remote_plan=$(import_remote_plan_dir) && import_remote_plan_upload "$plan" "$remote_plan"; then
+                echo "  Chunk lists copied to $remote_plan on the old server in $((SECONDS - started)) s; the workers read them there."
             else
+                import_remote_plan_remove "$remote_plan"
                 remote_plan=""
-                echo "  The worker lists could not be copied to the old server; rsync relays them, which delays the first copies on a large site."
+                # A relayed list delays its chunk by a time that grows with
+                # the square of its length: about 0.15 s for 5,000 names,
+                # 2.4 s for 20,000, 15 s for 50,000. Lists of 5,000 names
+                # cost ten million files a few minutes of worker time in
+                # all, where stopping would refuse the parallel transfer to
+                # an old server that only lacks the room or the tools to
+                # keep the lists.
+                if [ "$chunk" -gt "$relay" ]; then
+                    if ! chunks=$(import_rsync_rechunk "$plan" "$relay"); then
+                        echo "ERROR: the chunk lists of the parallel transfer could not be cut in $plan" >&2
+                        return 1
+                    fi
+                    chunk=$relay
+                fi
+                echo "  The chunk lists could not be copied to the old server: rsync relays each list from here, at a cost that grows with the square of its length, so a chunk holds $(import_count_text "$chunk") files at most ($(import_count_text "$chunks") chunks)."
             fi
-            IMPORT_RSYNC_REMOTE_PLAN="$remote_plan" IMPORT_RSYNC_SERIAL_AUTH="$worker_auth" \
+            echo "  Each rsync lists its chunk of up to $(import_count_text "$chunk") files on the old server before copying it; the first bytes follow the listing of the first chunks."
+            IMPORT_RSYNC_CONTROL_DIR="$masters" IMPORT_RSYNC_REMOTE_PLAN="$remote_plan" IMPORT_RSYNC_SERIAL_AUTH="$worker_auth" \
                 import_rsync_workers "$plan" "$jobs" "$worker_rsh" "${rsync_args[@]}" |
                 import_rsync_progress "$bytes" "$files"
             transfer_status=("${PIPESTATUS[@]}")
+            import_rsync_masters_close "$masters"
+            masters=""
             import_remote_plan_remove "$remote_plan"
             remote_plan=""
             printf 'rsync=%s progress=%s\n' "${transfer_status[@]}" > "$error_dir/parallel.status"
