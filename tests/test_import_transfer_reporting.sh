@@ -107,7 +107,7 @@ echo 'PASS: rsync and progress failures retain distinct exit codes and diagnosti
 mkdir -p "$TEST_DIR/plan" "$TEST_DIR/worker-logs"
 printf 'file\0' > "$TEST_DIR/plan/1.list"
 status=0
-PATH="$TEST_DIR/bin:$PATH" FIXTURE_RSYNC_STATUS=12 IMPORT_TRANSFER_LOG_DIR="$TEST_DIR/worker-logs" \
+PATH="$TEST_DIR/bin:$PATH" FIXTURE_RSYNC_STATUS=12 IMPORT_TRANSFER_LOG_DIR="$TEST_DIR/worker-logs" IMPORT_TRANSFER_RETRIES=0 \
     import_rsync_workers "$TEST_DIR/plan" 1 unused > "$TEST_DIR/worker-output" 2>&1 || status=$?
 [ "$status" -eq 12 ] || fail "worker status 12 became $status"
 rm -rf "$TEST_DIR/plan"

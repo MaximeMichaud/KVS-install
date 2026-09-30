@@ -118,6 +118,11 @@ ENVIRONMENT VARIABLES:
                           copying starts with the first chunk, not after
                           the list of every file, and the memory of each
                           rsync stays bounded.
+    IMPORT_TRANSFER_RETRIES=N Attempts after the first at a chunk whose
+                          connection to the old server dropped (8, range
+                          0-100): it starts again after a pause of 15 s
+                          that doubles up to 5 minutes, while the other
+                          workers go on.
     IMPORT_DATABASE_FORMAT=auto|sql|directory
                           Remote database export format. Auto uses native
                           MariaDB bulk loading when the source supports it,
@@ -848,6 +853,7 @@ IMPORT_REUSE_SITE_DIR="${IMPORT_REUSE_SITE_DIR:-}"
 IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
 IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-4}"
 IMPORT_TRANSFER_CHUNK="${IMPORT_TRANSFER_CHUNK:-20000}"
+IMPORT_TRANSFER_RETRIES="${IMPORT_TRANSFER_RETRIES:-8}"
 IMPORT_DATABASE_FORMAT="${IMPORT_DATABASE_FORMAT:-auto}"
 IMPORT_DATABASE_FORMAT_REQUEST=$IMPORT_DATABASE_FORMAT
 IMPORT_DATABASE_JOBS="${IMPORT_DATABASE_JOBS:-auto}"
@@ -1406,6 +1412,10 @@ import_inspect_remote() {
     fi
     if [[ ! "${IMPORT_TRANSFER_CHUNK:-20000}" =~ ^[1-9][0-9]{0,6}$ ]] || [ "${IMPORT_TRANSFER_CHUNK:-20000}" -gt 1000000 ]; then
         echo "ERROR: IMPORT_TRANSFER_CHUNK must be an integer from 1 to 1000000" >&2
+        exit 1
+    fi
+    if [[ ! "${IMPORT_TRANSFER_RETRIES:-8}" =~ ^[0-9]{1,3}$ ]] || [ "${IMPORT_TRANSFER_RETRIES:-8}" -gt 100 ]; then
+        echo "ERROR: IMPORT_TRANSFER_RETRIES must be an integer from 0 to 100" >&2
         exit 1
     fi
     if [ ! -f "$IMPORT_EXPORTER" ]; then

@@ -1759,6 +1759,99 @@ EOF
     pass "every rsync copies one chunk at most, and copying starts with the first"
 }
 
+# A connection lost in the middle of a transfer of hours (the rsync of the
+# old server killed, a network drop: statuses 5, 10, 12, 30, 35 and 255)
+# ended the whole transfer, and running the same command again meant a
+# new dump and a new scan of the site. The chunk now starts again after a
+# pause while the other workers go on; only a chunk that keeps failing, or
+# another status, stops the transfer.
+test_a_lost_connection_starts_the_chunk_again() {
+    local bin="$TMP_ROOT/drop-bin" plan="$TMP_ROOT/drop-plan" err="$TMP_ROOT/drop.err" i status out
+
+    mkdir -p "$bin"
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+serial=no
+for arg in "$@"; do
+    case "$arg" in
+        --files-from=*) list=${arg#--files-from=} ;;
+        --rsync-path=*KVS_IMPORT_SSH_READY*) serial=yes ;;
+    esac
+done
+chunk=${list##*/}
+chunk=${chunk%.list}
+names=$(tr -cd '\0' < "$list" | wc -c)
+attempt=$(($(grep -c "^$chunk " "$DROP_BIN/runs") + 1))
+printf '%s %s %s\n' "$chunk" "$attempt" "$names" >> "$DROP_BIN/runs"
+if [ "$chunk" = "$DROP_CHUNK" ] && [ "$attempt" -le "$DROP_TIMES" ]; then
+    if [ "${DROP_BEFORE_READY:-no}" = yes ]; then
+        echo "ssh: connect to host old.example.com port 22: Connection timed out" >&2
+        exit 255
+    fi
+    [ "$serial" = no ] || echo KVS_IMPORT_SSH_READY >&2
+    printf ' 1000 50%% 1.00MB/s 0:00:01 (xfr#1, to-chk=1/2)\n'
+    echo "rsync: connection unexpectedly closed (1000 bytes received so far) [receiver]" >&2
+    exit "$DROP_STATUS"
+fi
+[ "$serial" = no ] || echo KVS_IMPORT_SSH_READY >&2
+printf ' %d 100%% 1.00MB/s 0:00:01 (xfr#%d, to-chk=0/%d)\n' $((names * 1000)) "$names" "$names"
+EOF
+    chmod +x "$bin/rsync"
+    new_plan() {
+        rm -rf "$plan"
+        mkdir -p "$plan"
+        for i in 1 2 3; do printf './c%s-a\0./c%s-b\0' "$i" "$i" > "$plan/$i.list"; done
+        : > "$bin/runs"
+    }
+
+    # Chunk 2 loses its connection once, after copying part of it.
+    new_plan
+    status=0
+    out=$(DROP_BIN="$bin" DROP_CHUNK=2 DROP_TIMES=1 DROP_STATUS=255 PATH="$bin:$PATH" IMPORT_TRANSFER_RETRY_PAUSE=0 \
+        import_rsync_workers "$plan" 2 unused 2> "$err") || status=$?
+    [ "$status" -eq 0 ] || fail "a chunk stopped by a lost connection must start again, status $status: $(cat "$err")"
+    [ "$(grep -c '^2 ' "$bin/runs")" -eq 2 ] || fail "chunk 2 must run twice: $(cat "$bin/runs")"
+    grep -q '^2 2 2$' "$bin/runs" || fail "the new attempt must still find the list of chunk 2: $(cat "$bin/runs")"
+    [ "$(grep -c -v '^2 ' "$bin/runs")" -eq 2 ] || fail "the other chunks must run once: $(cat "$bin/runs")"
+    grep -q 'connection unexpectedly closed' "$err" || fail "the message of rsync must be shown: $(cat "$err")"
+    grep -q '^  Transfer worker [12] lost its connection on chunk 2 of 3 (rsync status 255); attempt 2 of 9 in 0 s\.$' "$err" ||
+        fail "the new attempt must be announced: $(cat "$err")"
+    [ -z "$(find "$plan" -name '*.list')" ] || fail "every list must go once its chunk is copied"
+    printf '%s\n' "$out" | awk '{ b = $1 + 0; f = substr($NF, 6) + 0; if (b < lb || f < lf) bad = 1; lb = b; lf = f } END { exit bad }' ||
+        fail "the progress must never go back: $out"
+
+    # A chunk that keeps losing its connection stops the transfer once its
+    # attempts are spent.
+    new_plan
+    status=0
+    DROP_BIN="$bin" DROP_CHUNK=2 DROP_TIMES=99 DROP_STATUS=12 PATH="$bin:$PATH" IMPORT_TRANSFER_RETRIES=2 IMPORT_TRANSFER_RETRY_PAUSE=0 \
+        import_rsync_workers "$plan" 2 unused > /dev/null 2> "$err" || status=$?
+    [ "$status" -eq 12 ] || fail "a chunk that keeps failing must stop the transfer with its status, got $status"
+    [ "$(grep -c '^2 ' "$bin/runs")" -eq 3 ] || fail "chunk 2 must run three times: $(cat "$bin/runs")"
+    grep -q '^ERROR: transfer worker [12] failed on chunk 2 of 3 (rsync status 12) after 3 attempts$' "$err" ||
+        fail "the attempts must be counted in the error: $(cat "$err")"
+
+    # Another status is no lost connection: no other attempt.
+    new_plan
+    status=0
+    DROP_BIN="$bin" DROP_CHUNK=2 DROP_TIMES=1 DROP_STATUS=23 PATH="$bin:$PATH" IMPORT_TRANSFER_RETRY_PAUSE=0 \
+        import_rsync_workers "$plan" 2 unused > /dev/null 2> "$err" || status=$?
+    [ "$status" -eq 23 ] || fail "status 23 must stop the transfer, got $status"
+    [ "$(grep -c '^2 ' "$bin/runs")" -eq 1 ] || fail "status 23 must not be tried again: $(cat "$bin/runs")"
+
+    # The old server out of reach when a worker connects (authentication
+    # one at a time): the same pauses, then the chunk.
+    new_plan
+    status=0
+    DROP_BIN="$bin" DROP_CHUNK=1 DROP_TIMES=1 DROP_STATUS=255 DROP_BEFORE_READY=yes PATH="$bin:$PATH" \
+        IMPORT_RSYNC_SERIAL_AUTH=yes IMPORT_TRANSFER_RETRY_PAUSE=0 import_rsync_workers "$plan" 2 unused > /dev/null 2> "$err" || status=$?
+    [ "$status" -eq 0 ] || fail "a worker that could not connect must try again, status $status: $(cat "$err")"
+    [ "$(grep -c '^1 ' "$bin/runs")" -eq 2 ] || fail "chunk 1 must run twice: $(cat "$bin/runs")"
+    grep -q '^  Transfer worker 1 could not reach the old server for chunk 1 of 3 (status 255); attempt 2 of 9 in 0 s\.$' "$err" ||
+        fail "the new connection must be announced: $(cat "$err")"
+    pass "a lost connection starts the chunk again"
+}
+
 # Workers take the chunks in turn: while one works on a long chunk, the
 # other takes all the rest. The aggregate record adds the finished chunks
 # to the progress of the running ones and never goes back.
@@ -1982,6 +2075,7 @@ test_the_plan_cuts_the_scan_into_bounded_chunks
 test_relayed_lists_are_cut_short_in_order
 test_every_rsync_copies_one_chunk_at_most
 test_progress_never_goes_back_across_chunks
+test_a_lost_connection_starts_the_chunk_again
 test_a_password_run_authenticates_once_per_worker
 test_interruption_during_a_later_chunk_leaves_nothing_behind
 
