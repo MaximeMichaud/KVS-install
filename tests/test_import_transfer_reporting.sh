@@ -84,7 +84,7 @@ RSYNC
 chmod +x "$TEST_DIR/bin/rsync"
 (
     PATH="$TEST_DIR/bin:$PATH"
-    IMPORT_TRANSFER_JOBS=1 IMPORT_REMOTE_SUDO=no IMPORT_SIZE_TIMEOUT=1
+    IMPORT_TRANSFER_JOBS=1 IMPORT_REMOTE_SUDO=no IMPORT_SIZE_TIMEOUT=1 IMPORT_TRANSFER_RETRIES=0
     IMPORT_SSH_TARGET=root@source.test IMPORT_TRANSFER_LOG_DIR="$TEST_DIR/logs"
     import_ssh_rsh() { printf unused; }
     export FIXTURE_RSYNC_STATUS=12
@@ -103,6 +103,56 @@ chmod +x "$TEST_DIR/bin/rsync"
     grep -Fxq 'rsync=0 progress=7' "$TEST_DIR/logs/final.status" || fail 'missing renderer exit code'
 ) || exit 1
 echo 'PASS: rsync and progress failures retain distinct exit codes and diagnostics'
+
+# The final rsync, the whole transfer with one worker, ended the import on
+# a lost connection. It now starts again after a pause and counts against
+# what is left; a pass that keeps failing, or another status, still stops.
+mkdir -p "$TEST_DIR/drop-bin" "$TEST_DIR/drop-logs" "$TEST_DIR/drop-destination"
+cat > "$TEST_DIR/drop-bin/rsync" <<'RSYNC'
+#!/bin/bash
+for arg in "$@"; do
+    if [ "$arg" = --dry-run ]; then
+        printf 'Number of regular files transferred: 2\nTotal transferred file size: 2048 bytes\n'
+        exit 0
+    fi
+done
+echo run >> "$FIXTURE_RUNS"
+printf ' 1024 50%% 1.00kB/s 0:00:01 (xfr#1, to-chk=1/2)\n'
+if [ "$(wc -l < "$FIXTURE_RUNS")" -le "$FIXTURE_DROPS" ]; then
+    echo 'rsync: connection unexpectedly closed (1024 bytes received so far) [receiver]' >&2
+    exit "$FIXTURE_DROP_STATUS"
+fi
+RSYNC
+chmod +x "$TEST_DIR/drop-bin/rsync"
+(
+    PATH="$TEST_DIR/drop-bin:$PATH"
+    IMPORT_TRANSFER_JOBS=1 IMPORT_REMOTE_SUDO=no IMPORT_SIZE_TIMEOUT=1 IMPORT_TRANSFER_RETRY_PAUSE=0
+    IMPORT_SSH_TARGET=root@source.test IMPORT_TRANSFER_LOG_DIR="$TEST_DIR/drop-logs"
+    import_ssh_rsh() { printf unused; }
+    export FIXTURE_RUNS="$TEST_DIR/drop-runs"
+    : > "$FIXTURE_RUNS"
+    status=0
+    FIXTURE_DROPS=1 FIXTURE_DROP_STATUS=12 import_remote_files /srv/example "$TEST_DIR/drop-destination" yes > "$TEST_DIR/drop-output" 2>&1 || status=$?
+    [ "$status" -eq 0 ] || fail "a final rsync that lost its connection must start again, status $status: $(cat "$TEST_DIR/drop-output")"
+    [ "$(wc -l < "$FIXTURE_RUNS")" -eq 2 ] || fail "the final rsync must run twice"
+    grep -q '^  The final rsync lost its connection to the old server (rsync status 12); attempt 2 of 9 in 0 s, from what already arrived\.$' "$TEST_DIR/drop-output" ||
+        fail "the new attempt must be announced: $(cat "$TEST_DIR/drop-output")"
+    grep -q '^  1 kB of 2 kB (50%), 1 of 2 files' "$TEST_DIR/drop-output" || fail "the first attempt must count the whole: $(cat "$TEST_DIR/drop-output")"
+    grep -q '^  1 kB of 1 kB (100%), 1 of 1 files' "$TEST_DIR/drop-output" || fail "the new attempt must count what is left: $(cat "$TEST_DIR/drop-output")"
+    grep -Fxq 'rsync=0 progress=0' "$TEST_DIR/drop-logs/final.status" || fail 'the last attempt must be saved'
+    : > "$FIXTURE_RUNS"
+    status=0
+    FIXTURE_DROPS=99 FIXTURE_DROP_STATUS=255 IMPORT_TRANSFER_RETRIES=2 import_remote_files /srv/example "$TEST_DIR/drop-destination" yes > "$TEST_DIR/drop-output" 2>&1 || status=$?
+    [ "$status" -eq 255 ] || fail "a final rsync that keeps failing must stop with its status, got $status"
+    [ "$(wc -l < "$FIXTURE_RUNS")" -eq 3 ] || fail "the final rsync must run three times"
+    grep -q '^ERROR: final rsync synchronization failed (status 255) after 3 attempts; see the errors above$' "$TEST_DIR/drop-output" ||
+        fail "the attempts must be counted in the error: $(cat "$TEST_DIR/drop-output")"
+    : > "$FIXTURE_RUNS"
+    status=0
+    FIXTURE_DROPS=1 FIXTURE_DROP_STATUS=23 import_remote_files /srv/example "$TEST_DIR/drop-destination" yes > "$TEST_DIR/drop-output" 2>&1 || status=$?
+    [ "$status" -eq 23 ] && [ "$(wc -l < "$FIXTURE_RUNS")" -eq 1 ] || fail "status 23 must stop at once, got $status"
+) || exit 1
+echo 'PASS: a final rsync that lost its connection starts again from what is left'
 
 mkdir -p "$TEST_DIR/plan" "$TEST_DIR/worker-logs"
 printf 'file\0' > "$TEST_DIR/plan/1.list"

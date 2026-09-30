@@ -122,7 +122,8 @@ ENVIRONMENT VARIABLES:
                           connection to the old server dropped (8, range
                           0-100): it starts again after a pause of 15 s
                           that doubles up to 5 minutes, while the other
-                          workers go on.
+                          workers go on. The planning scan and the final
+                          rsync pass get the same attempts.
     IMPORT_DATABASE_FORMAT=auto|sql|directory
                           Remote database export format. Auto uses native
                           MariaDB bulk loading when the source supports it,
