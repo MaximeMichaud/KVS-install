@@ -1260,13 +1260,13 @@ test_remote_site_size_bounds_warn_instead_of_blocking() {
         out=$(import_remote_free_space_check "$report" "$TMP_ROOT") || exit 8
         [ -z "$out" ] || exit 9
         [ "$(import_remote_size_text "$report")" = "not measured, at most 1 MB (the filesystem usage)" ] || exit 10
-        # The files of an earlier pass are here: the dump alone has to fit,
-        # however large the site.
+        # An earlier pass wrote here: the dump alone is checked, however
+        # large the site; the transfer checks the files left to copy.
         mkdir -p "$TMP_ROOT/pass2-dest"
         import_mark_destination "$TMP_ROOT/pass2-dest" "ssh://root@old:22/var/www/site" || exit 11
         printf 'site_size_status=exact\nsite_size_mb=%s\ndb_size_mb=1\nsite_fs_used_mb=%s\n' "$((avail * 3))" "$((avail * 3))" > "$report"
         out=$(import_remote_free_space_check "$report" "$TMP_ROOT/pass2-dest" "ssh://root@old:22/var/www/site") || exit 12
-        [[ "$out" == *"already under"* ]] || exit 13
+        [[ "$out" == *"an earlier pass from the same source wrote under"* ]] || exit 13
         import_remote_free_space_check "$report" "$TMP_ROOT/pass2-dest" "ssh://root@other:22/var/www/site" >/dev/null 2>&1 && exit 14
         import_remote_free_space_check "$report" "$TMP_ROOT/pass2-dest" >/dev/null 2>&1 && exit 15
         printf 'site_size_status=exact\nsite_size_mb=1\ndb_size_mb=%s\nsite_fs_used_mb=1\n' "$((avail * 3))" > "$report"

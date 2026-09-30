@@ -595,9 +595,15 @@ exec "\$@"
 EOF
     # df -Pk, the free space of the old server's temporary directory, finds
     # FAKE_DF_AVAILABLE kB there (a roomy disk by default), or no answer
-    # with FAKE_DF_FAIL; other uses of df get the real one.
+    # with FAKE_DF_FAIL; df -Pm finds FAKE_DF_LOCAL_MB MB under the
+    # destination when it is set. Other uses of df get the real one.
     cat > "$bin/df" <<EOF
 #!/bin/bash
+if [ "\${1:-}" = -Pm ] && [ -n "\${FAKE_DF_LOCAL_MB:-}" ]; then
+    echo "Filesystem 1048576-blocks Used Available Capacity Mounted on"
+    echo "fake 1000000 1 \$FAKE_DF_LOCAL_MB 1% /"
+    exit 0
+fi
 if [ "\${1:-}" = -Pk ]; then
     [ -z "\${FAKE_DF_FAIL:-}" ] || exit 1
     echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
@@ -1459,6 +1465,40 @@ test_chunk_lists_stay_off_an_old_server_short_of_room() {
     pass "the chunk lists stay off an old server short of room"
 }
 
+# The same command again after an interrupted transfer checks the room of
+# the database alone before it, the files of the earlier pass being there.
+# What is left to copy is known once the transfer is planned: it has to fit
+# with the database before a file is copied.
+test_the_transfer_stops_when_what_is_left_does_not_fit() {
+    local bin="$TMP_ROOT/fit-bin" site="$TMP_ROOT/fit-site" jobs
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    for jobs in 4 1; do
+        rm -rf "$TMP_ROOT/fit-dest"
+        (
+            PATH="$bin:$PATH"
+            IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/fit-ctl" import_ssh_setup old.example.com 22 root "" yes
+            IMPORT_REMOTE_SUDO=no
+            # 11 MB free: the few bytes of the site fit, not with the 10 MB
+            # of the database and a tenth of margin.
+            if FAKE_DF_LOCAL_MB=11 IMPORT_TRANSFER_RESERVE_MB=10 IMPORT_TRANSFER_JOBS=$jobs \
+                import_remote_files "$site" "$TMP_ROOT/fit-dest" yes > "$TMP_ROOT/fit.out" 2>&1; then
+                exit 1
+            fi
+            grep -q '^ERROR: not enough free space under .*/fit-dest: the transfer still copies [0-9]* kB and the database takes about 10 MB, with a tenth of margin, and 11 MB is free' \
+                "$TMP_ROOT/fit.out" || exit 2
+            [ -z "$(find "$TMP_ROOT/fit-dest" -type f)" ] || exit 3
+            # 13 MB free: it fits.
+            FAKE_DF_LOCAL_MB=13 IMPORT_TRANSFER_RESERVE_MB=10 IMPORT_TRANSFER_JOBS=$jobs \
+                import_remote_files "$site" "$TMP_ROOT/fit-dest" yes > "$TMP_ROOT/fit.out" 2>&1 || exit 4
+            diff -r "$site" "$TMP_ROOT/fit-dest" || exit 5
+            exit 0
+        ) || fail "the transfer must stop before copying what does not fit, with $jobs worker(s) (case $?): $(tail -n 3 "$TMP_ROOT/fit.out")"
+    done
+    pass "the transfer stops before copying what does not fit"
+}
+
 # An old server given by its IPv6 address: ssh takes the address as it
 # is, rsync reads host:path and took the host up to the first colon.
 test_ipv6_address_of_the_old_server() {
@@ -1934,6 +1974,7 @@ test_parallel_transfers_preserve_the_mirror
 test_hard_links_arrive_as_links
 test_parallel_workers_read_their_lists_on_the_old_server
 test_chunk_lists_stay_off_an_old_server_short_of_room
+test_the_transfer_stops_when_what_is_left_does_not_fit
 test_ipv6_address_of_the_old_server
 test_interrupt_stops_the_planning_scan
 test_parallel_interruption_stops_the_process_groups
