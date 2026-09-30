@@ -24,6 +24,12 @@ if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh" ]; then
     source "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh"
 fi
 
+# The commit that runs, shown in the setup header and with the file
+# transfer: a server left on an older checkout shows it in the lines an
+# operator copies from the terminal. Empty outside a git checkout.
+KVS_INSTALL_VERSION=$(git -C "$(dirname "${BASH_SOURCE[0]}")" log -1 --format='%h, %cd' --date=short 2>/dev/null) ||
+    KVS_INSTALL_VERSION=""
+
 #################################################################
 # Dev mode flag parsing
 # Usage: ./setup.sh --dev
@@ -1885,7 +1891,7 @@ import_fetch_remote() {
     fi
     chmod 600 "$dump"
     echo -e "  ${GREEN}✓${NC} Dump received: $dump ($(du -h -- "$dump" | cut -f1))"
-    echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR...${NC}"
+    echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR${KVS_INSTALL_VERSION:+ (kvs-install $KVS_INSTALL_VERSION)}...${NC}"
     import_destination_ready "$destination" "$source" || exit 1
     import_mark_destination "$destination" "$source" || exit 1
     transfer_logs=$(mktemp -d "$LOG_DIR/import-transfer.XXXXXX") || exit 1
@@ -2241,7 +2247,7 @@ install_gum >/dev/null 2>&1 || true
 # Run pre-flight checks
 preflight_checks
 
-echo -e "${CYAN}=== KVS Docker Setup ===${NC}"
+echo -e "${CYAN}=== KVS Docker Setup${KVS_INSTALL_VERSION:+ (kvs-install $KVS_INSTALL_VERSION)} ===${NC}"
 echo ""
 
 # Detect only resources owned by the final Compose project. The project name
