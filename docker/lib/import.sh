@@ -1962,6 +1962,26 @@ import_rsync_log_progress() {
     '
 }
 
+# import_rsync_retry_delay <status> <attempt> <retries> <pause>
+# The pause before another attempt at a chunk whose rsync lost the old
+# server (statuses 5, 10, 12, 30, 35 and the 255 of ssh: the connection or
+# the rsync of the old server gone, a timeout): <pause> seconds, doubled
+# after each attempt, 5 minutes at most. False for any other status, or
+# once <attempt> used the <retries> allowed after the first.
+import_rsync_retry_delay() {
+    local delay steps=$(($2 - 1))
+
+    case "$1" in
+        5 | 10 | 12 | 30 | 35 | 255) ;;
+        *) return 1 ;;
+    esac
+    [ "$2" -le "$3" ] || return 1
+    [ "$steps" -le 5 ] || steps=5
+    delay=$(($4 << steps))
+    [ "$delay" -le 300 ] || delay=300
+    printf '%s\n' "$delay"
+}
+
 # import_rsync_workers <plan directory> <jobs> <remote shell> <rsync arguments...>
 # Up to <jobs> workers copy the chunk lists 1.list, 2.list... of the plan
 # in turn: when the rsync of a worker ends, the worker takes the next chunk
@@ -1978,14 +1998,22 @@ import_rsync_log_progress() {
 # old server through its own SSH master, socket <n> in that directory,
 # which its first chunk opens and its later chunks reuse without
 # authenticating again; the caller closes the masters
-# (import_rsync_masters_close).
+# (import_rsync_masters_close). A chunk whose rsync lost the old server
+# starts again on the same worker after a pause, at most
+# IMPORT_TRANSFER_RETRIES more times (8, about 20 minutes of pauses with
+# IMPORT_TRANSFER_RETRY_PAUSE at 15 s), while the other workers go on:
+# running the whole import again would mean a new dump and a new scan.
 import_rsync_workers() (
     local plan="$1" jobs="$2" rsh="$3"
     shift 3
     local worker pid active result=0 status bytes files arg remote_program=rsync files_from worker_rsh
-    local chunk last=0 next=1 shown=-1 done_bytes=0 done_files=0 markers offset
+    local chunk last=0 next=1 shown=-1 done_bytes=0 done_files=0 markers offset delay tries
+    local retries="${IMPORT_TRANSFER_RETRIES:-8}" pause="${IMPORT_TRANSFER_RETRY_PAUSE:-15}"
     local error_dir="${IMPORT_TRANSFER_LOG_DIR:-$plan}" control="${IMPORT_RSYNC_CONTROL_DIR:-}"
     local -a pids=() chunks=() seen_bytes=() seen_files=() offsets=() connected=() rsync_args=()
+    local -a attempts=() retry_at=()
+    [[ "$retries" =~ ^[0-9]{1,3}$ ]] || retries=8
+    [[ "$pause" =~ ^[0-9]{1,3}$ ]] || pause=15
     # Keep the PID returned by $! as the session/process-group leader even
     # when a caller enabled shell job control (otherwise setsid may fork).
     set +m
@@ -2027,23 +2055,51 @@ import_rsync_workers() (
                 pids[worker]=""
                 printf '%s\n' "$status" > "$error_dir/$worker.status"
                 tail -c +$((offsets[worker] + 1)) -- "$error_dir/$worker.err" | sed '/^KVS_IMPORT_SSH_READY$/d' >&2
-                case "$status" in
-                    0) ;;
-                    24) [ "$result" -ne 0 ] || result=24 ;;
-                    *) echo "ERROR: transfer worker $worker failed on chunk $chunk of $last (rsync status $status)" >&2; return "$status" ;;
-                esac
-                # Its final record joins the count of the finished chunks.
+                # Its last record joins the count of the finished chunks,
+                # also for an attempt that stopped: what it copied stays,
+                # and only the file it was on is counted again.
                 read -r bytes files <<< "$(import_rsync_log_progress "$plan/$worker.log" "${seen_bytes[worker]}" "${seen_files[worker]}")"
                 done_bytes=$((done_bytes + bytes))
                 done_files=$((done_files + files))
-                rm -f -- "$plan/$chunk.list"
+                case "$status" in
+                    0) rm -f -- "$plan/$chunk.list" ;;
+                    24)
+                        [ "$result" -ne 0 ] || result=24
+                        rm -f -- "$plan/$chunk.list"
+                        ;;
+                    *)
+                        if ! delay=$(import_rsync_retry_delay "$status" "${attempts[worker]}" "$retries" "$pause"); then
+                            tries=""
+                            [ "${attempts[worker]}" -le 1 ] || tries=" after ${attempts[worker]} attempts"
+                            echo "ERROR: transfer worker $worker failed on chunk $chunk of $last (rsync status $status)$tries" >&2
+                            return "$status"
+                        fi
+                        echo "  Transfer worker $worker lost its connection on chunk $chunk of $last (rsync status $status); attempt $((attempts[worker] + 1)) of $((retries + 1)) in $delay s." >&2
+                        retry_at[worker]=$((SECONDS + delay))
+                        connected[worker]=""
+                        ;;
+                esac
             fi
-            while [ "$next" -le "$last" ] && [ ! -s "$plan/$next.list" ]; do
+            if [ -n "${retry_at[worker]:-}" ]; then
+                # The same chunk again once the pause is over; the worker
+                # takes no other one meanwhile. A master that died with the
+                # connection leaves a stale socket, which ssh replaces.
+                if [ "$SECONDS" -lt "${retry_at[worker]}" ]; then
+                    active=$((active + 1))
+                    continue
+                fi
+                retry_at[worker]=""
+                chunk=${chunks[worker]}
+                attempts[worker]=$((attempts[worker] + 1))
+            else
+                while [ "$next" -le "$last" ] && [ ! -s "$plan/$next.list" ]; do
+                    next=$((next + 1))
+                done
+                [ "$next" -le "$last" ] || continue
+                chunk=$next
                 next=$((next + 1))
-            done
-            [ "$next" -le "$last" ] || continue
-            chunk=$next
-            next=$((next + 1))
+                attempts[worker]=1
+            fi
             worker_rsh=$rsh
             if [ -n "$control" ]; then
                 # -S names the socket whatever ControlPath the options give.
@@ -2094,8 +2150,15 @@ import_rsync_workers() (
                     tail -c +$((offsets[worker] + 1)) -- "$error_dir/$worker.err" >&2
                     [ "$status" -ne 0 ] || status=1
                     printf '%s\n' "$status" > "$error_dir/$worker.status"
-                    echo "ERROR: transfer worker $worker ended before SSH was ready (status $status)" >&2
-                    return "$status"
+                    if ! delay=$(import_rsync_retry_delay "$status" "${attempts[worker]}" "$retries" "$pause"); then
+                        tries=""
+                        [ "${attempts[worker]}" -le 1 ] || tries=" after ${attempts[worker]} attempts"
+                        echo "ERROR: transfer worker $worker ended before SSH was ready (status $status)$tries" >&2
+                        return "$status"
+                    fi
+                    echo "  Transfer worker $worker could not reach the old server for chunk $chunk of $last (status $status); attempt $((attempts[worker] + 1)) of $((retries + 1)) in $delay s." >&2
+                    retry_at[worker]=$((SECONDS + delay))
+                    continue
                 fi
                 [ -z "$control" ] || connected[worker]=yes
             fi
