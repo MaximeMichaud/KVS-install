@@ -575,6 +575,35 @@ test_the_size_walk_stops_at_its_time_budget() {
     pass "the size walk stops at its time budget"
 }
 
+# The size walk lists the entries it measures in a temporary file. In a
+# full temporary directory that list is cut short, and the walk measured
+# part of the site and reported it as the whole of it, exact. It now
+# measures the site in one pass instead, and says why.
+test_a_full_temporary_directory_does_not_shrink_the_site_size() {
+    local site="$TMP_ROOT/full-tmp-site"
+    local out="$TMP_ROOT/full-tmp.out"
+    local err="$TMP_ROOT/full-tmp.err"
+    local i total
+
+    make_site "$site"
+    mkdir -p "$site/contents/videos_screenshots"
+    for ((i = 1; i <= 300; i++)); do
+        : > "$site/contents/videos_screenshots/screenshot-of-a-video-with-a-rather-long-file-name-$i.jpg"
+    done
+    # 8 kB at most for any file the exporter writes: its report fits, the
+    # 40 kB list of the entries to measure does not.
+    (
+        ulimit -f 8
+        STUB_LOG=/dev/null run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site"
+    ) || fail "detect must go on when the temporary directory is full: $(cat "$err")"
+    assert_key "$out" site_size_status exact
+    total=$(detect_value "$out" site_size_entries_total)
+    [ "$total" = 1 ] || [ "$total" = 304 ] ||
+        fail "an exact size must cover the whole site, not $total of its 304 entries: $(grep '^Site size' "$err")"
+    grep -q "could not be written" "$err" || fail "the one-pass measurement must be explained: $(cat "$err")"
+    pass "a full temporary directory does not shrink the site size"
+}
+
 # entry_value <detect output> <path> prints "mb|kind|state" of an entry.
 entry_value() {
     sed -n "s/^entry_[0-9]*=$(printf '%s' "$2" | sed 's/[.[\/*^$]/\\&/g')|//p" "$1" | head -n 1
@@ -1423,6 +1452,7 @@ test_detect_reports_the_installation_as_key_value_lines
 test_detect_reports_the_encoding_and_the_web_server_configuration
 test_the_size_walk_stops_at_its_time_budget
 test_the_size_walk_can_be_skipped
+test_a_full_temporary_directory_does_not_shrink_the_site_size
 test_detect_reports_the_entries_and_what_stays_behind
 test_excluded_and_included_paths_change_what_travels
 test_the_password_reaches_the_client_only_through_the_environment

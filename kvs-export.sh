@@ -692,11 +692,16 @@ kvs_measure_jobs() {
 kvs_list_measure_units() {
     local file="$1"
     local depth="$2"
+    local -a statuses
 
+    # find also fails on a directory it cannot read, which only leaves that
+    # directory out; cat fails when the list could not be written whole.
     {
         find -L "$SITE_DIR" -mindepth 1 -maxdepth "$((depth - 1))" ! -type d -print0 2> /dev/null
         find -L "$SITE_DIR" -mindepth "$depth" -maxdepth "$depth" -print0 2> /dev/null
-    } > "$file" < /dev/null
+    } < /dev/null | cat > "$file" 2> /dev/null
+    statuses=("${PIPESTATUS[@]}")
+    return "${statuses[1]}"
 }
 
 # Start the du processes over the listed entries, their lines arriving on
@@ -791,8 +796,14 @@ kvs_measure_site() {
     fi
     jobs=$(kvs_measure_jobs)
     UNITS_FILE=$(mktemp 2> /dev/null) || UNITS_FILE=""
+    if [ -n "$UNITS_FILE" ] && ! kvs_list_measure_units "$UNITS_FILE" "$depth"; then
+        # A list cut short would leave part of the site out of an exact
+        # size: the site is measured in one pass instead.
+        kvs_warn "the list of the entries to measure could not be written in ${TMPDIR:-/tmp} (full?); measuring the site in one pass"
+        rm -f -- "$UNITS_FILE"
+        UNITS_FILE=""
+    fi
     if [ -n "$UNITS_FILE" ]; then
-        kvs_list_measure_units "$UNITS_FILE" "$depth"
         while IFS= read -r -d '' _; do
             total=$((total + 1))
         done < "$UNITS_FILE"
