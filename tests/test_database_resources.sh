@@ -59,11 +59,11 @@ database_configure_resources > sizing.log
 [ "$(read_saved)" = '12288M 2048M' ] || fail '24 GiB automatic sizes not persisted'
 [ "$(stat -c '%a' .env)" = 600 ] || fail 'env file permissions changed'
 docker compose config --format json > rendered.json
-jq -e '.services.mariadb.command == ["--innodb-buffer-pool-size=12288M", "--innodb-log-file-size=2048M"]' rendered.json >/dev/null || fail 'persisted settings missing from rendered startup'
+jq -e '.services.mariadb.command == ["--innodb-buffer-pool-size=12288M", "--innodb-log-file-size=2048M", "--max-allowed-packet=1G"]' rendered.json >/dev/null || fail 'persisted settings missing from rendered startup'
 # Read from the saved file in a new process without the exported values.
 env -u MARIADB_BUFFER_POOL_SIZE -u MARIADB_REDO_LOG_SIZE "$real_docker" compose \
     --env-file "$work/.env" -f "$root/docker/docker-compose.yml" config --format json > fresh.json
-jq -e '.services.mariadb.command == ["--innodb-buffer-pool-size=12288M", "--innodb-log-file-size=2048M"]' fresh.json >/dev/null || fail 'new process lost saved startup settings'
+jq -e '.services.mariadb.command == ["--innodb-buffer-pool-size=12288M", "--innodb-log-file-size=2048M", "--max-allowed-packet=1G"]' fresh.json >/dev/null || fail 'new process lost saved startup settings'
 AVAILABLE_MB=1024
 database_configure_resources >/dev/null
 [ "$(read_saved)" = '12288M 2048M' ] || fail 'rerun resized a saved pool based on remaining free RAM'
@@ -152,5 +152,5 @@ reset_case
 printf 'MARIADB_BUFFER_POOL_SIZE=1G\nMARIADB_REDO_LOG_SIZE=512M\n' >> .env
 "$real_docker" compose --env-file "$work/.env" \
     -f "$root/docker/multi-site/docker-compose.site.yml.template" config --format json > secondary.json
-jq -e '.services.mariadb.command == ["--innodb-buffer-pool-size=1G", "--innodb-log-file-size=512M"]' secondary.json >/dev/null || fail 'secondary template ignores persistent sizes'
+jq -e '.services.mariadb.command == ["--innodb-buffer-pool-size=1G", "--innodb-log-file-size=512M", "--max-allowed-packet=1G"]' secondary.json >/dev/null || fail 'secondary template ignores persistent sizes'
 echo 'PASS: secondary template honors its own explicit resource budget'
