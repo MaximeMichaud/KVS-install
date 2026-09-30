@@ -94,6 +94,16 @@ reject_fixture full_stage
 grep -q 'native import staging needs' "$TEST_DIR/rejected.log" || fail 'missing staging space diagnostic'
 SIMULATE_FULL_STAGE=no
 
+# An InnoDB table converted from MyISAM on a lenient server keeps
+# ROW_FORMAT=FIXED, which the strict MariaDB of the stack refuses to create.
+fixture
+sed -i 's/^) ENGINE=InnoDB;$/) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=FIXED;/' "$TEST_DIR/source/data/ktvs_videos.sql"
+hash_fixture
+pack_fixture
+prepare_fixture row_format >/dev/null
+tail -n 1 "$TEST_DIR/init/row_format/data/new-site.example/ktvs_videos.sql" | grep -Fxq ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;' ||
+    fail 'an InnoDB table kept ROW_FORMAT=FIXED'
+
 fixture
 sed -i 's/source_database=old_source/source_database=old-site.example/' "$TEST_DIR/source/kvs-native-export.manifest"
 hash_fixture

@@ -299,6 +299,7 @@ native_import_prepare() (
         echo "ERROR: native bundle has an incorrect table count or no options table" >&2
         return 1
     fi
+    import_innodb_row_format "$work/payload/data/"*.sql || return 1
     runtime="$(dirname -- "${BASH_SOURCE[0]}")/native-import-runtime.sh"
     cp -- "$runtime" "$work/payload/runtime.sh" || return 1
     sql="$work/payload/finalize.sql"
