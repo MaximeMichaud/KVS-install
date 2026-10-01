@@ -75,7 +75,7 @@ location = /php-check {
     fastcgi_pass unix:/run/php/php8.3-fpm.sock;
     fastcgi_param SCRIPT_FILENAME $document_root/php-check.php;
 }
-include moderation-privacy.conf;
+include members-area.conf;
 NGINX
 fi
 {
@@ -105,15 +105,14 @@ else
     cp explicit.conf expected.conf
 fi
 
-mkdir -p "$site/contents/videos_screenshots/1/2" "$site/contents/videos_screenshots/1/3" "$site/contents/videos_sources"
-printf 'private screenshot\n' > "$site/contents/videos_screenshots/1/2/test.jpg"
-printf 'public screenshot\n' > "$site/contents/videos_screenshots/1/3/test.jpg"
-touch "$site/contents/videos_screenshots/1/3/.public"
-printf 'original upload\n' > "$site/contents/videos_sources/test.jpg"
-cat > "$site/authorize.php" <<'PHP'
+mkdir -p "$site/members/7/thumbs" "$site/members/originals"
+printf 'member photo\n' > "$site/members/7/photo.jpg"
+printf 'public thumbnail\n' > "$site/members/7/thumbs/photo.jpg"
+printf 'original upload\n' > "$site/members/originals/photo.jpg"
+cat > "$site/check_member.php" <<'PHP'
 <?php
 // A synthetic authorizer: no site code, credentials or database connection.
-if (($_SERVER['SCREEN_VIDEO_ID'] ?? '') !== '2') {
+if (($_SERVER['MEMBER_ALBUM_ID'] ?? '') !== '7') {
     http_response_code(500);
     exit;
 }
@@ -150,7 +149,7 @@ http {
         location = / { return 200 "home\n"; }
         location = /admin/ { return 200 "admin\n"; }
         location = /404.php { return 404 "missing\n"; }
-        # The recovered screenshot guards must precede the normal asset handler.
+        # The recovered member guards must precede the normal asset handler.
         location ~* \.(jpg|png)$ { expires 180d; }
         location / { return 404; }
     }
@@ -206,18 +205,18 @@ check_routes() {
     assert_http /missing 404
     if [ "$NGINX_IMPORT_TEST_MODE" = source ]; then
         assert_http /php-check 404
-        assert_http /contents/videos_sources/test.jpg 404
-        assert_http /contents/videos_screenshots/1/3/test.jpg 200 'public screenshot'
-        assert_http /contents/videos_screenshots/1/2/test.jpg 404 missing
+        assert_http /members/originals/photo.jpg 404
+        assert_http /members/7/thumbs/photo.jpg 200 'public thumbnail'
+        assert_http /members/7/photo.jpg 404 missing
         cp response denied-response
-        assert_http /contents/videos_screenshots/1/2/absent.jpg 404 missing
-        cmp response denied-response || fail 'denied and missing screenshots differ'
-        assert_http /contents/videos_screenshots/1/2/test.jpg 200 'private screenshot' allow
-        grep -qi '^Cache-Control: private, no-store' headers || fail 'authorized screenshot can be cached'
-        grep -qi '^X-Screen-Check: checked' headers || fail 'authorization result variable was lost'
-        assert_http /contents/videos_screenshots/1/2/test.jpg 500 '' error
-        assert_http /_screen_auth 404 missing allow
-        assert_http /_guarded_screen/contents/videos_screenshots/1/2/test.jpg 404 '' allow
+        assert_http /members/7/absent.jpg 404 missing
+        cmp response denied-response || fail 'denied and missing member files differ'
+        assert_http /members/7/photo.jpg 200 'member photo' allow
+        grep -qi '^Cache-Control: private, no-store' headers || fail 'an authorized member file can be cached'
+        grep -qi '^X-Member-Check: checked' headers || fail 'authorization result variable was lost'
+        assert_http /members/7/photo.jpg 500 '' error
+        assert_http /_member_check 404 missing allow
+        assert_http /_members_only/members/7/photo.jpg 404 '' allow
     fi
 }
 check_routes
@@ -242,8 +241,8 @@ done
 check_routes
 if [ "$NGINX_IMPORT_TEST_MODE" = source ]; then
     docker stop --time 3 "$php_container" >/dev/null
-    assert_http /contents/videos_screenshots/1/2/test.jpg 500 '' allow
-    assert_http /contents/videos_screenshots/1/3/test.jpg 200 'public screenshot'
+    assert_http /members/7/photo.jpg 500 '' allow
+    assert_http /members/7/thumbs/photo.jpg 200 'public thumbnail'
     echo "PASS: $checks HTTP routing checks, PHP authorization, backend failure, persistence and reload"
 else
     echo "PASS: $checks HTTP routing checks, nginx validation, persisted override and reload"

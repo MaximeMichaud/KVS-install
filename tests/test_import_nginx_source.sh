@@ -33,7 +33,7 @@ server {
     set $base /srv/example;
     error_page 404 /404.php;
     include common/site.conf;
-    include moderation-privacy.conf;
+    include members-area.conf;
 }
 # configuration file /etc/nginx/common/site.conf:
 access_log /var/log/nginx/example.log;
@@ -79,10 +79,10 @@ grep -Fxq '    fastcgi_pass php-fpm:9000;' "$output" || fail 'PHP socket not ada
 grep -Fxq '    fastcgi_param REQUEST_METHOD $request_method;' "$output" || fail 'FastCGI include not expanded'
 grep -Fxq 'error_page 404 /404.php;' "$output" || fail 'lost fallback'
 grep -Fxq 'rewrite ^/ordinary$ /ordinary.php last;' "$output" || fail 'lost ordinary rule'
-grep -Fxq '    auth_request /_screen_auth;' "$output" || fail 'lost authorization subrequest'
-grep -Fxq '    auth_request_set $screen_check $upstream_http_x_auth_check;' "$output" || fail 'lost authorization result'
-grep -Fxq 'location = /_screen_auth {' "$output" || fail 'lost exact authorization handler'
-grep -Fxq '    fastcgi_param SCREEN_VIDEO_ID $screen_video;' "$output" || fail 'lost authorization parameters'
+grep -Fxq '    auth_request /_member_check;' "$output" || fail 'lost authorization subrequest'
+grep -Fxq '    auth_request_set $member_check $upstream_http_x_auth_check;' "$output" || fail 'lost authorization result'
+grep -Fxq 'location = /_member_check {' "$output" || fail 'lost exact authorization handler'
+grep -Fxq '    fastcgi_param MEMBER_ALBUM_ID $member_album;' "$output" || fail 'lost authorization parameters'
 grep -Fxq '    fastcgi_pass_request_body off;' "$output" || fail 'lost body suppression'
 grep -Fxq '    fastcgi_param CONTENT_LENGTH "";' "$output" || fail 'lost empty body length'
 if grep -Eq 'unix:|/srv/|include |^listen |^rewrite \^/private/' "$output"; then
@@ -126,32 +126,32 @@ assert_refused 'an unavailable include'
 sed 's@location /private/@location /@' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
 assert_refused 'a root location conflicting with the target vhost'
 
-sed 's@location = /_screen_auth@location = /different_auth@' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
+sed 's@location = /_member_check@location = /different_auth@' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
 assert_refused 'an authorization endpoint missing from the imported routing'
 grep -q 'auth_request requires an imported exact internal location' "$TEST_DIR/error" || fail 'missing authorization endpoint was not explained'
 sed '/^internal;$/d' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
 assert_refused 'an authorization endpoint without internal protection'
-sed 's@auth_request /_screen_auth;@auth_request $arg_auth;@' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
+sed 's@auth_request /_member_check;@auth_request $arg_auth;@' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
 assert_refused 'a dynamic authorization URI'
-sed 's@include moderation-privacy-backend.conf;@include missing-backend.conf;@' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
+sed 's@include members-check-backend.conf;@include missing-backend.conf;@' "$TEST_DIR/source.conf" > "$TEST_DIR/candidate.conf"
 assert_refused 'an authorization backend missing from the source dump'
 
 cat > "$TEST_DIR/candidate.conf" <<'NGINX'
 # configuration file /etc/nginx/unrelated.conf:
 server { root /srv/other; include unrelated-auth.conf; }
 # configuration file /etc/nginx/unrelated-auth.conf:
-location = /_screen_auth { internal; return 204; }
+location = /_member_check { internal; return 204; }
 rewrite ^/other$ /index.php last;
 NGINX
-sed 's@location = /_screen_auth@location = /different_auth@' "$TEST_DIR/source.conf" >> "$TEST_DIR/candidate.conf"
+sed 's@location = /_member_check@location = /different_auth@' "$TEST_DIR/source.conf" >> "$TEST_DIR/candidate.conf"
 assert_refused 'an authorization endpoint present only in another virtual host'
 
 cat > "$TEST_DIR/candidate.conf" <<'NGINX'
 server {
     root /srv/example;
     rewrite ^/ordinary$ /ordinary.php last;
-    location /private/ { auth_request /_screen_auth; }
-    location = /_screen_auth { internal; return 403; }
+    location /private/ { auth_request /_member_check; }
+    location = /_member_check { internal; return 403; }
 }
 NGINX
 assert_refused 'inline authorization outside a complete imported fragment'
@@ -161,10 +161,10 @@ fi
 [ ! -s "$TEST_DIR/result" ] || fail 'plain extraction emitted rules without authorization'
 pass 'plain extraction refuses to discard authorization from an inline location'
 
-sed '/listen 443 ssl;/a\    auth_request /_screen_auth;\n    auth_request_set $server_check $upstream_status;' \
-    "$TEST_DIR/source.conf" | sed '/location = \/_screen_auth {/a\    auth_request off;' > "$TEST_DIR/candidate.conf"
+sed '/listen 443 ssl;/a\    auth_request /_member_check;\n    auth_request_set $server_check $upstream_status;' \
+    "$TEST_DIR/source.conf" | sed '/location = \/_member_check {/a\    auth_request off;' > "$TEST_DIR/candidate.conf"
 import_nginx_rewrites_from_config "$TEST_DIR/candidate.conf" /srv/example '' source > "$TEST_DIR/result"
-grep -Fxq 'auth_request /_screen_auth;' "$TEST_DIR/result" || fail 'server authorization was discarded'
+grep -Fxq 'auth_request /_member_check;' "$TEST_DIR/result" || fail 'server authorization was discarded'
 grep -Fxq 'auth_request_set $server_check $upstream_status;' "$TEST_DIR/result" || fail 'server authorization result was discarded'
 grep -Fxq '    auth_request off;' "$TEST_DIR/result" || fail 'explicit authorization inheritance override was discarded'
 pass 'server authorization and an explicit off override retain their original scope'
@@ -184,7 +184,7 @@ server {
     root /srv/example;
     error_page 404 /404.php;
     include common/site.conf;
-    include moderation-privacy.conf;
+    include members-area.conf;
 }
 NGINX
 import_nginx_rewrites_from_config "$TEST_DIR/candidate.conf" /srv/example '' source > "$TEST_DIR/result"
