@@ -345,7 +345,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep awk sort stat id chmod chown mv sha256sum getconf; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep awk sort stat id chmod chown mv sha256sum getconf mkfifo tee head cut; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -921,15 +921,46 @@ EOF
 #!/bin/bash
 printf 'chown argv:%s\n' "$*" >> "$STUB_LOG"
 EOF
-    chmod +x "$native_bin/id" "$native_bin/chown"
+    # Every read of the staged files by a checksum pass shows in the log.
+    cat > "$native_bin/sha256sum" <<EOF
+#!/bin/bash
+printf 'sha256sum argv:%s\n' "\$(printf ' [%s]' "\$@")" >> "\$STUB_LOG"
+exec "$(command -v sha256sum)" "\$@"
+EOF
+    chmod +x "$native_bin/id" "$native_bin/chown" "$native_bin/sha256sum"
     export STUB_NATIVE_CAPABLE=yes
     run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
         fail "native prerequisites must be checked: $(cat "$err")"
     assert_key "$out" db_dump_format directory
+    # A tar that cannot hand members to a command cannot checksum the bundle
+    # while it streams: auto keeps the SQL format and says why.
+    mkdir "$TMP_ROOT/plain-tar-bin"
+    cat > "$TMP_ROOT/plain-tar-bin/tar" <<EOF
+#!/bin/bash
+[ "\${1:-}" != --help ] || { echo 'Usage: tar [options]'; exit 0; }
+exec "$(command -v tar)" "\$@"
+EOF
+    chmod +x "$TMP_ROOT/plain-tar-bin/tar"
+    run_export "$TMP_ROOT/plain-tar-bin:$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+        fail "detect must succeed without GNU tar: $(cat "$err")"
+    assert_key "$out" db_dump_format sql
+    grep -q 'GNU tar' "$out" || fail "the fallback must name the tools the native stream needs"
+    # Each of those tools is required, not just one of them.
+    cp -a "$MIN_BIN" "$TMP_ROOT/no-mkfifo-bin"
+    rm "$TMP_ROOT/no-mkfifo-bin/mkfifo"
+    run_export "$native_bin:$STUB_BIN:$TMP_ROOT/no-mkfifo-bin" "$out" "$err" detect "$site" ||
+        fail "detect must succeed without mkfifo: $(cat "$err")"
+    assert_key "$out" db_dump_format sql
     run_export "$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory --gzip dump "$site" ||
         fail "native export must produce a bundle: $(cat "$err")"
     tar -xzf "$out" -C "$extracted"
     (cd "$extracted" && sha256sum -c SHA256SUMS >/dev/null) || fail "native checksums must verify after extraction"
+    # The staged export is read once, by the archive: the checksums come from
+    # the stream (one sha256sum on stdin per member) and close the archive.
+    [ "$(argv_lines | grep -c '^sha256sum argv:')" -eq 3 ] || fail "each bundle member must be hashed once: $(argv_lines | grep sha256sum)"
+    argv_lines | grep '^sha256sum argv:' | grep -qvFx 'sha256sum argv: []' &&
+        fail "the staged files must not be read by a separate checksum pass: $(argv_lines | grep sha256sum)"
+    [ "$(tar -tzf "$out" | tail -n 1)" = SHA256SUMS ] || fail "SHA256SUMS must close the streamed bundle: $(tar -tzf "$out")"
     assert_key "$extracted/kvs-native-export.manifest" format 2
     assert_key "$extracted/kvs-native-export.manifest" complete yes
     assert_key "$extracted/kvs-native-export.manifest" source_database oldsite
@@ -939,6 +970,20 @@ EOF
     argv_lines | grep -Fq 'mariadb-dump argv: [--no-defaults]' || fail "native exports must not inherit filtering or formatting options"
     grep -Fq '[--socket=/tmp/fixture.sock]' "$STUB_LOG" || fail "native exports must preserve the resolved local socket"
     argv_lines | grep -Fq '[--default-character-set=binary]' || fail "native data must preserve original character bytes"
+    # A member the stream could not hash would leave an empty digest: the
+    # export fails instead of shipping checksums the import rejects.
+    mkdir "$TMP_ROOT/broken-hash-bin"
+    cat > "$TMP_ROOT/broken-hash-bin/sha256sum" <<EOF
+#!/bin/bash
+[ "\$#" -eq 0 ] || exec "$(command -v sha256sum)" "\$@"
+cat > /dev/null
+exit 1
+EOF
+    chmod +x "$TMP_ROOT/broken-hash-bin/sha256sum"
+    if run_export "$TMP_ROOT/broken-hash-bin:$native_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" --database-format=directory --gzip dump "$site"; then
+        fail "a member that could not be hashed must stop the native export"
+    fi
+    grep -q 'could not be checksummed' "$err" || fail "the failed hash must be reported: $(cat "$err")"
 
     make_site "$TMP_ROOT/native-domain-site" https://source.example localhost
     sed -i 's/oldsite/source-site.example/' "$TMP_ROOT/native-domain-site/admin/include/setup_db.php"
