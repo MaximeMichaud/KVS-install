@@ -130,6 +130,14 @@ ENVIRONMENT VARIABLES:
                           site). It must come from the same old server and
                           be whole. Not on the last pass, which needs a
                           fresh dump of the frozen site. Never kept.
+    IMPORT_FILES_ONLY=yes Bring the site files up to date from the old
+                          server and stop there: no dump, no database
+                          load, no image built and no container started
+                          or stopped (a bulk copy, or a catch-up right
+                          before the old site is frozen, so the last pass
+                          has little left). With IMPORT_REMOTE_HOST; the
+                          site directory must be empty or come from the
+                          same old server. Never kept.
     IMPORT_DATABASE_FORMAT=auto|sql|directory
                           Remote database export format. Auto uses native
                           MariaDB bulk loading when the source supports it,
@@ -197,6 +205,10 @@ done
 
 if [ "$RESUME_IMPORT" = true ] && [ "$DEV_MODE" = true ]; then
     echo "ERROR: --resume-import cannot be combined with --dev" >&2
+    exit 1
+fi
+if [ "$RESUME_IMPORT" = true ] && [[ "${IMPORT_FILES_ONLY:-}" =~ ^(y|Y|yes|YES|true)$ ]]; then
+    echo "ERROR: --resume-import finishes a staged database import and cannot be combined with IMPORT_FILES_ONLY" >&2
     exit 1
 fi
 
@@ -869,6 +881,14 @@ case "${IMPORT_REUSE_DUMP:-}" in
     ''|n|N|no|NO|false) IMPORT_REUSE_DUMP=no ;;
     *) echo "ERROR: IMPORT_REUSE_DUMP must be yes or no" >&2; exit 1 ;;
 esac
+# A pass of the site files alone (import_files_only), decided by each run
+# on its own like the dump reuse: never written to .env, since the pass
+# that ends the migration loads a fresh dump.
+case "${IMPORT_FILES_ONLY:-}" in
+    y|Y|yes|YES|true) IMPORT_FILES_ONLY=yes ;;
+    ''|n|N|no|NO|false) IMPORT_FILES_ONLY=no ;;
+    *) echo "ERROR: IMPORT_FILES_ONLY must be yes or no" >&2; exit 1 ;;
+esac
 IMPORT_DATABASE_FORMAT="${IMPORT_DATABASE_FORMAT:-auto}"
 IMPORT_DATABASE_FORMAT_REQUEST=$IMPORT_DATABASE_FORMAT
 IMPORT_DATABASE_JOBS="${IMPORT_DATABASE_JOBS:-auto}"
@@ -912,6 +932,14 @@ if [ "$IMPORT_SOURCES_GIVEN" -gt 1 ]; then
 fi
 if [ -n "$IMPORT_REUSE_SITE_DIR" ] && [ "$IMPORT_SOURCE" != remote ]; then
     echo "ERROR: IMPORT_REUSE_SITE_DIR goes with IMPORT_REMOTE_HOST: it takes over the files of an earlier import of the same old server" >&2
+    exit 1
+fi
+if [ "$IMPORT_FILES_ONLY" = yes ] && [ "$IMPORT_SOURCE" != remote ]; then
+    echo "ERROR: IMPORT_FILES_ONLY goes with IMPORT_REMOTE_HOST: it brings the site files up to date from the old server" >&2
+    exit 1
+fi
+if [ "$IMPORT_FILES_ONLY" = yes ] && [ "$IMPORT_REUSE_DUMP" = yes ]; then
+    echo "ERROR: IMPORT_FILES_ONLY receives no dump and loads none; IMPORT_REUSE_DUMP is for a pass that loads one" >&2
     exit 1
 fi
 if [ -n "$IMPORT_SOURCE" ]; then
@@ -1395,7 +1423,11 @@ import_remote_free_space_check() {
             echo -e "${RED}ERROR: not enough free space for the dump under $destination${NC}"
             return 1
         fi
-        echo "  Free space:      an earlier pass from the same source wrote under $destination: the dump is checked now, the files left to copy once the transfer is planned"
+        if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
+            echo "  Free space:      an earlier pass from the same source wrote under $destination: the room the dump of the next full pass needs is checked now, the files left to copy once the transfer is planned"
+        else
+            echo "  Free space:      an earlier pass from the same source wrote under $destination: the dump is checked now, the files left to copy once the transfer is planned"
+        fi
         return 0
     fi
     case "$status" in
@@ -1415,11 +1447,32 @@ import_remote_free_space_check() {
     return 0
 }
 
+# import_remote_earlier_pass <destination>
+# True when the destination already holds files of an earlier pass from
+# the old server of this run: its site directory, or any of its sites when
+# IMPORT_REMOTE_DIR is left to the search (a different one is refused
+# later, as from any other source). The size of the site is then of no
+# use: the free space counts the dump and what the transfer plan leaves
+# to copy (import_remote_free_space_check). Measuring it would cost the
+# old server up to IMPORT_SIZE_TIMEOUT seconds of disk time on every pass,
+# the last one on the frozen site included.
+import_remote_earlier_pass() {
+    local destination="$1" marker
+
+    marker=$(cat -- "$(import_marker_file "$destination")" 2>/dev/null) || return 1
+    if [ -n "$IMPORT_REMOTE_DIR" ]; then
+        [ "$marker" = "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" ] || return 1
+    else
+        [[ "$marker" == "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT/"* ]] || return 1
+    fi
+    [ -d "$destination" ] && find "$destination" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
+}
+
 # The old server answers through kvs-export.sh, piped over one SSH
 # connection: what it holds, whether its database answers, what tools it
 # has. Nothing is written or installed there.
 import_inspect_remote() {
-    local batch=no accept_new=no attempt=1 prefix db_ok encoding nginx_lines nginx_files
+    local batch=no accept_new=no attempt=1 prefix db_ok encoding nginx_lines nginx_files budget
 
     if [[ ! "$IMPORT_TRANSFER_JOBS" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
         echo "ERROR: IMPORT_TRANSFER_JOBS must be an integer from 1 to 32" >&2
@@ -1467,12 +1520,16 @@ import_inspect_remote() {
     # to leave behind after seeing the entries and their sizes.
     while :; do
     while :; do
-        if [ "$IMPORT_SIZE_TIMEOUT" -gt 0 ]; then
+        budget=$IMPORT_SIZE_TIMEOUT
+        if import_remote_earlier_pass "/var/www/$DOMAIN"; then
+            budget=skip
+            echo "  Looking for the site on $IMPORT_SSH_TARGET (its size is not measured: /var/www/$DOMAIN holds an earlier pass from it, and the transfer counts what is left)..."
+        elif [ "$IMPORT_SIZE_TIMEOUT" -gt 0 ]; then
             echo "  Looking for the site on $IMPORT_SSH_TARGET (its size is measured for at most $IMPORT_SIZE_TIMEOUT s; IMPORT_SIZE_TIMEOUT=0 measures all of it)..."
         else
             echo "  Looking for the site on $IMPORT_SSH_TARGET (its whole size is measured, IMPORT_SIZE_TIMEOUT bounds that)..."
         fi
-        if import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$IMPORT_SIZE_TIMEOUT" "$IMPORT_EXCLUDE" "$IMPORT_INCLUDE"; then
+        if import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$budget" "$IMPORT_EXCLUDE" "$IMPORT_INCLUDE"; then
             break
         fi
         if grep -q '^site_candidate_1=' "$IMPORT_REMOTE_REPORT" 2>/dev/null; then
@@ -1571,8 +1628,9 @@ import_inspect_remote() {
     import_remote_load_excludes "$IMPORT_REMOTE_REPORT"
     IMPORT_SITE_IONCUBE=$(import_kv "$IMPORT_REMOTE_REPORT" ioncube)
     import_save_nginx_config "$IMPORT_REMOTE_REPORT"
-    # Reject unsupported source routing before starting the dump or site transfer.
-    if [ "$IMPORT_NGINX_REWRITES" = source ]; then
+    # Reject unsupported source routing before starting the dump or site
+    # transfer; a pass of the files alone writes no rules.
+    if [ "$IMPORT_NGINX_REWRITES" = source ] && [ "${IMPORT_FILES_ONLY:-no}" != yes ]; then
         import_prepare_source_nginx_rewrites
     fi
     if [ -f .env ]; then
@@ -1604,15 +1662,21 @@ import_inspect_remote() {
         exit 1
     fi
     IMPORT_TABLES_PREFIX=$prefix
-    if [ "$db_ok" != yes ]; then
+    if [ "$db_ok" != yes ] && [ "${IMPORT_FILES_ONLY:-no}" != yes ]; then
         echo -e "${RED}ERROR: the database of the old server does not answer; fix the access there, or dump it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP${NC}"
         exit 1
     fi
     # A run that stopped after the take-over is repeated with the same
     # command: the files are then in place, recorded as imported from this
-    # source, and the directory they came from is gone.
+    # source, and the directory they came from is gone. A pass of the files
+    # alone leaves the earlier import where it is: the pass that loads the
+    # database under this domain takes it over.
     if [ -n "$IMPORT_REUSE_SITE_DIR" ] && [ "$(cat "$(import_marker_file "/var/www/$DOMAIN")" 2>/dev/null)" != \
         "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" ]; then
+        if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
+            echo -e "${RED}ERROR: IMPORT_FILES_ONLY does not take over $IMPORT_REUSE_SITE_DIR; bring those files up to date under their own domain, the pass without IMPORT_FILES_ONLY takes them over${NC}"
+            exit 1
+        fi
         import_take_over_site "$IMPORT_REUSE_SITE_DIR" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
     fi
     import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
@@ -1620,7 +1684,7 @@ import_inspect_remote() {
     if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
         import_ensure_tool rsync || exit 1
     fi
-    if [ "$IMPORT_REMOTE_COMPRESSOR" = zstd ]; then
+    if [ "$IMPORT_REMOTE_COMPRESSOR" = zstd ] && [ "${IMPORT_FILES_ONLY:-no}" != yes ]; then
         import_ensure_tool zstd || exit 1
     fi
     if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
@@ -1898,7 +1962,7 @@ import_fetch_remote() {
     if [ "$IMPORT_REMOTE_COMPRESSOR" = zstd ]; then
         extension=zst
     fi
-    if [ "$IMPORT_REMOTE_DATABASE_FORMAT" = directory ] && ! import_native_target_supported; then
+    if [ "${IMPORT_FILES_ONLY:-no}" != yes ] && [ "$IMPORT_REMOTE_DATABASE_FORMAT" = directory ] && ! import_native_target_supported; then
         if [ "$IMPORT_DATABASE_FORMAT" = directory ]; then
             echo "ERROR: native directory import requires MariaDB 11.8 or newer on the destination" >&2
             exit 1
@@ -1916,7 +1980,9 @@ import_fetch_remote() {
     # which is harmless, instead of rows whose files never came. A second
     # pass, once the old site is frozen, carries the changes made since.
     echo ""
-    if [ "${IMPORT_REUSE_DUMP:-no}" = yes ]; then
+    if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
+        echo "  No dump in a pass of the files alone (IMPORT_FILES_ONLY=yes); a dump an earlier run received stays as it is."
+    elif [ "${IMPORT_REUSE_DUMP:-no}" = yes ]; then
         echo -e "${CYAN}Checking the database dump an earlier run received...${NC}"
         import_reuse_dump "$dump" "$destination" "$source" "$IMPORT_TABLES_PREFIX" || exit 1
     else
@@ -1939,7 +2005,11 @@ import_fetch_remote() {
     fi
     echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR${KVS_INSTALL_VERSION:+ (kvs-install $KVS_INSTALL_VERSION)}...${NC}"
     import_destination_ready "$destination" "$source" || exit 1
-    import_mark_destination "$destination" "$source" || exit 1
+    if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
+        import_mark_destination_files_only "$destination" "$source" "$IMPORT_STAGING/$DOMAIN" || exit 1
+    else
+        import_mark_destination "$destination" "$source" || exit 1
+    fi
     transfer_logs=$(mktemp -d "$LOG_DIR/import-transfer.XXXXXX") || exit 1
     # The database is loaded after the files, under the same disk as in the
     # free space check of the inspection.
@@ -1954,9 +2024,62 @@ import_fetch_remote() {
     rm -rf -- "$transfer_logs"
     echo -e "  ${GREEN}✓${NC} Site files in $destination"
     import_ssh_close
+    [ "${IMPORT_FILES_ONLY:-no}" != yes ] || return 0
     IMPORT_DB_DUMP=$dump
     IMPORT_RAW_DUMP=$dump
     IMPORT_SITE_DIR=$destination
+}
+
+# import_files_only: the pass IMPORT_FILES_ONLY=yes asks for. The old
+# server is inspected as for any import and its site files come into
+# /var/www/<domain> through the same transfer, then the setup stops: no
+# dump is received and one an earlier run left stays, the database volume,
+# the images and the containers are not touched, and .env keeps the domain
+# and the choices of the last full pass (the paths left behind or taken
+# along aside, kept for every pass). A large site copies its files this
+# way while it stays live, without the hours of a database export, and a
+# catch-up right before its writes are frozen leaves the last pass, the
+# one with a fresh dump, little to copy. The site directory must be
+# absent, empty or filled from the same old server, as for any import;
+# its files become the old server's, configuration files included, which
+# the next full pass sets up for this server again.
+import_files_only() {
+    local destination="/var/www/$DOMAIN" answer completed="" env_domain project
+
+    if ! declare -F import_validate_site >/dev/null; then
+        echo -e "${RED}ERROR: the import library $IMPORT_LIB is missing; run setup.sh from a full checkout of the repository${NC}"
+        exit 1
+    fi
+    IMPORT_DATABASE_FORMAT=$IMPORT_DATABASE_FORMAT_REQUEST
+    echo ""
+    echo -e "${CYAN}Site files from the old server, nothing else (IMPORT_FILES_ONLY=yes): no dump, the database and the containers stay as they are${NC}"
+    import_inspect_remote
+    env_domain=$(sed -n 's/^DOMAIN=//p' .env 2>/dev/null | tail -n 1)
+    if [ "$env_domain" = "$DOMAIN" ]; then
+        completed=$(sed -n 's/^KVS_IMPORT_COMPLETED=//p' .env 2>/dev/null | tail -n 1)
+    fi
+    echo ""
+    echo "The files of $destination become those of the old server (files it no longer has are removed); the database, the dump and the containers stay as they are."
+    if [ -n "$completed" ]; then
+        echo -e "${YELLOW}An import completed here on $completed: its site files, configuration included, become the old server's until the next pass without IMPORT_FILES_ONLY. Never run this once the site is live here.${NC}"
+    fi
+    if [ "${HEADLESS:-}" != "y" ]; then
+        echo -n "Continue? [Y/n]: "
+        read -r answer
+        if [[ "$answer" =~ ^[Nn]$ ]]; then
+            echo "Cancelled."
+            exit 0
+        fi
+    fi
+    import_fetch_remote
+    echo ""
+    echo -e "${GREEN}The site files in $destination are those of the old server as of this pass; no dump was received, the database and the containers were left as they were.${NC}"
+    echo "Next: once the writes on the old site are frozen, the same command without IMPORT_FILES_ONLY (with VOLUME_CHOICE=1 after a completed import) exports a fresh dump, copies what changed since this pass and loads the database."
+    project=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env 2>/dev/null | tail -n 1)
+    if [ "$env_domain" = "$DOMAIN" ] && [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] &&
+        docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null | grep -q .; then
+        echo -e "${YELLOW}The containers of $project still run on these files, now with the old server's setup.php and setup_db.php: the copy of the site they serve fails until that pass sets the files up for this server again.${NC}"
+    fi
 }
 
 KVS_ADMIN_PASSWORD_PROVIDED=false
@@ -2554,6 +2677,13 @@ if [ "$DOMAIN" = "example.com" ]; then
 elif ! validate_domain "$DOMAIN"; then
     echo -e "${RED}ERROR: Invalid domain format: $DOMAIN${NC}"
     exit 1
+fi
+
+# A pass of the site files alone ends here, before anything below writes
+# the domain to .env, picks images, stops containers or deletes a volume.
+if [ "$IMPORT_FILES_ONLY" = yes ]; then
+    import_files_only
+    exit 0
 fi
 
 # An import completed under another domain (a development subdomain tried

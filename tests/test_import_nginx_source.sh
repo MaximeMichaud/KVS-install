@@ -8,7 +8,7 @@ TEST_DIR=$(mktemp -d /tmp/kvs-nginx-source.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT
 # shellcheck source=/dev/null
 source "$ROOT_DIR/docker/lib/import.sh"
-for name in import_prepare_source_nginx_rewrites import_ensure_nginx_rewrites import_save_nginx_config import_inspect_remote; do
+for name in import_prepare_source_nginx_rewrites import_ensure_nginx_rewrites import_save_nginx_config import_remote_earlier_pass import_inspect_remote; do
     awk -v signature="$name() {" '
         $0 == signature { capture = 1 }
         capture { print }
