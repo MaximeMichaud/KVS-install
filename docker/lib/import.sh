@@ -1651,6 +1651,45 @@ import_remote_dump() {
     import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- "${options[@]}" dump "$dir" < "$exporter" > "$output"
 }
 
+# import_reuse_dump <dump> <destination> <source> <table prefix>
+# A run that stopped during the file transfer leaves the dump it received
+# in place. IMPORT_REUSE_DUMP=yes takes it again instead of exporting the
+# database once more, which takes hours on a large site. The files copied
+# next are then newer than the rows, the order a live site tolerates, and
+# the next pass exports a fresh dump. The dump must have come from the same
+# source and be whole: a dump cut off by a lost connection is refused here,
+# before the transfer, not once the files are in. A run records its source
+# right after its dump, so a dump newer than that record comes from a run
+# that stopped in between, possibly one pointed at another old server.
+import_reuse_dump() {
+    local dump="$1"
+    local destination="$2"
+    local source="$3"
+    local prefix="$4"
+    local marker_file marker info
+
+    if [ ! -f "$dump" ] || [ -L "$dump" ] || [ ! -s "$dump" ]; then
+        echo "ERROR: IMPORT_REUSE_DUMP=yes, but no dump received by an earlier run is in $dump; run without it to export the database again" >&2
+        return 1
+    fi
+    marker_file=$(import_marker_file "$destination")
+    marker=$(cat -- "$marker_file" 2>/dev/null) || marker=""
+    if [ "$marker" != "$source" ]; then
+        echo "ERROR: IMPORT_REUSE_DUMP=yes, but $dump was not received from $source${marker:+ (the last import here came from $marker)}; run without it to export the database again" >&2
+        return 1
+    fi
+    if [ "$marker_file" -ot "$dump" ]; then
+        echo "ERROR: IMPORT_REUSE_DUMP=yes, but $dump arrived after the last import from $source started, from a run that stopped before its files and may have read another old server; run without it to export the database again" >&2
+        return 1
+    fi
+    if ! info=$(import_inspect_dump "$dump" "$prefix") || [ "$(import_field "$info" 4)" != yes ] ||
+        [ "$(import_field "$info" 1)" -lt 1 ]; then
+        echo "ERROR: IMPORT_REUSE_DUMP=yes, but $dump is incomplete or unreadable; run without it to export the database again" >&2
+        return 1
+    fi
+    echo "  Reusing the dump received on $(date -r "$dump" '+%Y-%m-%d %H:%M') ($(du -h -- "$dump" | cut -f1)): the database is the one of that moment, the next pass exports a fresh one"
+}
+
 #################################################################
 # Transfer progress
 #################################################################
