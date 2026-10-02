@@ -1347,6 +1347,73 @@ test_hard_links_arrive_as_links() {
     pass "hard links of the site arrive as links"
 }
 
+# The init gives the whole site to 1000:1000 and the modes KVS needs (666
+# for the files under contents, 777 for its directories). With rsync -a,
+# every later pass gave each file back its owner and mode on the old
+# server and the init then changed them all again: two metadata writes
+# per file and per pass, millions on a large site, the frozen pass too.
+# The files the init set now keep their modes, a changed one as well, a
+# new file arrives with its mode on the old server, and every rsync from
+# the old server writes 1000:1000.
+test_a_later_pass_keeps_the_owner_and_modes_the_init_set() {
+    local bin="$TMP_ROOT/modes-bin" template="$TMP_ROOT/modes-template" site destination shots changed jobs
+
+    make_fake_ssh "$bin"
+    make_site "$template" "$template"
+    mkdir -p "$template/contents/videos_screenshots/0/1"
+    printf 'one\n' > "$template/contents/videos_screenshots/0/1/1.jpg"
+    printf 'two\n' > "$template/contents/videos_screenshots/0/1/2.jpg"
+    chmod 644 "$template/contents/videos_screenshots/0/1/1.jpg" "$template/contents/videos_screenshots/0/1/2.jpg"
+    chmod 755 "$template/contents/videos_screenshots/0/1"
+    # A wrapper around real rsync keeps the command line of every rsync
+    # run on this side.
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/bash
+case " $* " in
+    *" --server "*) ;;
+    *) printf '%s\n' "$*" >> "$MODES_BIN/local-rsync" ;;
+esac
+exec "$REAL_RSYNC" "$@"
+EOF
+    chmod +x "$bin/rsync"
+    (
+        export REAL_RSYNC MODES_BIN="$bin"
+        REAL_RSYNC=$(command -v rsync)
+        PATH="$bin:$PATH"
+        umask 022
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/modes-ctl" import_ssh_setup old.example.com 22 root "" yes
+        IMPORT_REMOTE_SUDO=no
+        for jobs in 1 4; do
+            site="$TMP_ROOT/modes-site-$jobs" destination="$TMP_ROOT/modes-dest-$jobs"
+            shots="$destination/contents/videos_screenshots/0/1"
+            cp -a "$template" "$site"
+            IMPORT_TRANSFER_JOBS=$jobs import_remote_files "$site" "$destination" yes > "$TMP_ROOT/modes-$jobs-first.out" 2>&1 || exit 1
+            [ "$(stat -c '%a' "$shots/1.jpg")" = 644 ] || exit 2
+            # What the init does to the copy.
+            chmod 777 "$shots"
+            chmod 666 "$shots/1.jpg" "$shots/2.jpg"
+            changed=$(stat -c '%z' "$shots/1.jpg")
+            printf 'two, changed\n' > "$site/contents/videos_screenshots/0/1/2.jpg"
+            printf 'three\n' > "$site/contents/videos_screenshots/0/1/3.jpg"
+            chmod 644 "$site/contents/videos_screenshots/0/1/3.jpg"
+            IMPORT_TRANSFER_JOBS=$jobs import_remote_files "$site" "$destination" yes > "$TMP_ROOT/modes-$jobs-later.out" 2>&1 || exit 3
+            [ "$(stat -c '%a' "$shots")" = 777 ] || exit 4
+            [ "$(stat -c '%a' "$shots/1.jpg")" = 666 ] || exit 5
+            [ "$(stat -c '%z' "$shots/1.jpg")" = "$changed" ] || exit 6
+            [ "$(cat "$shots/2.jpg")" = 'two, changed' ] && [ "$(stat -c '%a' "$shots/2.jpg")" = 666 ] || exit 7
+            [ "$(stat -c '%a' "$shots/3.jpg")" = 644 ] || exit 8
+        done
+        exit 0
+    ) || fail "a later pass must keep the modes the init set and leave an unchanged file alone (case $?)"
+    grep -F 'old.example.com:' "$bin/local-rsync" > "$TMP_ROOT/modes-transfers" ||
+        fail "no rsync from the old server was seen"
+    if grep -v -F -e '--chown=1000:1000' "$TMP_ROOT/modes-transfers" | grep -q . ||
+        grep -v -F -e '--no-perms' "$TMP_ROOT/modes-transfers" | grep -q .; then
+        fail "every rsync from the old server must write 1000:1000 and keep the modes here: $(head -n 1 "$TMP_ROOT/modes-transfers")"
+    fi
+    pass "a later pass keeps the owner and modes the init set"
+}
+
 # rsync relays a --files-from list given on its side to the sender on the
 # old server, a relay that grows with the square of the list: the workers
 # of a site of ten million files copied nothing for hours. They read their
@@ -2138,6 +2205,7 @@ test_links_leaving_the_site_are_listed_and_the_copy_follows_them
 test_the_tar_stream_reports_what_the_old_server_could_not_read
 test_parallel_transfers_preserve_the_mirror
 test_hard_links_arrive_as_links
+test_a_later_pass_keeps_the_owner_and_modes_the_init_set
 test_parallel_workers_read_their_lists_on_the_old_server
 test_chunk_lists_stay_off_an_old_server_short_of_room
 test_the_transfer_stops_when_what_is_left_does_not_fit

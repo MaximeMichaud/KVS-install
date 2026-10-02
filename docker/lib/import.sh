@@ -2267,9 +2267,10 @@ import_rsync_workers() (
             # Open both logs in the parent before forking. Redirections on the
             # background command itself run in the child, so readiness polling
             # can otherwise reach grep before the diagnostics file exists.
+            # umask 0: see rsync_args in import_remote_files.
             if ! {
-                setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
-                    --ignore-missing-args --files-from="$files_from" -e "$worker_rsh" --info=progress2 --outbuf=L \
+                (umask 0 && exec setsid rsync "${rsync_args[@]}" --force --no-recursive --dirs --from0 \
+                    --ignore-missing-args --files-from="$files_from" -e "$worker_rsh" --info=progress2 --outbuf=L) \
                     < /dev/null &
                 pids[worker]=$!
             } > "$plan/$worker.log" 2>> "$error_dir/$worker.err"; then
@@ -2903,7 +2904,16 @@ import_remote_files() (
         # once per name it would take more room than the site measured
         # and the free space checked. The plan leaves the other names of
         # a group to the final mirror, which links them without data.
-        rsync_args=(-a -H -s --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
+        # The files arrive owned by 1000:1000, the owner the init gives
+        # the whole site, and the files already here keep the modes the
+        # init set: with -a alone, every pass gave each file back its
+        # owner and mode on the old server and the init then changed them
+        # again, two metadata writes per file and per pass, the last one
+        # too. A new file takes its mode on the old server less the umask
+        # of the rsync, so the copying rsyncs run under umask 0, as -a
+        # gave it that mode whole; the 077 of this transfer would make it
+        # private.
+        rsync_args=(-a -H -s --no-perms --chown=1000:1000 --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
             "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$rsync_host:$dir/" "$destination/")
         if [ "$jobs" -gt 1 ] && command -v setsid >/dev/null 2>&1; then
             plan=$work
@@ -3102,7 +3112,7 @@ import_remote_files() (
         attempt=1
         while :; do
             rm -f -- "$work/final.progress" "$work/final.stats"
-            rsync "${rsync_args[@]}" --info=progress2 --stats 2> "$error_dir/final-rsync.err" |
+            (umask 0 && exec rsync "${rsync_args[@]}" --info=progress2 --stats) 2> "$error_dir/final-rsync.err" |
                 IMPORT_PROGRESS_ENTRIES="$site_entries" IMPORT_PROGRESS_COUNTED="$counted" IMPORT_PROGRESS_DISKS="$disks" \
                     IMPORT_PROGRESS_STATS="$work/final.stats" import_rsync_progress "$bytes" "$files" "" "$work/final.progress"
             transfer_status=("${PIPESTATUS[@]}")
