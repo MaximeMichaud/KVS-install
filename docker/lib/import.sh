@@ -441,6 +441,34 @@ import_mark_destination() {
     printf '%s\n' "$source" > "$marker"
 }
 
+# import_mark_destination_files_only <destination> <source marker> <staged dump prefix>
+# The record of the source for a pass of the files alone. Such a pass
+# receives no dump and must not vouch for one: import_reuse_dump takes a
+# dump older than the record as received by the run that wrote it, from
+# that source. A record of the same source keeps its time; a new one is
+# dated before the dumps staged under the prefix (<prefix>.sql.* and
+# <prefix>.mariadb.tar.*), which IMPORT_REUSE_DUMP=yes then refuses.
+import_mark_destination_files_only() {
+    local destination="$1"
+    local source="$2"
+    local prefix="$3"
+    local marker dump oldest=""
+
+    marker=$(import_marker_file "$destination")
+    if [ -f "$marker" ] && [ "$(cat -- "$marker")" = "$source" ]; then
+        mkdir -p "$destination"
+        return
+    fi
+    import_mark_destination "$destination" "$source" || return 1
+    for dump in "$prefix".sql.* "$prefix".mariadb.tar.*; do
+        [ -f "$dump" ] || continue
+        if [ -z "$oldest" ] || [ "$dump" -ot "$oldest" ]; then
+            oldest=$dump
+        fi
+    done
+    [ -z "$oldest" ] || touch -d "@$(($(stat -c %Y -- "$oldest") - 1))" -- "$marker"
+}
+
 # import_external_search_host <site directory>
 # The host the KVS External Search plugin of a site calls when the plugin
 # is enabled (a Sphinx or Manticore API on the old server), nothing when
@@ -1596,7 +1624,8 @@ import_remote_paths_ok() {
 # stdin, nothing is written there. The key=value report lands in the
 # output file. The budget is how many seconds the exporter may spend
 # measuring the site size (0: all of it); past it the report carries a
-# lower bound and the filesystem usage. The paths, space separated and
+# lower bound and the filesystem usage; skip measures nothing, for a pass
+# whose free space does not depend on it. The paths, space separated and
 # relative to the site directory, are what the transfer leaves behind on
 # top of what the exporter leaves on its own, and what it takes along
 # after all.
@@ -1613,9 +1642,11 @@ import_remote_detect() {
     if [ -n "$dir" ]; then
         import_remote_path_check "$dir" || return 1
     fi
-    if [ -n "$budget" ]; then
-        options=(--size-timeout "$budget")
-    fi
+    case "$budget" in
+        '') ;;
+        skip) options=(--no-size) ;;
+        *) options=(--size-timeout "$budget") ;;
+    esac
     if [ -n "${IMPORT_DATABASE_FORMAT:-}" ]; then
         options+=(--database-format "$IMPORT_DATABASE_FORMAT")
     fi

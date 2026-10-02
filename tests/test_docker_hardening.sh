@@ -1227,7 +1227,8 @@ test_remote_site_size_bounds_warn_instead_of_blocking() {
     local avail
 
     # shellcheck disable=SC2016  # Literal setup.sh lines.
-    grep -Fq 'import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$IMPORT_SIZE_TIMEOUT"' "$setup" ||
+    { grep -Fq 'budget=$IMPORT_SIZE_TIMEOUT' "$setup" &&
+        grep -Fq 'import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$budget"' "$setup"; } ||
         fail "setup.sh must hand IMPORT_SIZE_TIMEOUT to the remote detection"
     # shellcheck disable=SC2016  # Literal setup.sh line.
     grep -Fq 'IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"' "$setup" || fail "the size budget must default to 300 s"
@@ -1283,7 +1284,7 @@ test_remote_entries_are_shown_and_their_patterns_reach_the_transfer() {
     local report="$TMP_ROOT/entries-report.txt"
 
     # shellcheck disable=SC2016  # Literal setup.sh lines.
-    grep -Fq 'import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$IMPORT_SIZE_TIMEOUT" "$IMPORT_EXCLUDE" "$IMPORT_INCLUDE"' "$setup" ||
+    grep -Fq 'import_remote_detect "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$IMPORT_REMOTE_REPORT" "$budget" "$IMPORT_EXCLUDE" "$IMPORT_INCLUDE"' "$setup" ||
         fail "setup.sh must hand IMPORT_EXCLUDE and IMPORT_INCLUDE to the remote detection"
     # shellcheck disable=SC2016  # Literal setup.sh line.
     grep -Fq 'import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}"' "$setup" ||
