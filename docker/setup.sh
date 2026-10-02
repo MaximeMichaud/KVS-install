@@ -107,8 +107,11 @@ ENVIRONMENT VARIABLES:
                           was counted and the space used on the old server's
                           filesystem as the upper bound. 0 measures it all.
                           Parallel file planning always scans the whole site.
-    IMPORT_TRANSFER_JOBS=N Concurrent rsync file transfers (4, range 1-32).
-                          1 keeps a single stream. Separate SSH connections
+                          A pass after one whose count ran out of this time
+                          does not count again.
+    IMPORT_TRANSFER_JOBS=N Concurrent rsync file transfers (1, range 1-32).
+                          One stream reads hard disks fastest; more can help
+                          a source on SSD. Separate SSH connections
                           are used when authentication allows it. All files
                           are planned before workers start; a final
                           pass reconciles the site and removes stale files.
@@ -875,7 +878,7 @@ fi
 # taken over instead of transferred again.
 IMPORT_REUSE_SITE_DIR="${IMPORT_REUSE_SITE_DIR:-}"
 IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
-IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-4}"
+IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-1}"
 IMPORT_TRANSFER_CHUNK="${IMPORT_TRANSFER_CHUNK:-20000}"
 IMPORT_TRANSFER_RETRIES="${IMPORT_TRANSFER_RETRIES:-8}"
 IMPORT_DISKSTATS_INTERVAL="${IMPORT_DISKSTATS_INTERVAL:-30}"

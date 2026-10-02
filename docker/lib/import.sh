@@ -1782,6 +1782,16 @@ import_count_file() {
     printf '%s/%s.count\n' "$IMPORT_MARKER_DIR" "$(basename -- "$1")"
 }
 
+# import_count_timeout_file <destination>: present while the last count of
+# the site copied into a destination ran out of its time
+# (IMPORT_SIZE_TIMEOUT). The same scan over the same disks would run out
+# of time again, so a later pass measures against the saved count instead
+# of spending that time once more.
+import_count_timeout_file() {
+    [ -n "${IMPORT_MARKER_DIR:-}" ] || return 1
+    printf '%s/%s.count-timeout\n' "$IMPORT_MARKER_DIR" "$(basename -- "$1")"
+}
+
 # import_count_scope <patterns...>: the exclusion patterns of a transfer
 # as one word; a count describes the site under these patterns only.
 import_count_scope() {
@@ -2817,7 +2827,8 @@ import_remote_files() (
     local status=0
     local pattern totals count_status files=0 bytes=0 site_files site_bytes site_entries=0
     local scope saved saved_files saved_bytes saved_date counted="" sampler="" owner disks="" interval="${IMPORT_DISKSTATS_INTERVAL:-0}"
-    local jobs="${IMPORT_TRANSFER_JOBS:-4}" chunk="${IMPORT_TRANSFER_CHUNK:-20000}" chunks
+    local count_flag="" skip_count=no
+    local jobs="${IMPORT_TRANSFER_JOBS:-1}" chunk="${IMPORT_TRANSFER_CHUNK:-20000}" chunks
     local worker_rsh worker_auth=no plan="" work error_dir remote_plan="" masters="" rsync_host
     local lists_size started relay="${IMPORT_RSYNC_RELAY_FILES:-5000}" remote_free relayed
     local reserve="${IMPORT_TRANSFER_RESERVE_MB:-0}" free_mb left
@@ -2899,7 +2910,17 @@ import_remote_files() (
         elif [ "$jobs" -gt 1 ]; then
             echo "  setsid is unavailable; using one transfer worker."
         fi
-        if [ -n "$plan" ]; then
+        # The count of a single stream that ran out of its time on the last
+        # pass would run out again over the same disks: a later pass into
+        # the filled directory measures against the last complete scan
+        # from this source instead, and the frozen pass is spared that
+        # time. IMPORT_SIZE_TIMEOUT=0 asks for the whole count anyway.
+        count_flag=$(import_count_timeout_file "$destination") || count_flag=""
+        if [ -z "$plan" ] && [ "${IMPORT_SIZE_TIMEOUT:-300}" != 0 ] && [ -n "$count_flag" ] && [ -f "$count_flag" ] &&
+            find "$destination" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q . &&
+            import_count_load "$destination" "$scope" > /dev/null; then
+            skip_count=yes
+        elif [ -n "$plan" ]; then
             echo "  Planning all files for $jobs parallel workers, in chunks of at most $(import_count_text "$chunk") files (complete scan; no size-count timeout)..."
         else
             echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
@@ -2910,7 +2931,9 @@ import_remote_files() (
         # again after a pause, with an empty plan: a scan that ended early
         # leaves pieces a shorter one would not overwrite.
         attempt=1
-        while :; do
+        totals=""
+        count_status=124
+        while [ "$skip_count" = no ]; do
             count_status=0
             totals=$(IMPORT_RSYNC_PLAN="$plan" IMPORT_RSYNC_COUNT_ERROR="$error_dir/count.err" import_rsync_totals "${rsync_args[@]}") || count_status=$?
             printf '%s\n' "$count_status" > "$error_dir/count.status"
@@ -2933,7 +2956,10 @@ import_remote_files() (
         if [ -n "$totals" ]; then
             IFS=$'\t' read -r files bytes site_files site_bytes site_entries <<< "$totals"
             case "$count_status" in
-                0|24) import_count_save "$destination" "$scope" "$site_entries" "$site_files" "$site_bytes" ;;
+                0|24)
+                    import_count_save "$destination" "$scope" "$site_entries" "$site_files" "$site_bytes"
+                    [ -z "$count_flag" ] || rm -f -- "$count_flag"
+                    ;;
             esac
             if [ "$files" -eq 0 ] && [ "$bytes" -eq 0 ]; then
                 echo "  To transfer:     nothing, the site's $(import_count_text "$site_files") files ($(import_bytes_text "$site_bytes")) are already here; rsync checks them"
@@ -2954,12 +2980,19 @@ import_remote_files() (
                 fi
             fi
         elif [ "$count_status" -eq 124 ]; then
+            if [ "$skip_count" = no ] && [ -n "$count_flag" ]; then
+                : > "$count_flag" 2>/dev/null || true
+            fi
             # The site of an earlier pass from the same source is the best
             # whole there is, dated: never a guess when there is none.
             if saved=$(import_count_load "$destination" "$scope"); then
                 read -r site_entries saved_files saved_bytes saved_date <<< "$saved"
                 counted=$(date -d "@$saved_date" +%Y-%m-%d 2>/dev/null) || counted="@$saved_date"
-                echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the progress measures against the count of $counted instead, an estimate (the site then held $(import_count_text "$site_entries") entries, $(import_count_text "$saved_files") files, $(import_bytes_text "$saved_bytes"))"
+                if [ "$skip_count" = yes ]; then
+                    echo "  Not counted: the count of the last pass ran out of its time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 counts anyway); the progress measures against the count of $counted, an estimate (the site then held $(import_count_text "$site_entries") entries, $(import_count_text "$saved_files") files, $(import_bytes_text "$saved_bytes"))"
+                else
+                    echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the progress measures against the count of $counted instead, an estimate (the site then held $(import_count_text "$site_entries") entries, $(import_count_text "$saved_files") files, $(import_bytes_text "$saved_bytes"))"
+                fi
             else
                 site_entries=0
                 echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit) and no earlier pass from this source finished one: the transfer shows its counts without a whole, and what is left stays unknown"
