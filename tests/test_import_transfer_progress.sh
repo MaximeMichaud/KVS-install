@@ -559,6 +559,9 @@ RSYNC
         # IMPORT_SIZE_TIMEOUT=0 counts anyway; a count that finishes clears the mark.
         IMPORT_SIZE_TIMEOUT=0 skip_run 'count copy'
         [ ! -e "$flag" ] || fail "a count that finished must clear the mark"
+        # 0 sets no limit, which the announce of the count says.
+        grep -q '^  Counting what the transfer moves (a scan of the old server, without a time limit: IMPORT_SIZE_TIMEOUT=0)\.\.\.$' "$TEST_DIR/skip.out" ||
+            fail "a count without a limit must say so, not 'at most 0 s': $(cat "$TEST_DIR/skip.out")"
         skip_run 'count copy'
         # An emptied directory is counted, mark or not.
         : > "$flag"
