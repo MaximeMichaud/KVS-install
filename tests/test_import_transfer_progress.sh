@@ -496,6 +496,78 @@ RSYNC
     echo 'PASS: a count that ran out of time is replaced by the earlier one of the same source, dated'
 }
 
+# A count that runs out of its time leaves a mark next to the saved scan:
+# the next pass into the filled directory does not count again (the same
+# scan over the same disks would run out of time as well) and measures
+# against the saved scan at once. IMPORT_SIZE_TIMEOUT=0 counts anyway, a
+# count that finishes clears the mark, and an empty directory is counted.
+test_a_count_out_of_time_is_not_run_again() {
+    local bin="$TEST_DIR/skip-bin" destination="$TEST_DIR/skip-www/example.test"
+    local flag="$TEST_DIR/skip-markers/example.test.count-timeout"
+    mkdir -p "$bin" "$TEST_DIR/skip-logs" "$TEST_DIR/skip-markers"
+    cat > "$bin/rsync" <<'RSYNC'
+#!/bin/bash
+for arg in "$@"; do
+    if [ "$arg" = --dry-run ]; then
+        echo count >> "$FIXTURE_CALLS"
+        [ -z "${FIXTURE_COUNT_SLEEP:-}" ] || sleep "$FIXTURE_COUNT_SLEEP"
+        printf 'Number of files: 1,250 (reg: 1,000, dir: 250)\nNumber of regular files transferred: 400\n'
+        printf 'Total file size: 5,000,000 bytes\nTotal transferred file size: 2,000,000 bytes\n'
+        exit 0
+    fi
+done
+echo copy >> "$FIXTURE_CALLS"
+printf ' 2000000 100%% 1.00MB/s 0:00:02 (xfr#400, to-chk=0/1300)\n'
+if [[ " $* " == *" --stats "* ]]; then
+    printf '\nNumber of files: 1,300 (reg: 1,040, dir: 260)\nNumber of created files: 400\n'
+    printf 'Number of regular files transferred: 400\nTotal file size: 5,200,000 bytes\n'
+    printf 'Total transferred file size: 2,000,000 bytes\n\nsent 1 bytes  received 2 bytes  3.00 bytes/sec\n'
+    printf 'total size is 5,200,000  speedup is 2.60\n'
+fi
+RSYNC
+    chmod +x "$bin/rsync"
+    (
+        PATH="$bin:$PATH"
+        export FIXTURE_CALLS="$TEST_DIR/skip-calls"
+        IMPORT_REMOTE_SUDO=no IMPORT_SIZE_TIMEOUT=1 IMPORT_TRANSFER_RETRIES=0
+        IMPORT_SSH_TARGET=root@old.test IMPORT_TRANSFER_LOG_DIR="$TEST_DIR/skip-logs"
+        IMPORT_MARKER_DIR="$TEST_DIR/skip-markers"
+        import_ssh_rsh() { printf unused; }
+        # skip_run <expected calls>: one pass, then the rsync runs it made.
+        skip_run() {
+            rm -f "$FIXTURE_CALLS"
+            import_remote_files /srv/site "$destination" yes > "$TEST_DIR/skip.out" 2>&1 ||
+                fail "a transfer failed: $(cat "$TEST_DIR/skip.out")"
+            [ "$(paste -sd' ' "$FIXTURE_CALLS")" = "$1" ] ||
+                fail "expected the rsync runs '$1', got '$(paste -sd' ' "$FIXTURE_CALLS")': $(cat "$TEST_DIR/skip.out")"
+        }
+        import_mark_destination "$destination" ssh://root@old.test:22/srv/site
+        # The first pass: its count runs out of time, the final rsync keeps
+        # its scan, and the default is one worker (no plan).
+        FIXTURE_COUNT_SLEEP=3 skip_run 'count copy'
+        if grep -q 'Planning all files' "$TEST_DIR/skip.out"; then fail "one worker is the default, without a plan: $(cat "$TEST_DIR/skip.out")"; fi
+        [ -f "$flag" ] || fail "a count out of time must leave its mark"
+        grep -q '^entries=1300$' "$TEST_DIR/skip-markers/example.test.count" ||
+            fail "the final rsync must keep its scan: $(cat "$TEST_DIR/skip-markers/example.test.count" 2>&1)"
+        # The directory holds that pass: the next one does not count.
+        touch "$destination/file"
+        FIXTURE_COUNT_SLEEP=3 skip_run copy
+        grep -q "^  Not counted: the count of the last pass ran out of its time (IMPORT_SIZE_TIMEOUT=1, 0 counts anyway); the progress measures against the count of $(date +%Y-%m-%d), an estimate (the site then held 1,300 entries, 1,040 files, 4 MB)$" "$TEST_DIR/skip.out" ||
+            fail "the pass must say it did not count, and against what it measures: $(cat "$TEST_DIR/skip.out")"
+        if grep -q 'Counting what the transfer moves' "$TEST_DIR/skip.out"; then fail "a pass that does not count must not announce a count: $(cat "$TEST_DIR/skip.out")"; fi
+        [ -f "$flag" ] || fail "a pass that did not count keeps the mark"
+        # IMPORT_SIZE_TIMEOUT=0 counts anyway; a count that finishes clears the mark.
+        IMPORT_SIZE_TIMEOUT=0 skip_run 'count copy'
+        [ ! -e "$flag" ] || fail "a count that finished must clear the mark"
+        skip_run 'count copy'
+        # An emptied directory is counted, mark or not.
+        : > "$flag"
+        rm -f "$destination/file"
+        FIXTURE_COUNT_SLEEP=3 skip_run 'count copy'
+    ) || exit 1
+    echo 'PASS: a count that ran out of time is not run again on the next pass into the filled directory'
+}
+
 # rsync -H: the site counts every name of a hard-linked file, the copy
 # transfers it once, and the entries count every name on both sides: the
 # kept count and the checks of the transfer agree.
@@ -850,7 +922,8 @@ fi
 for name in test_the_progress_never_wraps_an_80_column_terminal test_every_line_holds_within_79_columns \
     test_the_time_left_counts_the_entries_still_to_check test_an_earlier_count_measures_the_progress \
     test_the_time_left_follows_the_recent_pace test_a_narrow_terminal_cuts_the_lines \
-    test_a_timed_out_count_measures_against_the_earlier_one test_the_sampler_reads_the_disks_and_stops \
+    test_a_timed_out_count_measures_against_the_earlier_one test_a_count_out_of_time_is_not_run_again \
+    test_the_sampler_reads_the_disks_and_stops \
     test_the_transfer_shows_the_disks test_a_killed_transfer_stops_reading_the_disks test_a_figure_at_rest_keeps_its_average; do
     "$name" &
     pids+=("$!")
