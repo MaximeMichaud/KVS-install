@@ -57,20 +57,25 @@ fix_dir "$KVS_PATH/langs" "777"
 fix_dir "$KVS_PATH/contents" "755"
 fix_dir "$KVS_PATH/admin/data" "755"
 
+# The passes below change only what differs: chmod and chown write the
+# inode even when the mode or the owner is already right, and on a site
+# of millions of files that is millions of metadata writes on every
+# start, the start right after the last pass of an import included.
+
 # --- All subdirs in these paths must be 777 ---
-find "$KVS_PATH/admin/logs" -type d -exec chmod 777 {} + 2>/dev/null || true
-find "$KVS_PATH/admin/data" -mindepth 1 -type d -exec chmod 777 {} + 2>/dev/null || true
-find "$KVS_PATH/contents" -mindepth 1 -type d -exec chmod 777 {} + 2>/dev/null || true
-find "$KVS_PATH/template" -type d -exec chmod 777 {} + 2>/dev/null || true
-find "$KVS_PATH/static" -type d -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/admin/logs" -type d ! -perm 777 -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/admin/data" -mindepth 1 -type d ! -perm 777 -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/contents" -mindepth 1 -type d ! -perm 777 -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/template" -type d ! -perm 777 -exec chmod 777 {} + 2>/dev/null || true
+find "$KVS_PATH/static" -type d ! -perm 777 -exec chmod 777 {} + 2>/dev/null || true
 
 # --- Files that must be 666 ---
-find "$KVS_PATH/admin/logs" -type f ! -iname ".htaccess" -exec chmod 666 {} + 2>/dev/null || true
-find "$KVS_PATH/admin/data" -type f \( -iname "*.dat" -o -iname "*.pem" -o -iname "*.tpl" \) -exec chmod 666 {} + 2>/dev/null || true
-find "$KVS_PATH/contents" -type f ! -iname ".htaccess" -exec chmod 666 {} + 2>/dev/null || true
-find "$KVS_PATH/template" -type f ! -iname ".htaccess" -exec chmod 666 {} + 2>/dev/null || true
-find "$KVS_PATH/langs" -type f -iname "*.lang" -exec chmod 666 {} + 2>/dev/null || true
-find "$KVS_PATH/static" -type f -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/admin/logs" -type f ! -iname ".htaccess" ! -perm 666 -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/admin/data" -type f \( -iname "*.dat" -o -iname "*.pem" -o -iname "*.tpl" \) ! -perm 666 -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/contents" -type f ! -iname ".htaccess" ! -perm 666 -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/template" -type f ! -iname ".htaccess" ! -perm 666 -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/langs" -type f -iname "*.lang" ! -perm 666 -exec chmod 666 {} + 2>/dev/null || true
+find "$KVS_PATH/static" -type f ! -perm 666 -exec chmod 666 {} + 2>/dev/null || true
 fix_file "$KVS_PATH/robots.txt" "666"
 fix_file "$KVS_PATH/favicon.ico" "666"
 
@@ -78,8 +83,9 @@ fix_file "$KVS_PATH/favicon.ico" "666"
 fix_dir "$KVS_PATH/admin/data/tmp" "777" "true"
 fix_dir "$KVS_PATH/admin/data/engine" "777" "true"
 
-# Final ownership
-chown -R 1000:1000 "$KVS_PATH"
+# Final ownership, as chown -R gives it (-h: a link itself, never what
+# it points to), on the entries owned by anyone else only.
+find "$KVS_PATH" \( ! -uid 1000 -o ! -gid 1000 \) -exec chown -h 1000:1000 {} +
 
 # Run the archive's permission script once at the end. KVS releases use xargs
 # without --no-run-if-empty, which calls chmod with no operands on fresh sites.
@@ -95,7 +101,9 @@ fi
 # The archive permission script makes most PHP files world-readable. Database
 # credentials only need to be readable by PHP-FPM's owner and root-run cron.
 if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
-    chown 1000:1000 "$KVS_PATH/admin/include/setup_db.php"
+    if [ "$(stat -c '%u:%g' "$KVS_PATH/admin/include/setup_db.php")" != 1000:1000 ]; then
+        chown 1000:1000 "$KVS_PATH/admin/include/setup_db.php"
+    fi
     fix_file "$KVS_PATH/admin/include/setup_db.php" "600"
 fi
 

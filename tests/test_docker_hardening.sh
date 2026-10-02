@@ -777,6 +777,69 @@ EOF
     pass "KVS permissions avoid empty xargs errors and run once at finalization"
 }
 
+# chmod and chown write the inode even when the mode or the owner is
+# already right: the permission pass of every start rewrote the metadata
+# of every file of the site, millions of writes on a large one, the start
+# right after the last pass of an import included. A pass over a site it
+# already set must leave every change time as it was.
+test_a_second_permission_pass_changes_nothing() {
+    local case_dir="$TMP_ROOT/permissions-again"
+    local site_dir="$case_dir/site"
+    local common_mock="$case_dir/common.sh"
+    local script_copy="$case_dir/60-permissions.sh"
+    local owner before after
+
+    mkdir -p \
+        "$site_dir/admin/logs" \
+        "$site_dir/admin/data/system" \
+        "$site_dir/admin/include" \
+        "$site_dir/admin/smarty/cache" \
+        "$site_dir/admin/smarty/template-c" \
+        "$site_dir/admin/smarty/template-c-site" \
+        "$site_dir/contents/videos_screenshots/0/1" \
+        "$site_dir/template/blocks" \
+        "$site_dir/langs" \
+        "$site_dir/static/js"
+    printf 'shot\n' > "$site_dir/contents/videos_screenshots/0/1/1.jpg"
+    printf 'deny\n' > "$site_dir/contents/.htaccess"
+    printf 'log\n' > "$site_dir/admin/logs/cron.txt"
+    printf 'data\n' > "$site_dir/admin/data/system/config.dat"
+    printf 'tpl\n' > "$site_dir/template/blocks/list.tpl"
+    printf 'lang\n' > "$site_dir/langs/english.lang"
+    printf 'js\n' > "$site_dir/static/js/app.js"
+    printf 'robots\n' > "$site_dir/robots.txt"
+    printf 'credentials\n' > "$site_dir/admin/include/setup_db.php"
+    chmod 644 "$site_dir/contents/videos_screenshots/0/1/1.jpg" "$site_dir/admin/logs/cron.txt" \
+        "$site_dir/admin/data/system/config.dat" "$site_dir/template/blocks/list.tpl" \
+        "$site_dir/langs/english.lang" "$site_dir/static/js/app.js" "$site_dir/robots.txt" \
+        "$site_dir/admin/include/setup_db.php"
+    chmod 755 "$site_dir/contents/videos_screenshots/0/1" "$site_dir/template/blocks" "$site_dir/static/js"
+    make_init_common_mock "$common_mock"
+    # The owner the containers run as is 1000:1000; the test gives the
+    # files to the account running it instead, the only owner it can set.
+    owner="$(id -u):$(id -g)"
+    sed -e "s|source /init/lib/common.sh|source ${common_mock}|" \
+        -e "s/1000:1000/${owner}/g" -e "s/-uid 1000/-uid $(id -u)/" -e "s/-gid 1000/-gid $(id -g)/" \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/60-permissions.sh" > "$script_copy"
+
+    TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/first.log" 2>&1 ||
+        fail "the first permission pass failed: $(cat "$case_dir/first.log")"
+    [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1/1.jpg")" = 666 ] &&
+        [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1")" = 777 ] &&
+        [ "$(stat -c '%a' "$site_dir/contents/.htaccess")" = 644 ] &&
+        [ "$(stat -c '%a' "$site_dir/template/blocks")" = 777 ] &&
+        [ "$(stat -c '%a' "$site_dir/static/js/app.js")" = 666 ] &&
+        [ "$(stat -c '%a' "$site_dir/admin/include/setup_db.php")" = 600 ] ||
+        fail "the first permission pass must still set the modes KVS needs"
+    before=$(find "$site_dir" -printf '%C@ %u:%g %m %p\n' | sort -k4)
+    TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/second.log" 2>&1 ||
+        fail "the second permission pass failed: $(cat "$case_dir/second.log")"
+    after=$(find "$site_dir" -printf '%C@ %u:%g %m %p\n' | sort -k4)
+    [ "$before" = "$after" ] ||
+        fail "a second permission pass rewrote what the first had set: $(diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep '^>' | head -n 3 | tr '\n' ' ')"
+    pass "a second permission pass leaves every file as the first set it"
+}
+
 test_final_compose_failure_is_fatal() {
     local block_file="$TMP_ROOT/compose-up-block.sh"
     local output="$TMP_ROOT/compose-up-output.log"
@@ -1350,6 +1413,7 @@ test_nginx_rewrites_are_atomic_and_non_empty
 test_manticore_scripts_support_numeric_domains_and_internal_api
 test_project_url_uses_validated_public_https_port
 test_permission_script_skips_empty_xargs_batches
+test_a_second_permission_pass_changes_nothing
 test_setup_rebuilds_init_and_optional_manticore_images
 test_final_compose_failure_is_fatal
 test_optional_gum_install_failure_is_nonfatal
