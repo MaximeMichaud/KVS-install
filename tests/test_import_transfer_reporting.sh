@@ -21,7 +21,8 @@ out=$(
 [[ "$out" =~ in\ ([0-9]+):([0-9]{2}):([0-9]{2}) ]] || fail "missing elapsed time: $out"
 elapsed=$((10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))
 [ "$elapsed" -ge 1 ] && [ "$elapsed" -le 30 ] || fail "two seconds became $elapsed seconds"
-grep -Eq 'Transferred 150 files, 4.0 MB.*\([1-9][0-9.]* (MB|kB|B)/s, [1-9][0-9,]* files/s\)' <<< "$out" || fail "incorrect rates: $out"
+grep -Eq '^  Transferred 150 files, 4.0 MB in ' <<< "$out" || fail "incorrect summary: $out"
+grep -Eq '^  Average [1-9][0-9.]* (MB|kB|B)/s, [1-9][0-9,]* files/s$' <<< "$out" || fail "incorrect rates: $out"
 echo 'PASS: real elapsed seconds and nonzero byte/file rates'
 
 # A carriage-return record must appear while the producer is still busy,
@@ -52,14 +53,16 @@ out=$(
         printf ' 0 0%% 0.00B/s 0:00:03 (xfr#0, to-chk=0/43000)\n'
     } | import_rsync_progress 0 0 yes
 )
-grep -Eq 'Copy: 0 B/s, 0 files/s; check: [1-9][0-9,]* entries/s, 41,000 of 42,000 discovered entries checked, scan running' <<< "$out" ||
+grep -Eq 'Checked: 41,000 of 42,000 entries found so far, scan running' <<< "$out" ||
+    fail "a progressing scan must count the entries it discovered: $out"
+grep -Eq 'Rates:   0 B/s, 0 files/s copied, [1-9][0-9,]* entries/s checked' <<< "$out" ||
     fail "a progressing scan with no copies must report its own rate: $out"
-grep -Eq 'Transferred 0 files, 0 B .*; 43,000 entries checked' <<< "$out" ||
+grep -Eq 'Average .*; 43,000 entries checked' <<< "$out" ||
     fail "a scan-only final summary must retain the checked-entry count: $out"
 echo 'PASS: scan throughput and completion remain visible without copying files'
 
 out=$(printf 'Number of files: 5000000000\nNumber of regular files transferred: 4000000000\nTotal file size: 12000000000 bytes\nTotal transferred file size: 11000000000 bytes\n' | import_rsync_stats_totals)
-[ "$out" = $'4000000000\t11000000000\t5000000000\t12000000000' ] || fail "large totals overflowed: $out"
+[ "$out" = $'4000000000\t11000000000\t5000000000\t12000000000\t5000000000' ] || fail "large totals overflowed: $out"
 echo 'PASS: totals above 32-bit integer limits'
 
 mkdir -p "$TEST_DIR/bin" "$TEST_DIR/logs" "$TEST_DIR/destination"
@@ -137,8 +140,8 @@ chmod +x "$TEST_DIR/drop-bin/rsync"
     [ "$(wc -l < "$FIXTURE_RUNS")" -eq 2 ] || fail "the final rsync must run twice"
     grep -q '^  The final rsync lost its connection to the old server (rsync status 12); attempt 2 of 9 in 0 s, from what already arrived\.$' "$TEST_DIR/drop-output" ||
         fail "the new attempt must be announced: $(cat "$TEST_DIR/drop-output")"
-    grep -q '^  1 kB of 2 kB (50%), 1 of 2 files' "$TEST_DIR/drop-output" || fail "the first attempt must count the whole: $(cat "$TEST_DIR/drop-output")"
-    grep -q '^  1 kB of 1 kB (100%), 1 of 1 files' "$TEST_DIR/drop-output" || fail "the new attempt must count what is left: $(cat "$TEST_DIR/drop-output")"
+    grep -q '^  Copied:  1 kB of 2 kB (50%), 1 of 2 files' "$TEST_DIR/drop-output" || fail "the first attempt must count the whole: $(cat "$TEST_DIR/drop-output")"
+    grep -q '^  Copied:  1 kB of 1 kB (100%), 1 of 1 files' "$TEST_DIR/drop-output" || fail "the new attempt must count what is left: $(cat "$TEST_DIR/drop-output")"
     grep -Fxq 'rsync=0 progress=0' "$TEST_DIR/drop-logs/final.status" || fail 'the last attempt must be saved'
     : > "$FIXTURE_RUNS"
     status=0

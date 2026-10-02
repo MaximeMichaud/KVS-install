@@ -1751,21 +1751,85 @@ import_count_text() {
 }
 
 # import_rsync_stats_totals: reads the --stats block of an rsync dry run
-# and prints "<files>\t<bytes>\t<site files>\t<site bytes>": what the
-# transfer moves (regular files and their size) and what the site
-# holds. Prints nothing without the two transfer figures.
+# and prints "<files>\t<bytes>\t<site files>\t<site bytes>\t<site
+# entries>": what the transfer moves (regular files and their size) and
+# what the site holds: its regular files and their size, then its
+# entries, the files, directories and links its whole scan lists. With -H
+# the site counts every name of a hard-linked file and the transfer one;
+# the entries count every name, as the checks of the transfer do. Prints
+# nothing without the two transfer figures.
 import_rsync_stats_totals() {
     awk '
         function number(s) { gsub(/[^0-9]/, "", s); return s + 0 }
         /^Number of files: / {
-            site_files = number($4)
+            site_entries = number($4)
+            site_files = site_entries
             if (match($0, /reg: [0-9,.]+/)) site_files = number(substr($0, RSTART + 5, RLENGTH - 5))
         }
         /^Number of (regular )?files transferred: / { files = number($NF); have_files = 1 }
         /^Total file size: / { site_bytes = number($4) }
         /^Total transferred file size: / { bytes = number($5); have_bytes = 1 }
-        END { if (have_files && have_bytes) printf "%.0f\t%.0f\t%.0f\t%.0f\n", files, bytes, site_files, site_bytes }
+        END { if (have_files && have_bytes) printf "%.0f\t%.0f\t%.0f\t%.0f\t%.0f\n", files, bytes, site_files, site_bytes, site_entries }
     '
+}
+
+# import_count_file <destination>: where the last complete count of the
+# site copied into a destination is kept, next to its source marker in
+# IMPORT_MARKER_DIR. Nothing without that directory: a file in the
+# destination would leave with the --delete of the mirror.
+import_count_file() {
+    [ -n "${IMPORT_MARKER_DIR:-}" ] || return 1
+    printf '%s/%s.count\n' "$IMPORT_MARKER_DIR" "$(basename -- "$1")"
+}
+
+# import_count_scope <patterns...>: the exclusion patterns of a transfer
+# as one word; a count describes the site under these patterns only.
+import_count_scope() {
+    printf '%s\n' "$@" | cksum | awk '{ print $1 "-" $2 }'
+}
+
+# import_count_save <destination> <scope> <entries> <files> <bytes>
+# Keeps what a complete scan of the site found (the dry run of the count or
+# of the plan, or the final rsync), with its date and the source the
+# marker of the destination names: a later pass whose count does not
+# finish in time measures its progress against it. Saves nothing without
+# a marker or a figure, and never fails the transfer.
+import_count_save() {
+    local destination="$1" scope="$2" entries="$3" files="$4" bytes="$5" file source
+
+    file=$(import_count_file "$destination") || return 0
+    source=$(cat -- "$(import_marker_file "$destination")" 2>/dev/null) || return 0
+    [ -n "$source" ] || return 0
+    [[ "$entries" =~ ^[1-9][0-9]*$ && "$files" =~ ^[0-9]+$ && "$bytes" =~ ^[0-9]+$ ]] || return 0
+    if ! {
+        printf 'source=%s\nscope=%s\ndate=%s\n' "$source" "$scope" "$(date +%s)"
+        printf 'entries=%s\nfiles=%s\nbytes=%s\n' "$entries" "$files" "$bytes"
+    } > "$file.tmp" 2>/dev/null || ! mv -f -- "$file.tmp" "$file" 2>/dev/null; then
+        rm -f -- "$file.tmp"
+    fi
+    return 0
+}
+
+# import_count_load <destination> <scope>
+# Prints "<entries> <files> <bytes> <epoch>" of the saved count when it
+# was made from the source the marker of the destination names now and
+# under the same exclusions; nothing, and status 1, otherwise.
+import_count_load() {
+    local file source
+
+    file=$(import_count_file "$1") || return 1
+    [ -f "$file" ] || return 1
+    source=$(cat -- "$(import_marker_file "$1")" 2>/dev/null) || return 1
+    [ -n "$source" ] || return 1
+    awk -v source="$source" -v scope="$2" '
+        { key = $0; sub(/=.*/, "", key); value = $0; sub(/^[^=]*=/, "", value); saved[key] = value }
+        END {
+            if (saved["source"] != source || saved["scope"] != scope) exit 1
+            if (saved["entries"] !~ /^[1-9][0-9]*$/ || saved["files"] !~ /^[0-9]+$/) exit 1
+            if (saved["bytes"] !~ /^[0-9]+$/ || saved["date"] !~ /^[0-9]+$/) exit 1
+            print saved["entries"], saved["files"], saved["bytes"], saved["date"]
+        }
+    ' "$file"
 }
 
 # import_rsync_totals <rsync arguments...>
@@ -2254,36 +2318,181 @@ import_rsync_workers() (
     return "$result"
 )
 
+# What import_disk_sampler reads on the old server: its clock, the I/O
+# counters of its block devices and which of them are whole disks.
+# shellcheck disable=SC2016  # Expanded by the shell of the old server.
+IMPORT_DISKSTATS_COMMAND='cat /proc/uptime /proc/diskstats; for d in /sys/block/*; do if [ -e "$d/device" ]; then echo "disk ${d##*/}"; fi; done'
+
+# import_disk_busy <previous reading> <reading>
+# How long each disk was busy between two readings of
+# IMPORT_DISKSTATS_COMMAND, in percent of the time between them on the
+# old server's own clock (/proc/uptime): field 13 of /proc/diskstats
+# counts the milliseconds a device spent doing I/O. Prints one line,
+# "<seconds between the readings> <disk> <percent>...", the busiest disk
+# first, or "<seconds> nodisk" when the readings hold no whole disk, and
+# nothing when they cannot be compared. The whole disks are those the old
+# server lists in /sys/block with a device (a partition, md,
+# device-mapper and loop devices have none, and md counts no I/O time),
+# or the usual names of whole disks when /sys tells nothing.
+import_disk_busy() {
+    LC_ALL=C awk '
+        FNR == 1 {
+            part++
+            if (NF == 2 && $1 ~ /^[0-9]+([.][0-9]+)?$/) clock[part] = $1 + 0
+            else bad = 1
+            next
+        }
+        $1 == "disk" && NF == 2 { if (part == 2) { disk[$2] = 1; listed = 1 }; next }
+        NF >= 14 && $1 ~ /^[0-9]+$/ && $13 ~ /^[0-9]+$/ { ticks[part, $3] = $13 + 0; names[$3] = 1 }
+        END {
+            if (part != 2 || bad) exit
+            elapsed = (clock[2] - clock[1]) * 1000
+            if (elapsed <= 0) exit
+            if (!listed) {
+                for (name in names) if (name ~ /^(sd[a-z]+|hd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$/) disk[name] = 1
+            }
+            n = 0
+            for (name in disk) {
+                if (!((1, name) in ticks) || !((2, name) in ticks)) continue
+                busy = (ticks[2, name] - ticks[1, name]) * 100 / elapsed
+                # A counter that went back wrapped or was reset.
+                if (busy < 0) continue
+                if (busy > 100) busy = 100
+                n++
+                who[n] = name
+                pct[n] = int(busy + 0.5)
+            }
+            out = sprintf("%d", elapsed / 1000 + 0.5)
+            if (n == 0) out = out " nodisk"
+            # The busiest first, then by name: a few disks, a plain selection.
+            for (i = 1; i <= n; i++) {
+                best = i
+                for (j = i + 1; j <= n; j++) {
+                    if (pct[j] > pct[best] || (pct[j] == pct[best] && who[j] < who[best])) best = j
+                }
+                name = who[i]; who[i] = who[best]; who[best] = name
+                busy = pct[i]; pct[i] = pct[best]; pct[best] = busy
+                out = out " " who[i] " " pct[i]
+            }
+            print out
+        }
+    ' "$1" "$2"
+}
+
+# import_disk_sampler <file> <seconds> [owner pid]
+# Every <seconds>, reads the I/O counters of the old server through the
+# multiplexed SSH connection (a few hundred bytes, read-only, no sudo)
+# and writes into <file> "<epoch> <seconds measured> <disk> <percent>...",
+# what import_disk_busy found between the last two readings that came,
+# or "<epoch> 0 unknown noanswer|nodisk" while there is none. A reading
+# that does not come within 15 s is dropped. It never prompts (BatchMode,
+# unless sshpass answers the password): a lost master connection that
+# needs a password typed in is not opened again.
+# Runs until TERM, which ends its SSH command and its pause at once, or
+# until the owner process is gone: a caller killed outright cannot stop
+# it, and nothing should read the old server for a transfer that ended.
+import_disk_sampler() {
+    local file="$1" interval="$2" owner="${3:-}" probe="" nap="" good=no result
+    local -a batch=()
+
+    [ "${IMPORT_SSH_COMMAND[0]}" = sshpass ] || batch=(-o BatchMode=yes)
+    trap '[ -z "$probe" ] || kill "$probe" 2>/dev/null; [ -z "$nap" ] || kill "$nap" 2>/dev/null; rm -f -- "$file.reading" "$file.previous" "$file.tmp"; exit 0' TERM
+    while [ -z "$owner" ] || kill -0 "$owner" 2>/dev/null; do
+        timeout 15 "${IMPORT_SSH_COMMAND[@]}" "${batch[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" "$IMPORT_DISKSTATS_COMMAND" \
+            < /dev/null > "$file.reading" 2>/dev/null &
+        probe=$!
+        if wait "$probe" && [ -s "$file.reading" ]; then
+            probe=""
+            result=""
+            [ ! -s "$file.previous" ] || result=$(import_disk_busy "$file.previous" "$file.reading")
+            case "$result" in
+                "") ;;
+                *" nodisk") good=yes; printf '%s 0 unknown nodisk\n' "$(date +%s)" > "$file.tmp" ;;
+                *) good=yes; printf '%s %s\n' "$(date +%s)" "$result" > "$file.tmp" ;;
+            esac
+            [ -z "$result" ] || mv -f -- "$file.tmp" "$file"
+            mv -f -- "$file.reading" "$file.previous"
+        else
+            probe=""
+            # A reading that did not come leaves the last one in place,
+            # which ages: the renderer says when it is too old.
+            if [ "$good" = no ]; then
+                printf '%s 0 unknown noanswer\n' "$(date +%s)" > "$file.tmp" && mv -f -- "$file.tmp" "$file"
+            fi
+        fi
+        sleep "$interval" &
+        nap=$!
+        wait "$nap"
+        nap=""
+    done
+    rm -f -- "$file.reading" "$file.previous" "$file.tmp"
+}
+
 # import_rsync_progress <bytes to transfer> <files to transfer> [terminal yes|no] [state file]
-# Reads the output of rsync --info=progress2 and shows the transfer
-# against the totals of its dry run: bytes and files done out of the
-# whole and the time left that follows the slower of the two, since the
-# tail of a site is many small files where the bytes hardly move while
-# the files go by; then the rates of the last twenty seconds, the
-# entries rsync has checked of those its scan has found (a repeat of a
-# large site spends most of its time there, moving nothing), and the
-# time elapsed. Two lines rewritten in place on a terminal, one line
-# every ten seconds otherwise (a log); no time left before five seconds
-# have passed, the first rate says little. Without totals the counts
-# show alone. Whatever else rsync prints passes through. rsync's own
-# figures mislead here: the line it prints when a file completes carries
-# the time elapsed and the average rate, not an estimate (its code
-# switches to them on that line), and its percentage is relative to the
-# files the scan has found so far. Use seconds from systime(), supported
-# by Debian mawk and gawk. A random seed is not a portable timestamp.
+# Reads the output of rsync --info=progress2 and shows the transfer, one
+# line a topic. Copied: the bytes and files done, out of the totals of the
+# dry run when there are some. Checked: the entries rsync has checked
+# (files, directories and links, every name of a hard-linked file), out
+# of the entries of the whole site when they are known, or of those its
+# scan has found so far: a repeat of a large site spends most of its time
+# there, moving nothing. Rates: those of the last twenty seconds (the
+# average since the start before that). Time: elapsed, and left, the
+# longest of what the bytes, the files and the entries left take at the
+# pace of the last five minutes (IMPORT_PROGRESS_PACE seconds; since the
+# start before that), since the tail of a site is many small files where
+# the bytes hardly move while the files go by. A repeat moves bytes in
+# bursts, where the walk meets a changed file: a figure that did not move
+# in the window while another did keeps its average since the start, one
+# that never moved makes the time left a floor ("at least"), and a window
+# where nothing moved gives no time left. No time left before five
+# seconds have passed, and "left unknown" when nothing tells what is
+# left. Disks: how busy the disks of the old server are, the last reading
+# of import_disk_sampler in the file IMPORT_PROGRESS_DISKS names.
+# Every line holds within 79 columns, so that an 80 column terminal
+# never wraps it, even one that wraps as soon as its last column is
+# written. The lines are rewritten in place on a terminal, and cut to its
+# width when it is narrower (IMPORT_PROGRESS_COLUMNS, read from the
+# terminal otherwise); a log gets them every thirty seconds. Whatever else
+# rsync prints passes through, except its --stats block, which goes to
+# IMPORT_PROGRESS_STATS when that names a file. rsync's own figures
+# mislead here: the line it prints when a file completes carries the time
+# elapsed and the average rate, not an estimate (its code switches to them
+# on that line), and its percentage is relative to the files the scan has
+# found so far. Use seconds from systime(), supported by Debian mawk and
+# gawk. A random seed is not a portable timestamp.
+# IMPORT_PROGRESS_ENTRIES gives the entries of the whole site from a
+# complete scan; with IMPORT_PROGRESS_COUNTED, the date of the earlier
+# pass that made it, shown with the figure since the site may have
+# changed since. A scan of this pass that is done supersedes it, and a
+# scan that finds more entries than it holds sets it aside.
 # With a state file, the figures of the last record go there at the end,
 # "<bytes> <files>", for a new attempt to count what is left.
 import_rsync_progress() {
     local total_bytes="${1:-0}" total_files="${2:-0}" terminal="${3:-}" state="${4:-}"
+    local entries="${IMPORT_PROGRESS_ENTRIES:-0}" counted="${IMPORT_PROGRESS_COUNTED:-}"
+    local disks="${IMPORT_PROGRESS_DISKS:-}" stats="${IMPORT_PROGRESS_STATS:-}"
+    local columns="${IMPORT_PROGRESS_COLUMNS:-}" pace="${IMPORT_PROGRESS_PACE:-300}" size=""
     local -a awk_options=()
 
     if [ -z "$terminal" ]; then
         if [ -t 1 ]; then terminal=yes; else terminal=no; fi
     fi
+    if [ "$terminal" = yes ] && [ -z "$columns" ] && [ -t 1 ]; then
+        # stty reads the size of the terminal on its standard input.
+        { size=$(stty size <&3 2>/dev/null); } 3>&1
+        columns=${size##* }
+    fi
+    [[ "$columns" =~ ^[0-9]+$ ]] || columns=0
+    [[ "$entries" =~ ^[0-9]+$ ]] || entries=0
+    # The Time line names the window: an hour at most keeps it in 79
+    # columns.
+    if [[ ! "$pace" =~ ^[1-9][0-9]{0,3}$ ]] || [ "$pace" -gt 3600 ]; then pace=300; fi
     # mawk otherwise waits for a full input buffer. Its interactive mode
     # requires newline records, so normalize rsync carriage returns first.
     if awk -W version 2>&1 | grep -q '^mawk '; then awk_options=(-W interactive); fi
-    stdbuf -o0 tr '\r' '\n' | awk "${awk_options[@]}" -v total_bytes="$total_bytes" -v total_files="$total_files" -v terminal="$terminal" -v state="$state" '
+    stdbuf -o0 tr '\r' '\n' | awk "${awk_options[@]}" -v total_bytes="$total_bytes" -v total_files="$total_files" \
+        -v terminal="$terminal" -v state="$state" -v entries="$entries" -v counted="$counted" -v disks="$disks" \
+        -v stats="$stats" -v columns="$columns" -v pace="$pace" '
         function now() { return systime() }
         function commas(n,    s, r) {
             s = sprintf("%.0f", int(n))
@@ -2306,20 +2515,80 @@ import_rsync_progress() {
             m = int((s % 3600) / 60)
             return sprintf("%d:%02d:%02d", h, m, s % 60)
         }
-        # Once a second on a terminal, every ten seconds otherwise, and at
-        # the end. The rates are those of the last twenty seconds (the
-        # average since the start before that); the time left is the longer
-        # of the two they give.
-        function report(final,    t, elapsed, i, o, byte_rate, file_rate, check_rate, checked, left, left_files, first, second, pct) {
+        # The block is rewritten by moving up one line per line drawn: a
+        # line the terminal wraps would leave its first part behind.
+        function fit(text) {
+            if (columns > 1 && length(text) >= columns) return substr(text, 1, columns - 1)
+            return text
+        }
+        # Back to the first line drawn, cleared with all below it.
+        function erase() {
+            if (!drawn) return
+            printf "\r"
+            if (drawn > 1) printf "\033[%dA", drawn - 1
+            printf "\033[J"
+            drawn = 0
+        }
+        function emit(n,    i, out) {
+            if (terminal == "yes") {
+                out = ""
+                if (drawn) out = "\r"
+                if (drawn > 1) out = out sprintf("\033[%dA", drawn - 1)
+                for (i = 1; i <= n; i++) out = out fit(line[i]) (i < n ? "\033[K\n" : "\033[J")
+                printf "%s", out
+                drawn = n
+            } else {
+                for (i = 1; i <= n; i++) printf "%s\n", line[i]
+            }
+            fflush()
+        }
+        # The last reading of import_disk_sampler: "<epoch> <seconds>"
+        # then "<disk> <percent>" pairs, busiest first, or "unknown" and
+        # why. As many disks as 80 columns take.
+        function disk_line(t,    text, n, f, i, item) {
+            if (disks == "") return ""
+            text = ""
+            if ((getline text < disks) <= 0) { close(disks); return "" }
+            close(disks)
+            n = split(text, f, " ")
+            if (n < 3 || f[1] !~ /^[0-9]+$/ || f[2] !~ /^[0-9]+$/) return ""
+            if (t - f[1] > 3 * f[2] + 60) return "  Disks:   no reading from the old server for " clock(t - f[1])
+            if (f[3] == "unknown") {
+                if (f[4] == "nodisk") return "  Disks:   the old server lists no whole disk in /proc/diskstats"
+                return "  Disks:   the old server gave no reading over SSH"
+            }
+            text = "  Disks:   old server busy"
+            for (i = 3; i + 1 <= n; i += 2) {
+                item = sprintf("%s %s %d%%", (i > 3 ? "," : ""), f[i], f[i + 1])
+                # Room for ", 12 more" unless this is the last disk, and
+                # for " (last 120 s)", within 79 columns.
+                if (i > 3 && length(text item) > (i + 1 >= n ? 66 : 56)) {
+                    text = text sprintf(", %d more", (n - i + 1) / 2)
+                    break
+                }
+                text = text item
+            }
+            return text sprintf(" (last %d s)", f[2])
+        }
+        # The seconds the rest of a figure takes at its pace over the
+        # window, or at its average since the start when it did not move
+        # in the window; -1 when it never moved.
+        function needs(rest, recent, average) {
+            if (recent > 0) return rest / recent
+            if (average > 0) return rest / average
+            return -1
+        }
+        function report(final,    t, elapsed, i, o, byte_rate, file_rate, check_rate, checked, n, pct, whole, estimate, outdated, dt, pace_bytes, pace_files, pace_checked, known, partial, left, r, text) {
             t = now()
             if (!final) {
                 if (terminal == "yes" && t == shown) return
-                if (terminal != "yes" && t - shown < 10) return
+                if (terminal != "yes" && t - shown < 30) return
             }
             shown = t
             elapsed = t - start
             if (elapsed < 0) elapsed = 0
             checked = found - to_check
+            if (checked < 0) checked = 0
             seen_bytes[t] = bytes
             seen_files[t] = files
             seen_checked[t] = checked
@@ -2349,47 +2618,135 @@ import_rsync_progress() {
                     byte_rate = bytes / elapsed
                     file_rate = files / elapsed
                 }
-                first = sprintf("  Transferred %s files, %s in %s (%s/s, %s files/s)", commas(files), size(bytes), clock(elapsed), size(byte_rate), commas(file_rate))
-                if (found > 0) first = first sprintf("; %s entries checked", commas(checked))
-                if (terminal == "yes") {
-                    if (drawn) printf "\r\033[1A"
-                    printf "%s\033[K\n\033[K", first
-                } else {
-                    printf "%s\n", first
-                }
+                n = 0
+                line[++n] = sprintf("  Transferred %s files, %s in %s", commas(files), size(bytes), clock(elapsed))
+                text = sprintf("  Average %s/s, %s files/s", size(byte_rate), commas(file_rate))
+                if (found > 0) text = text sprintf("; %s entries checked", commas(checked))
+                line[++n] = text
+                if (terminal == "yes") erase()
+                for (i = 1; i <= n; i++) printf "%s\n", line[i]
                 fflush()
                 return
             }
+            # The pace of the time left: thirty samples over the window,
+            # the oldest the last one at least a window old.
+            if (t - pace_t[pace_last] >= pace_step) {
+                pace_last++
+                pace_t[pace_last] = t
+                pace_b[pace_last] = bytes
+                pace_f[pace_last] = files
+                pace_c[pace_last] = checked
+            }
+            while (pace_first < pace_last && pace_t[pace_first + 1] <= t - pace) {
+                delete pace_t[pace_first]
+                delete pace_b[pace_first]
+                delete pace_f[pace_first]
+                delete pace_c[pace_first]
+                pace_first++
+            }
+            dt = t - pace_t[pace_first]
+            pace_bytes = 0
+            pace_files = 0
+            pace_checked = 0
+            if (dt > 0) {
+                pace_bytes = (bytes - pace_b[pace_first]) / dt
+                pace_files = (files - pace_f[pace_first]) / dt
+                pace_checked = (checked - pace_c[pace_first]) / dt
+            }
+            # The whole of the entries: this pass, once its scan is done;
+            # otherwise the given count, unless the scan found more.
+            whole = entries
+            estimate = (counted != "")
+            outdated = 0
+            if (found > 0 && scan_done) {
+                whole = found
+                estimate = 0
+            } else if (whole > 0 && found > whole) {
+                whole = 0
+                outdated = 1
+            }
+            n = 0
             if (total_bytes > 0 || total_files > 0) {
-                left = -1
-                if (total_bytes > bytes && byte_rate > 0) left = (total_bytes - bytes) / byte_rate
-                if (total_files > files && file_rate > 0) {
-                    left_files = (total_files - files) / file_rate
-                    if (left_files > left) left = left_files
-                }
-                if (elapsed < 5) left = -1
                 if (total_bytes > 0) pct = 100 * bytes / total_bytes
                 else pct = 100 * files / total_files
                 if (pct > 100) pct = 100
-                first = sprintf("  %s of %s (%d%%), %s of %s files, %s left", size(bytes), size(total_bytes), pct, commas(files), commas(total_files), (left < 0 ? "?" : clock(left)))
+                line[++n] = sprintf("  Copied:  %s of %s (%d%%), %s of %s files", size(bytes), size(total_bytes), pct, commas(files), commas(total_files))
             } else {
-                first = sprintf("  %s, %s files", size(bytes), commas(files))
+                line[++n] = sprintf("  Copied:  %s, %s files", size(bytes), commas(files))
             }
             if (found > 0) {
-                second = sprintf("  Copy: %s/s, %s files/s; check: %s entries/s, %s of %s discovered entries checked, scan %s, %s elapsed", size(byte_rate), commas(file_rate), (elapsed > 0 ? commas(check_rate) : "?"), commas(checked), commas(found), (scan_done ? "done" : "running"), clock(elapsed))
-            } else {
-                second = sprintf("  Copy: %s/s, %s files/s, %s elapsed", size(byte_rate), commas(file_rate), clock(elapsed))
+                if (whole > 0) {
+                    pct = 100 * checked / whole
+                    if (pct > 100) pct = 100
+                    if (estimate) line[++n] = sprintf("  Checked: %s of about %s entries (%d%%), count of %s", commas(checked), commas(whole), pct, counted)
+                    else line[++n] = sprintf("  Checked: %s of %s entries (%d%%)", commas(checked), commas(whole), pct)
+                } else {
+                    line[++n] = sprintf("  Checked: %s of %s entries found so far, scan running", commas(checked), commas(found))
+                }
             }
-            if (terminal == "yes") {
-                if (drawn) printf "\r\033[1A"
-                printf "%s\033[K\n%s\033[K", first, second
-                drawn = 1
+            text = sprintf("  Rates:   %s/s, %s files/s copied", size(byte_rate), commas(file_rate))
+            if (found > 0) text = text sprintf(", %s entries/s checked", (elapsed > 0 ? commas(check_rate) : "?"))
+            line[++n] = text
+            known = (total_bytes > 0 || total_files > 0 || (whole > 0 && found > 0))
+            if (!known) {
+                if (outdated) text = "left unknown, the site grew since " counted
+                else text = "left unknown: no complete count of this site yet"
+            } else if (elapsed < 5 || dt < 1) {
+                text = "time left unknown yet"
+            } else if (pace_bytes <= 0 && pace_files <= 0 && pace_checked <= 0) {
+                text = "time left unknown: no progress " (elapsed >= pace ? "in the last " window : "so far")
             } else {
-                printf "%s, %s\n", first, substr(second, 3)
+                left = 0
+                partial = 0
+                if (total_bytes > bytes) {
+                    r = needs(total_bytes - bytes, pace_bytes, bytes / elapsed)
+                    if (r < 0) partial = 1
+                    else if (r > left) left = r
+                }
+                if (total_files > files) {
+                    r = needs(total_files - files, pace_files, files / elapsed)
+                    if (r < 0) partial = 1
+                    else if (r > left) left = r
+                }
+                if (whole > 0 && found > 0 && whole > checked) {
+                    r = needs(whole - checked, pace_checked, checked / elapsed)
+                    if (r < 0) partial = 1
+                    else if (r > left) left = r
+                }
+                # Past 10,000 hours the figure says nothing more and would
+                # widen the line.
+                if (left >= 36000000) text = "over 10,000 hours"
+                else text = (partial ? "at least " : "about ") clock(left)
+                text = text " left (pace " (elapsed >= pace ? "of the last " window : "so far") ")"
+                if (partial && left < 1) text = "time left unknown: nothing copied so far"
             }
-            fflush()
+            line[++n] = sprintf("  Time:    %s elapsed, %s", clock(elapsed), text)
+            text = disk_line(t)
+            if (text != "") line[++n] = text
+            emit(n)
         }
-        BEGIN { start = now(); shown = -100; bytes = 0; files = 0; found = 0; to_check = 0; scan_done = 0; drawn = 0 }
+        BEGIN {
+            start = now()
+            shown = -100
+            bytes = 0
+            files = 0
+            found = 0
+            to_check = 0
+            scan_done = 0
+            drawn = 0
+            in_stats = 0
+            pace += 0
+            pace_step = int(pace / 30)
+            if (pace_step < 1) pace_step = 1
+            if (pace >= 60) window = sprintf("%d min", pace / 60)
+            else window = sprintf("%d s", pace)
+            pace_first = 1
+            pace_last = 1
+            pace_t[1] = start
+            pace_b[1] = 0
+            pace_f[1] = 0
+            pace_c[1] = 0
+        }
         /^ *[0-9][0-9,.]* +[0-9]+% +[0-9.]+[kMGT]?B\/s +[0-9]+:[0-9][0-9]:[0-9][0-9]/ {
             b = $1
             gsub(/[,.]/, "", b)
@@ -2405,16 +2762,21 @@ import_rsync_progress() {
             next
         }
         /^[[:space:]]*$/ { next }
+        # The --stats block rsync ends with: the counts of the whole site,
+        # for the caller, not for the screen.
+        stats != "" && /^Number of files: / { in_stats = 1 }
+        in_stats && /^(Number of |Total |Literal data|Matched data|File list |sent |total size is )/ {
+            print > stats
+            next
+        }
         {
-            if (terminal == "yes" && drawn) {
-                printf "\r\033[1A\033[K\n\033[K\r\033[1A"
-                drawn = 0
-            }
+            if (terminal == "yes") erase()
             print
             fflush()
         }
         END {
             report(1)
+            if (stats != "") close(stats)
             if (state != "") printf "%.0f %.0f\n", bytes, files > state
         }
     '
@@ -2441,12 +2803,20 @@ import_rsync_progress() {
 # links inside it stay links. Files that vanish during the transfer are
 # what a live site does and not a failure; files rsync could not read or
 # links pointing nowhere are.
+# A complete scan (the count, the plan or the final rsync) is saved next
+# to the source marker (import_count_save): when the count of a later
+# pass runs out of time, the progress measures the entries checked
+# against it, an estimate dated as such, instead of showing no whole.
+# With IMPORT_DISKSTATS_INTERVAL seconds (0, the default, for none), the
+# progress also shows how busy the disks of the old server are
+# (import_disk_sampler).
 import_remote_files() (
     local dir="$1"
     local destination="$2"
     local use_rsync="$3"
     local status=0
-    local pattern totals count_status files=0 bytes=0 site_files site_bytes
+    local pattern totals count_status files=0 bytes=0 site_files site_bytes site_entries=0
+    local scope saved saved_files saved_bytes saved_date counted="" sampler="" owner disks="" interval="${IMPORT_DISKSTATS_INTERVAL:-0}"
     local jobs="${IMPORT_TRANSFER_JOBS:-4}" chunk="${IMPORT_TRANSFER_CHUNK:-20000}" chunks
     local worker_rsh worker_auth=no plan="" work error_dir remote_plan="" masters="" rsync_host
     local lists_size started relay="${IMPORT_RSYNC_RELAY_FILES:-5000}" remote_free relayed
@@ -2490,12 +2860,25 @@ import_remote_files() (
         work=$(mktemp -d "${TMPDIR:-/var/tmp}/kvs-import-transfer.XXXXXX" 2>/dev/null || mktemp -d) || return 1
         # Interrupted or not, the SSH masters of the workers end and the
         # chunk lists leave the old server.
-        trap 'import_rsync_masters_close "$masters"; import_remote_plan_remove "$remote_plan"; rm -rf -- "$work"' EXIT
+        trap '[ -z "$sampler" ] || { kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null; }; import_rsync_masters_close "$masters"; import_remote_plan_remove "$remote_plan"; rm -rf -- "$work"' EXIT
         error_dir=${IMPORT_TRANSFER_LOG_DIR:-$work}
         # The caller owns the private persistent directory when diagnostics
         # must survive a failure; file lists and progress logs stay temporary.
         [ -d "$error_dir" ] || return 1
         umask 077
+        scope=$(import_count_scope "${patterns[@]}")
+        # The disks are read from the start, so that two readings are
+        # there once the copy shows its progress. The trap stops the
+        # sampler; were this shell killed outright, the sampler sees it is
+        # gone (BASHPID read here: a background command expands its words
+        # in the child).
+        [[ "$interval" =~ ^[0-9]{1,3}$ ]] || interval=0
+        if [ "$interval" -gt 0 ] && [ -n "${IMPORT_SSH_TARGET:-}" ]; then
+            disks="$work/disks"
+            owner=$BASHPID
+            import_disk_sampler "$disks" "$interval" "$owner" 2>/dev/null &
+            sampler=$!
+        fi
         if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
             rsync_path=(--rsync-path="sudo -n rsync")
         fi
@@ -2548,7 +2931,10 @@ import_remote_files() (
             attempt=$((attempt + 1))
         done
         if [ -n "$totals" ]; then
-            IFS=$'\t' read -r files bytes site_files site_bytes <<< "$totals"
+            IFS=$'\t' read -r files bytes site_files site_bytes site_entries <<< "$totals"
+            case "$count_status" in
+                0|24) import_count_save "$destination" "$scope" "$site_entries" "$site_files" "$site_bytes" ;;
+            esac
             if [ "$files" -eq 0 ] && [ "$bytes" -eq 0 ]; then
                 echo "  To transfer:     nothing, the site's $(import_count_text "$site_files") files ($(import_bytes_text "$site_bytes")) are already here; rsync checks them"
             else
@@ -2568,7 +2954,16 @@ import_remote_files() (
                 fi
             fi
         elif [ "$count_status" -eq 124 ]; then
-            echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the transfer shows its counts without a whole"
+            # The site of an earlier pass from the same source is the best
+            # whole there is, dated: never a guess when there is none.
+            if saved=$(import_count_load "$destination" "$scope"); then
+                read -r site_entries saved_files saved_bytes saved_date <<< "$saved"
+                counted=$(date -d "@$saved_date" +%Y-%m-%d 2>/dev/null) || counted="@$saved_date"
+                echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the progress measures against the count of $counted instead, an estimate (the site then held $(import_count_text "$site_entries") entries, $(import_count_text "$saved_files") files, $(import_bytes_text "$saved_bytes"))"
+            else
+                site_entries=0
+                echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit) and no earlier pass from this source finished one: the transfer shows its counts without a whole, and what is left stays unknown"
+            fi
         fi
         if [ -n "$plan" ] && [ -s "$plan/pieces" ]; then
             if ! chunks=$(import_rsync_chunks "$plan" "$jobs" "$chunk"); then
@@ -2641,7 +3036,7 @@ import_remote_files() (
             echo "  Each rsync lists its chunk of up to $(import_count_text "$chunk") files on the old server before copying it; the first bytes follow the listing of the first chunks."
             IMPORT_RSYNC_CONTROL_DIR="$masters" IMPORT_RSYNC_REMOTE_PLAN="$remote_plan" IMPORT_RSYNC_SERIAL_AUTH="$worker_auth" \
                 import_rsync_workers "$plan" "$jobs" "$worker_rsh" "${rsync_args[@]}" |
-                import_rsync_progress "$bytes" "$files"
+                IMPORT_PROGRESS_DISKS="$disks" import_rsync_progress "$bytes" "$files"
             transfer_status=("${PIPESTATUS[@]}")
             import_rsync_masters_close "$masters"
             masters=""
@@ -2668,12 +3063,15 @@ import_remote_files() (
         # workers it checks every file of the site, both long on a large
         # site. A lost connection starts it again after a pause: what
         # arrived stays, a file cut short too (the partial directory), and
-        # the count goes on with what is left.
+        # the count goes on with what is left. Its checks are measured
+        # against the entries of the site, which its own --stats count
+        # once it went through all of them, for the next pass.
         attempt=1
         while :; do
-            rm -f -- "$work/final.progress"
-            rsync "${rsync_args[@]}" --info=progress2 2> "$error_dir/final-rsync.err" |
-                import_rsync_progress "$bytes" "$files" "" "$work/final.progress"
+            rm -f -- "$work/final.progress" "$work/final.stats"
+            rsync "${rsync_args[@]}" --info=progress2 --stats 2> "$error_dir/final-rsync.err" |
+                IMPORT_PROGRESS_ENTRIES="$site_entries" IMPORT_PROGRESS_COUNTED="$counted" IMPORT_PROGRESS_DISKS="$disks" \
+                    IMPORT_PROGRESS_STATS="$work/final.stats" import_rsync_progress "$bytes" "$files" "" "$work/final.progress"
             transfer_status=("${PIPESTATUS[@]}")
             printf 'rsync=%s progress=%s\n' "${transfer_status[@]}" > "$error_dir/final.status"
             cat "$error_dir/final-rsync.err" >&2
@@ -2694,6 +3092,14 @@ import_remote_files() (
         done
         tries=""
         [ "$attempt" -le 1 ] || tries=" after $attempt attempts"
+        case "$status" in
+            0|24)
+                if [ -s "$work/final.stats" ] && totals=$(import_rsync_stats_totals < "$work/final.stats") && [ -n "$totals" ]; then
+                    IFS=$'\t' read -r _ _ site_files site_bytes site_entries <<< "$totals"
+                    import_count_save "$destination" "$scope" "$site_entries" "$site_files" "$site_bytes"
+                fi
+                ;;
+        esac
         case "$status" in
             24)
                 echo "  Some files vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
