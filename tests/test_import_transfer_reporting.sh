@@ -230,6 +230,105 @@ mapfile -t remaining < <(find "$LOG_DIR" -mindepth 1 -maxdepth 1 -type d)
 [ "${#remaining[@]}" -eq 1 ] && [ "${remaining[0]}" = "$saved" ] || fail 'success removed previous errors or left a new diagnostics directory'
 echo 'PASS: setup preserves failed diagnostics across processes and cleans successful attempts'
 
+# A run that stopped during the file transfer leaves its dump: with
+# IMPORT_REUSE_DUMP=yes the same command takes it again instead of a new
+# export, once it is known to come from the same source and to be whole.
+# shellcheck source=/dev/null
+source "$ROOT_DIR/docker/lib/native-import.sh"
+IMPORT_TABLES_PREFIX=ktvs_ IMPORT_MARKER_DIR="$TEST_DIR/staging"
+import_remote_dump() { echo exported >> "$TEST_DIR/reuse-calls"; printf 'new export\n' > "$3"; }
+import_remote_files() { echo files >> "$TEST_DIR/reuse-calls"; return 0; }
+reuse_marker() { printf '%s\n' "$1" > "$TEST_DIR/staging/example.test.source"; }
+reuse_run() {
+    local status=0
+    rm -f "$TEST_DIR/reuse-calls"
+    (IMPORT_REUSE_DUMP=$1 import_fetch_remote) > "$TEST_DIR/reuse-output" 2>&1 || status=$?
+    touch "$TEST_DIR/reuse-calls"
+    return "$status"
+}
+# reuse_sql_dump whole|cut: a dump of one table, with or without the line
+# mariadb-dump ends a complete dump with.
+reuse_sql_dump() {
+    {
+        cat <<'SQL'
+CREATE TABLE `ktvs_options` (
+  `variable` varchar(64)
+);
+SQL
+        [ "$1" = cut ] || echo '-- Dump completed on 2026-10-01'
+    } | gzip > "$sql_dump"
+}
+sql_dump="$TEST_DIR/staging/example.test.sql.gz"
+reuse_sql_dump whole
+reuse_marker ssh://root@source.test:22/srv/example
+cp "$sql_dump" "$TEST_DIR/sql-dump.copy"
+reuse_run yes || fail "a whole dump of the same source was refused: $(cat "$TEST_DIR/reuse-output")"
+[ "$(cat "$TEST_DIR/reuse-calls")" = files ] || fail "the database was exported again, or the files did not follow: $(cat "$TEST_DIR/reuse-calls")"
+cmp -s "$sql_dump" "$TEST_DIR/sql-dump.copy" || fail 'the reused dump changed'
+grep -Fq 'Reusing the dump received on' "$TEST_DIR/reuse-output" || fail 'the reuse is not reported'
+if grep -Fq 'Dump received:' "$TEST_DIR/reuse-output"; then fail 'a reused dump is reported as received'; fi
+
+reuse_sql_dump cut
+reuse_marker ssh://root@source.test:22/srv/example
+cp "$sql_dump" "$TEST_DIR/sql-dump.copy"
+if reuse_run yes; then fail 'a dump cut off before its completion line was reused'; fi
+grep -Fq 'is incomplete or unreadable' "$TEST_DIR/reuse-output" || fail "missing reason for a cut dump: $(cat "$TEST_DIR/reuse-output")"
+[ ! -s "$TEST_DIR/reuse-calls" ] || fail "a refused reuse exported or copied: $(cat "$TEST_DIR/reuse-calls")"
+cmp -s "$sql_dump" "$TEST_DIR/sql-dump.copy" || fail 'a refused dump was removed or changed'
+
+reuse_sql_dump whole
+reuse_marker ssh://root@other.test:22/srv/example
+if reuse_run yes; then fail 'a dump of another source was reused'; fi
+grep -Fq 'was not received from ssh://root@source.test:22/srv/example (the last import here came from ssh://root@other.test:22/srv/example)' "$TEST_DIR/reuse-output" ||
+    fail "missing reason for another source: $(cat "$TEST_DIR/reuse-output")"
+[ ! -s "$TEST_DIR/reuse-calls" ] || fail 'a dump of another source led to a transfer'
+reuse_marker ssh://root@source.test:22/srv/example
+
+rm -f "$sql_dump"
+if reuse_run yes; then fail 'a missing dump was reused'; fi
+grep -Fq 'no dump received by an earlier run' "$TEST_DIR/reuse-output" || fail "missing reason for an absent dump: $(cat "$TEST_DIR/reuse-output")"
+[ ! -s "$TEST_DIR/reuse-calls" ] || fail 'an absent dump led to a transfer'
+
+printf 'old export\n' > "$sql_dump"
+reuse_run no || fail "a fresh export failed: $(cat "$TEST_DIR/reuse-output")"
+[ "$(paste -sd' ' "$TEST_DIR/reuse-calls")" = 'exported files' ] || fail "without IMPORT_REUSE_DUMP the database must be exported again: $(cat "$TEST_DIR/reuse-calls")"
+grep -Fq 'IMPORT_REUSE_DUMP=yes takes it again' "$TEST_DIR/reuse-output" || fail 'the replaced dump is not pointed out'
+[ "$(cat "$sql_dump")" = 'new export' ] || fail 'the new export did not replace the old dump'
+
+# A run records its source right after its dump: a whole dump newer than
+# that record came from a run that stopped in between, possibly one
+# pointed at another old server.
+reuse_sql_dump whole
+touch -d '1 minute ago' "$TEST_DIR/staging/example.test.source"
+if reuse_run yes; then fail 'a dump newer than the record of its source was reused'; fi
+grep -Fq 'arrived after the last import from ssh://root@source.test:22/srv/example started' "$TEST_DIR/reuse-output" ||
+    fail "missing reason for a dump newer than its source record: $(cat "$TEST_DIR/reuse-output")"
+[ ! -s "$TEST_DIR/reuse-calls" ] || fail 'a dump newer than its source record led to a transfer'
+
+# The same for a native bundle, the format an old MariaDB 11 server gives.
+IMPORT_REMOTE_DATABASE_FORMAT=directory
+import_native_target_supported() { return 0; }
+native_dump="$TEST_DIR/staging/example.test.mariadb.tar.gz"
+mkdir -p "$TEST_DIR/bundle/data"
+printf 'format=2\ncomplete=yes\nsource_database=old\ntables_prefix=ktvs_\nkvs_version=7.0.2\ntables=1\n' > "$TEST_DIR/bundle/kvs-native-export.manifest"
+cat > "$TEST_DIR/bundle/data/ktvs_options.sql" <<'SQL'
+CREATE TABLE `ktvs_options` (`variable` varchar(64) NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+SQL
+head -c 300000 /dev/urandom | base64 -w 76 | sed 's/^/v/' > "$TEST_DIR/bundle/data/ktvs_options.txt"
+(cd "$TEST_DIR/bundle" && sha256sum kvs-native-export.manifest data/* > SHA256SUMS)
+tar -czf "$native_dump" -C "$TEST_DIR/bundle" kvs-native-export.manifest SHA256SUMS data
+reuse_marker ssh://root@source.test:22/srv/example
+reuse_run yes || fail "a whole native bundle was refused: $(cat "$TEST_DIR/reuse-output")"
+[ "$(cat "$TEST_DIR/reuse-calls")" = files ] || fail "a whole native bundle was exported again: $(cat "$TEST_DIR/reuse-calls")"
+head -c "$(($(stat -c %s "$native_dump") / 2))" "$native_dump" > "$TEST_DIR/cut.tar.gz"
+mv "$TEST_DIR/cut.tar.gz" "$native_dump"
+reuse_marker ssh://root@source.test:22/srv/example
+if reuse_run yes; then fail 'a native bundle cut in half was reused'; fi
+grep -Fq 'is incomplete or unreadable' "$TEST_DIR/reuse-output" || fail "missing reason for a cut bundle: $(cat "$TEST_DIR/reuse-output")"
+[ ! -s "$TEST_DIR/reuse-calls" ] || fail 'a cut native bundle led to a transfer'
+IMPORT_REMOTE_DATABASE_FORMAT=sql
+echo 'PASS: a run takes the dump an interrupted run received only when asked, from the same source and whole'
+
 # The size of the dump is redrawn in place while the old server reports on
 # stderr: each of its messages keeps a line of its own on the terminal
 # instead of following the size ("  Received 0 MBDumping ..."), and the

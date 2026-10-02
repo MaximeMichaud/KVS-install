@@ -124,6 +124,12 @@ ENVIRONMENT VARIABLES:
                           that doubles up to 5 minutes, while the other
                           workers go on. The planning scan and the final
                           rsync pass get the same attempts.
+    IMPORT_REUSE_DUMP=yes Take the database dump received by a run that
+                          stopped during the file transfer instead of
+                          exporting the database again (hours on a large
+                          site). It must come from the same old server and
+                          be whole. Not on the last pass, which needs a
+                          fresh dump of the frozen site. Never kept.
     IMPORT_DATABASE_FORMAT=auto|sql|directory
                           Remote database export format. Auto uses native
                           MariaDB bulk loading when the source supports it,
@@ -855,6 +861,14 @@ IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
 IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-4}"
 IMPORT_TRANSFER_CHUNK="${IMPORT_TRANSFER_CHUNK:-20000}"
 IMPORT_TRANSFER_RETRIES="${IMPORT_TRANSFER_RETRIES:-8}"
+# Each run decides on its own whether it takes the dump an earlier run
+# received (import_reuse_dump): never written to .env, since the last pass
+# needs a fresh dump.
+case "${IMPORT_REUSE_DUMP:-}" in
+    y|Y|yes|YES|true) IMPORT_REUSE_DUMP=yes ;;
+    ''|n|N|no|NO|false) IMPORT_REUSE_DUMP=no ;;
+    *) echo "ERROR: IMPORT_REUSE_DUMP must be yes or no" >&2; exit 1 ;;
+esac
 IMPORT_DATABASE_FORMAT="${IMPORT_DATABASE_FORMAT:-auto}"
 IMPORT_DATABASE_FORMAT_REQUEST=$IMPORT_DATABASE_FORMAT
 IMPORT_DATABASE_JOBS="${IMPORT_DATABASE_JOBS:-auto}"
@@ -1902,19 +1916,27 @@ import_fetch_remote() {
     # which is harmless, instead of rows whose files never came. A second
     # pass, once the old site is frozen, carries the changes made since.
     echo ""
-    echo -e "${CYAN}Receiving the database dump from $IMPORT_SSH_TARGET...${NC}"
-    rm -f "$dump"
-    import_remote_dump "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$dump" &
-    pid=$!
-    if [ -t 1 ]; then
-        import_watch_file_size "$dump" "$pid" "Received"
+    if [ "${IMPORT_REUSE_DUMP:-no}" = yes ]; then
+        echo -e "${CYAN}Checking the database dump an earlier run received...${NC}"
+        import_reuse_dump "$dump" "$destination" "$source" "$IMPORT_TABLES_PREFIX" || exit 1
+    else
+        if [ -s "$dump" ]; then
+            echo "  The dump an earlier run received is replaced by a new export (IMPORT_REUSE_DUMP=yes takes it again when only files are left to copy)."
+        fi
+        echo -e "${CYAN}Receiving the database dump from $IMPORT_SSH_TARGET...${NC}"
+        rm -f "$dump"
+        import_remote_dump "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$dump" &
+        pid=$!
+        if [ -t 1 ]; then
+            import_watch_file_size "$dump" "$pid" "Received"
+        fi
+        if ! wait "$pid"; then
+            echo -e "${RED}ERROR: the dump of the old database failed (see the messages above)${NC}"
+            exit 1
+        fi
+        chmod 600 "$dump"
+        echo -e "  ${GREEN}✓${NC} Dump received: $dump ($(du -h -- "$dump" | cut -f1))"
     fi
-    if ! wait "$pid"; then
-        echo -e "${RED}ERROR: the dump of the old database failed (see the messages above)${NC}"
-        exit 1
-    fi
-    chmod 600 "$dump"
-    echo -e "  ${GREEN}✓${NC} Dump received: $dump ($(du -h -- "$dump" | cut -f1))"
     echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR${KVS_INSTALL_VERSION:+ (kvs-install $KVS_INSTALL_VERSION)}...${NC}"
     import_destination_ready "$destination" "$source" || exit 1
     import_mark_destination "$destination" "$source" || exit 1
