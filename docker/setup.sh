@@ -124,6 +124,11 @@ ENVIRONMENT VARIABLES:
                           that doubles up to 5 minutes, while the other
                           workers go on. The planning scan and the final
                           rsync pass get the same attempts.
+    IMPORT_DISKSTATS_INTERVAL=S Seconds between two readings of how busy
+                          the disks of the old server are, shown with the
+                          transfer progress (30, range 0-300; 0 for none).
+                          A read of /proc/diskstats over the open SSH
+                          connection, nothing written there.
     IMPORT_REUSE_DUMP=yes Take the database dump received by a run that
                           stopped during the file transfer instead of
                           exporting the database again (hours on a large
@@ -873,6 +878,7 @@ IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
 IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-4}"
 IMPORT_TRANSFER_CHUNK="${IMPORT_TRANSFER_CHUNK:-20000}"
 IMPORT_TRANSFER_RETRIES="${IMPORT_TRANSFER_RETRIES:-8}"
+IMPORT_DISKSTATS_INTERVAL="${IMPORT_DISKSTATS_INTERVAL:-30}"
 # Each run decides on its own whether it takes the dump an earlier run
 # received (import_reuse_dump): never written to .env, since the last pass
 # needs a fresh dump.
@@ -1484,6 +1490,10 @@ import_inspect_remote() {
     fi
     if [[ ! "${IMPORT_TRANSFER_RETRIES:-8}" =~ ^[0-9]{1,3}$ ]] || [ "${IMPORT_TRANSFER_RETRIES:-8}" -gt 100 ]; then
         echo "ERROR: IMPORT_TRANSFER_RETRIES must be an integer from 0 to 100" >&2
+        exit 1
+    fi
+    if [[ ! "${IMPORT_DISKSTATS_INTERVAL:-30}" =~ ^[0-9]{1,3}$ ]] || [ "${IMPORT_DISKSTATS_INTERVAL:-30}" -gt 300 ]; then
+        echo "ERROR: IMPORT_DISKSTATS_INTERVAL must be an integer from 0 to 300" >&2
         exit 1
     fi
     if [ ! -f "$IMPORT_EXPORTER" ]; then
