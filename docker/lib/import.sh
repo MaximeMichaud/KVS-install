@@ -2932,6 +2932,8 @@ import_remote_files() (
             skip_count=yes
         elif [ -n "$plan" ]; then
             echo "  Planning all files for $jobs parallel workers, in chunks of at most $(import_count_text "$chunk") files (complete scan; no size-count timeout)..."
+        elif [ "${IMPORT_SIZE_TIMEOUT:-300}" = 0 ]; then
+            echo "  Counting what the transfer moves (a scan of the old server, without a time limit: IMPORT_SIZE_TIMEOUT=0)..."
         else
             echo "  Counting what the transfer moves (a scan of the old server, at most ${IMPORT_SIZE_TIMEOUT:-300} s)..."
         fi
