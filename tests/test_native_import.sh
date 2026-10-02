@@ -94,6 +94,19 @@ reject_fixture full_stage
 grep -q 'native import staging needs' "$TEST_DIR/rejected.log" || fail 'missing staging space diagnostic'
 SIMULATE_FULL_STAGE=no
 
+# kvs-export.sh streams the checksums after the data they cover: two
+# archives of 512-byte records, the end blocks of the first one dropped.
+fixture
+hash_fixture
+{
+    tar --format=gnu -b 1 -cf - -C "$TEST_DIR/source" kvs-native-export.manifest data | head -c -1024
+    tar --format=gnu -b 1 -cf - -C "$TEST_DIR/source" SHA256SUMS
+} | gzip > "$TEST_DIR/fixture.mariadb.tar.gz"
+[ "$(tar -tzf "$TEST_DIR/fixture.mariadb.tar.gz" | tail -n 1)" = SHA256SUMS ] || fail 'streamed bundle fixture layout'
+[ "$(native_import_inspect "$TEST_DIR/fixture.mariadb.tar.gz" ktvs_)" = $'2\t\t0\tyes' ] || fail 'checksums last: inspection'
+prepare_fixture checksums_last >/dev/null
+[ -f "$TEST_DIR/init/checksums_last/data/new-site.example/ktvs_videos.txt" ] || fail 'checksums last: preparation'
+
 # An InnoDB table converted from MyISAM on a lenient server keeps
 # ROW_FORMAT=FIXED, which the strict MariaDB of the stack refuses to create.
 fixture

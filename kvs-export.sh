@@ -1395,7 +1395,7 @@ kvs_build_dump_args() {
 kvs_stream_dump() {
     if [ "$DB_DUMP_FORMAT" = directory ]; then
         kvs_prepare_directory_dump || return 1
-        tar -cf - -C "$NATIVE_STAGING_DIR/bundle" kvs-native-export.manifest SHA256SUMS data < /dev/null | "${COMPRESS_CMD[@]}"
+        kvs_stream_directory_bundle | "${COMPRESS_CMD[@]}"
         return $?
     fi
     (
@@ -1524,6 +1524,15 @@ kvs_select_database_format() {
     fi
     if ! command -v sha256sum >/dev/null 2>&1; then
         kvs_directory_refuse "sha256sum is required to verify native bundles"
+        return $?
+    fi
+    # The bundle is checksummed while it streams: GNU tar hands every member
+    # to a command, and GNU head drops the end of the first archive. One
+    # command -v for several tools succeeds when any of them exists.
+    if ! kvs_tool_advertises tar --to-command || ! command -v mkfifo >/dev/null 2>&1 ||
+        ! command -v tee >/dev/null 2>&1 || ! command -v cut >/dev/null 2>&1 ||
+        [ "$(printf 'kvs' | head -c -1 2>/dev/null)" != kv ]; then
+        kvs_directory_refuse "GNU tar and the GNU tools mkfifo, tee, head and cut are required to stream native bundles"
         return $?
     fi
     mysql_uid=$(id -u mysql 2>/dev/null) || mysql_uid=""
@@ -1743,12 +1752,49 @@ kvs_prepare_directory_dump() {
         printf 'format=2\ncomplete=yes\nsource_database=%s\ntables_prefix=%s\nkvs_version=%s\ntables=%s\n' \
             "$DB_NAME" "$TABLES_PREFIX" "$KVS_VERSION" "${#DB_DIRECTORY_TABLES[@]}"
     } > "$NATIVE_STAGING_DIR/bundle/kvs-native-export.manifest" || return 1
-    (
-        cd "$NATIVE_STAGING_DIR/bundle" || exit 1
-        sha256sum kvs-native-export.manifest data/* > SHA256SUMS && sha256sum -c SHA256SUMS >/dev/null
-    ) || return 1
+    # SHA256SUMS is written while the bundle streams (kvs_stream_directory_bundle).
     NATIVE_DUMP_READY=yes
     return 0
+}
+
+# Write the native bundle on stdout as one tar archive, reading each staged
+# file once. On a source whose database does not fit in memory, every pass
+# over the staged export is a full read of the disks the live database sits
+# on; a checksum pass and a verification pass before the archive tripled
+# that read. A second tar reads the archive as it is written and hashes
+# every member it holds, and SHA256SUMS, complete once the data went
+# through, ends the archive: the importer extracts everything before it
+# verifies, so the order of the members is free. With 512-byte records the
+# first archive ends with exactly two zero blocks, which head drops so that
+# the checksums can follow.
+kvs_stream_directory_bundle() {
+    local bundle="$NATIVE_STAGING_DIR/bundle" work="$NATIVE_STAGING_DIR/stream"
+    local hasher expected count status=0
+
+    rm -rf -- "$work" "$bundle/SHA256SUMS"
+    mkdir -m 700 "$work" "$work/members" && mkfifo -m 600 "$work/archive" || return 1
+    # The hasher prints "<sha256>  <member>" for every regular file, like
+    # sha256sum run in the bundle directory; the directory entry lands in
+    # the private members directory.
+    # shellcheck disable=SC2016  # Expanded by the shell tar starts for each member.
+    (cd "$work/members" && exec tar -xf - --to-command='printf "%s  %s\n" "$(sha256sum | cut -c 1-64)" "$TAR_FILENAME"') \
+        < "$work/archive" > "$work/sums" &
+    hasher=$!
+    tar --format=gnu -b 1 -cf - -C "$bundle" kvs-native-export.manifest data < /dev/null |
+        tee -- "$work/archive" | head -c -1024 || status=1
+    wait "$hasher" || status=1
+    expected=$((${#DB_DIRECTORY_TABLES[@]} * 2 + 1))
+    # Only well-formed records count: a member sha256sum could not read
+    # leaves an empty digest, and its line would pass for a checksum.
+    count=$(awk 'NF == 2 && length($1) == 64 && $1 !~ /[^0-9a-f]/ && substr($0, 65, 2) == "  " &&
+            ($2 == "kvs-native-export.manifest" || $2 ~ /^data\/[A-Za-z0-9_]+[.](sql|txt)$/) { valid++ }
+        END { print (valid == NR ? NR : 0) }' "$work/sums") || count=0
+    if [ "$status" -ne 0 ] || [ "$count" != "$expected" ]; then
+        kvs_error "the native bundle could not be checksummed while it was written ($count of $expected files)"
+        return 1
+    fi
+    mv -- "$work/sums" "$bundle/SHA256SUMS" || return 1
+    tar --format=gnu -b 1 -cf - -C "$bundle" SHA256SUMS < /dev/null
 }
 
 kvs_require_dump_tool() {
