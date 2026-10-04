@@ -3,6 +3,12 @@ set -eu
 
 TARGET_DIR=${PHPMYADMIN_TARGET_DIR:-/usr/share/phpmyadmin}
 COMPLETION_MARKER="${TARGET_DIR}/.kvs-install-complete"
+# The sample server is localhost, which PHP reaches through a Unix socket that
+# the PHP-FPM container does not have. MariaDB is the "mariadb" Compose service.
+SAMPLE_HOST_LINE="\$cfg['Servers'][\$i]['host'] = 'localhost';"
+MARIADB_HOST_LINE="\$cfg['Servers'][\$i]['host'] = 'mariadb';"
+# Rewrites exactly the sample line, with BusyBox sed as well as GNU sed.
+HOST_EDIT="/^[\$]cfg\['Servers']\[[\$]i]\['host'] = 'localhost';\$/s/localhost/mariadb/"
 TEMP_ROOT=${TMPDIR:-/tmp}
 STAGING_DIR=
 DOWNLOAD_FILE=
@@ -28,6 +34,43 @@ is_initialized() {
         metadata_is "$COMPLETION_MARKER" '0:0:600' &&
         metadata_is "${TARGET_DIR}/config.inc.php" '1000:1000:600' &&
         metadata_is "${TARGET_DIR}/tmp" '1000:1000:700'
+}
+
+# Written last, through a temporary file that cleanup removes if the run stops.
+write_completion_marker() {
+    MARKER_TMP=$(mktemp "${TARGET_DIR}/.kvs-install-complete.XXXXXX")
+    printf '%s\n' complete > "$MARKER_TMP"
+    chown 0:0 "$MARKER_TMP"
+    chmod 600 "$MARKER_TMP"
+    mv -f "$MARKER_TMP" "$COMPLETION_MARKER"
+    MARKER_TMP=
+    is_initialized || {
+        echo "ERROR: phpMyAdmin completion metadata is invalid" >&2
+        exit 1
+    }
+}
+
+# Installations made before the host was set keep the sample's localhost line.
+# Rewrite it inside the same file so its inode, owner and mode stay as they
+# are; any other host was chosen on purpose and is left alone.
+repair_database_host() {
+    config="${TARGET_DIR}/config.inc.php"
+
+    grep -Fqx "$SAMPLE_HOST_LINE" "$config" || return 0
+    # The x keeps the final newlines, which command substitution would strip.
+    repaired=$(sed "$HOST_EDIT" "$config" && printf x)
+    # Writing in place empties the file before refilling it, so the marker is
+    # removed first and written back once the new content is verified. A run
+    # that stops halfway then makes the next one install phpMyAdmin again.
+    if ! rm -f -- "$COMPLETION_MARKER" ||
+        ! printf '%s' "${repaired%x}" > "$config" ||
+        grep -Fqx "$SAMPLE_HOST_LINE" "$config" ||
+        ! grep -Fqx "$MARIADB_HOST_LINE" "$config"; then
+        echo "ERROR: Could not point phpMyAdmin at the mariadb service in ${config}" >&2
+        exit 1
+    fi
+    write_completion_marker
+    echo "Switched the sample localhost server entry of config.inc.php to mariadb"
 }
 
 remove_target_entries() {
@@ -96,6 +139,7 @@ trap 'exit 143' 15
 
 if is_initialized; then
     echo "phpMyAdmin is already initialized"
+    repair_database_host
     exit 0
 fi
 
@@ -135,13 +179,18 @@ grep -Fq "\$cfg['blowfish_secret'] = '';" \
     echo "ERROR: phpMyAdmin sample configuration has no secret placeholder" >&2
     exit 1
 }
+grep -Fqx "$SAMPLE_HOST_LINE" "${STAGING_DIR}/config.sample.inc.php" || {
+    echo "ERROR: phpMyAdmin sample configuration has no localhost server entry" >&2
+    exit 1
+}
 
 BLOWFISH=$(head -c 48 /dev/urandom | base64 | tr -d '=+/' | cut -c 1-32)
 [ "${#BLOWFISH}" -eq 32 ] || {
     echo "ERROR: Could not generate the phpMyAdmin application secret" >&2
     exit 1
 }
-sed "s|cfg\['blowfish_secret'\] = '';|cfg['blowfish_secret'] = '${BLOWFISH}';|" \
+sed -e "s|cfg\['blowfish_secret'\] = '';|cfg['blowfish_secret'] = '${BLOWFISH}';|" \
+    -e "$HOST_EDIT" \
     "${STAGING_DIR}/config.sample.inc.php" > "${STAGING_DIR}/config.inc.php"
 if grep -Fq "\$cfg['blowfish_secret'] = '';" "${STAGING_DIR}/config.inc.php" ||
     ! grep -Fq "$BLOWFISH" "${STAGING_DIR}/config.inc.php"; then
@@ -149,6 +198,11 @@ if grep -Fq "\$cfg['blowfish_secret'] = '';" "${STAGING_DIR}/config.inc.php" ||
     exit 1
 fi
 unset BLOWFISH
+if grep -Fqx "$SAMPLE_HOST_LINE" "${STAGING_DIR}/config.inc.php" ||
+    ! grep -Fqx "$MARIADB_HOST_LINE" "${STAGING_DIR}/config.inc.php"; then
+    echo "ERROR: Could not point phpMyAdmin at the mariadb service" >&2
+    exit 1
+fi
 
 if [ -e "$TARGET_DIR" ] && [ ! -d "$TARGET_DIR" ]; then
     echo "ERROR: phpMyAdmin target exists but is not a directory" >&2
@@ -209,16 +263,7 @@ chmod 755 "$TARGET_DIR"
     exit 1
 }
 
-MARKER_TMP=$(mktemp "${TARGET_DIR}/.kvs-install-complete.XXXXXX")
-printf '%s\n' complete > "$MARKER_TMP"
-chown 0:0 "$MARKER_TMP"
-chmod 600 "$MARKER_TMP"
-mv -f "$MARKER_TMP" "$COMPLETION_MARKER"
-MARKER_TMP=
-is_initialized || {
-    echo "ERROR: phpMyAdmin completion metadata is invalid" >&2
-    exit 1
-}
+write_completion_marker
 
 PROMOTION_IN_PROGRESS=false
 rm -rf -- "$BACKUP_DIR"

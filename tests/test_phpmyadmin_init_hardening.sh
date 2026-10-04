@@ -21,7 +21,11 @@ MOCK_BIN="${TEST_DIR}/bin"
 ARCHIVE_DIR="${TEST_DIR}/archives"
 VALID_ARCHIVE="${ARCHIVE_DIR}/phpMyAdmin-valid.tar.gz"
 INCOMPLETE_ARCHIVE="${ARCHIVE_DIR}/phpMyAdmin-incomplete.tar.gz"
+UNEXPECTED_HOST_ARCHIVE="${ARCHIVE_DIR}/phpMyAdmin-unexpected-host.tar.gz"
+SAMPLE_HOST_LINE="\$cfg['Servers'][\$i]['host'] = 'localhost';"
+MARIADB_HOST_LINE="\$cfg['Servers'][\$i]['host'] = 'mariadb';"
 REAL_MV=$(command -v mv)
+REAL_RM=$(command -v rm)
 RUNTIME_VOLUME=
 
 cleanup() {
@@ -83,6 +87,9 @@ case "$url" in
             incomplete)
                 cp "$MOCK_INCOMPLETE_ARCHIVE" "$output"
                 ;;
+            unexpected-host)
+                cp "$MOCK_UNEXPECTED_HOST_ARCHIVE" "$output"
+                ;;
             valid)
                 cp "$MOCK_VALID_ARCHIVE" "$output"
                 ;;
@@ -122,10 +129,23 @@ EOF
 cat > "${valid_root}/config.sample.inc.php" <<'EOF'
 <?php
 $cfg['blowfish_secret'] = '';
-$cfg['Servers'][1]['host'] = 'mariadb';
+$cfg['Servers'][$i]['host'] = 'localhost';
 EOF
 printf '%s\n' 'release asset' > "${valid_root}/libraries/release.txt"
 tar -czf "$VALID_ARCHIVE" -C "${ARCHIVE_DIR}/valid" \
+    phpMyAdmin-9.9.9-all-languages
+
+# A release whose sample no longer has the localhost line must stop the
+# installation rather than keep a host that PHP-FPM cannot reach.
+unexpected_host_root="${ARCHIVE_DIR}/unexpected-host/phpMyAdmin-9.9.9-all-languages"
+mkdir -p "$unexpected_host_root"
+cp "${valid_root}/index.php" "${unexpected_host_root}/index.php"
+cat > "${unexpected_host_root}/config.sample.inc.php" <<'EOF'
+<?php
+$cfg['blowfish_secret'] = '';
+$cfg['Servers'][$i]['host'] = '127.0.0.1';
+EOF
+tar -czf "$UNEXPECTED_HOST_ARCHIVE" -C "${ARCHIVE_DIR}/unexpected-host" \
     phpMyAdmin-9.9.9-all-languages
 
 incomplete_root="${ARCHIVE_DIR}/incomplete/phpMyAdmin-9.9.9-all-languages"
@@ -185,6 +205,7 @@ run_init() {
     MOCK_CURL_MODE="$mode" \
     MOCK_VALID_ARCHIVE="$VALID_ARCHIVE" \
     MOCK_INCOMPLETE_ARCHIVE="$INCOMPLETE_ARCHIVE" \
+    MOCK_UNEXPECTED_HOST_ARCHIVE="$UNEXPECTED_HOST_ARCHIVE" \
     MOCK_CURL_LOG="$curl_log" \
     MOCK_APK_LOG="$apk_log" \
     MOCK_REAL_MV="$REAL_MV" \
@@ -224,6 +245,10 @@ assert_failure_preserves_installation() {
 
 assert_failure_preserves_installation download-failure
 assert_failure_preserves_installation incomplete
+assert_failure_preserves_installation unexpected-host
+grep -Fq 'phpMyAdmin sample configuration has no localhost server entry' \
+    "${TEST_DIR}/unexpected-host/output.log" ||
+    fail "an unexpected sample database host was not reported"
 
 promotion_failure_dir="${TEST_DIR}/promotion-failure"
 promotion_failure_target="${promotion_failure_dir}/target"
@@ -281,6 +306,11 @@ fi
 secret=$(sed -n "s/.*blowfish_secret.*= '\([A-Za-z0-9]\{32\}\)';.*/\1/p" \
     "${success_target}/config.inc.php")
 [ "${#secret}" -eq 32 ] || fail "config.inc.php has no 32-character application secret"
+grep -Fqx "$MARIADB_HOST_LINE" "${success_target}/config.inc.php" ||
+    fail "config.inc.php does not connect to the mariadb service"
+if grep -Fq "'localhost'" "${success_target}/config.inc.php"; then
+    fail "config.inc.php still connects to localhost"
+fi
 assert_no_transients "$success_target" "$success_temp"
 
 first_fingerprint=$(tree_fingerprint "$success_target")
@@ -296,6 +326,151 @@ grep -Fq 'phpMyAdmin is already initialized' "${success_dir}/second.log" ||
 [ ! -s "$success_curl_log" ] || fail "an idempotent rerun attempted a download"
 [ ! -s "$success_apk_log" ] || fail "an idempotent rerun attempted package installation"
 assert_no_transients "$success_target" "$success_temp"
+
+# Volumes initialized before the database host was written keep the sample's
+# localhost line. A rerun fixes that line inside the same file and nothing else.
+seed_initialized_installation() {
+    local target="$1"
+    shift
+
+    seed_complete_installation "$target"
+    printf '%s\n' '<?php' "\$cfg['Servers'][\$i]['auth_type'] = 'cookie';" "$@" \
+        > "${target}/config.inc.php"
+    printf '%s\n' complete > "${target}/.kvs-install-complete"
+    chmod 0600 "${target}/.kvs-install-complete"
+}
+
+repair_dir="${TEST_DIR}/repair"
+repair_target="${repair_dir}/target"
+repair_temp="${repair_dir}/tmp"
+repair_config="${repair_target}/config.inc.php"
+mkdir -p "$repair_target" "$repair_temp"
+# The commented copy has to survive, and the blank last line shows that the
+# rewrite keeps the end of the file as it was.
+seed_initialized_installation "$repair_target" "$SAMPLE_HOST_LINE" \
+    "// ${SAMPLE_HOST_LINE}" ''
+awk -v sample="$SAMPLE_HOST_LINE" -v mariadb="$MARIADB_HOST_LINE" \
+    '$0 == sample { $0 = mariadb } { print }' "$repair_config" \
+    > "${repair_dir}/expected.php"
+repair_inode=$(stat -c '%i' "$repair_config")
+run_init download-failure "$repair_target" "$repair_temp" "${repair_dir}/first.log" \
+    "${repair_dir}/curl.log" "${repair_dir}/apk.log"
+grep -Fq 'phpMyAdmin is already initialized' "${repair_dir}/first.log" ||
+    fail "the database host repair did not start from the initialized installation"
+grep -Fxq 'Switched the sample localhost server entry of config.inc.php to mariadb' \
+    "${repair_dir}/first.log" || fail "the database host repair was not reported"
+cmp -s "${repair_dir}/expected.php" "$repair_config" ||
+    fail "the database host repair changed more than the sample host line"
+[ "$(stat -c '%i:%u:%g:%a' "$repair_config")" = "${repair_inode}:1000:1000:600" ] ||
+    fail "the database host repair replaced config.inc.php or changed its metadata"
+[ "$(stat -c '%u:%g:%a' "${repair_target}/.kvs-install-complete")" = '0:0:600' ] ||
+    fail "the database host repair changed the completion marker"
+
+repaired_fingerprint=$(tree_fingerprint "$repair_target")
+repaired_mtime=$(stat -c '%y' "$repair_config")
+run_init download-failure "$repair_target" "$repair_temp" "${repair_dir}/second.log" \
+    "${repair_dir}/curl.log" "${repair_dir}/apk.log"
+grep -Fq 'phpMyAdmin is already initialized' "${repair_dir}/second.log" ||
+    fail "the repaired installation is no longer initialized"
+[ "$(cat "${repair_dir}/second.log")" = 'phpMyAdmin is already initialized' ] ||
+    fail "a rerun repaired the database host again"
+[ "$(tree_fingerprint "$repair_target")" = "$repaired_fingerprint" ] ||
+    fail "a rerun changed the repaired installation"
+[ "$(stat -c '%y' "$repair_config")" = "$repaired_mtime" ] ||
+    fail "a rerun rewrote the repaired configuration"
+[ ! -s "${repair_dir}/curl.log" ] || fail "the database host repair attempted a download"
+[ ! -s "${repair_dir}/apk.log" ] ||
+    fail "the database host repair attempted package installation"
+assert_no_transients "$repair_target" "$repair_temp"
+
+# Any other host line was set on purpose, and so was a copy of the sample line
+# that someone commented out or reformatted: the rerun leaves the file alone.
+assert_host_left_alone() {
+    local name="$1"
+    shift
+    local case_dir="${TEST_DIR}/${name}"
+    local target="${case_dir}/target"
+    local temp_root="${case_dir}/tmp"
+    local config="${target}/config.inc.php"
+    local fingerprint
+    local mtime
+
+    mkdir -p "$target" "$temp_root"
+    seed_initialized_installation "$target" "$@"
+    fingerprint=$(tree_fingerprint "$target")
+    mtime=$(stat -c '%y' "$config")
+    run_init download-failure "$target" "$temp_root" "${case_dir}/output.log" \
+        "${case_dir}/curl.log" "${case_dir}/apk.log" ||
+        fail "${name} made the initializer fail"
+    [ "$(cat "${case_dir}/output.log")" = 'phpMyAdmin is already initialized' ] ||
+        fail "${name} was not left alone as an initialized installation"
+    [ "$(tree_fingerprint "$target")" = "$fingerprint" ] ||
+        fail "${name} changed the installation"
+    [ "$(stat -c '%y' "$config")" = "$mtime" ] ||
+        fail "${name} rewrote the configuration"
+    assert_no_transients "$target" "$temp_root"
+}
+
+assert_host_left_alone custom-host \
+    "\$cfg['Servers'][\$i]['host'] = 'db.example.internal';"
+assert_host_left_alone near-miss-host "// ${SAMPLE_HOST_LINE}" \
+    "    ${SAMPLE_HOST_LINE}" "${SAMPLE_HOST_LINE/ = /  =  }"
+
+# Writing in place empties config.inc.php before the new content goes in. A
+# write cut short must fail the run and leave no completion marker, so the
+# partial file is never taken for an initialized installation.
+cut_dir="${TEST_DIR}/cut-write"
+cut_target="${cut_dir}/target"
+cut_temp="${cut_dir}/tmp"
+cut_config="${cut_target}/config.inc.php"
+mkdir -p "$cut_target" "$cut_temp"
+seed_initialized_installation "$cut_target" "$SAMPLE_HOST_LINE"
+# The comments bring the file to the size of the real sample, past the limit.
+seq -f '// Sample configuration comment %g' 1 150 >> "$cut_config"
+cut_size=$(stat -c '%s' "$cut_config")
+# bash counts ulimit -f in KiB. With SIGXFSZ ignored, the cut is a write error
+# that the initializer sees rather than a signal that kills it.
+if (trap '' XFSZ; ulimit -f 1; run_init download-failure "$cut_target" "$cut_temp" \
+    "${cut_dir}/output.log" "${cut_dir}/curl.log" "${cut_dir}/apk.log"); then
+    fail "a configuration rewrite cut short was reported as a success"
+fi
+[ "$(stat -c '%s' "$cut_config")" -lt "$cut_size" ] ||
+    fail "the file size limit did not cut the configuration rewrite short"
+grep -Fxq "ERROR: Could not point phpMyAdmin at the mariadb service in ${cut_config}" \
+    "${cut_dir}/output.log" || fail "a configuration rewrite cut short was not reported"
+[ ! -e "${cut_target}/.kvs-install-complete" ] ||
+    fail "a configuration rewrite cut short kept the completion marker"
+assert_no_transients "$cut_target" "$cut_temp"
+
+# The marker goes before config.inc.php is emptied. When it cannot be removed,
+# the run fails and the configuration stays exactly as it was.
+kept_dir="${TEST_DIR}/kept-marker"
+kept_target="${kept_dir}/target"
+kept_temp="${kept_dir}/tmp"
+mkdir -p "$kept_target" "$kept_temp" "${kept_dir}/bin"
+cat > "${kept_dir}/bin/rm" <<'EOF'
+#!/bin/sh
+case "$*" in
+    */.kvs-install-complete)
+        exit 1
+        ;;
+esac
+exec "${MOCK_REAL_RM:?}" "$@"
+EOF
+chmod 0755 "${kept_dir}/bin/rm"
+seed_initialized_installation "$kept_target" "$SAMPLE_HOST_LINE"
+kept_fingerprint=$(tree_fingerprint "$kept_target")
+if MOCK_REAL_RM="$REAL_RM" PATH="${kept_dir}/bin:$PATH" \
+    run_init download-failure "$kept_target" "$kept_temp" "${kept_dir}/output.log" \
+    "${kept_dir}/curl.log" "${kept_dir}/apk.log"; then
+    fail "a repair that could not remove the completion marker succeeded"
+fi
+[ "$(tree_fingerprint "$kept_target")" = "$kept_fingerprint" ] ||
+    fail "config.inc.php was rewritten while its completion marker was in place"
+grep -Fq 'ERROR: Could not point phpMyAdmin at the mariadb service' \
+    "${kept_dir}/output.log" ||
+    fail "a repair that could not remove the completion marker was not reported"
+assert_no_transients "$kept_target" "$kept_temp"
 
 # Exercise the same script with Alpine's BusyBox tools when the project image
 # is already available locally. Image pulls are deliberately forbidden here.
@@ -324,6 +499,36 @@ if docker image inspect alpine:latest >/dev/null 2>&1; then
             [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/tmp)" = 1000:1000:700 ]
             [ -s /usr/share/phpmyadmin/index.php ]
         ' || fail "the Alpine runtime produced unsafe phpMyAdmin metadata"
+    # Put back the localhost line of earlier installations. Its repair runs
+    # before apk, so BusyBox alone has to rewrite it in place.
+    docker run --rm --network none \
+        -e MOCK_CURL_MODE=download-failure \
+        -e MOCK_CURL_LOG=/tmp/curl.log \
+        -e MOCK_APK_LOG=/tmp/apk.log \
+        -e MOCK_REAL_MV=/bin/mv \
+        -e LEGACY_HOST_LINE="$SAMPLE_HOST_LINE" \
+        -e EXPECTED_HOST_LINE="$MARIADB_HOST_LINE" \
+        -e PATH=/mock:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        -v "${RUNTIME_VOLUME}:/usr/share/phpmyadmin" \
+        -v "${INIT_SCRIPT}:/usr/local/bin/init-phpmyadmin:ro" \
+        -v "${MOCK_BIN}:/mock:ro" \
+        alpine:latest sh -ceu '
+            config=/usr/share/phpmyadmin/config.inc.php
+            grep -Fqx "$EXPECTED_HOST_LINE" "$config"
+            printf "%s\n" "<?php" "$LEGACY_HOST_LINE" "// $LEGACY_HOST_LINE" > "$config"
+            metadata=$(stat -c "%i:%u:%g:%a" "$config")
+            [ "${metadata#*:}" = 1000:1000:600 ]
+            init-phpmyadmin > /tmp/repair.log
+            grep -Fqx "Switched the sample localhost server entry of config.inc.php to mariadb" \
+                /tmp/repair.log
+            grep -Fqx "$EXPECTED_HOST_LINE" "$config"
+            grep -Fqx "// $LEGACY_HOST_LINE" "$config"
+            [ "$(stat -c "%i:%u:%g:%a" "$config")" = "$metadata" ]
+            init-phpmyadmin > /tmp/rerun.log
+            [ "$(cat /tmp/rerun.log)" = "phpMyAdmin is already initialized" ]
+            [ ! -e /tmp/curl.log ]
+            [ ! -e /tmp/apk.log ]
+        ' || fail "the Alpine runtime did not write or repair the database host in place"
     docker volume rm -f "$RUNTIME_VOLUME" >/dev/null
     RUNTIME_VOLUME=
 fi
