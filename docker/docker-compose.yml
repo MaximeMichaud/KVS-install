@@ -1,9 +1,20 @@
+# Docker keeps what each container prints (docker compose logs) in json-file
+# logs that grow without end unless capped. Every service, the one-shots
+# included, takes this cap; DOCKER_LOG_MAX_SIZE and DOCKER_LOG_MAX_FILE in
+# .env change it for the containers created afterwards.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+    max-file: "${DOCKER_LOG_MAX_FILE:-3}"
+
 services:
   nginx:
     build:
       context: ./nginx
     container_name: ${SITE_PREFIX:-kvs}-nginx
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
@@ -11,6 +22,11 @@ services:
       - DOMAIN=${DOMAIN}
       - USE_WWW=${USE_WWW:-false}
       - PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT:-443}
+      # Rotation of <domain>.access.log and <domain>.error.log, done by the
+      # container itself (nginx/rotate-site-logs.sh).
+      - NGINX_LOG_MAX_SIZE=${NGINX_LOG_MAX_SIZE:-100M}
+      - NGINX_LOG_KEEP=${NGINX_LOG_KEEP:-20}
+      - NGINX_LOG_CHECK_INTERVAL=${NGINX_LOG_CHECK_INTERVAL:-60}
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ../conf/nginx/templates:/etc/nginx/templates:ro
@@ -41,6 +57,7 @@ services:
         IONCUBE: ${IONCUBE:-YES}
     container_name: ${SITE_PREFIX:-kvs}-php
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - manticore-api:/var/www/manticore-api
@@ -79,6 +96,7 @@ services:
     # mariadbd, which still gets the whole period to shut down.
     init: true
     restart: unless-stopped
+    logging: *default-logging
     ports:
       # Localhost only - safe for kvs-cli access
       - "127.0.0.1:${MARIADB_HOST_PORT:-3306}:3306"
@@ -105,6 +123,7 @@ services:
     container_name: ${SITE_PREFIX:-kvs}-memcached
     hostname: cache
     restart: unless-stopped
+    logging: *default-logging
     command: memcached -m ${CACHE_MEMORY:-256}
     ports:
       # Localhost only - for kvs-cli access
@@ -121,6 +140,7 @@ services:
     container_name: ${SITE_PREFIX:-kvs}-dragonfly
     hostname: cache
     restart: unless-stopped
+    logging: *default-logging
     # Dragonfly needs 256 MB of maxmemory per proactor thread; setup.sh keeps
     # CACHE_MEMORY and CACHE_THREADS consistent with the host.
     command: dragonfly --memcached_port=11211 --maxmemory=${CACHE_MEMORY:-512}mb --proactor_threads=${CACHE_THREADS:-2} --logtostderr
@@ -147,6 +167,7 @@ services:
     # PID 1 and forwards SIGTERM to the entrypoint, then to searchd.
     init: true
     restart: unless-stopped
+    logging: *default-logging
     ports:
       # Localhost only - for kvs-cli access
       - "127.0.0.1:${MANTICORE_MYSQL_HOST_PORT:-9306}:9306"  # MySQL protocol
@@ -177,6 +198,7 @@ services:
     image: neilpang/acme.sh
     container_name: ${SITE_PREFIX:-kvs}-acme
     restart: unless-stopped
+    logging: *default-logging
     profiles:
       - direct-tls
     command: daemon
@@ -199,6 +221,7 @@ services:
     # SIGKILL. Docker's init takes PID 1, passes SIGTERM on and reaps orphans.
     init: true
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - ./geoip:/usr/share/geoip:ro
@@ -213,6 +236,7 @@ services:
     build:
       context: ./init
     container_name: ${SITE_PREFIX:-kvs}-init
+    logging: *default-logging
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - manticore-api:/var/www/manticore-api
@@ -242,6 +266,7 @@ services:
   phpmyadmin-init:
     image: alpine:latest
     container_name: ${SITE_PREFIX:-kvs}-phpmyadmin-init
+    logging: *default-logging
     entrypoint: ["/usr/local/bin/init-phpmyadmin"]
     volumes:
       - phpmyadmin-data:/usr/share/phpmyadmin

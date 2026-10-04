@@ -53,6 +53,23 @@ printf '[Service]\nTimeoutStopSec=11min\n' > /etc/systemd/system/docker.service.
 systemctl daemon-reload
 ```
 
+#### Logs
+
+Each container, the one-shot `kvs-init` and `phpmyadmin-init` included, keeps what it prints (`docker compose logs <service>`) in at most `DOCKER_LOG_MAX_FILE` json-file logs of `DOCKER_LOG_MAX_SIZE` each, 3 files of `10m` by default. These containers use json-file even where `/etc/docker/daemon.json` sets another `log-driver`, such as `journald` or a driver that ships the logs to a collector: to keep it, give each service its own `logging` in `docker-compose.override.yml`, which then replaces the cap.
+
+Nginx writes the requests and errors of the site to `<domain>.access.log` and `<domain>.error.log` in `/var/log/nginx` and rotates them itself, in single-site and multi-site, without the host's `logrotate`: a log that reaches `NGINX_LOG_MAX_SIZE` (default `100M`, a `k`, `M` or `G` suffix counting in powers of 1024, checked every `NGINX_LOG_CHECK_INTERVAL` seconds, default `60`) is renamed and Nginx reopens its logs, so no line is lost. The renamed log is gzip-compressed once Nginx no longer writes to it, and the `NGINX_LOG_KEEP` newest generations are kept (default `20`, `<domain>.access.log.1.gz` being the newest). The history kept follows the size of the logs, not their age: a busy site keeps more of it with a larger `NGINX_LOG_KEEP`, and each compressed generation takes a fraction of `NGINX_LOG_MAX_SIZE`. `NGINX_LOG_MAX_SIZE=0` turns the rotation off.
+
+Set these variables in `docker/.env`, or in the `.env` of an additional multi-site site; the multi-site Caddy proxy keeps the defaults. Docker applies logging options when it creates a container, so an existing installation rebuilds the Nginx image, which carries the rotation, and recreates its containers from its `docker` directory:
+
+```bash
+docker compose build nginx
+docker compose up -d
+```
+
+In multi-site, the Caddy proxy belongs to a Compose project of its own, which these commands leave as it is: `./multi-site/site-manager.sh caddy-start`, run from the same directory, recreates it with the cap. An additional site runs the `docker-compose.yml` copied from `multi-site/docker-compose.site.yml.template` when it was added: copy the template over it again, carrying over any local change, then run the same commands in `multi-site/sites/<domain>`. Its site logs then live in a volume, as those of the main site do; the ones it wrote before stay in the replaced container and go with it.
+
+Troubleshooting: the requests of the site are in `<domain>.access.log` (`docker compose exec nginx tail -F /var/log/nginx/example.com.access.log`, which keeps following the log across a rotation), not in `access.log`, which is the container output shown by `docker compose logs nginx`.
+
 ### Standalone Installation
 
 For traditional bare-metal installation on Debian systems.

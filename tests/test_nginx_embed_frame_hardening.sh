@@ -71,6 +71,7 @@ run_rendered_template_case() {
         -e "s|/etc/nginx|${case_dir}/etc/nginx|g" \
         -e 's|exec /docker-entrypoint.sh "$@"|exec "$@"|' \
         -e '/^[[:space:]]*monitor_certificate_changes &$/c\    : # Not needed here.' \
+        -e '\|^/usr/local/bin/rotate-site-logs &$|c\: # Not needed here.' \
         "$ENTRYPOINT" > "${case_dir}/docker-entrypoint.sh"
 
     DOMAIN="$domain" USE_WWW=false SSL_PROVIDER=selfsigned \

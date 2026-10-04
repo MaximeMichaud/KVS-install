@@ -277,6 +277,7 @@ run_certificate_case() {
         -e "s|/etc/nginx|${case_dir}/etc/nginx|g" \
         -e 's|exec /docker-entrypoint.sh "$@"|exec "$@"|' \
         -e '/^[[:space:]]*monitor_certificate_changes &$/c\    : # Tested separately below.' \
+        -e '\|^/usr/local/bin/rotate-site-logs &$|c\: # Tested in test_log_rotation.sh.' \
         "$ENTRYPOINT" > "${case_dir}/docker-entrypoint.sh"
 
     case "$initial_state" in
@@ -367,6 +368,7 @@ run_public_port_case() {
         -e "s|/etc/nginx|${case_dir}/etc/nginx|g" \
         -e 's|exec /docker-entrypoint.sh "$@"|exec "$@"|' \
         -e '/^[[:space:]]*monitor_certificate_changes &$/c\    : # Tested separately below.' \
+        -e '\|^/usr/local/bin/rotate-site-logs &$|c\: # Tested in test_log_rotation.sh.' \
         "$ENTRYPOINT" > "${case_dir}/docker-entrypoint.sh"
 
     before_cert=$(sha256sum "${ssl_dir}/cert.pem")

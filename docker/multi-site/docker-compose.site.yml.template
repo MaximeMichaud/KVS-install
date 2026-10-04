@@ -7,6 +7,18 @@
 #
 # =============================================================================
 
+# =============================================================================
+# Logging - Docker keeps what each container prints in json-file logs that
+# grow without end unless capped. Every service, the one-shots included,
+# takes this cap; DOCKER_LOG_MAX_SIZE and DOCKER_LOG_MAX_FILE in the site's
+# .env change it for the containers created afterwards.
+# =============================================================================
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+    max-file: "${DOCKER_LOG_MAX_FILE:-3}"
+
 services:
   # ===========================================================================
   # Nginx - Web Server
@@ -18,6 +30,7 @@ services:
         - DOMAIN=${DOMAIN}
     container_name: ${SITE_PREFIX}-nginx
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - ../../../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ../../nginx/kvs-caddy.conf.template:/etc/nginx/templates/kvs.conf.template:ro
@@ -26,11 +39,18 @@ services:
       - manticore-api:/var/www/manticore-api
       - phpmyadmin-data:/usr/share/phpmyadmin:ro
       - nginx-includes:/etc/nginx/includes:ro
+      # The site logs and their generations outlive a recreated container.
+      - nginx-logs:/var/log/nginx
     environment:
       - DOMAIN=${DOMAIN}
       - USE_WWW=${USE_WWW:-false}
       - SSL_PROVIDER=none
       - PROJECT_HTTPS_PORT=443
+      # Rotation of <domain>.access.log and <domain>.error.log, done by the
+      # container itself (nginx/rotate-site-logs.sh).
+      - NGINX_LOG_MAX_SIZE=${NGINX_LOG_MAX_SIZE:-100M}
+      - NGINX_LOG_KEEP=${NGINX_LOG_KEEP:-20}
+      - NGINX_LOG_CHECK_INTERVAL=${NGINX_LOG_CHECK_INTERVAL:-60}
     depends_on:
       php-fpm:
         condition: service_started
@@ -57,6 +77,7 @@ services:
         IONCUBE: ${IONCUBE:-YES}
     container_name: ${SITE_PREFIX}-php
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - manticore-api:/var/www/manticore-api
@@ -97,6 +118,7 @@ services:
     # gets the whole period to shut down.
     init: true
     restart: unless-stopped
+    logging: *default-logging
     environment:
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?error}
       MARIADB_DATABASE: ${DOMAIN}
@@ -122,6 +144,7 @@ services:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
     container_name: ${SITE_PREFIX}-cache
     restart: unless-stopped
+    logging: *default-logging
     ulimits:
       memlock: -1
     command: ["--memcached_port=11211", "--maxmemory", "${CACHE_MEMORY:-512}mb", "--proactor_threads", "2"]
@@ -139,6 +162,7 @@ services:
     image: memcached:alpine
     container_name: ${SITE_PREFIX}-memcached
     restart: unless-stopped
+    logging: *default-logging
     command: ["-m", "${CACHE_MEMORY:-512}"]
     networks:
       site-internal:
@@ -161,6 +185,7 @@ services:
     # SIGKILL. Docker's init takes PID 1, passes SIGTERM on and reaps orphans.
     init: true
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
     depends_on:
@@ -175,6 +200,7 @@ services:
     build:
       context: ../../../init
     container_name: ${SITE_PREFIX}-init
+    logging: *default-logging
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - manticore-api:/var/www/manticore-api
@@ -205,6 +231,7 @@ services:
   phpmyadmin-init:
     image: alpine:latest
     container_name: ${SITE_PREFIX}-phpmyadmin-init
+    logging: *default-logging
     entrypoint: ["/usr/local/bin/init-phpmyadmin"]
     volumes:
       - phpmyadmin-data:/usr/share/phpmyadmin
@@ -229,3 +256,4 @@ volumes:
   mariadb-data:
   phpmyadmin-data:
   nginx-includes:
+  nginx-logs:

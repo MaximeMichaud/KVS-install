@@ -17,11 +17,20 @@
 #
 # =============================================================================
 
+# Docker keeps what Caddy prints in json-file logs, capped like those of the
+# sites.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+    max-file: "${DOCKER_LOG_MAX_FILE:-3}"
+
 services:
   caddy:
     image: caddy:2-alpine
     container_name: kvs-caddy
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"

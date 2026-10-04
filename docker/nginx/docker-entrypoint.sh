@@ -213,5 +213,8 @@ if [ "$SSL_PROVIDER" != "none" ]; then
     monitor_certificate_changes &
 fi
 
+# Rotate the site logs so that they cannot fill the disk (rotate-site-logs.sh).
+/usr/local/bin/rotate-site-logs &
+
 # Execute the original nginx entrypoint
 exec /docker-entrypoint.sh "$@"

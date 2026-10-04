@@ -42,6 +42,7 @@ render() {
     sed -e "s|/etc/nginx|$root/etc/nginx|g" \
         -e 's|exec /docker-entrypoint.sh "$@"|exec "$@"|' \
         -e '/^[[:space:]]*monitor_certificate_changes &$/c\    : # No background worker in the rendering fixture.' \
+        -e '\|^/usr/local/bin/rotate-site-logs &$|c\: # No background worker in the rendering fixture.' \
         "$ROOT_DIR/docker/nginx/docker-entrypoint.sh" > "$root/entrypoint.sh"
     DOMAIN="$domain" USE_WWW="$www" SSL_PROVIDER="$provider" \
         sh "$root/entrypoint.sh" true > "$root/render.log"
