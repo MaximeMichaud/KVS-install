@@ -3201,3 +3201,127 @@ import_watch_file_size() {
     done
     printf '\033[K'
 }
+
+# The kernel after the last pass of a large site. An inode in the inode
+# cache is attached to the writeback of the memory cgroup that dirties it
+# first (a file it creates or writes, a mode or an owner it changes, a
+# directory whose access time a walk refreshes). When that cgroup is
+# removed, as a one-shot container's is when it ends, kernel workers of
+# the inode_switch_wbs workqueue move each of its inodes still in the
+# cache to a cgroup that lives on, before the removed one can be freed.
+# Right after the last pass of a site of millions of files, that move
+# once held a server's CPUs in the kernel, with the memory reclaim
+# spinning on the locks of the writeback lists: MariaDB and SSH barely
+# ran, and a clean reboot ended it. Before 7.2.9, each batch of the move
+# scanned again the inodes still waiting, so its time grew with the
+# square of their number; setup.sh warns on such a kernel
+# (preflight_kernel_writeback_status). The functions below read what the
+# kernel shows of it, nothing more, under IMPORT_PROC_ROOT (/proc) and
+# IMPORT_CGROUP_ROOT (/sys/fs/cgroup).
+
+# import_writeback_dying: how many removed cgroups the kernel has not freed
+# yet, from cgroup.stat at the root of cgroup v2: those whose memory
+# controller is still there when the kernel counts them per controller
+# (nr_dying_subsys_memory), all of them otherwise (nr_dying_descendants).
+# A removed cgroup waits there while memory is charged to it or inodes are
+# attached to its writeback. Nothing, and status 1, without cgroup v2.
+import_writeback_dying() {
+    awk '
+        $1 == "nr_dying_subsys_memory" && $2 ~ /^[0-9]+$/ { memory = $2 }
+        $1 == "nr_dying_descendants" && $2 ~ /^[0-9]+$/ { all = $2 }
+        END { if (memory != "") print memory; else if (all != "") print all; else exit 1 }
+    ' "${IMPORT_CGROUP_ROOT:-/sys/fs/cgroup}/cgroup.stat" 2>/dev/null
+}
+
+# import_writeback_switching: how many kernel workers run a work item of
+# the inode_switch_wbs workqueue at this moment. /proc/<pid>/comm of a
+# kworker ends in +<workqueue> while it runs a work item of that queue,
+# and in -<workqueue> once it is done with it. The paths reach cat in
+# batches: tens of thousands of processes exceed what one exec takes
+# (ARG_MAX), and that cat would fail and leave a count of 0.
+import_writeback_switching() {
+    printf '%s\0' "${IMPORT_PROC_ROOT:-/proc}"/[0-9]*/comm |
+        xargs -0 -r cat 2>/dev/null |
+        awk '/^kworker\/.*[+]inode_switch_wbs$/ { n++ } END { print n + 0 }'
+}
+
+# import_cpu_ticks: "<kernel> <all>", the clock ticks of all the CPUs
+# since boot spent in the kernel (system, irq and softirq) and in all, from
+# the first line of /proc/stat; the time of guests is part of user time
+# there already. Nothing, and status 1, when it cannot be read.
+import_cpu_ticks() {
+    awk '
+        $1 == "cpu" && NF >= 9 { printf "%.0f %.0f\n", $4 + $7 + $8, $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9; found = 1; exit }
+        END { exit !found }
+    ' "${IMPORT_PROC_ROOT:-/proc}/stat" 2>/dev/null
+}
+
+# import_writeback_check <removed cgroups before> [seconds] [docker directory]
+# Looks at the kernel once a second for <seconds> (5): whether a worker
+# moves inodes between cgroups, how much of the CPU time went to the
+# kernel, and how many removed cgroups wait to be freed, against <removed
+# cgroups before> (import_writeback_dying when the KVS init started, the
+# step that walks every file in a container removed when it ends; empty
+# when unknown). Prints one line and returns 0 when the kernel is quiet.
+# When a worker moved inodes in at least half of the looks, or the kernel
+# took at least half of the CPU time, prints what it saw and what to do,
+# with the commands to run from the docker directory of the installation
+# (the current directory by default), and returns 1. One look in two, not
+# one, since a cgroup of a few thousand inodes is moved in a moment; what
+# holds a server is a move that lasts.
+import_writeback_check() {
+    local before="$1" seconds="${2:-5}" directory
+    local looks=0 busy=0 kernel="" load="" cpus="" dying="" waiting="" seen
+    local start_kernel="" start_all="" end_kernel="" end_all=""
+
+    directory=$(printf '%q' "${3:-$PWD}")
+    [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || seconds=5
+    read -r start_kernel start_all < <(import_cpu_ticks) || true
+    while [ "$looks" -lt "$seconds" ]; do
+        sleep 1
+        looks=$((looks + 1))
+        [ "$(import_writeback_switching)" -eq 0 ] || busy=$((busy + 1))
+    done
+    read -r end_kernel end_all < <(import_cpu_ticks) || true
+    if [[ "$start_kernel $start_all $end_kernel $end_all" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]] &&
+        [ "$end_all" -gt "$start_all" ]; then
+        kernel=$(((end_kernel - start_kernel) * 100 / (end_all - start_all)))
+    fi
+    load=$(cut -d ' ' -f 1 "${IMPORT_PROC_ROOT:-/proc}/loadavg" 2>/dev/null) || load=""
+    cpus=$(nproc 2>/dev/null) || cpus=""
+    dying=$(import_writeback_dying) || dying=""
+    if [ -n "$dying" ]; then
+        waiting="$dying removed cgroups wait to be freed"
+        [[ ! "$before" =~ ^[0-9]+$ ]] || waiting="$waiting ($before when the KVS init started)"
+    fi
+
+    seen="inodes moving between cgroups (inode_switch_wbs) in $busy of $looks looks"
+    seen="$seen${kernel:+, $kernel% of the CPU time in the kernel}"
+    if [ $((busy * 2)) -lt "$looks" ] && { [ -z "$kernel" ] || [ "$kernel" -lt 50 ]; }; then
+        echo "  Kernel after the import: $seen${waiting:+, $waiting}."
+        return 0
+    fi
+    seen="$seen${load:+, load $load${cpus:+ on $cpus CPUs}}${waiting:+, $waiting}"
+    cat << EOF
+WARNING: the kernel is still busy after the import: $seen.
+  The kernel moves the cached inodes of a removed cgroup (a container that
+  ended, a closed session) to a cgroup that lives on. After a pass over
+  millions of files this can hold the CPUs for a long time, and MariaDB,
+  PHP-FPM and SSH get little of them. Start nothing heavy meanwhile (no
+  other pass, no reindex) and watch it:
+    cd $directory && ./reconfigure.sh --writeback-status
+  Never write 2 or 3 to /proc/sys/vm/drop_caches meanwhile: freeing
+  inodes waits on the locks of the move. 1 frees the page cache only,
+  which eases the CPUs without ending the move; the reboot below ends it.
+  If the server stays saturated, stop the stack and reboot, in this order:
+    cd $directory
+    docker compose stop cron manticore nginx php-fpm
+    docker compose stop -t 600 mariadb
+    systemctl reboot
+  Once the server is back, start the containers stopped by hand, which
+  their restart policy (unless-stopped) leaves stopped at boot:
+    cd $directory && docker compose start
+  README.md, "After the last pass of a large site", has the details.
+EOF
+    return 1
+}

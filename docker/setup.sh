@@ -1077,7 +1077,7 @@ import_check_leftover_dump() {
 # The questionnaire: which source, then what it holds. Headless runs come
 # here with the source already chosen through the environment.
 select_import_source() {
-    local answer
+    local answer chosen=no
 
     if [ -z "$IMPORT_SOURCE" ] && [ "${HEADLESS:-}" != "y" ]; then
         echo ""
@@ -1132,6 +1132,7 @@ select_import_source() {
                 ;;
         esac
         IMPORT_MODE=true
+        chosen=yes
     fi
     [ "$IMPORT_MODE" = true ] || return 0
     import_check_completed
@@ -1142,6 +1143,11 @@ select_import_source() {
     fi
     echo ""
     echo -e "${CYAN}Import of an existing KVS site (experimental)${NC}"
+    # The preflight came before this choice and gave the kernel a plain
+    # line: the import gets its warning now.
+    if [ "$chosen" = yes ]; then
+        preflight_kernel_writeback_warning "$(uname -r 2>/dev/null)"
+    fi
     case "$IMPORT_SOURCE" in
         archive) import_inspect_archive ;;
         directory) import_inspect_directory ;;
@@ -2255,6 +2261,83 @@ preflight_free_disk_gb() {
     echo "${min_gb:-0} ${min_path:-/}"
 }
 
+# preflight_kernel_writeback_status <kernel release, as uname -r prints it>
+# Prints whether the kernel has the two writeback fixes of 7.2.9 (upstream
+# f6988c90671e and 407a5d205179) for the move of the cached inodes of a
+# removed cgroup, which can hold the CPUs for a long time after the last
+# pass of a large import (lib/import.sh): fixed, vulnerable, unaffected
+# before 5.14, which has no such move, or unknown. They came with 7.3-rc5,
+# 7.2.9, 6.18.55, 6.12.112 and 6.6.158; nothing is known of the other
+# series, nor of a release numbered by its distribution, X.Y.0 followed by
+# a build number (Ubuntu, Debian 12), whose sublevel says nothing of the
+# stable updates and backports it carries: RHEL 8 has the move in what it
+# numbers 4.18.0. A 7.3 release candidate can show its number anywhere in
+# the suffix (7.3.0-rc4, 7.3.0-0.rc4.38.fc44, 7.3.0-070300rc4-generic).
+preflight_kernel_writeback_status() {
+    local release="$1" major minor sublevel rest fixed_sublevel distribution_numbered=no
+
+    if [[ ! "$release" =~ ^([0-9]+)\.([0-9]+)(\.([0-9]+))?(.*)$ ]]; then
+        echo unknown
+        return 0
+    fi
+    major=$((10#${BASH_REMATCH[1]}))
+    minor=$((10#${BASH_REMATCH[2]}))
+    sublevel=$((10#${BASH_REMATCH[4]:-0}))
+    rest=${BASH_REMATCH[5]}
+    if (( sublevel == 0 )) && [[ "$rest" =~ ^-[0-9] ]]; then
+        distribution_numbered=yes
+    fi
+    if (( major < 5 || (major == 5 && minor < 14) )); then
+        if [ "$distribution_numbered" = yes ]; then
+            echo unknown
+        else
+            echo unaffected
+        fi
+        return 0
+    fi
+    if (( major > 7 || (major == 7 && minor > 3) )); then
+        echo fixed
+        return 0
+    fi
+    if (( major == 7 && minor == 3 )); then
+        if (( sublevel == 0 )) && [[ "$rest" =~ (^|[^[:alpha:]])rc([0-9]+) ]] && (( 10#${BASH_REMATCH[2]} < 5 )); then
+            echo vulnerable
+        else
+            echo fixed
+        fi
+        return 0
+    fi
+    case "$major.$minor" in
+        7.2) fixed_sublevel=9 ;;
+        6.18) fixed_sublevel=55 ;;
+        6.12) fixed_sublevel=112 ;;
+        6.6) fixed_sublevel=158 ;;
+        *)
+            echo unknown
+            return 0
+            ;;
+    esac
+    if [ "$distribution_numbered" = yes ]; then
+        echo unknown
+    elif (( sublevel >= fixed_sublevel )); then
+        echo fixed
+    else
+        echo vulnerable
+    fi
+}
+
+# preflight_kernel_writeback_warning <kernel release>: the warning an
+# import gets on a kernel without the writeback fixes of 7.2.9, nothing on
+# any other. Like the RAM item it asks nothing, so a headless run goes on.
+preflight_kernel_writeback_warning() {
+    local release="$1"
+
+    [ "$(preflight_kernel_writeback_status "$release")" = vulnerable ] || return 0
+    echo -e "${YELLOW}⚠${NC} Kernel: ${release} lacks two writeback fixes of 7.2.9 (also in 6.18.55, 6.12.112 and 6.6.158)"
+    echo "  Without them it can hold the CPUs for a long time after the last pass of an import of"
+    echo "  millions of files: upgrade it first, see \"After the last pass of a large site\" in README.md"
+}
+
 # Pre-flight checks before installation
 preflight_checks() {
     echo ""
@@ -2321,7 +2404,30 @@ preflight_checks() {
         echo -e "${YELLOW}⚠${NC} RAM: ${total_ram_mb} MB total (recommended 2 GB minimum)"
     fi
 
-    # 5. Internet connectivity (can be bypassed)
+    # 5. Kernel writeback fixes (informational only, like the RAM: no
+    # question, so a headless run goes on). They matter after the last pass
+    # of an import, so only an import gets the warning: here when the
+    # environment chose it, in select_import_source when the questionnaire
+    # does; any other run gets a plain line.
+    local kernel_release
+    kernel_release=$(uname -r 2>/dev/null) || kernel_release=""
+    case "$(preflight_kernel_writeback_status "$kernel_release")" in
+        vulnerable)
+            if [ "${IMPORT_MODE:-false}" = true ]; then
+                preflight_kernel_writeback_warning "$kernel_release"
+            else
+                echo "  Kernel: ${kernel_release} (lacks the writeback fixes of 7.2.9, which matter after an import of millions of files)"
+            fi
+            ;;
+        fixed|unaffected)
+            echo -e "${GREEN}✓${NC} Kernel: ${kernel_release}"
+            ;;
+        *)
+            echo "  Kernel: ${kernel_release:-unknown} (whether it has the writeback fixes of 7.2.9 is not known)"
+            ;;
+    esac
+
+    # 6. Internet connectivity (can be bypassed)
     echo -n "  Checking internet connectivity... "
     if check_internet; then
         echo -e "${GREEN}✓${NC} Connected"
@@ -2331,7 +2437,7 @@ preflight_checks() {
         warnings=$((warnings + 1))
     fi
 
-    # 6. Required commands
+    # 7. Required commands
     local required_cmds=("curl" "unzip" "sed" "awk" "grep" "ss")
     local missing_cmds=()
     for cmd in "${required_cmds[@]}"; do
@@ -4605,6 +4711,14 @@ import_finish() {
     echo -e "  ${GREEN}✓${NC} Import complete: $(grep -c -v '^#' "$report") tables, row counts in $report"
 }
 
+# The removed cgroups the kernel has not freed yet, before the init walks
+# every file of an imported site in a container removed when it ends: the
+# check at the end of the setup compares with it (lib/import.sh).
+IMPORT_WRITEBACK_DYING=""
+if [ "$IMPORT_MODE" = true ] && declare -F import_writeback_dying >/dev/null; then
+    IMPORT_WRITEBACK_DYING=$(import_writeback_dying) || IMPORT_WRITEBACK_DYING=""
+fi
+
 progress_bar "Initializing KVS"
 run_step "Initializing KVS" \
     docker compose --profile setup run --rm --no-deps "${SETUP_RUN_FLAGS[@]}" kvs-init
@@ -4941,6 +5055,21 @@ else
     echo "  KVS support access left as configured in KVS (enabled by default). Set DISABLE_KVS_SUPPORT_ACCESS=true to turn it off."
 fi
 unset PUBLIC_PROJECT_URL
+
+# The kernel can keep moving the inodes of removed cgroups long after the
+# last pass of a site of millions of files (lib/import.sh): say so while
+# the operator is still there, after everything else, so it stays on
+# screen. The site already runs: the look delays nothing.
+if [ "$IMPORT_MODE" = true ] && declare -F import_writeback_check >/dev/null; then
+    echo ""
+    echo "Looking at the kernel after the import (5 s)..."
+    if IMPORT_WRITEBACK_REPORT=$(import_writeback_check "$IMPORT_WRITEBACK_DYING" 5 "$PWD"); then
+        printf '%s\n' "$IMPORT_WRITEBACK_REPORT"
+    else
+        printf '%b%s%b\n' "$YELLOW" "$IMPORT_WRITEBACK_REPORT" "$NC"
+    fi
+    printf '%s\n' "$IMPORT_WRITEBACK_REPORT" >> "$DEBUG_LOG" 2>/dev/null || true
+fi
 
 # Mark end of installation in logs
 {

@@ -23,6 +23,11 @@ while [[ $# -gt 0 ]]; do
             RUNTIME_ACTION=import-status
             shift
             ;;
+        --writeback-status)
+            [ -z "$RUNTIME_ACTION" ] || { echo "ERROR: choose one operation" >&2; exit 1; }
+            RUNTIME_ACTION=writeback-status
+            shift
+            ;;
         --watch)
             IMPORT_WATCH=yes
             shift
@@ -54,6 +59,12 @@ OPTIONS:
                 Inspect MariaDB startup/import activity without changing it.
                 --watch refreshes until TCP is ready, without a deadline
                 unless MARIADB_WAIT_SECONDS is set to a positive value.
+    --writeback-status
+                Look at the kernel for 5 seconds, without changing
+                anything: whether it still moves the cached inodes of
+                removed cgroups, as after the last pass of a site of
+                millions of files, and what to do when it does. Exits 1
+                when the kernel is busy with it.
 
 REQUIREMENTS:
     Run it from the docker directory of the installation. The .env file
@@ -310,6 +321,11 @@ if [ -n "$RUNTIME_ACTION" ]; then
             once=yes
             [ "$IMPORT_WATCH" != yes ] || once=no
             database_wait_ready "${MARIADB_WAIT_SECONDS:-0}" "$once"
+            ;;
+        writeback-status)
+            # shellcheck source=/dev/null
+            source "$(dirname "${BASH_SOURCE[0]}")/lib/import.sh"
+            import_writeback_check "" 5 "$PWD"
             ;;
         manticore)
             # shellcheck source=/dev/null

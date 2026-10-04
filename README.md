@@ -244,6 +244,30 @@ The debug switches of the old server's `setup.php` are turned off on import: `en
 
 Not covered: a domain the KVS license does not accept (it needs a new archive from KVS), custom web server rules from the old vhost, and the standalone installer.
 
+#### After the last pass of a large site
+
+Watch the new server for a while after the last pass of a site of millions of files. Right after one, a server stalled: a load far above its number of CPUs, most of the CPU time in the kernel (`sy` in `top` or `vmstat 5`), and MariaDB and SSH barely running. The kernel was moving the cached inodes attached to a removed cgroup (a container that ended, a session that closed) to a cgroup that lives on, while the memory reclaim spun on the locks of the same writeback lists. Its signs are kernel workers named `kworker/...+inode_switch_wbs` (`ps -eo pid,pcpu,args | grep '[+]inode_switch_wbs'`) and removed cgroups that stay counted in `/sys/fs/cgroup/cgroup.stat` (`nr_dying_subsys_memory`, `nr_dying_descendants` on older kernels). The setup looks for them for five seconds once the site runs and says what to do; `./reconfigure.sh --writeback-status`, from the `docker` directory, looks again at any time and changes nothing. After closing the session that ran the passes (SSH, tmux, screen), look again from a new one: that session is a cgroup too, and the inodes its transfers wrote can be attached to it. Start no other pass and no reindex meanwhile.
+
+Linux 7.2.9 fixes two defects of that move, upstream commits f6988c90671e and 407a5d205179, which 7.3-rc5, 6.18.55, 6.12.112 and 6.6.158 carry too: each batch of the move scanned again the inodes still waiting, so once the move fell behind its time grew with the square of their number, and on a kernel with full or lazy preemption its loop never let a Tasks-RCU grace period end, which made a BPF or ftrace detach wait for the whole move. The move and its locks remain on a fixed kernel, so watch the server there too. Before an import, the setup warns when the running kernel belongs to one of those series and lacks them (other runs get a plain line): upgrade it before the last pass. Other series, and kernels numbered by their distribution (Ubuntu, Debian 12, RHEL 8, whose 4.18 has the move), are not known either way.
+
+Never write 2 or 3 to `/proc/sys/vm/drop_caches` during the move: freeing inodes takes the locks the move holds, so it only adds to the contention. Writing 1 frees the page cache alone, which leaves more memory and fewer tasks reclaiming and eases the CPUs, but the move goes on: the reboot is what ends it.
+
+When the server stays saturated, stop the stack and reboot: a clean reboot ended that stall. Stop the web, search and background services first, with the default timeout of ten seconds (none of them needs longer), then MariaDB with up to ten minutes to flush its changed pages and shut down cleanly (`-t 600` also holds for a container created before its stop grace period, which Docker would kill after ten seconds, leaving a crash recovery to the next start):
+
+```bash
+cd /opt/kvs/docker
+docker compose stop cron manticore nginx php-fpm
+docker compose stop -t 600 mariadb
+systemctl reboot
+```
+
+Once the server is back, start the containers stopped by hand: their restart policy (`unless-stopped`) leaves them stopped at boot, while the others started on their own.
+
+```bash
+cd /opt/kvs/docker
+docker compose start
+```
+
 ## Compatibility
 
 The latest versions are more stable and we recommend using Debian 13 for the best support.
