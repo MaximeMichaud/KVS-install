@@ -67,6 +67,17 @@ services:
       # 16M, the default, stopped the import with "Server has gone away".
       - "--max-allowed-packet=1G"
     container_name: ${SITE_PREFIX:-kvs}-mariadb
+    # docker stop sends SIGTERM and, by default, SIGKILL 10 s later, which
+    # can cut MariaDB short while it flushes its changed pages and leave a
+    # crash recovery to the next start. A duration with its unit (600s,
+    # 15m); a host shutdown may allow less, see the README.
+    stop_grace_period: ${MARIADB_STOP_GRACE_PERIOD:-10m}
+    # While it loads the dump of an import on the first start, the image's
+    # entrypoint is a bash PID 1 with no SIGTERM handler, so docker stop
+    # waited out the whole grace period before killing the load. Docker's
+    # init takes PID 1 and forwards SIGTERM to the entrypoint, then to
+    # mariadbd, which still gets the whole period to shut down.
+    init: true
     restart: unless-stopped
     ports:
       # Localhost only - safe for kvs-cli access
@@ -130,6 +141,11 @@ services:
       context: ./manticore
     container_name: ${SITE_PREFIX:-kvs}-manticore
     hostname: searchd
+    # Until it hands over to searchd, the KVS entrypoint is a bash PID 1
+    # with no SIGTERM handler while it waits for MariaDB and rebuilds every
+    # index, so docker stop waited out its whole timeout. Docker's init takes
+    # PID 1 and forwards SIGTERM to the entrypoint, then to searchd.
+    init: true
     restart: unless-stopped
     ports:
       # Localhost only - for kvs-cli access
@@ -178,6 +194,10 @@ services:
         PHP_VERSION: ${PHP_VERSION:-8.1}
         IONCUBE: ${IONCUBE:-YES}
     container_name: ${SITE_PREFIX:-kvs}-cron
+    # cron -f installs no SIGTERM handler, and the kernel drops such a signal
+    # sent to PID 1, so docker stop waited out its whole timeout before
+    # SIGKILL. Docker's init takes PID 1, passes SIGTERM on and reaps orphans.
+    init: true
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs

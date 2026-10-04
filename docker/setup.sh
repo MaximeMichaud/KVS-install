@@ -524,6 +524,16 @@ validate_domain() {
     return 0
 }
 
+# MARIADB_STOP_GRACE_PERIOD, when set, as Compose reads stop_grace_period:
+# a duration with its unit. Compose rejects anything else for the whole
+# project, so every docker compose command of the setup would fail.
+check_mariadb_stop_grace_period() {
+    [ -n "${MARIADB_STOP_GRACE_PERIOD:-}" ] || return 0
+    [[ "$MARIADB_STOP_GRACE_PERIOD" =~ ^([0-9]+(ms|s|m|h))+$ ]] && return 0
+    echo "ERROR: MARIADB_STOP_GRACE_PERIOD must be a duration with its unit, such as 600s or 15m, got '$MARIADB_STOP_GRACE_PERIOD'" >&2
+    return 1
+}
+
 include_www_for_domain() {
     local dot_count
 
@@ -748,6 +758,7 @@ setup_resume_import() {
         echo "ERROR: saved COMPOSE_PROJECT_NAME is missing or invalid." >&2
         return 1
     fi
+    check_mariadb_stop_grace_period || return 1
     MODE=${MODE:-single}
     SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
     USE_WWW=${USE_WWW:-false}
@@ -2502,6 +2513,7 @@ chmod 600 .env
 
 # Load environment
 source .env
+check_mariadb_stop_grace_period || exit 1
 
 # Domain validation
 
@@ -3715,7 +3727,9 @@ select_manticore
 delete_database_volume() {
     local volume_name="$1"
 
-    if ! docker compose down; then
+    # The volume goes right after: a clean shutdown of MariaDB is worth
+    # nothing here, so it gets Docker's usual 10 s, not its grace period.
+    if ! docker compose down --timeout 10; then
         echo -e "${RED}ERROR: Could not stop this Compose project${NC}"
         return 1
     fi

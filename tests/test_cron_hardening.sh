@@ -130,6 +130,29 @@ if grep -Eq '(^|&&|;)[[:space:]]*crontab[[:space:]]+/etc/cron\.d/' "$CRON_DOCKER
     fail "/etc/cron.d file is incorrectly installed as a user crontab"
 fi
 
+# cron -f handles no SIGTERM, nor does the Manticore entrypoint while it
+# indexes: as PID 1 both ignored docker stop until the timeout ran out, so
+# Docker's init has to take PID 1 and forward the signal.
+compose_service_runs_init() {
+    local file="$1"
+    local service="$2"
+
+    awk -v service="$service" '
+        $0 == "  " service ":" { in_service = 1; next }
+        in_service && (/^[^ ]/ || /^  [^ ]/) { exit }
+        in_service && $0 == "    init: true" { found = 1; exit }
+        END { exit(found ? 0 : 1) }
+    ' "$file"
+}
+
+for compose_file in "$ROOT_DIR/docker/docker-compose.yml" \
+    "$ROOT_DIR/docker/multi-site/docker-compose.site.yml.template"; do
+    compose_service_runs_init "$compose_file" cron ||
+        fail "cron does not run under an init that forwards SIGTERM: $compose_file"
+done
+compose_service_runs_init "$ROOT_DIR/docker/docker-compose.yml" manticore ||
+    fail "Manticore does not run under an init that forwards SIGTERM"
+
 grep -Fq 'COPY manticore-indexer.cron /etc/cron.d/manticore-indexer' \
     "$MANTICORE_DOCKERFILE" || fail "Manticore system crontab is not installed"
 grep -Fq 'chown root:root /etc/cron.d/manticore-indexer' "$MANTICORE_DOCKERFILE" ||
@@ -170,8 +193,10 @@ if [ -n "${MANTICORE_RUNTIME_CONTAINER:-}" ]; then
         manticore_uid=$(id -u manticore)
         manticore_gid=$(id -g manticore)
         [ "$manticore_uid" -ne 0 ]
-        [ "$(stat -c %u /proc/1)" = "$manticore_uid" ]
-        [ "$(stat -c %g /proc/1)" = "$manticore_gid" ]
+        # PID 1 is the Docker init: check the privilege drop on searchd.
+        searchd_pid=$(pgrep -o -x searchd)
+        [ "$(stat -c %u "/proc/$searchd_pid")" = "$manticore_uid" ]
+        [ "$(stat -c %g "/proc/$searchd_pid")" = "$manticore_gid" ]
         [ "$(stat -c %u /etc/manticoresearch/manticore.conf)" = "$manticore_uid" ]
         [ "$(stat -c %a /etc/manticoresearch/manticore.conf)" = 600 ]
         [ "$(stat -c %u /var/lib/manticore)" = "$manticore_uid" ]

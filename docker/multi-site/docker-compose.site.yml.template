@@ -85,6 +85,17 @@ services:
       # 16M, the default, stopped the import with "Server has gone away".
       - "--max-allowed-packet=1G"
     container_name: ${SITE_PREFIX}-mariadb
+    # docker stop sends SIGTERM and, by default, SIGKILL 10 s later, which
+    # can cut MariaDB short while it flushes its changed pages and leave a
+    # crash recovery to the next start. A duration with its unit (600s,
+    # 15m); a host shutdown may allow less, see the README.
+    stop_grace_period: ${MARIADB_STOP_GRACE_PERIOD:-10m}
+    # While it initializes the database on the first start, the image's
+    # entrypoint is a bash PID 1 with no SIGTERM handler, so docker stop
+    # waited out the whole grace period. Docker's init takes PID 1 and
+    # forwards SIGTERM to the entrypoint, then to mariadbd, which still
+    # gets the whole period to shut down.
+    init: true
     restart: unless-stopped
     environment:
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?error}
@@ -145,6 +156,10 @@ services:
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
     container_name: ${SITE_PREFIX}-cron
+    # cron -f installs no SIGTERM handler, and the kernel drops such a signal
+    # sent to PID 1, so docker stop waited out its whole timeout before
+    # SIGKILL. Docker's init takes PID 1, passes SIGTERM on and reaps orphans.
+    init: true
     restart: unless-stopped
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs

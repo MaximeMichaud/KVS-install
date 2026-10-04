@@ -154,3 +154,73 @@ printf 'MARIADB_BUFFER_POOL_SIZE=1G\nMARIADB_REDO_LOG_SIZE=512M\n' >> .env
     -f "$root/docker/multi-site/docker-compose.site.yml.template" config --format json > secondary.json
 jq -e '.services.mariadb.command == ["--innodb-buffer-pool-size=1G", "--innodb-log-file-size=512M", "--max-allowed-packet=1G"]' secondary.json >/dev/null || fail 'secondary template ignores persistent sizes'
 echo 'PASS: secondary template honors its own explicit resource budget'
+
+# Docker kills a container 10 s after SIGTERM unless told otherwise, which
+# can cut MariaDB short while it flushes its changed pages.
+reset_case
+grep -Fqx 'MARIADB_STOP_GRACE_PERIOD=10m' "$root/docker/.env.example" ||
+    fail '.env.example does not carry the MariaDB stop grace period'
+for grace in '' 15m; do
+    [ -z "$grace" ] || printf 'MARIADB_STOP_GRACE_PERIOD=%s\n' "$grace" >> .env
+    for compose_file in "$root/docker/docker-compose.yml" "$root/docker/multi-site/docker-compose.site.yml.template"; do
+        "$real_docker" compose --env-file "$work/.env" -f "$compose_file" config --format json > grace.json
+        jq -e --arg expected "${grace:-10m}0s" '.services.mariadb.stop_grace_period == $expected' grace.json >/dev/null ||
+            fail "$compose_file: MariaDB stop grace period is not ${grace:-the 10m default}"
+        # The entrypoint that loads the dump of an import is a bash PID 1
+        # with no SIGTERM handler: without an init, a stop during that load
+        # waited out the whole grace period.
+        jq -e '.services.mariadb.init == true' grace.json >/dev/null ||
+            fail "$compose_file: MariaDB does not run under an init that forwards SIGTERM"
+    done
+done
+echo 'PASS: MariaDB gets a 10 minute stop grace period in both Compose files, and .env can change it'
+
+# The volume deletion stops the project right before the volume goes: a
+# clean shutdown is worth nothing there, so MariaDB gets the usual 10 s.
+source <(sed -n '/^delete_database_volume() {/,/^}/p' "$root/docker/setup.sh")
+(
+    # shellcheck disable=SC2329  # Called by delete_database_volume.
+    docker() { printf '%s\n' "$*" >> docker-calls.log; [ "$1 $2" != 'volume inspect' ]; }
+    delete_database_volume kvs-resources_mariadb-data > /dev/null
+) || fail 'the volume deletion failed'
+grep -Fxq 'compose down --timeout 10' docker-calls.log ||
+    fail "the volume deletion must stop the project within 10 s: $(cat docker-calls.log)"
+echo 'PASS: the volume deletion does not wait for the stop grace period'
+
+# Compose rejects a stop grace period without its unit for the whole
+# project, so every docker compose command would fail: setup.sh and
+# reconfigure.sh refuse it first, by name.
+source <(sed -n '/^check_mariadb_stop_grace_period() {/,/^}/p' "$root/docker/setup.sh")
+reset_case
+for grace in '' 10m 600s 1h30m 500ms; do
+    MARIADB_STOP_GRACE_PERIOD=$grace check_mariadb_stop_grace_period || fail "stop grace period '$grace' refused"
+    MARIADB_STOP_GRACE_PERIOD=$grace "$real_docker" compose --env-file "$work/.env" \
+        -f "$root/docker/docker-compose.yml" config --quiet || fail "Compose refuses the stop grace period '$grace'"
+done
+if MARIADB_STOP_GRACE_PERIOD=600 "$real_docker" compose --env-file "$work/.env" \
+    -f "$root/docker/docker-compose.yml" config --quiet 2>/dev/null; then
+    fail 'Compose now takes a stop grace period without its unit: revisit the check'
+fi
+for grace in 600 10M ' 10m' 10m30 0; do
+    if MARIADB_STOP_GRACE_PERIOD=$grace check_mariadb_stop_grace_period 2> grace.err; then
+        fail "stop grace period '$grace' accepted"
+    fi
+    grep -Fq "MARIADB_STOP_GRACE_PERIOD must be a duration with its unit, such as 600s or 15m, got '$grace'" grace.err ||
+        fail "a refused stop grace period must be named: $(cat grace.err)"
+done
+loaded=$(grep -m 1 -A 1 '^source .env$' "$root/docker/setup.sh")
+grep -Fxq 'check_mariadb_stop_grace_period || exit 1' <<< "$loaded" ||
+    fail 'setup.sh must check the stop grace period as soon as it loads .env'
+mkdir -p reconfigure/bin
+cp "$root/docker/reconfigure.sh" reconfigure/
+touch reconfigure/docker-compose.yml
+printf '#!/bin/sh\nexit 97\n' > reconfigure/bin/docker
+chmod +x reconfigure/bin/docker
+printf 'DOMAIN=example.com\nMARIADB_PASSWORD=fixture-user-only\nMARIADB_STOP_GRACE_PERIOD=600\n' > reconfigure/.env
+status=0
+(cd reconfigure && PATH="$work/reconfigure/bin:$PATH" bash reconfigure.sh) > reconfigure.log 2>&1 || status=$?
+if [ "$status" -ne 1 ] ||
+    ! grep -Fq "MARIADB_STOP_GRACE_PERIOD in .env must be a duration with its unit, such as 600s or 15m, got '600'" reconfigure.log; then
+    fail "reconfigure.sh must refuse a stop grace period without its unit (exit $status): $(cat reconfigure.log)"
+fi
+echo 'PASS: a stop grace period without its unit is refused before any docker compose command'

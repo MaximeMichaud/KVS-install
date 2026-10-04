@@ -45,6 +45,14 @@ The script will:
 
 Database, cache and search ports are bound to host loopback; Nginx rejects requests for unknown hosts instead of disclosing the site. See [network exposure and origin protection](docker/SECURITY.md) for the defaults, Cloudflare requirements and deployment checks.
 
+MariaDB gets ten minutes to shut down (`MARIADB_STOP_GRACE_PERIOD` in `.env`, a duration with its unit, such as `600s` or `15m`), where Docker kills a container 10 seconds after asking it to stop: `docker compose stop`, `down` and `restart` and `docker stop` wait up to that long, so a server with a large buffer pool flushes its changed pages instead of leaving a crash recovery to the next start. A container keeps the value it was created with until `docker compose up -d` recreates it. A stop during the first start of an import, while MariaDB still loads the dump, ends the load at once instead; run the import again with `VOLUME_CHOICE=1` to replace the partial database. A reboot or a power-off can allow less. `dockerd` stops every container with its own grace period and waits for the longest one plus 5 seconds (or its `--shutdown-timeout`, 15 seconds, when that is longer), but systemd only gives `docker.service` its stop timeout, `DefaultTimeoutStopSec` (90 seconds unless the distribution changes it: the unit Docker ships sets none), then kills `dockerd`; what still runs gets a last SIGTERM at the end of the shutdown and SIGKILL after the same timeout. With `"live-restore": true` in `/etc/docker/daemon.json`, `dockerd` stops without stopping the containers, and MariaDB only gets that last SIGTERM. Before rebooting a busy server, stop the stack with `docker compose stop` in the `docker` directory and start it again with `docker compose start` once the server is back (the restart policy leaves the containers stopped by hand stopped at boot), or, without live-restore, let systemd wait for Docker longer than the grace period:
+
+```bash
+mkdir -p /etc/systemd/system/docker.service.d
+printf '[Service]\nTimeoutStopSec=11min\n' > /etc/systemd/system/docker.service.d/stop-timeout.conf
+systemctl daemon-reload
+```
+
 ### Standalone Installation
 
 For traditional bare-metal installation on Debian systems.

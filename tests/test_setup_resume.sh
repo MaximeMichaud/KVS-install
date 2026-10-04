@@ -12,7 +12,7 @@ import re
 import sys
 from pathlib import Path
 source = Path(sys.argv[1]).read_text()
-names = ('validate_domain', 'parse_publish_endpoint',
+names = ('validate_domain', 'check_mariadb_stop_grace_period', 'parse_publish_endpoint',
          'resolve_public_port_configuration', 'setup_resume_import',
          'setup_resume_assert_database', 'setup_start_runtime_services', 'setup_start_cron', 'import_count_rows',
          'setup_resume_docker_query', 'setup_resume_database_snapshot', 'import_finish')
@@ -151,6 +151,19 @@ fi
 MARIADB_WAIT_SECONDS=42 setup_resume_import >/dev/null
 grep -Fxq wait:42 "$CALLS"
 unset MARIADB_WAIT_SECONDS
+# Compose would reject a saved stop grace period without its unit in every
+# command: recovery stops on it before any Docker call.
+: > "$CALLS"
+: > "$METADATA_CALLS"
+cp .env saved.env
+printf 'MARIADB_STOP_GRACE_PERIOD=600\n' >> .env
+if setup_resume_import > "$fixture/grace-failure.log" 2>&1; then
+    echo 'FAIL: a saved stop grace period without its unit must stop recovery'; exit 1
+fi
+grep -Fq "MARIADB_STOP_GRACE_PERIOD must be a duration with its unit, such as 600s or 15m, got '600'" "$fixture/grace-failure.log"
+[ ! -s "$METADATA_CALLS" ] && [ ! -s "$CALLS" ]
+mv saved.env .env
+unset MARIADB_STOP_GRACE_PERIOD
 
 # A row-count failure must not remove the marker, staged dump, or write a
 # completion receipt, even though the old pipeline's tr would have succeeded.

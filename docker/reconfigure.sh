@@ -102,6 +102,12 @@ if [[ ! "$TABLES_PREFIX" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
     echo "ERROR: TABLES_PREFIX in .env must be 1 to 32 identifier characters, got '$TABLES_PREFIX'" >&2
     exit 1
 fi
+# Compose reads it as a duration with its unit and rejects anything else
+# for the whole project, so every docker compose command below would fail.
+if [ -n "${MARIADB_STOP_GRACE_PERIOD:-}" ] && [[ ! "$MARIADB_STOP_GRACE_PERIOD" =~ ^([0-9]+(ms|s|m|h))+$ ]]; then
+    echo "ERROR: MARIADB_STOP_GRACE_PERIOD in .env must be a duration with its unit, such as 600s or 15m, got '$MARIADB_STOP_GRACE_PERIOD'" >&2
+    exit 1
+fi
 
 set_env_value() {
     local key="$1"
