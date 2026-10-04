@@ -59,10 +59,12 @@ Each container, the one-shot `kvs-init` and `phpmyadmin-init` included, keeps wh
 
 Nginx writes the requests and errors of the site to `<domain>.access.log` and `<domain>.error.log` in `/var/log/nginx` and rotates them itself, in single-site and multi-site, without the host's `logrotate`: a log that reaches `NGINX_LOG_MAX_SIZE` (default `100M`, a `k`, `M` or `G` suffix counting in powers of 1024, checked every `NGINX_LOG_CHECK_INTERVAL` seconds, default `60`) is renamed and Nginx reopens its logs, so no line is lost. The renamed log is gzip-compressed once Nginx no longer writes to it, and the `NGINX_LOG_KEEP` newest generations are kept (default `20`, `<domain>.access.log.1.gz` being the newest). The history kept follows the size of the logs, not their age: a busy site keeps more of it with a larger `NGINX_LOG_KEEP`, and each compressed generation takes a fraction of `NGINX_LOG_MAX_SIZE`. `NGINX_LOG_MAX_SIZE=0` turns the rotation off.
 
-Set these variables in `docker/.env`, or in the `.env` of an additional multi-site site; the multi-site Caddy proxy keeps the defaults. Docker applies logging options when it creates a container, so an existing installation rebuilds the Nginx image, which carries the rotation, and recreates its containers from its `docker` directory:
+The busiest logs of the other containers have a bound as well: PHP-FPM hands PHP errors to its container output, Manticore sends its query log there, and the cron container keeps what the KVS cron task prints in `/var/log/cron.log`, which becomes `cron.log.1` once past 10 MiB, replacing the previous one.
+
+Set these variables in `docker/.env`, or in the `.env` of an additional multi-site site; the multi-site Caddy proxy keeps the defaults. Docker applies logging options when it creates a container, so an existing installation rebuilds its images, which carry these rotations, and recreates its containers from its `docker` directory:
 
 ```bash
-docker compose build nginx
+docker compose build
 docker compose up -d
 ```
 

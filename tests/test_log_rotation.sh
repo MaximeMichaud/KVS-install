@@ -709,6 +709,76 @@ test_loop_survives_restart() {
         fail "the generation of the first loop did not move up intact"
 }
 
+#################################################################
+# The other logs written inside the containers
+#################################################################
+
+# PHP-FPM hands PHP errors to the container output when php.ini names no
+# error_log, and Manticore sends its query log there. The server log of
+# Manticore stays a file: Manticore Buddy reads it back.
+test_service_logs() {
+    local php_ini="${ROOT_DIR}/docker/php/php.ini"
+    local manticore_conf="${ROOT_DIR}/docker/manticore/manticore.conf.template"
+
+    grep -Fqx 'log_errors = On' "$php_ini" || fail "php.ini no longer logs the PHP errors"
+    if grep -Eq '^[[:space:]]*error_log[[:space:]]*=' "$php_ini"; then
+        fail "php.ini writes the PHP errors to a file instead of the container output"
+    fi
+    grep -Fqx '    query_log = /dev/stdout' "$manticore_conf" ||
+        fail "Manticore does not send its query log to the container output"
+    grep -Fqx '    log = /var/log/manticore/searchd.log' "$manticore_conf" ||
+        fail "the Manticore server log, which Manticore Buddy reads back, is no longer a file"
+}
+
+# The root job of the cron image, run on a scratch log with the owner of the
+# test in place of www-data: nothing happens at 10 MiB; past it, the log
+# becomes cron.log.1, where a run still writing finishes, and a new log takes
+# its name with the mode the task needs; a later rotation replaces cron.log.1.
+test_cron_log_rotation() {
+    local dir
+    local log
+    local command
+    local writer
+    local old_inode
+
+    dir=$(new_case cron-log)
+    log="${dir}/cron.log"
+    command=$(awk '/^[^#[:space:]]/ && !/^[A-Za-z_][A-Za-z0-9_]*=/ {
+        command = $7
+        for (field = 8; field <= NF; field++) command = command " " $field
+        print command
+    }' "${ROOT_DIR}/docker/cron/cron-log-rotate.cron")
+    [ -n "$command" ] || fail "no rotation command in cron-log-rotate.cron"
+    command=${command//\/var\/log\/cron.log/$log}
+    command=${command//-o www-data -g www-data/-o $(id -un) -g $(id -gn)}
+    [[ "$command" != *www-data* && "$command" != */var/log/* ]] ||
+        fail "the rotation command could not be pointed at a scratch log: ${command}"
+
+    truncate -s 10485760 "$log"
+    old_inode=$(stat -c %i "$log")
+    sh -c "$command" || fail "the rotation command failed on a log of 10 MiB"
+    [ ! -e "${log}.1" ] && [ "$(stat -c %i "$log")" = "$old_inode" ] ||
+        fail "a cron log of 10 MiB was rotated"
+
+    printf 'last line\n' >> "$log"
+    exec {writer}>>"$log"
+    sh -c "$command" || fail "the rotation command failed on a log past 10 MiB"
+    printf 'line of a run still writing\n' >&"$writer"
+    exec {writer}>&-
+    [ "$(stat -c %i "${log}.1")" = "$old_inode" ] ||
+        fail "a cron log past 10 MiB did not become cron.log.1"
+    [ "$(tail -c 38 "${log}.1")" = $'last line\nline of a run still writing' ] ||
+        fail "the lines of a run still writing did not land in cron.log.1"
+    [ "$(stat -c '%s %a %U' "$log")" = "0 660 $(id -un)" ] ||
+        fail "the new cron log is not an empty file the task can write"
+
+    printf 'newer run\n' >> "$log"
+    truncate -s 10485761 "$log"
+    sh -c "$command" || fail "the second rotation failed"
+    [ "$(head -c 10 "${log}.1")" = 'newer run' ] && [ ! -s "$log" ] ||
+        fail "a second rotation did not replace cron.log.1"
+}
+
 test_compose_log_limits
 test_settings_documented
 test_rotation_wiring
@@ -720,5 +790,7 @@ test_rotation_waits_for_nginx
 test_settings
 test_compression
 test_loop_survives_restart
+test_service_logs
+test_cron_log_rotation
 
-echo "PASS: Container log limits and Nginx site log rotation"
+echo "PASS: Container log limits, Nginx site log rotation and the other container logs"

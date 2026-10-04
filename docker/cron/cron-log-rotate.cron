@@ -1,0 +1,10 @@
+# /etc/cron.d system crontab bounding the KVS cron log, to which every run of
+# the KVS task adds a few lines: past 10 MiB, cron.log becomes cron.log.1,
+# replacing the previous one. The task runs as www-data, which cannot rename
+# files in /var/log, hence a root job. A link keeps the old log as cron.log.1
+# before a new one takes its name in a single rename, so a run never finds
+# cron.log missing, and one still writing finishes in cron.log.1.
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
+
+*/15 * * * * root [ -z "$(find /var/log/cron.log -size +10M)" ] || { install -o www-data -g www-data -m 0660 /dev/null /var/log/cron.log.new && ln -f /var/log/cron.log /var/log/cron.log.1 && mv -f /var/log/cron.log.new /var/log/cron.log; }

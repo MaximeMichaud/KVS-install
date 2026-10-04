@@ -81,9 +81,6 @@ RUN sed -i \
     -e 's/pm.max_spare_servers = 3/pm.max_spare_servers = 10/' \
     /usr/local/etc/php-fpm.d/www.conf
 
-# Create log directory
-RUN mkdir -p /var/log/php && chown www-data:www-data /var/log/php
-
 # Symlink PHP to /usr/bin (KVS scripts expect it there)
 RUN ln -sf /usr/local/bin/php /usr/bin/php
 

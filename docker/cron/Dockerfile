@@ -61,11 +61,13 @@ RUN groupmod --gid 1000 www-data \
     && usermod --uid 1000 --gid 1000 www-data
 
 # Install system crontabs. Files in /etc/cron.d include an explicit user field,
-# so the KVS task can run unprivileged while the binary updater remains root.
+# so the KVS task can run unprivileged while the binary updater and the
+# rotation of the KVS cron log remain root.
 COPY crontab /etc/cron.d/kvs-cron
 COPY yt-dlp-update.cron /etc/cron.d/yt-dlp-update
-RUN chown root:root /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update \
-    && chmod 0644 /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update \
+COPY cron-log-rotate.cron /etc/cron.d/cron-log-rotate
+RUN chown root:root /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update /etc/cron.d/cron-log-rotate \
+    && chmod 0644 /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update /etc/cron.d/cron-log-rotate \
     && install -o www-data -g www-data -m 0660 /dev/null /var/log/cron.log \
     && install -o root -g root -m 0600 /dev/null /var/log/yt-dlp-update.log
 

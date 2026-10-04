@@ -6,8 +6,11 @@ searchd {
     listen = 9312
     listen = 0.0.0.0:9306:mysql
     listen = 9308:http
+    # A search adds a line to the query log: on the container output, the
+    # Docker log cap bounds it. The server log stays a file, since Manticore
+    # Buddy reads it back, which fails on /dev/stdout.
     log = /var/log/manticore/searchd.log
-    query_log = /var/log/manticore/query.log
+    query_log = /dev/stdout
     pid_file = /var/run/manticore/searchd.pid
 }
 

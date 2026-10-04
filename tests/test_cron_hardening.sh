@@ -18,6 +18,7 @@ command -v shellcheck >/dev/null 2>&1 || fail "ShellCheck is required"
 
 KVS_CRON="$ROOT_DIR/docker/cron/crontab"
 UPDATER_CRON="$ROOT_DIR/docker/cron/yt-dlp-update.cron"
+LOG_ROTATE_CRON="$ROOT_DIR/docker/cron/cron-log-rotate.cron"
 MANTICORE_CRON="$ROOT_DIR/docker/manticore/manticore-indexer.cron"
 CRON_DOCKERFILE="$ROOT_DIR/docker/cron/Dockerfile"
 MANTICORE_DOCKERFILE="$ROOT_DIR/docker/manticore/Dockerfile"
@@ -90,7 +91,7 @@ check_command_syntax() {
     [ "$counter" -gt 0 ] || fail "no cron command found in $file"
 }
 
-for cron_file in "$KVS_CRON" "$UPDATER_CRON" "$MANTICORE_CRON"; do
+for cron_file in "$KVS_CRON" "$UPDATER_CRON" "$LOG_ROTATE_CRON" "$MANTICORE_CRON"; do
     [ -s "$cron_file" ] || fail "missing cron file: $cron_file"
     [ "$(tail -c 1 "$cron_file" | od -An -t x1 | tr -d '[:space:]')" = 0a ] ||
         fail "cron file has no final newline: $cron_file"
@@ -110,6 +111,13 @@ if grep -Fq 'cron.php' "$UPDATER_CRON"; then
     fail "the root updater crontab contains the KVS task"
 fi
 
+# www-data cannot rename files in /var/log, so a root job bounds its log.
+grep -Eq '^\*/15 \* \* \* \* root .*/var/log/cron\.log' "$LOG_ROTATE_CRON" ||
+    fail "the KVS cron log is not rotated by a root job"
+if grep -Fq 'cron.php' "$LOG_ROTATE_CRON"; then
+    fail "the root log rotation crontab contains the KVS task"
+fi
+
 grep -Fxq "0 * * * * manticore find /var/lib/manticore -name '*.new.*' -delete; /usr/bin/indexer --rotate --all >> /var/log/manticore/indexer-cron.log 2>&1" \
     "$MANTICORE_CRON" || fail "Manticore index rotation is not assigned to the manticore user"
 if grep -Eq '^[^#].*[[:space:]]root[[:space:]].*indexer' "$MANTICORE_CRON"; then
@@ -124,6 +132,12 @@ grep -Fq 'COPY crontab /etc/cron.d/kvs-cron' "$CRON_DOCKERFILE" ||
     fail "KVS system crontab is not installed"
 grep -Fq 'COPY yt-dlp-update.cron /etc/cron.d/yt-dlp-update' "$CRON_DOCKERFILE" ||
     fail "root updater crontab is not installed separately"
+grep -Fq 'COPY cron-log-rotate.cron /etc/cron.d/cron-log-rotate' "$CRON_DOCKERFILE" ||
+    fail "the KVS cron log rotation crontab is not installed"
+grep -Eq 'chown root:root .*/etc/cron\.d/cron-log-rotate' "$CRON_DOCKERFILE" ||
+    fail "the KVS cron log rotation crontab has no root ownership guarantee"
+grep -Eq 'chmod 0644 .*/etc/cron\.d/cron-log-rotate' "$CRON_DOCKERFILE" ||
+    fail "the KVS cron log rotation crontab has incompatible permissions"
 grep -Fq 'install -o www-data -g www-data -m 0660 /dev/null /var/log/cron.log' \
     "$CRON_DOCKERFILE" || fail "KVS cron log is not writable by UID/GID 1000"
 if grep -Eq '(^|&&|;)[[:space:]]*crontab[[:space:]]+/etc/cron\.d/' "$CRON_DOCKERFILE"; then
