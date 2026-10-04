@@ -1347,14 +1347,14 @@ test_hard_links_arrive_as_links() {
     pass "hard links of the site arrive as links"
 }
 
-# The init gives the whole site to 1000:1000 and the modes KVS needs (666
-# for the files under contents, 777 for its directories). With rsync -a,
-# every later pass gave each file back its owner and mode on the old
-# server and the init then changed them all again: two metadata writes
-# per file and per pass, millions on a large site, the frozen pass too.
-# The files the init set now keep their modes, a changed one as well, a
-# new file arrives with its mode on the old server, and every rsync from
-# the old server writes 1000:1000.
+# The init gives the whole site to 1000:1000, and a mode set on this
+# side, by the init or by KVS (666 and 777 on what it writes), must stay.
+# With rsync -a, every later pass gave each file back its owner and mode
+# on the old server and the init then changed them all again: two
+# metadata writes per file and per pass, millions on a large site, the
+# frozen pass too. The files set here now keep their modes, a changed one
+# as well, a new file arrives with its mode on the old server, and every
+# rsync from the old server writes 1000:1000.
 test_a_later_pass_keeps_the_owner_and_modes_the_init_set() {
     local bin="$TMP_ROOT/modes-bin" template="$TMP_ROOT/modes-template" site destination shots changed jobs
 
@@ -1389,7 +1389,7 @@ EOF
             cp -a "$template" "$site"
             IMPORT_TRANSFER_JOBS=$jobs import_remote_files "$site" "$destination" yes > "$TMP_ROOT/modes-$jobs-first.out" 2>&1 || exit 1
             [ "$(stat -c '%a' "$shots/1.jpg")" = 644 ] || exit 2
-            # What the init does to the copy.
+            # Modes set on this side, as KVS gives them to what it writes.
             chmod 777 "$shots"
             chmod 666 "$shots/1.jpg" "$shots/2.jpg"
             changed=$(stat -c '%z' "$shots/1.jpg")

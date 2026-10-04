@@ -758,6 +758,9 @@ test_permission_script_skips_empty_xargs_batches() {
         "$site_dir/static"
     printf '%s\n' 'database credential fixture' > "$site_dir/admin/include/setup_db.php"
     chmod 755 "$site_dir/admin/include/setup_db.php"
+    # A site the init extracted from the archive, the only kind it runs
+    # the archive's script on.
+    printf '%s\n' 'archive=KVS_7.0.2_[example.com].zip' > "$site_dir/.kvs-extraction-complete"
     cat > "$site_dir/_INSTALL/install_permissions.sh" <<'EOF'
 #!/bin/bash
 cd ..
@@ -780,14 +783,18 @@ EOF
 # chmod and chown write the inode even when the mode or the owner is
 # already right: the permission pass of every start rewrote the metadata
 # of every file of the site, millions of writes on a large one, the start
-# right after the last pass of an import included. A pass over a site it
-# already set must leave every change time as it was.
+# right after the last pass of an import included. Every KVS process of
+# the stack runs as the owner of the site, so the pass only adds the bits
+# PHP and nginx need (rw-r--r-- on a file, rwxr-xr-x on a directory)
+# where one is missing: a site copied with the usual 644 and 755 or with
+# KVS's 666 and 777 is not written at all, and a second pass over what
+# the first set changes nothing either.
 test_a_second_permission_pass_changes_nothing() {
     local case_dir="$TMP_ROOT/permissions-again"
     local site_dir="$case_dir/site"
     local common_mock="$case_dir/common.sh"
     local script_copy="$case_dir/60-permissions.sh"
-    local owner before after
+    local owner before after usual kept entry
 
     mkdir -p \
         "$site_dir/admin/logs" \
@@ -797,23 +804,38 @@ test_a_second_permission_pass_changes_nothing() {
         "$site_dir/admin/smarty/template-c" \
         "$site_dir/admin/smarty/template-c-site" \
         "$site_dir/contents/videos_screenshots/0/1" \
+        "$site_dir/contents/videos_screenshots/0/2" \
+        "$site_dir/contents/videos_screenshots/0/3" \
         "$site_dir/template/blocks" \
         "$site_dir/langs" \
         "$site_dir/static/js"
     printf 'shot\n' > "$site_dir/contents/videos_screenshots/0/1/1.jpg"
+    printf 'private shot\n' > "$site_dir/contents/videos_screenshots/0/1/2.jpg"
+    printf 'kvs shot\n' > "$site_dir/contents/videos_screenshots/0/3/1.jpg"
     printf 'deny\n' > "$site_dir/contents/.htaccess"
     printf 'log\n' > "$site_dir/admin/logs/cron.txt"
     printf 'data\n' > "$site_dir/admin/data/system/config.dat"
     printf 'tpl\n' > "$site_dir/template/blocks/list.tpl"
+    printf 'read only tpl\n' > "$site_dir/template/blocks/view.tpl"
     printf 'lang\n' > "$site_dir/langs/english.lang"
     printf 'js\n' > "$site_dir/static/js/app.js"
     printf 'robots\n' > "$site_dir/robots.txt"
     printf 'credentials\n' > "$site_dir/admin/include/setup_db.php"
+    usual=("contents/videos_screenshots/0/1/1.jpg" "admin/logs/cron.txt" "admin/data/system/config.dat"
+        "template/blocks/list.tpl" "langs/english.lang" "static/js/app.js"
+        "contents/videos_screenshots/0/1" "template/blocks" "static/js")
     chmod 644 "$site_dir/contents/videos_screenshots/0/1/1.jpg" "$site_dir/admin/logs/cron.txt" \
         "$site_dir/admin/data/system/config.dat" "$site_dir/template/blocks/list.tpl" \
         "$site_dir/langs/english.lang" "$site_dir/static/js/app.js" "$site_dir/robots.txt" \
         "$site_dir/admin/include/setup_db.php"
     chmod 755 "$site_dir/contents/videos_screenshots/0/1" "$site_dir/template/blocks" "$site_dir/static/js"
+    # What KVS creates under its umask 0 stays as it is too.
+    chmod 777 "$site_dir/contents/videos_screenshots/0/3"
+    chmod 666 "$site_dir/contents/videos_screenshots/0/3/1.jpg"
+    # Modes that would keep nginx or PHP out.
+    chmod 600 "$site_dir/contents/videos_screenshots/0/1/2.jpg"
+    chmod 700 "$site_dir/contents/videos_screenshots/0/2"
+    chmod 444 "$site_dir/template/blocks/view.tpl"
     make_init_common_mock "$common_mock"
     # The owner the containers run as is 1000:1000; the test gives the
     # files to the account running it instead, the only owner it can set.
@@ -822,22 +844,78 @@ test_a_second_permission_pass_changes_nothing() {
         -e "s/1000:1000/${owner}/g" -e "s/-uid 1000/-uid $(id -u)/" -e "s/-gid 1000/-gid $(id -g)/" \
         "$REPO_ROOT/docker/init/docker-entrypoint.d/60-permissions.sh" > "$script_copy"
 
+    kept=$(cd "$site_dir" && for entry in "${usual[@]}" contents/videos_screenshots/0/3 contents/videos_screenshots/0/3/1.jpg; do
+        stat -c '%Z.%z %a %n' "$entry"
+    done)
     TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/first.log" 2>&1 ||
         fail "the first permission pass failed: $(cat "$case_dir/first.log")"
-    [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1/1.jpg")" = 666 ] &&
-        [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1")" = 777 ] &&
+    [ "$kept" = "$(cd "$site_dir" && for entry in "${usual[@]}" contents/videos_screenshots/0/3 contents/videos_screenshots/0/3/1.jpg; do
+        stat -c '%Z.%z %a %n' "$entry"
+    done)" ] || fail "the first permission pass wrote entries that already had the modes the stack needs"
+    [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1/2.jpg")" = 644 ] &&
+        [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/2")" = 755 ] &&
+        [ "$(stat -c '%a' "$site_dir/template/blocks/view.tpl")" = 644 ] &&
         [ "$(stat -c '%a' "$site_dir/contents/.htaccess")" = 644 ] &&
-        [ "$(stat -c '%a' "$site_dir/template/blocks")" = 777 ] &&
-        [ "$(stat -c '%a' "$site_dir/static/js/app.js")" = 666 ] &&
+        [ "$(stat -c '%a' "$site_dir/contents")" = 755 ] &&
+        [ "$(stat -c '%a' "$site_dir/tmp")" = 777 ] &&
+        [ "$(stat -c '%a' "$site_dir/admin/smarty/template-c")" = 777 ] &&
+        [ "$(stat -c '%a' "$site_dir/robots.txt")" = 666 ] &&
         [ "$(stat -c '%a' "$site_dir/admin/include/setup_db.php")" = 600 ] ||
-        fail "the first permission pass must still set the modes KVS needs"
+        fail "the first permission pass must add the modes PHP and nginx need and keep the KVS directories writable"
     before=$(find "$site_dir" -printf '%C@ %u:%g %m %p\n' | sort -k4)
     TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/second.log" 2>&1 ||
         fail "the second permission pass failed: $(cat "$case_dir/second.log")"
     after=$(find "$site_dir" -printf '%C@ %u:%g %m %p\n' | sort -k4)
     [ "$before" = "$after" ] ||
         fail "a second permission pass rewrote what the first had set: $(diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep '^>' | head -n 3 | tr '\n' ' ')"
-    pass "a second permission pass leaves every file as the first set it"
+    pass "a permission pass adds only the missing modes and a second pass changes nothing"
+}
+
+# An imported site that kept its _INSTALL directory brings KVS's
+# install_permissions.sh along, and the script sets 666 and 777 with
+# chmod on every file and directory of the content trees whatever their
+# mode: millions of inode writes from the init container on a large site.
+# The init runs it only on a site it extracted from the archive.
+test_an_imported_site_keeps_its_install_script_unrun() {
+    local case_dir="$TMP_ROOT/permissions-imported"
+    local site_dir="$case_dir/site"
+    local common_mock="$case_dir/common.sh"
+    local script_copy="$case_dir/60-permissions.sh"
+    local owner before
+
+    mkdir -p "$site_dir/_INSTALL" "$site_dir/admin/include" "$site_dir/contents/videos_screenshots/0/1"
+    printf 'shot\n' > "$site_dir/contents/videos_screenshots/0/1/1.jpg"
+    chmod 644 "$site_dir/contents/videos_screenshots/0/1/1.jpg"
+    chmod 755 "$site_dir/contents/videos_screenshots/0/1"
+    printf 'credentials\n' > "$site_dir/admin/include/setup_db.php"
+    # What KVS's script does to the content tree, without its empty-list
+    # failure.
+    cat > "$site_dir/_INSTALL/install_permissions.sh" <<'EOF'
+cd ..
+find contents -type d | xargs chmod 777
+find contents -type f \( ! -iname ".htaccess" \) | xargs chmod 666
+chmod 755 contents
+EOF
+    make_init_common_mock "$common_mock"
+    owner="$(id -u):$(id -g)"
+    sed -e "s|source /init/lib/common.sh|source ${common_mock}|" \
+        -e "s/1000:1000/${owner}/g" -e "s/-uid 1000/-uid $(id -u)/" -e "s/-gid 1000/-gid $(id -g)/" \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/60-permissions.sh" > "$script_copy"
+
+    before=$(stat -c '%Z.%z %a' "$site_dir/contents/videos_screenshots/0/1/1.jpg")
+    TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/imported.log" 2>&1 ||
+        fail "the permission pass over an imported site failed: $(cat "$case_dir/imported.log")"
+    [ "$(stat -c '%Z.%z %a' "$site_dir/contents/videos_screenshots/0/1/1.jpg")" = "$before" ] ||
+        fail "the archive's permission script ran over an imported site"
+    assert_file_contains "$case_dir/imported.log" "Not running _INSTALL/install_permissions.sh"
+
+    printf '%s\n' 'archive=KVS_7.0.2_[example.com].zip' > "$site_dir/.kvs-extraction-complete"
+    TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/extracted.log" 2>&1 ||
+        fail "the permission pass over an extracted site failed: $(cat "$case_dir/extracted.log")"
+    [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1/1.jpg")" = 666 ] &&
+        [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1")" = 777 ] ||
+        fail "the archive's permission script must still run on a site extracted from the archive"
+    pass "the archive's permission script runs on an extracted site only"
 }
 
 test_final_compose_failure_is_fatal() {
@@ -1414,6 +1492,7 @@ test_manticore_scripts_support_numeric_domains_and_internal_api
 test_project_url_uses_validated_public_https_port
 test_permission_script_skips_empty_xargs_batches
 test_a_second_permission_pass_changes_nothing
+test_an_imported_site_keeps_its_install_script_unrun
 test_setup_rebuilds_init_and_optional_manticore_images
 test_final_compose_failure_is_fatal
 test_optional_gum_install_failure_is_nonfatal
