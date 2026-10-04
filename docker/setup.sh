@@ -750,7 +750,7 @@ if [ "$DEV_MODE" = true ]; then
     export DNS_CHOICE=2              # Continue anyway (localhost testing)
     # The headless search selector defaults to disabled, while preserving
     # an explicit choice or an enabled search service from .env.
-    export DOMAIN="${DOMAIN:-maximemichaud.ca}"  # Default test domain
+    export DOMAIN="${DOMAIN:-example.com}"  # Default test domain
     export EMAIL="${EMAIL:-dev@localhost.local}"
 
     # Docker build flags
@@ -2495,7 +2495,7 @@ select_site_prefix() {
     echo -e "${CYAN}Container Prefix (for multi-site support)${NC}"
 
     # Generate default from domain (remove TLD)
-    # e.g., maximemichaud.ca -> maximemichaud, example.com -> example
+    # e.g., example.com -> example, shop.example.org -> shop-example
     DEFAULT_PREFIX="${DOMAIN%.*}"
     # Sanitize: lowercase, replace dots/underscores with hyphens
     DEFAULT_PREFIX=$(echo "$DEFAULT_PREFIX" | tr '[:upper:]' '[:lower:]' | tr '._' '-')
