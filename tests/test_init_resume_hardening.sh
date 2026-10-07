@@ -800,12 +800,12 @@ test_existing_database_url_and_tls_state_are_synchronized() {
     [ "$(<"$state/url")" = \
         'https://7.0.2.example.org/contents/videos' ] ||
         fail "existing :18445 URL was not normalized to implicit port 443"
-    [ "$(<"$state/ssl-skip")" = 1 ] ||
-        fail "self-signed configuration did not enable the TLS exception"
+    [ "$(<"$state/ssl-skip")" = 0 ] ||
+        fail "direct self-signed configuration disabled TLS verification"
     assert_file_contains "$case_dir/selfsigned.log" \
         'Server URLs configured: https://7.0.2.example.org/contents/...'
     assert_file_contains "$case_dir/selfsigned.log" \
-        'SSL verification disabled for self-signed certificate'
+        'SSL verification enabled for public or internally trusted certificate'
 
     first_url=$(<"$state/url")
     first_skip=$(<"$state/ssl-skip")
@@ -819,6 +819,13 @@ test_existing_database_url_and_tls_state_are_synchronized() {
     [ "$(<"$state/url")" = "$first_url" ] &&
         [ "$(<"$state/ssl-skip")" = "$first_skip" ] ||
         fail "repeated database configuration was not idempotent"
+
+    TEST_KVS_PATH="$site_dir" TEST_CONFIG_STATE="$state" \
+        DOMAIN=7.0.2.example.org USE_WWW=false PROJECT_HTTPS_PORT=443 \
+        MODE=multi SSL_PROVIDER=selfsigned \
+        bash "$script_copy" > "$case_dir/caddy.log" 2>&1
+    [ "$(<"$state/ssl-skip")" = 1 ] ||
+        fail "the direct TLS correction changed Caddy's existing policy"
 
     TEST_KVS_PATH="$site_dir" \
         TEST_CONFIG_STATE="$state" \
@@ -836,7 +843,7 @@ test_existing_database_url_and_tls_state_are_synchronized() {
     assert_file_contains "$case_dir/public.log" \
         'Server URLs configured: https://www.7.0.2.example.org:18445/contents/...'
     assert_file_contains "$case_dir/public.log" \
-        'SSL verification enabled for public certificate'
+        'SSL verification enabled for public or internally trusted certificate'
 
     pass "existing server URLs and TLS verification synchronize bidirectionally and idempotently"
 }

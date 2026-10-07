@@ -419,11 +419,17 @@ test_certificate_monitor() {
     cp "${TEST_DIR}/fixtures/monitor-a/key.pem" "${ssl_dir}/key.pem"
 
     awk '
+        /^certificate_pair_is_valid\(\) \{/ { capture = 1 }
+        /^publish_internal_trust\(\) \{/ { capture = 1 }
+        capture { print }
+        capture && /^\}$/ { capture = 0 }
+    ' "$ENTRYPOINT" > "$monitor_function"
+    awk '
         /^monitor_certificate_changes\(\) \($/ { capture = 1 }
         capture { print }
         capture && /^\)$/ { exit }
     ' "$ENTRYPOINT" |
-        sed "s|/etc/nginx/ssl|${case_dir}/ssl|g" > "$monitor_function"
+        sed "s|/etc/nginx/ssl|${case_dir}/ssl|g" >> "$monitor_function"
     grep -Fq 'nginx -t' "$monitor_function" ||
         fail "the certificate monitor does not validate Nginx before reload"
     grep -Fq 'nginx -s reload' "$monitor_function" ||
@@ -468,7 +474,8 @@ EOF
 
     # shellcheck source=/dev/null
     . "$monitor_function"
-    PATH="${mock_dir}:${PATH}" DOMAIN="$domain" CERTIFICATE_RELOAD_INTERVAL=1 \
+    PATH="${mock_dir}:${PATH}" DOMAIN="$domain" SSL_DIR="$ssl_dir" \
+        INCLUDE_WWW=false SSL_PROVIDER=letsencrypt CERTIFICATE_RELOAD_INTERVAL=1 \
         monitor_certificate_changes >"${case_dir}/monitor.log" 2>&1 &
     MONITOR_PID=$!
 

@@ -48,4 +48,7 @@ ENV_INI="/usr/local/etc/php/conf.d/zzz-env.ini"
     [ -n "$PHP_MAX_EXECUTION_TIME" ] && echo "max_execution_time = $PHP_MAX_EXECUTION_TIME"
 } > "$ENV_INI"
 
+if [ -f /usr/local/lib/kvs-tls/internal-trust.sh ]; then
+    exec sh /usr/local/lib/kvs-tls/internal-trust.sh run "$@"
+fi
 exec "$@"

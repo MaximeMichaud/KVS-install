@@ -36,4 +36,7 @@ start_memcache_loopback() {
 
 start_memcache_loopback
 
+if [ -f /usr/local/lib/kvs-tls/internal-trust.sh ]; then
+    exec sh /usr/local/lib/kvs-tls/internal-trust.sh run "$@"
+fi
 exec "$@"

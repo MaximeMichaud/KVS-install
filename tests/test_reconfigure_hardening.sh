@@ -157,7 +157,7 @@ initialize_application_state() {
     if [ "$mode" != multi ] && [ "$https_port" -ne 443 ]; then
         port_suffix=":${https_port}"
     fi
-    [ "$provider" != selfsigned ] || expected_skip=1
+    if [ "$provider" = selfsigned ] && [ "$mode" = multi ]; then expected_skip=1; fi
 
     before_url="https://${domain}:9443/contents/"
     after_url="https://${host}${port_suffix}/contents/"
@@ -400,6 +400,12 @@ case "${1:-}" in
         exit "${MOCK_COMPOSE_STATUS:-0}"
         ;;
     exec)
+        if [[ "$joined" == *' KVS_TLS_HOST='* ]]; then
+            exit "${MOCK_TLS_VERIFY_STATUS:-0}"
+        fi
+        if [[ "$joined" == *'/internal-trust.sh publish '* ]]; then
+            exit "${MOCK_TLS_PUBLISH_STATUS:-0}"
+        fi
         if [[ "$joined" == *' kvs-caddy caddy validate '* ]]; then
             next_status MOCK_CADDY_VALIDATE_RESULTS caddy-validate-count
             printf 'caddy-validate count=%s status=%s\n' \
@@ -983,8 +989,24 @@ assert_contains "$LAST_DIR/docker.calls" \
 assert_not_contains "$LAST_DIR/docker.calls" \
     'KVS_CERT_SAN=DNS:7.0.2.example.org,DNS:www.7.0.2.example.org' \
     "the self-signed subdomain received an unwanted www SAN"
-assert_contains "$LAST_DIR/docker.calls" 'mariadb-query tls-skip-1' \
-    "self-signed TLS did not persist the SSL verification exception"
+assert_contains "$LAST_DIR/docker.calls" 'mariadb-query tls-skip-0' \
+    "self-signed TLS did not enable certificate verification"
+assert_contains "$LAST_DIR/docker.calls" 'kvs-cron php -r' \
+    "cron TLS trust was not checked"
+
+create_fixture selfsigned-untrusted
+set_env_value "$TEST_ROOT/selfsigned-untrusted" SSL_PROVIDER selfsigned
+run_case selfsigned-untrusted MOCK_TLS_VERIFY_STATUS=60
+assert_failure "self-signed trust failure"
+assert_not_contains "$LAST_DIR/docker.calls" 'mariadb-query tls-skip-0' \
+    "strict storage checks were persisted before internal trust worked"
+
+create_fixture selfsigned-publish-failure
+set_env_value "$TEST_ROOT/selfsigned-publish-failure" SSL_PROVIDER selfsigned
+run_case selfsigned-publish-failure MOCK_TLS_PUBLISH_STATUS=1
+assert_failure "self-signed trust publication failure"
+assert_not_contains "$LAST_DIR/docker.calls" 'mariadb-query tls-skip-0' \
+    "strict storage checks were persisted after publication failed"
 
 create_fixture acme-stop-failure
 set_env_value "$TEST_ROOT/acme-stop-failure" SSL_PROVIDER selfsigned

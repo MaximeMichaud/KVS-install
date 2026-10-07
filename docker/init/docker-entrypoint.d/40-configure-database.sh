@@ -76,10 +76,10 @@ else
     log_info "Server URLs configured: ${PROJECT_URL}/contents/..."
 fi
 
-# Synchronize TLS verification in both directions. Public certificates must
-# not inherit the relaxed setting from an earlier self-signed deployment.
+# Direct NGINX self-signed TLS is trusted by PHP and cron at startup. Caddy's
+# internal CA in multi-site mode still uses the existing exception.
 SSL_SKIP_VALUE=0
-if [ "$SSL_PROVIDER" = "selfsigned" ]; then
+if [ "$SSL_PROVIDER" = "selfsigned" ] && [ "${MODE:-single}" = multi ]; then
     SSL_SKIP_VALUE=1
 fi
 if ! db_exec \
@@ -97,5 +97,5 @@ fi
 if [ "$SSL_SKIP_VALUE" -eq 1 ]; then
     log_info "SSL verification disabled for self-signed certificate"
 else
-    log_info "SSL verification enabled for public certificate"
+    log_info "SSL verification enabled for public or internally trusted certificate"
 fi

@@ -16,8 +16,18 @@ services:
     profiles:
       - direct-tls
 
+  # Caddy owns TLS here; the shared trust volume belongs to direct NGINX TLS.
+  php-fpm:
+    environment:
+      - SSL_PROVIDER=none
+
+  cron:
+    environment:
+      - SSL_PROVIDER=none
+
   kvs-init:
     environment:
+      - MODE=multi
       - PROJECT_HTTPS_PORT=443
 
 networks:

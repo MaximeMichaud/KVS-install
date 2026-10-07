@@ -21,6 +21,7 @@ services:
     environment:
       - DOMAIN=${DOMAIN}
       - USE_WWW=${USE_WWW:-false}
+      - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
       - PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT:-443}
       # Rotation of <domain>.access.log and <domain>.error.log, done by the
       # container itself (nginx/rotate-site-logs.sh).
@@ -37,6 +38,8 @@ services:
       - manticore-api:/var/www/manticore-api
       - phpmyadmin-data:/usr/share/phpmyadmin:ro
       - acme-certs:/etc/nginx/ssl
+      - internal-tls:/run/kvs-internal-tls
+      - ./tls:/usr/local/lib/kvs-tls:ro
       - letsencrypt-webroot:/var/www/_letsencrypt
       - nginx-logs:/var/log/nginx
       - nginx-includes:/etc/nginx/includes:ro
@@ -63,8 +66,12 @@ services:
       - manticore-api:/var/www/manticore-api
       - phpmyadmin-data:/usr/share/phpmyadmin
       - ./php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
+      - internal-tls:/run/kvs-internal-tls:ro
+      - ./tls:/usr/local/lib/kvs-tls:ro
       - ./geoip:/usr/share/geoip:ro
     environment:
+      - DOMAIN=${DOMAIN}
+      - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
       - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-512M}
       - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
       - PHP_POST_MAX_SIZE=${PHP_POST_MAX_SIZE:-2048M}
@@ -225,6 +232,11 @@ services:
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - ./geoip:/usr/share/geoip:ro
+      - internal-tls:/run/kvs-internal-tls:ro
+      - ./tls:/usr/local/lib/kvs-tls:ro
+    environment:
+      - DOMAIN=${DOMAIN}
+      - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
     depends_on:
       - php-fpm
       - mariadb
@@ -248,6 +260,7 @@ services:
       - MARIADB_PASSWORD=${MARIADB_PASSWORD}
       - USE_WWW=${USE_WWW:-false}
       - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+      - MODE=${MODE:-single}
       - ENABLE_MANTICORE=${ENABLE_MANTICORE:-false}
       - PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT:-443}
       - KVS_ADMIN_PASSWORD=${KVS_ADMIN_PASSWORD:-}
@@ -298,6 +311,7 @@ volumes:
   mariadb-data:
   acme-data:
   acme-certs:
+  internal-tls:
   letsencrypt-webroot:
   phpmyadmin-data:
   nginx-logs:

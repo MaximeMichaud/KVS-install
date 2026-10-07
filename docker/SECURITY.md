@@ -116,3 +116,65 @@ The integration test requires local `nginx:alpine` and `caddy:2-alpine` images.
 It checks real HTTP/TLS behavior, configured domains, ACME, configuration
 regeneration, container restart and Caddy health checks. It does not alter a
 running deployment or its host firewall.
+
+## Internal HTTPS with self-signed certificates
+
+In single-site mode, the site's domain resolves to NGINX inside the Docker
+network. Native KVS storage checks first request the site's protected URL,
+so that certificate must be trusted even when the storage server itself uses
+a publicly trusted certificate.
+
+With `SSL_PROVIDER=selfsigned`, NGINX publishes its public certificate in the
+`internal-tls` volume. PHP and cron mount this volume read-only, install the
+certificate in their system trust store before starting, and refresh it when
+it changes. The private key stays in `acme-certs`, which application containers
+do not mount. Trust comes from the local installation, never from an unverified
+HTTPS connection. The `docker/tls` directory must accompany the Compose files.
+
+New storage servers can keep **Skip SSL certificate verification** unchecked.
+KVS still checks certificate validity and hostnames, including after redirects.
+Recreating the containers preserves trust. NGINX renews its self-signed
+certificate within the last seven days of validity; its certificate monitor
+checks every five minutes, and application trust refreshes every two seconds.
+A replacement can briefly fail verification while the consumers refresh.
+Missing or invalid trust never falls back to disabling verification.
+
+A retained CA-issued certificate keeps using the normal CA store. To use a
+private development CA, explicitly mount its public `.crt` file under
+`/usr/local/share/ca-certificates/` in both PHP and cron; startup loads it as
+well. Never mount its private key. Public ACME certificates and Caddy's
+multi-site certificate handling remain separate; this change does not install
+or distribute Caddy's internal CA.
+
+For an existing single-site installation, update the installer checkout, then
+rebuild and recreate the three services from its `docker` directory, retaining
+the installation's usual Compose files and environment:
+
+```bash
+docker compose build nginx php-fpm cron
+docker compose up -d --no-deps --force-recreate php-fpm cron nginx
+```
+
+This installs internal trust without changing storage records. To also apply
+the current `.env` configuration and re-enable verification on every existing
+storage row, `./reconfigure.sh` now checks actual TLS from both PHP and cron
+before clearing the old self-signed exception. Reconfiguration has its usual
+broader effects on URLs and services; review the current `.env` first. Custom
+web-server images or entrypoints must retain the publication and reload hooks.
+
+The regression test uses an internal Docker network, synthetic media, and
+disposable volumes. Build the NGINX test image and supply existing PHP images
+with PHP/cURL, OpenSSL and `update-ca-certificates` installed:
+
+```bash
+docker build -t kvs-internal-tls-nginx-test:local docker/nginx
+KVS_TLS_TEST_PHP_IMAGE=your-php-image \
+KVS_TLS_TEST_CRON_IMAGE=your-cron-image \
+    python3 tests/integration_internal_tls.py
+```
+
+It checks strict PHP CLI and FPM transfers, fresh startup, restarts, recreation,
+certificate replacement and renewal, CA-issued certificate retention, missing
+or corrupt publications, and rejection of unknown, expired or wrong-host
+certificates. It also proves that the same PHP runtime fails with cURL 60 when
+the trust bootstrap is omitted.

@@ -2961,7 +2961,7 @@ case $SSL_CHOICE in
         sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=selfsigned/" .env
         echo -e "${YELLOW}Selected self-signed certificate${NC}"
         echo -e "${YELLOW}  → Use for: local development, or with a reverse proxy (Cloudflare, HAProxy, nginx, etc.)${NC}"
-        echo -e "${YELLOW}  → SSL verification will be disabled for cron jobs and internal API calls${NC}"
+        echo -e "${YELLOW}  → Direct NGINX certificates are trusted automatically by PHP and cron${NC}"
         ;;
     *)
         SSL_PROVIDER="letsencrypt"

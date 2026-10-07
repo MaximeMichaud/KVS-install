@@ -393,7 +393,7 @@ if [ "$MODE" = "single" ] && [ "$SSL_PROVIDER" != "selfsigned" ] &&
 fi
 export MODE SSL_PROVIDER USE_WWW SITE_PREFIX PROJECT_HTTPS_PORT
 EXPECTED_SSL_SKIP=0
-if [ "$SSL_PROVIDER" = "selfsigned" ]; then
+if [ "$SSL_PROVIDER" = "selfsigned" ] && [ "$MODE" = multi ]; then
     EXPECTED_SSL_SKIP=1
 fi
 
@@ -1201,6 +1201,8 @@ generate_self_signed_certificate() {
                 -keyout "${staging_dir}/key.pem" \
                 -out "${staging_dir}/cert.pem" \
                 -subj "/CN=${KVS_CERT_DOMAIN}" \
+                -addext "basicConstraints=critical,CA:FALSE" \
+                -addext "extendedKeyUsage=serverAuth" \
                 -addext "subjectAltName=${KVS_CERT_SAN}" >/dev/null 2>&1
             chmod 600 "${staging_dir}/key.pem"
             chmod 644 "${staging_dir}/cert.pem"
@@ -1450,8 +1452,11 @@ elif [ "$SSL_PROVIDER" = "selfsigned" ]; then
         echo -e "${RED}ERROR: Nginx could not load the self-signed certificate${NC}"
         exit 1
     fi
-    run_query "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = 1;"
-    echo -e "${GREEN}Self-signed TLS configured and SSL verification disabled${NC}"
+    if ! docker exec "$NGINX_CONTAINER" \
+        sh /usr/local/lib/kvs-tls/internal-trust.sh publish; then
+        echo -e "${RED}ERROR: Could not publish internal TLS trust${NC}"
+        exit 1
+    fi
 else
     if ! docker compose up -d --force-recreate nginx acme >/dev/null; then
         echo -e "${RED}ERROR: Could not start Nginx and ACME${NC}"
@@ -1470,6 +1475,36 @@ if ! docker exec "$NGINX_CONTAINER" nginx -t >/dev/null 2>&1 ||
     ! docker exec "$NGINX_CONTAINER" nginx -s reload >/dev/null; then
     echo -e "${RED}ERROR: Nginx could not reload after backend recreation${NC}"
     exit 1
+fi
+
+if [ "$MODE" = single ] && [ "$SSL_PROVIDER" = selfsigned ]; then
+    # Prove the actual PHP/cURL trust store in both application containers
+    # before removing the old database workaround. Use the internal TLS port;
+    # PROJECT_HTTPS_PORT describes the host mapping, not NGINX's listener.
+    for tls_container in "$PHP_CONTAINER" "${CONTAINER_PREFIX}-cron"; do
+        if ! docker exec -e KVS_TLS_HOST="$DOMAIN" "$tls_container" php -r '
+            $url = "https://" . getenv("KVS_TLS_HOST") . "/";
+            foreach (range(1, 30) as $attempt) {
+                $curl = curl_init($url);
+                curl_setopt_array($curl, array(CURLOPT_NOBODY => true,
+                    CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 2,
+                    CURLOPT_PROXY => "", CURLOPT_SSL_VERIFYPEER => true,
+                    CURLOPT_SSL_VERIFYHOST => 2));
+                $ok = curl_exec($curl) !== false;
+                $error = curl_error($curl);
+                curl_close($curl);
+                if ($ok) { exit(0); }
+                sleep(1);
+            }
+            fwrite(STDERR, "Internal TLS verification failed: $error\n");
+            exit(1);
+        '; then
+            echo -e "${RED}ERROR: Internal TLS is not trusted by ${tls_container}${NC}"
+            exit 1
+        fi
+    done
+    run_query "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = 0;"
+    echo -e "${GREEN}Self-signed TLS trusted by PHP and cron; SSL verification enabled${NC}"
 fi
 set_env_value PROJECT_HTTPS_PORT "$PROJECT_HTTPS_PORT"
 export PROJECT_HTTPS_PORT

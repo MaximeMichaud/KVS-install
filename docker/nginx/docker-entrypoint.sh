@@ -108,24 +108,42 @@ certificate_pair_is_valid() {
     [ "$certificate_public_key" = "$private_public_key" ]
 }
 
+generate_self_signed_pair() (
+    mkdir -p "$SSL_DIR"
+    staging_dir=$(mktemp -d "$SSL_DIR/.selfsigned.XXXXXX")
+    trap 'rm -rf "$staging_dir"' EXIT
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "$staging_dir/key.pem" -out "$staging_dir/cert.pem" \
+        -subj "/CN=${DOMAIN}" \
+        -addext 'basicConstraints=critical,CA:FALSE' \
+        -addext 'extendedKeyUsage=serverAuth' \
+        -addext "subjectAltName=${CERTIFICATE_SAN}" 2>/dev/null || exit 1
+    chmod 600 "$staging_dir/key.pem" || exit 1
+    chmod 644 "$staging_dir/cert.pem" || exit 1
+    mv -f "$staging_dir/key.pem" "$SSL_DIR/key.pem" || exit 1
+    mv -f "$staging_dir/cert.pem" "$SSL_DIR/cert.pem" || exit 1
+    echo "Self-signed certificate generated for ${DOMAIN}"
+)
+
 # Generate self-signed cert if not exists (fallback until ACME runs)
 # Skip if SSL_PROVIDER=none (behind reverse proxy like Caddy)
 if [ "$SSL_PROVIDER" != "none" ]; then
     SSL_DIR="/etc/nginx/ssl/${DOMAIN}"
     if ! certificate_pair_is_valid; then
         echo "SSL certificate pair is missing, invalid, or mismatched; generating a self-signed certificate..."
-        mkdir -p "${SSL_DIR}"
-        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-            -keyout "${SSL_DIR}/key.pem" \
-            -out "${SSL_DIR}/cert.pem" \
-            -subj "/CN=${DOMAIN}" \
-            -addext "subjectAltName=${CERTIFICATE_SAN}" \
-            2>/dev/null
-        echo "Self-signed certificate generated for ${DOMAIN}"
+        generate_self_signed_pair
     fi
 else
     echo "SSL_PROVIDER=none: Skipping SSL certificate generation (behind reverse proxy)"
 fi
+
+publish_internal_trust() {
+    if [ -f /usr/local/lib/kvs-tls/internal-trust.sh ]; then
+        DOMAIN="$DOMAIN" SSL_PROVIDER="$SSL_PROVIDER" \
+            sh /usr/local/lib/kvs-tls/internal-trust.sh publish
+    fi
+}
+publish_internal_trust
 
 # Remove default nginx config (conflicts with our server blocks)
 rm -f /etc/nginx/conf.d/default.conf
@@ -187,13 +205,27 @@ monitor_certificate_changes() (
             2>/dev/null || true
     )
     while sleep "$certificate_monitor_interval"; do
+        # Renew our self-signed leaf before expiry, including on an installation
+        # that runs for more than a year without a container restart. A retained
+        # public/private-CA certificate remains the operator/ACME's responsibility.
+        if [ "$SSL_PROVIDER" = selfsigned ] &&
+            ! openssl x509 -in "$certificate_monitor_cert_file" -noout -checkend 604800 >/dev/null 2>&1; then
+            certificate_subject=$(openssl x509 -in "$certificate_monitor_cert_file" -noout -subject -nameopt RFC2253) || continue
+            certificate_issuer=$(openssl x509 -in "$certificate_monitor_cert_file" -noout -issuer -nameopt RFC2253) || continue
+            if [ "${certificate_subject#subject=}" = "${certificate_issuer#issuer=}" ] &&
+                openssl verify -no_check_time -CAfile "$certificate_monitor_cert_file" \
+                    -no-CApath -check_ss_sig "$certificate_monitor_cert_file" >/dev/null 2>&1; then
+                generate_self_signed_pair || continue
+            fi
+        fi
         certificate_monitor_current_hash=$(
             sha256sum "$certificate_monitor_cert_file" "$certificate_monitor_key_file" \
                 2>/dev/null || true
         )
         [ -n "$certificate_monitor_current_hash" ] || continue
         [ "$certificate_monitor_current_hash" != "$certificate_monitor_previous_hash" ] || continue
-        if nginx -t >/dev/null 2>&1 && nginx -s reload; then
+        if certificate_pair_is_valid && nginx -t >/dev/null 2>&1 &&
+            publish_internal_trust && nginx -s reload; then
             certificate_monitor_previous_hash="$certificate_monitor_current_hash"
             echo "Reloaded Nginx after a certificate change"
         fi
