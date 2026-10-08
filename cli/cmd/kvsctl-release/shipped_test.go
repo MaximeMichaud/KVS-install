@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -720,6 +725,188 @@ func TestCheckShipped(t *testing.T) {
 	edit(bare, "manifest.json", fmt.Sprintf("\"size\": %d\n", m.Latest().Bundle.Size), "\"size\": 0\n")
 	resign(bare)
 	finds("a bundle signed without its size", bare, "the manifest signs no size for the bundle of 26.11.0")
+}
+
+// The publish job on a tag of this tree, from the images to the check of
+// the kvsctl it ships: release-images.sh turns the digests the images job
+// recorded and docker/images.lock into the image list, kvsctl-release
+// bundles docker/docker-compose.yml with its override and signs the
+// manifest with the knobs of .github/release.env, the kvsctl the cli job
+// built reads that manifest with the keys it embeds and prints what the
+// job parses, and TestShippedRelease plans every installation on it. The
+// registry is a stub that serves every image, the release publishes two
+// PHP series and every MariaDB series of the lock, and kvsctl embeds the
+// key of the test in place of ReleasePublicKey. A change to the compose
+// file, the lock, release-images.sh or kvsctl that would stop the publish
+// job of a release stops this test first.
+func TestAReleaseOfThisTreePassesThePublishCheck(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds kvsctl and runs it as a process")
+	}
+	const version = "26.11.0"
+	root := filepath.Join("..", "..", "..")
+	registry := registryStub()
+	defer registry.Close()
+	host := strings.TrimPrefix(registry.URL, "http://")
+	work := t.TempDir()
+	write := func(path, content string, mode os.FileMode) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// What the images job records for each image it pushes.
+	digests := filepath.Join(work, "digests")
+	record := func(file, key, repository, tag string) {
+		write(filepath.Join(digests, file), key+"="+stubDigest("/v2/kvs-install/"+repository+"/manifests/"+tag)+"\n", 0o644)
+	}
+	record("nginx.txt", "nginx", "nginx", version)
+	record("kvs-init.txt", "kvs-init", "init", version)
+	record("manticore.txt", "manticore", "manticore", version)
+	for _, series := range []string{"8.1", "8.4"} {
+		record("php-fpm"+series+".txt", "php-fpm@"+series, "php", version+"-php"+series)
+		record("cron"+series+".txt", "cron@"+series, "cron", version+"-php"+series)
+	}
+	lock := filepath.Join(work, "images.lock")
+	write(lock, stubLock(t, filepath.Join(root, "docker", "images.lock"), host), 0o644)
+	spec := filepath.Join(work, "spec")
+	script := exec.Command("bash", filepath.Join(root, ".github", "scripts", "release-images.sh"), host+"/kvs-install", version, digests, spec)
+	script.Env = append(os.Environ(), "IMAGES_LOCK="+lock)
+	if out, err := script.CombinedOutput(); err != nil {
+		t.Fatalf("release-images.sh: %v\n%s", err, out)
+	}
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(data))
+	}
+	images, imageDigests, phpSeries := read(filepath.Join(spec, "images.spec")), read(filepath.Join(spec, "digests.spec")), read(filepath.Join(spec, "php-series.spec"))
+
+	// The cli job, with the key of the test embedded.
+	keys := t.TempDir()
+	if err := keygen([]string{"--out", keys}); err != nil {
+		t.Fatal(err)
+	}
+	pub := read(filepath.Join(keys, "release.pub"))
+	dist := filepath.Join(work, "dist")
+	kvsctl := filepath.Join(dist, "kvsctl-linux-amd64")
+	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-s -w -X main.Version="+version+" -X main.ReleasePublicKey="+pub,
+		"-o", kvsctl, "../kvsctl")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	built, err := os.ReadFile(kvsctl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(built)
+	write(filepath.Join(dist, sumsFile), hex.EncodeToString(sum[:])+"  kvsctl-linux-amd64\n", 0o644)
+
+	// The publish job: the bundle and the manifest, with the knobs of
+	// .github/release.env read the way the job reads them, but NOTES, which
+	// the file leaves empty between releases, and those that name a version
+	// or a key of a real release: MIN_FROM, KVSCTL_MIN and ANNOUNCE_KEY.
+	knobs := exec.Command("bash", "-c", `set -a; . "$1"; set +a; printf '%s\0' "$KVS_MIN" "$COMPOSE_MIN" "$DATABASE" "$ONE_WAY" "$HIGHLIGHT_1" "$HIGHLIGHT_2" "$HIGHLIGHT_3"`, "bash", filepath.Join(root, ".github", "release.env"))
+	out, err := knobs.Output()
+	if err != nil {
+		t.Fatalf(".github/release.env: %v", err)
+	}
+	knob := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	if len(knob) != 7 {
+		t.Fatalf(".github/release.env gives KVS_MIN, COMPOSE_MIN, DATABASE, ONE_WAY and the highlights as %q", knob)
+	}
+	compose := read(filepath.Join(root, "docker", "docker-compose.yml"))
+	repo := gitRepo(t, map[string]string{"docker/docker-compose.yml": compose + "\n", "README.md": "readme\n"}, nil)
+	bundlePath := filepath.Join(dist, "kvs-stack-"+version+".tar.gz")
+	if err := bundle([]string{"--repo", repo, "--ref", "HEAD", "--version", version, "--images", images, "--digests", imageDigests, "--out", bundlePath}); err != nil {
+		t.Fatal(err)
+	}
+	base := "https://example.test/releases/download/" + version + "/"
+	arguments := []string{
+		"--key", filepath.Join(keys, "release.key"), "--out", dist, "--version", version,
+		"--bundle", bundlePath, "--bundle-url", base + "kvs-stack-" + version + ".tar.gz",
+		"--images", images, "--digests", imageDigests, "--notes", "a line of notes",
+		"--php-series", phpSeries, "--php", strings.Split(phpSeries, ",")[0],
+		"--kvs-min", knob[0], "--compose-min", knob[1], "--database", knob[2],
+		"--cli", "linux-amd64=" + base + "kvsctl-linux-amd64", "--assets", dist,
+	}
+	if knob[3] == "true" {
+		arguments = append(arguments, "--one-way")
+	}
+	for _, highlight := range knob[4:] {
+		if highlight != "" {
+			arguments = append(arguments, "--highlight", highlight)
+		}
+	}
+	if err := manifestCmd(arguments); err != nil {
+		t.Fatal(err)
+	}
+
+	// The step that tries the kvsctl of the release, which unsets
+	// KVSCTL_RELEASE_KEY; no installation is there for kvsctl to remind of.
+	run := func(args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command(kvsctl, args...)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "KVS_INSTALL_DIR=" + t.TempDir()}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("kvsctl %s: %v\n%s", strings.Join(args, " "), err, stderr.String())
+		}
+		return out
+	}
+	// The job reads the version as the second word, awk '{ print $2 }'.
+	if words := strings.Fields(string(run("version"))); len(words) < 2 || words[1] != version {
+		t.Errorf("kvsctl version prints %q, and the publish job wants %s as its second word", words, version)
+	}
+	// And any(.[]; .version == $version) of jq on the list of releases.
+	var listed []map[string]any
+	if err := json.Unmarshal(run("releases", "--json", "--manifest", "file://"+filepath.Join(dist, "manifest.json")), &listed); err != nil {
+		t.Errorf("kvsctl releases --json does not print a list of releases: %v", err)
+	}
+	if !slices.ContainsFunc(listed, func(r map[string]any) bool { return r["version"] == version }) {
+		t.Errorf("kvsctl releases --json lists no object whose version is %s: %v", version, listed)
+	}
+
+	t.Setenv("KVSCTL_SHIPPED_DIR", dist)
+	t.Setenv("KVSCTL_SHIPPED_VERSION", version)
+	t.Setenv("KVSCTL_SHIPPED_KEYS", pub)
+	t.Run("TestShippedRelease", TestShippedRelease)
+}
+
+// stubLock is the lock at path with every image read from the registry
+// stub at host instead, under the same repository and tag, and the digest
+// the stub answers for it.
+func stubLock(t *testing.T, path, host string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 || strings.HasPrefix(line, "#") {
+			continue
+		}
+		ref, _, _ := strings.Cut(fields[2], "@")
+		m := refRe.FindStringSubmatch(ref)
+		if m == nil || m[3] == "" {
+			t.Fatalf("%s: %q names no repository and tag", path, fields[2])
+		}
+		fields[2] = host + "/" + m[2] + ":" + m[3] + "@" + stubDigest("/v2/"+m[2]+"/manifests/"+m[3])
+		lines[i] = strings.Join(fields, "\t")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // An image of another series agrees with the override as long as .env

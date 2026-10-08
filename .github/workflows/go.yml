@@ -1,0 +1,91 @@
+name: kvsctl
+
+# On a change of kvsctl or of a file of the repository its tests read, and
+# called by the release workflow, which builds and pushes nothing before
+# these checks pass on the tagged commit. The dump and replay tests run a
+# MariaDB that docker/images.lock pins, of the series
+# docker/docker-compose.yml installs, so a MariaDB pin bump runs them; a
+# .env test compares how kvsctl and docker compose read
+# docker/.env.example, another reads the entrypoints of the PHP-FPM and
+# cron images; and a test runs the publish check of the release workflow
+# on the compose file, the lock and .github/release.env, through
+# release-images.sh.
+on:
+  push:
+    paths:
+      - "cli/**"
+      - ".github/workflows/go.yml"
+      - "docker/images.lock"
+      - "docker/docker-compose.yml"
+      - "docker/.env.example"
+      - "docker/php/docker-entrypoint.sh"
+      - "docker/cron/docker-entrypoint.sh"
+      - ".github/release.env"
+      - ".github/scripts/release-images.sh"
+  pull_request:
+    paths:
+      - "cli/**"
+      - ".github/workflows/go.yml"
+      - "docker/images.lock"
+      - "docker/docker-compose.yml"
+      - "docker/.env.example"
+      - "docker/php/docker-entrypoint.sh"
+      - "docker/cron/docker-entrypoint.sh"
+      - ".github/release.env"
+      - ".github/scripts/release-images.sh"
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      # setup-go installs the version cli/go.mod names and sets
+      # GOTOOLCHAIN=local; the release workflow builds the published binaries
+      # the same way and checks the same thing.
+      - name: the toolchain
+        run: |
+          want=$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')
+          have=$(go env GOVERSION)
+          if [ "$have" != "$want" ]; then
+            echo "::error::running ${have}, cli/go.mod names ${want}"
+            exit 1
+          fi
+          echo "running ${have}"
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        run: go vet ./...
+      # KVSCTL_COMPOSE_PARITY has the .env tests compare what kvsctl reads
+      # with what the docker compose of the runner reads, docker/.env.example
+      # included. The one that reads the example skips where there is no
+      # compose, so the step before them wants it.
+      - name: docker compose
+        run: docker compose version
+      - name: test
+        env:
+          KVSCTL_COMPOSE_PARITY: "1"
+        run: go test -race ./...
+      # The known vulnerabilities of the Go release and of the modules
+      # kvsctl links that its code reaches. The tool is pinned, so a release
+      # of it never changes the verdict on its own; the vulnerability
+      # database is read at each run, so a commit checked once fails later
+      # when a vulnerability it ships becomes known.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      # Static and for linux/amd64, the way the release workflow builds the
+      # only binaries it publishes.
+      - name: build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ./...

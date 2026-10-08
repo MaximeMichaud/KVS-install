@@ -1,0 +1,551 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "[0-9][0-9].[0-9]*.[0-9]*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time. The publish job extends the manifest of the latest
+# release, so two runs publishing together would build on the same previous
+# manifest and the second would drop the release of the first. A run started
+# while another one is in progress waits for it. GitHub keeps one waiting
+# run per group: a third run cancels the one that was waiting, which then
+# has to be started again.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      tag: ${{ steps.version.outputs.tag }}
+      namespace: ${{ steps.namespace.outputs.value }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: validate the tag
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./.github/scripts/release-version.sh "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+      # The knobs of .github/release.env end up in the signed manifest. A
+      # missing NOTES line, or a value of the file kvsctl-release would
+      # refuse whatever manifest it extends, stops the run here, before the
+      # images job pushes anything. What depends on more than the file is
+      # checked before the images too: MIN_FROM against the manifest of the
+      # latest release by the step "the previous manifest" below,
+      # ANNOUNCE_KEY against the signing keys by the keys job.
+      - name: check release.env
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: ./.github/scripts/release-env.sh "$VERSION"
+
+      # verify-manifest.sh checks the signature with kvsctl-release.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      # The manifest this release extends is the one of the latest release,
+      # which the publish job reads again: kvsctl-release refuses there a
+      # list that is not the stable one, and a MIN_FROM that list does not
+      # hold. Both stop the run here instead, before anything is pushed.
+      - name: the previous manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./.github/scripts/verify-manifest.sh \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" \
+            "${RUNNER_TEMP}/previous.json"
+          ./.github/scripts/release-previous.sh "${RUNNER_TEMP}/previous.json"
+
+      # GHCR refuses an image name with an uppercase letter, and this
+      # repository has two of them.
+      - name: image namespace
+        id: namespace
+        run: |
+          lower=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "value=ghcr.io/${lower}" >> "$GITHUB_OUTPUT"
+
+      # The notes cover everything since the previous stable release, for a
+      # candidate and for the release it leads to alike. Both values were
+      # checked by the scripts that print them, so they are safe to splice
+      # into the arguments of git-cliff.
+      - name: the range of the release notes
+        id: range
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: ./.github/scripts/release-notes-range.sh "$TAG" >> "$GITHUB_OUTPUT"
+
+      # The range decides which commits the notes list. "--ignore-tags ."
+      # makes git-cliff ignore every tag inside it, so they come out as one
+      # section named after this tag, even when another tag sits on the same
+      # commit (a release tagged on the commit of its last candidate, whose
+      # run is started again). The git-cliff version is pinned so the notes
+      # render the way they were checked when cliff.toml last changed.
+      - name: release notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          version: v2.14.2
+          config: cliff.toml
+          args: ${{ steps.range.outputs.value }} --tag ${{ steps.version.outputs.tag }} --ignore-tags . --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+
+  # The checks a pull request runs, on the tagged commit: the kvsctl tests
+  # and the shell suites, which cover the release scripts and the lock.
+  # Nothing is built, pushed or published before both pass.
+  go:
+    name: kvsctl tests
+    uses: ./.github/workflows/go.yml
+    permissions:
+      contents: read
+
+  suites:
+    name: shell suites
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
+  # The keys the publish job signs with have to be keys kvsctl-release can
+  # sign with, and keys the kvsctl of this commit trusts, ReleasePublicKey in
+  # cli/cmd/kvsctl/main.go, or every kvsctl built from it refuses the
+  # manifest. The publish job finds out, but only after the images job has
+  # pushed every image under the version tag, and the version is then spent.
+  # This job reads the same secrets in the same protected environment, so it
+  # waits for an approval too, and nothing is pushed before it passes. It
+  # also stops every release while ReleasePublicKey lists the key kvsctl was
+  # developed with.
+  keys:
+    name: signing keys
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # The script reads each secret with kvsctl-release, as the publish job
+      # signs with it.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: the signing keys against ReleasePublicKey
+        env:
+          KVSCTL_RELEASE_KEY: ${{ secrets.KVSCTL_RELEASE_KEY }}
+          KVSCTL_RELEASE_KEY_NEXT: ${{ secrets.KVSCTL_RELEASE_KEY_NEXT }}
+        run: ./.github/scripts/release-signing-keys.sh
+
+  images:
+    name: ${{ matrix.service }}${{ matrix.php && format(' php{0}', matrix.php) || '' }}
+    needs: [prepare, go, suites, keys]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { service: nginx, compose: nginx, context: docker/nginx, base: "", php: "" }
+          - { service: init, compose: kvs-init, context: docker/init, base: "", php: "" }
+          - { service: manticore, compose: manticore, context: docker/manticore, base: "", php: "" }
+          - { service: php, compose: php-fpm, context: docker/php, base: php-fpm, php: "8.1" }
+          - { service: php, compose: php-fpm, context: docker/php, base: php-fpm, php: "8.2" }
+          - { service: php, compose: php-fpm, context: docker/php, base: php-fpm, php: "8.3" }
+          - { service: php, compose: php-fpm, context: docker/php, base: php-fpm, php: "8.4" }
+          - { service: cron, compose: cron, context: docker/cron, base: php-cli, php: "8.1" }
+          - { service: cron, compose: cron, context: docker/cron, base: php-cli, php: "8.2" }
+          - { service: cron, compose: cron, context: docker/cron, base: php-cli, php: "8.3" }
+          - { service: cron, compose: cron, context: docker/cron, base: php-cli, php: "8.4" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build arguments
+        id: args
+        env:
+          PHP_SERIES: ${{ matrix.php }}
+          BASE_NAME: ${{ matrix.base }}
+        run: |
+          {
+            echo 'value<<ARGS_EOF'
+            if [ -n "$PHP_SERIES" ]; then
+              echo "PHP_VERSION=${PHP_SERIES}"
+              echo "PHP_BASE=$(./docker/bin/resolve-bases.sh --get "$BASE_NAME" "$PHP_SERIES")"
+            fi
+            echo 'ARGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ needs.prepare.outputs.namespace }}/${{ matrix.service }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}${{ matrix.php && format('-php{0}', matrix.php) || '' }}
+
+      # provenance and sbom stay off. Buildx turns them on by default inside
+      # Actions, which makes even a single platform push an OCI index with an
+      # extra unknown/unknown manifest: the digest recorded below would then
+      # be the index digest while the size is the amd64 one. A plain image
+      # manifest keeps the two consistent.
+      #
+      # linux/amd64 only: a release publishes amd64 images and kvsctl
+      # binaries, and kvsctl refuses another architecture. The PHP-FPM and
+      # cron images build on arm64 too, which the docker images workflow
+      # checks for every PHP series; it builds the others for amd64 only.
+      - name: build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: ${{ steps.args.outputs.value }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}${{ matrix.php }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}${{ matrix.php }}
+
+      # outputs.digest is the registry digest, the one a pull can be checked
+      # against; outputs.imageid is the local config digest and is not
+      # pullable.
+      - name: record the digest
+        env:
+          SERVICE: ${{ matrix.compose }}
+          PHP_SERIES: ${{ matrix.php }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          key=$SERVICE
+          if [ -n "$PHP_SERIES" ]; then
+            key="${SERVICE}@${PHP_SERIES}"
+          fi
+          mkdir -p digests
+          printf '%s=%s\n' "$key" "$DIGEST" > "digests/${SERVICE}${PHP_SERIES}.txt"
+
+      # One artifact per matrix entry: upload-artifact refuses several
+      # uploads under one name. The publish job merges them back.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.service }}${{ matrix.php }}
+          path: digests/*.txt
+          if-no-files-found: error
+
+  cli:
+    name: kvsctl
+    needs: [prepare, go, suites]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      # setup-go installs the version cli/go.mod names (its toolchain line
+      # when there is one, its go line otherwise) and sets GOTOOLCHAIN=local,
+      # so the go command cannot switch to another one. The published
+      # binaries run as root and read network input: this proves they are
+      # built with exactly the release go.mod asks for.
+      - name: the toolchain
+        working-directory: cli
+        run: |
+          want=$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')
+          have=$(go env GOVERSION)
+          if [ "$have" != "$want" ]; then
+            echo "::error::the binaries would be built with ${have}, cli/go.mod names ${want}"
+            exit 1
+          fi
+          echo "building with ${have}"
+
+      # linux/amd64 only, like the images of the stack: kvsctl has nothing
+      # to install on another architecture.
+      - name: build the binaries
+        working-directory: cli
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p ../dist
+          for command in kvsctl kvsctl-release; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+              -ldflags "-s -w -X main.Version=${VERSION}" \
+              -o "../dist/${command}-linux-amd64" "./cmd/${command}"
+          done
+
+      - name: checksums
+        working-directory: dist
+        run: sha256sum kvsctl-* > SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [prepare, go, suites, images, cli]
+    runs-on: ubuntu-latest
+    # Protected: with the keys job, the only job that can read the signing
+    # keys, so a pull request build can never reach them.
+    environment: release
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: notes
+          path: .
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: cli
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: digests
+
+      # The new manifest extends this one, so it has to be the signed
+      # manifest of the newest stack release. A 404 is the first release only
+      # while no published stable release carries a manifest.json; when one
+      # does, the latest release is not a stack release, and the script names
+      # it instead of letting the new manifest drop every earlier release.
+      - name: the previous manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./.github/scripts/verify-manifest.sh \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" \
+            previous.json
+
+      - name: the arguments kvsctl-release takes
+        env:
+          NAMESPACE: ${{ needs.prepare.outputs.namespace }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release-images.sh "$NAMESPACE" "$VERSION" digests spec
+
+      # KVSCTL_RELEASE_KEY signs every release. KVSCTL_RELEASE_KEY_NEXT is
+      # only set during a key rotation and signs too, so the binaries that
+      # trust either key accept the manifest (docs/releasing.md).
+      - name: the signing keys
+        env:
+          KVSCTL_RELEASE_KEY: ${{ secrets.KVSCTL_RELEASE_KEY }}
+          KVSCTL_RELEASE_KEY_NEXT: ${{ secrets.KVSCTL_RELEASE_KEY_NEXT }}
+        run: |
+          umask 077
+          if [ -z "$KVSCTL_RELEASE_KEY" ]; then
+            echo "::error::the release environment has no KVSCTL_RELEASE_KEY secret (docs/releasing.md, one-time setup)"
+            exit 1
+          fi
+          printf '%s' "$KVSCTL_RELEASE_KEY" > "${RUNNER_TEMP}/release.key"
+          if [ -n "$KVSCTL_RELEASE_KEY_NEXT" ]; then
+            printf '%s' "$KVSCTL_RELEASE_KEY_NEXT" > "${RUNNER_TEMP}/release-next.key"
+          fi
+
+      - name: the bundle and the manifest
+        working-directory: cli
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -a
+          . ../.github/release.env
+          set +a
+
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          bundle="../dist/kvs-stack-${VERSION}.tar.gz"
+          images=$(cat ../spec/images.spec)
+          digests=$(cat ../spec/digests.spec)
+          # The commit the tag points at, peeled from an annotated tag. It is
+          # read on a line of its own so a failure stops the step instead of
+          # passing an empty --commit.
+          commit=$(git rev-parse --verify "${TAG}^{commit}")
+
+          # Every image of the override is pinned to the digest the build
+          # reported or the lock holds, never to a tag alone.
+          go run ./cmd/kvsctl-release bundle \
+            --repo .. --ref "$TAG" --version "$VERSION" \
+            --images "$images" --digests "$digests" --out "$bundle"
+
+          arguments=(
+            --key "${RUNNER_TEMP}/release.key"
+            --out ../dist/
+            --version "$VERSION"
+            --commit "$commit"
+            --bundle "$bundle"
+            --bundle-url "${base}/kvs-stack-${VERSION}.tar.gz"
+            --images "$images"
+            --digests "$digests"
+            --notes "$NOTES"
+            --notes-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+            --php-series "$(cat ../spec/php-series.spec)"
+            --php "$(cut -d, -f1 ../spec/php-series.spec)"
+            --kvs-min "$KVS_MIN"
+            --compose-min "$COMPOSE_MIN"
+            --database "$DATABASE"
+            --cli "linux-amd64=${base}/kvsctl-linux-amd64"
+            --assets ../dist/
+          )
+          if [ -f "${RUNNER_TEMP}/release-next.key" ]; then
+            arguments+=(--key "${RUNNER_TEMP}/release-next.key")
+          fi
+          if [ -n "$ANNOUNCE_KEY" ]; then
+            arguments+=(--announce-key "$ANNOUNCE_KEY")
+          fi
+          if [ -n "$MIN_FROM" ]; then
+            arguments+=(--min-from "$MIN_FROM")
+          fi
+          if [ -n "$KVSCTL_MIN" ]; then
+            arguments+=(--kvsctl-min "$KVSCTL_MIN")
+          fi
+          for highlight in "$HIGHLIGHT_1" "$HIGHLIGHT_2" "$HIGHLIGHT_3"; do
+            if [ -n "$highlight" ]; then
+              arguments+=(--highlight "$highlight")
+            fi
+          done
+          if [ "$ONE_WAY" = "true" ]; then
+            arguments+=(--one-way)
+          fi
+          if [ -f ../previous.json ]; then
+            arguments+=(--previous ../previous.json)
+          fi
+
+          go run ./cmd/kvsctl-release manifest "${arguments[@]}"
+
+      - name: forget the keys
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/release.key" "${RUNNER_TEMP}/release-next.key"
+
+      # The kvsctl this release ships trusts the keys of ReleasePublicKey in
+      # the tagged commit. Every signature of the new manifest has to verify
+      # with one of them, so a secret that does not match the binary, the
+      # next key of a rotation included, stops the release here, before
+      # anything is published.
+      - name: check the manifest against the keys kvsctl ships with
+        working-directory: cli
+        run: |
+          keys=$(../.github/scripts/release-public-keys.sh)
+          IFS=',' read -r -a key_list <<<"$keys"
+          pub_args=()
+          for key in "${key_list[@]}"; do
+            pub_args+=(--pub "$key")
+          done
+          go run ./cmd/kvsctl-release verify --all \
+            --manifest ../dist/manifest.json \
+            --signature ../dist/manifest.json.sig \
+            "${pub_args[@]}"
+
+      # The kvsctl this release ships has to be able to install it. The
+      # binary reads the signed manifest with the keys it embeds alone,
+      # KVSCTL_RELEASE_KEY unset, and says which version it was built as.
+      # TestShippedRelease (cli/cmd/kvsctl-release/shipped_test.go) then
+      # checks the bundle and the kvsctl builds the way kvsctl downloads
+      # them, and runs the upgrade plan of kvsctl for every pair of a PHP and
+      # a MariaDB series the release publishes: the images it picks and the
+      # .env keys it writes have to be the ones the compose override of the
+      # bundle runs and reads. It skips when it is given no release, so its
+      # PASS line is required.
+      - name: check that the kvsctl of the release can install it
+        working-directory: cli
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -o pipefail
+          unset KVSCTL_RELEASE_KEY
+          dist=$(cd ../dist && pwd)
+          kvsctl="${dist}/kvsctl-linux-amd64"
+          # An artifact keeps no file mode.
+          chmod +x "$kvsctl"
+          built=$("$kvsctl" version)
+          if [ "$(printf '%s\n' "$built" | awk '{ print $2 }')" != "$VERSION" ]; then
+            echo "::error::the kvsctl of the release says '${built}', not version ${VERSION}"
+            exit 1
+          fi
+          "$kvsctl" releases --json --manifest "file://${dist}/manifest.json" > "${RUNNER_TEMP}/releases.json"
+          if ! jq -e --arg version "$VERSION" 'any(.[]; .version == $version)' "${RUNNER_TEMP}/releases.json" > /dev/null; then
+            echo "::error::the kvsctl of the release reads the manifest, and it does not list ${VERSION} there"
+            exit 1
+          fi
+          keys=$(../.github/scripts/release-public-keys.sh)
+          KVSCTL_SHIPPED_DIR="$dist" KVSCTL_SHIPPED_VERSION="$VERSION" KVSCTL_SHIPPED_KEYS="$keys" \
+            go test -count=1 -run '^TestShippedRelease$' -v ./cmd/kvsctl-release | tee "${RUNNER_TEMP}/shipped.log"
+          grep -q '^--- PASS: TestShippedRelease ' "${RUNNER_TEMP}/shipped.log"
+
+      # A pre-release is excluded from the latest flag, so
+      # releases/latest/download/manifest.json keeps naming the newest stable
+      # release and the stable channel never sees a candidate.
+      #
+      # Every asset goes to a draft, which is published last: GitHub accepts
+      # no upload to a published release once release immutability is on.
+      # The action drafts a stable release itself and publishes it after the
+      # uploads; a candidate it would publish at once, so it is created as a
+      # draft here and published by the next step.
+      - name: the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          draft: ${{ needs.prepare.outputs.prerelease }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          make_latest: ${{ needs.prepare.outputs.prerelease == 'false' }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/manifest.json
+            dist/manifest.json.sig
+            dist/kvs-stack-*.tar.gz
+            dist/kvsctl-linux-amd64
+            dist/kvsctl-release-linux-amd64
+            dist/SHA256SUMS
+
+      - name: publish the candidate
+        if: needs.prepare.outputs.prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false

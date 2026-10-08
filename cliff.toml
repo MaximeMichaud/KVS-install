@@ -1,0 +1,72 @@
+# git-cliff configuration.
+#
+# The prepare job of the release workflow runs
+#
+#   git cliff <previous stable tag>..<tag> --tag <tag> --ignore-tags . --strip header
+#
+# and puts the result in the body of the GitHub release:
+# .github/scripts/release-notes-range.sh prints the range, which starts at
+# the previous stable release, and every tag inside it is ignored, so the
+# notes are one section named after <tag>. The manifest kvsctl fetches on
+# every status check never carries this text: it holds the one line of NOTES
+# from .github/release.env and a notes_url pointing at the release page, so
+# the list of releases does not grow without bound.
+#
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """
+# Changelog
+"""
+# The group names start with an HTML comment that only sets their order:
+# git-cliff sorts the groups by name, and striptags removes the comment.
+body = """
+{% if version %}\
+## {{ version | trim_start_matches(pat="v") }} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}{{ commit.scope }}: {% endif %}{{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+topo_order = false
+sort_commits = "oldest"
+
+# The types this repository uses, in the order a reader wants them.
+commit_parsers = [
+  { message = "^[a-z]+(\\(.+\\))?!:", group = "<!-- 00 -->Breaking changes" },
+  { body = ".*BREAKING CHANGE", group = "<!-- 00 -->Breaking changes" },
+  { message = "^feat", group = "<!-- 01 -->Features" },
+  { message = "^fix", group = "<!-- 02 -->Fixes" },
+  { message = "^perf", group = "<!-- 03 -->Performance" },
+  { message = "^refactor", group = "<!-- 04 -->Refactoring" },
+  { message = "^docs", group = "<!-- 05 -->Documentation" },
+  { message = "^test", group = "<!-- 06 -->Tests" },
+  { message = "^build", group = "<!-- 07 -->Build" },
+  { message = "^ci", group = "<!-- 08 -->CI" },
+  { message = "^style", group = "<!-- 09 -->Style" },
+  { message = "^chore", group = "<!-- 10 -->Chores" },
+  { message = "^revert", group = "<!-- 11 -->Reverts" },
+]
+
+# Tags are the stack version, calendar versioning YY.M.PATCH with no prefix.
+# Only a stable tag marks a release, for a changelog rendered by hand: a
+# candidate, 26.11.0-rc1, is not a boundary, so the section of 26.11.0 lists
+# everything since the previous stable release, the commits its candidates
+# already listed included, which is also what the release workflow writes.
+tag_pattern = "^[0-9]{2}\\.[0-9]+\\.[0-9]+$"
+skip_tags = ""
+ignore_tags = ""

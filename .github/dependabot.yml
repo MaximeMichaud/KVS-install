@@ -9,3 +9,18 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+  # kvsctl is built from cli/; one grouped pull request a week keeps its
+  # modules current without a pull request per module.
+  - package-ecosystem: "gomod"
+    directory: "/cli"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+      include: "scope"

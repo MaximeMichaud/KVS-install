@@ -1,0 +1,100 @@
+name: tests
+
+# The shell suites of tests/, on every push to a branch and every pull
+# request. The release workflow calls this workflow as well, so a tag builds
+# and pushes nothing before the suites of its commit pass.
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  suites:
+    name: shell suites
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # PyYAML lets the workflow suite read the workflows as GitHub does. The
+      # runner image has every other tool the suites use, Docker with
+      # Compose, PHP, rsync, zstd and 7-Zip among them. The suites check the
+      # scripts against GNU coreutils, those of the Debian releases the stack
+      # supports: an image whose coreutils are the uutils ones, which Ubuntu
+      # defaults to from 26.04 on, gets GNU coreutils first, as the uutils
+      # sort also leaves a temporary directory behind in a TMPDIR that one of
+      # the suites checks stays empty.
+      - name: the tools the suites use
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            gettext-base uidmap python3-yaml
+          if sort --version | grep -q uutils; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              --allow-remove-essential coreutils-from-gnu coreutils-from-uutils-
+          fi
+          sort --version | sed -n 1p
+          sort --version | grep -q 'GNU coreutils'
+          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+
+      # The phpMyAdmin suite runs as root of a user namespace of its own,
+      # mapped onto the subordinate ids that as-uid-1000.sh gives the user
+      # the suites run as. Ubuntu takes every capability away inside a
+      # namespace an unconfined program creates while this sysctl is on.
+      - name: user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          .github/scripts/as-uid-1000.sh unshare --map-auto --map-root-user --net id -u
+
+      # The release builds nginx, init and manticore from the base their
+      # Dockerfile names by default, so that base has to be the one the lock
+      # pins. The compose files run the Alpine of the lock for
+      # phpmyadmin-init, the one the suites run its init.sh with.
+      - name: the Dockerfiles and the compose files are on the lock
+        run: ./docker/bin/resolve-bases.sh --check-dockerfiles
+
+      # As uid 1000: the scripts the suites exercise give the site's files
+      # to 1000:1000, which the runner user, uid 1001, may not. With CI set,
+      # a suite that needs Docker fails when Docker is missing, where a
+      # workstation without it only skips that part and says so.
+      - name: the suites
+        env:
+          CI: "true"
+        run: .github/scripts/as-uid-1000.sh tests/run.sh
+
+  # The jobs of the release workflow run the scripts of .github/scripts on
+  # the runner as it comes, uutils coreutils included where its Ubuntu
+  # defaults to them (26.04 and later), while the suites job above switches
+  # to GNU coreutils. The suites of those scripts run here once more, on the
+  # coreutils they run with in a release.
+  release-scripts:
+    name: release scripts, runner coreutils
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # PyYAML lets the workflow suite read the workflows as GitHub does.
+      - name: the tools the suites use
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-yaml
+          sort --version | sed -n 1p
+
+      - name: the release script suites
+        env:
+          CI: "true"
+        run: |
+          for suite in tests/test_release_*.sh; do
+            echo "Running ${suite#tests/}"
+            "$suite"
+          done
