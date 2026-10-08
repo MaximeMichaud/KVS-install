@@ -3,7 +3,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # This optional integration test uses a cached image and an isolated network.
-# Run manually; tests/run.sh does not require Docker.
+# Run manually: tests/run.sh does not run it.
 default_version=$(sed -n 's/^MARIADB_VERSION=//p' "$root/docker/.env.example")
 export DATABASE_TEST_IMAGE="${DATABASE_TEST_IMAGE:-mariadb:$default_version}"
 export DATABASE_TEST_ROOT_PASSWORD

@@ -1,7 +1,21 @@
 # /etc/cron.d system crontab for hourly Manticore index rotation.
-# An indexer run by hand as root leaves rotation files searchd cannot read
-# and the next runs cannot replace; they are cleared before each rotation.
+# The rebuild the entrypoint runs when the container starts holds the same
+# lock: while it runs, the hour is skipped, and logged, rather than starting
+# a second indexer on the same files.
+# An indexer run by hand as root leaves rotation files searchd cannot open;
+# they are cleared before each rotation. Only files of another user go, as
+# searchd can still be swapping in the .new files of the entrypoint's
+# rebuild when that rebuild releases the lock.
+# A rotation that rebuilt every table removes the failure the rebuild behind
+# searchd recorded (docker-entrypoint.sh), which the health check reports.
+# It leaves the failure of a build before searchd: searchd does not take a
+# table it started without from a rotation, only a start builds it. A
+# rotation that fails records nothing and is only logged: an hour that meets
+# MariaDB restarting, during an upgrade for instance, would otherwise report
+# the container unhealthy until the next one.
+# indexer exits 0 as long as one table was built, so the output of the hour
+# is kept apart and read for the ERROR line of a table that failed.
 SHELL=/bin/sh
 PATH=/usr/local/bin:/usr/bin:/bin
 
-0 * * * * manticore find /var/lib/manticore -name '*.new.*' -delete; /usr/bin/indexer --rotate --all >> /var/log/manticore/indexer-cron.log 2>&1
+0 * * * * manticore flock -n -E 75 /var/run/manticore/indexer.lock sh -c "find /var/lib/manticore -name '*.new.*' ! -user manticore -delete; /usr/bin/indexer --rotate --all > /var/log/manticore/indexer-hourly.log 2>&1 && ! grep -Eq '^(ERROR|FATAL):' /var/log/manticore/indexer-hourly.log && rm -f /var/run/manticore/kvs-rebuild-failed; cat /var/log/manticore/indexer-hourly.log" >> /var/log/manticore/indexer-cron.log 2>&1; [ $? -ne 75 ] || echo "$(date -u): an index rebuild holds the lock, this hourly rotation is skipped" >> /var/log/manticore/indexer-cron.log

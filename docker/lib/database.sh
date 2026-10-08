@@ -481,7 +481,10 @@ database_available_memory_mb() { database_memory_budget_mb available; }
 database_capacity_memory_mb() { database_memory_budget_mb capacity; }
 
 # An override can replace services.mariadb.command entirely. Check the rendered
-# command before saving settings or replacing a database volume.
+# command before saving settings or replacing a database volume. Compose
+# 2.22.0 and newer indent the items of the list under command:; older
+# releases write them at the level of the key ("    - --innodb-..."), so
+# only the next key ends the list.
 database_verify_compose_resources() {
     local config
     config=$(docker compose config) || return 1
@@ -489,7 +492,7 @@ database_verify_compose_resources() {
         /^  mariadb:$/ { db=1; next }
         db && /^  [^ ]/ { db=0 }
         db && /^    command:$/ { command=1; next }
-        command && /^    [^ ]/ { command=0 }
+        command && /^    [^ -]/ { command=0 }
         db && command {
             line=$0
             sub(/^[[:space:]]*-[[:space:]]*/, "", line)

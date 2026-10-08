@@ -1,5 +1,16 @@
-FROM debian:trixie-slim
+# One-shot init image: it unpacks the KVS archive, imports the database and
+# configures the site, then exits.
+#
+# The base is pinned by digest: a tag moves, a digest does not, so this build
+# and the release CI resolve the same bytes. Refresh it with
+# docker/bin/resolve-bases.sh, which rewrites docker/images.lock.
+ARG DEBIAN_BASE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+FROM ${DEBIAN_BASE}
 
+# DL3008 stays muted on purpose. Pinning a Debian package version pins it to
+# one snapshot of the suite, and Debian removes the old binaries as soon as a
+# security update lands, so a pinned apt line stops building a few days later.
+# The base image digest above is what makes this layer reproducible.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \

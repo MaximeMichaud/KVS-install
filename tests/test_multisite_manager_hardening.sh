@@ -21,10 +21,13 @@ create_fixture() {
     local name="$1"
     local fixture="${TEST_DIR}/${name}/docker"
 
-    mkdir -p "${fixture}/multi-site" "${fixture}/kvs-archive"
+    mkdir -p "${fixture}/multi-site" "${fixture}/kvs-archive" "${fixture}/bin"
     cp "${ROOT_DIR}/docker/multi-site/site-manager.sh" "${fixture}/multi-site/"
     cp "${ROOT_DIR}/docker/multi-site/docker-compose.site.yml.template" \
         "${fixture}/multi-site/"
+    # A new site takes its PHP build bases from docker/images.lock.
+    cp "${ROOT_DIR}/docker/bin/resolve-bases.sh" "${fixture}/bin/"
+    cp "${ROOT_DIR}/docker/images.lock" "${fixture}/"
     : > "${fixture}/kvs-archive/KVS_test.zip"
 }
 
@@ -316,6 +319,41 @@ example_env="${TEST_DIR}/valid/docker/multi-site/sites/example.com/.env"
 [ -f "$example_env" ] || fail "a valid site was not created from another directory"
 [ "$(stat -c '%a' "$example_env")" = 600 ] || fail "the generated .env is not mode 0600"
 [ -d "${valid_webroot}/example.com" ] || fail "the configured webroot base was not used"
+
+# A new site builds PHP-FPM and cron from the bases docker/images.lock pins
+# for its series, like the primary site, and the template reads them.
+site_php=$(sed -n 's/^PHP_VERSION=//p' "$example_env")
+pinned_fpm=$("${ROOT_DIR}/docker/bin/resolve-bases.sh" --get php-fpm "$site_php")
+pinned_cli=$("${ROOT_DIR}/docker/bin/resolve-bases.sh" --get php-cli "$site_php")
+grep -Fxq "PHP_FPM_BASE=${pinned_fpm}" "$example_env" ||
+    fail "a new site does not carry the pinned PHP-FPM base of PHP ${site_php}"
+grep -Fxq "PHP_CLI_BASE=${pinned_cli}" "$example_env" ||
+    fail "a new site does not carry the pinned PHP CLI base of PHP ${site_php}"
+example_config=$(
+    cd "${TEST_DIR}/valid/docker/multi-site/sites/example.com"
+    "$REAL_DOCKER" compose config --format json
+)
+[ "$(jq -r '.services["php-fpm"].build.args.PHP_BASE' <<< "$example_config")" = "$pinned_fpm" ] ||
+    fail "the PHP-FPM of a new site does not build from its pinned base"
+[ "$(jq -r '.services.cron.build.args.PHP_BASE' <<< "$example_config")" = "$pinned_cli" ] ||
+    fail "the cron of a new site does not build from its pinned base"
+
+# A series the lock does not know stops the addition before anything exists.
+create_fixture unpinned
+unpinned_root="${TEST_DIR}/unpinned/docker"
+sed -i '/^php-fpm[[:space:]]8\.1[[:space:]]/d' "${unpinned_root}/images.lock"
+set +e
+KVS_WEBROOT_BASE="${TEST_DIR}/unpinned/webroots" \
+    bash "${unpinned_root}/multi-site/site-manager.sh" add example.org > "${TEST_DIR}/unpinned/out" 2>&1
+unpinned_status=$?
+set -e
+[ "$unpinned_status" -ne 0 ] || fail "a site was added without a pinned PHP base"
+grep -Fq 'PHP 8.1 has no pinned base in docker/images.lock' "${TEST_DIR}/unpinned/out" ||
+    fail "the missing PHP base was not reported: $(cat "${TEST_DIR}/unpinned/out")"
+[ ! -e "${unpinned_root}/multi-site/sites/example.org" ] &&
+    [ ! -e "${unpinned_root}/multi-site/caddy/sites/example.org.caddy" ] &&
+    [ ! -e "${TEST_DIR}/unpinned/webroots/example.org" ] ||
+    fail "a site refused for its PHP base left files behind"
 
 KVS_WEBROOT_BASE="$valid_webroot" \
     bash "$valid_script" primary-config primary.example.co.uk kvs-reserved-com internal true >/dev/null

@@ -458,6 +458,9 @@ add_site() {
     local site_dir="${SITES_DIR}/${domain}"
     local site_prefix="kvs-${domain_safe}"
     local primary_domain
+    local php_version=8.1
+    local resolver="${SCRIPT_DIR}/../bin/resolve-bases.sh"
+    local php_fpm_base php_cli_base
 
     primary_domain=$(primary_site_value DOMAIN)
     if [ "$primary_domain" = "$domain" ]; then
@@ -484,6 +487,17 @@ add_site() {
     if ! compgen -G "${KVS_ARCHIVE_DIR}/KVS_*.zip" >/dev/null; then
         log_error "No KVS archive found in ${KVS_ARCHIVE_DIR}/"
         exit 1
+    fi
+
+    # The build bases of the PHP series, pinned by digest in
+    # docker/images.lock, as setup.sh writes them for the primary site
+    # (set_php_bases): without them the template builds PHP-FPM and cron
+    # from the moving php:<series> tags. Read before anything is created,
+    # so a series the lock does not know leaves no half-made site behind.
+    if ! php_fpm_base=$("$resolver" --get php-fpm "$php_version") ||
+        ! php_cli_base=$("$resolver" --get php-cli "$php_version"); then
+        log_error "PHP ${php_version} has no pinned base in docker/images.lock"
+        return 1
     fi
 
     # Create site directory
@@ -520,8 +534,13 @@ MARIADB_REDO_LOG_SIZE=128M
 MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
 MARIADB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
 
-# PHP
-PHP_VERSION=8.1
+# PHP. PHP-FPM and cron build from the bases docker/images.lock pins for
+# PHP_VERSION; after a change of PHP_VERSION, set PHP_FPM_BASE and
+# PHP_CLI_BASE to what ../../../bin/resolve-bases.sh --get php-fpm <series>
+# and --get php-cli <series> print.
+PHP_VERSION=${php_version}
+PHP_FPM_BASE=${php_fpm_base}
+PHP_CLI_BASE=${php_cli_base}
 IONCUBE=YES
 PHP_MEMORY_LIMIT=512M
 PHP_UPLOAD_MAX_FILESIZE=2048M

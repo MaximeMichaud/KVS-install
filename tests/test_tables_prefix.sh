@@ -77,7 +77,7 @@ rm -f "$KVS_PATH/admin/include/setup.php"
 # --- the Docker setup: import, site in place, archive, fallback --------------
 eval "$(extract_function "$ROOT_DIR/docker/setup.sh" setup_php_config_value)"
 eval "$(extract_function "$ROOT_DIR/docker/setup.sh" kvs_tables_prefix)"
-[ "$(setup_php_config_value tables_prefix < "$TEST_DIR/init-site/admin/include/setup.php" 2>/dev/null || true)" = "" ] ||
+[ "$(setup_php_config_value tables_prefix 2>/dev/null < "$TEST_DIR/init-site/admin/include/setup.php" || true)" = "" ] ||
     fail "a missing file yields nothing"
 write_setup "$TEST_DIR/init-site" kvs7_
 [ "$(setup_php_config_value tables_prefix < "$TEST_DIR/init-site/admin/include/setup.php")" = kvs7_ ] ||

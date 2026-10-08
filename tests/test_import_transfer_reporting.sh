@@ -42,6 +42,65 @@ wait "$progress_pid"
 [ "$live" = yes ] || fail 'progress waited for a full input buffer or EOF'
 echo 'PASS: progress is displayed before the next record or EOF'
 
+# uutils stdbuf, the coreutils of Ubuntu 26.04, makes a directory in TMPDIR
+# for the library it preloads and leaves it there at every run. A stand-in
+# does the same: the progress must leave TMPDIR as it found it, after a
+# transfer and after one that was interrupted.
+mkdir -p "$TEST_DIR/uutils" "$TEST_DIR/progress-tmp"
+cat > "$TEST_DIR/uutils/stdbuf" <<'EOF'
+#!/bin/bash
+mktemp -d "${TMPDIR:-/tmp}/.tmpXXXXXX" > /dev/null || exit 125
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+exec "$@"
+EOF
+chmod +x "$TEST_DIR/uutils/stdbuf"
+out=$(printf ' 1024 100%% 1.00kB/s 0:00:01 (xfr#1)\n' |
+    PATH="$TEST_DIR/uutils:$PATH" TMPDIR="$TEST_DIR/progress-tmp" import_rsync_progress 0 0 no) ||
+    fail "the progress failed with the stdbuf of uutils: $out"
+grep -Fq '  Transferred 1 files, 1 kB in ' <<< "$out" || fail "the progress lost its summary with the stdbuf of uutils: $out"
+[ -z "$(ls -A "$TEST_DIR/progress-tmp")" ] ||
+    fail "the progress left $(ls -A "$TEST_DIR/progress-tmp") in TMPDIR with the stdbuf of uutils"
+# Ctrl-C, a closed terminal or a kill reaches the whole pipe through its
+# process group. Job control gives the pipe one of its own, and INT at its
+# default, where a background job of a script ignores it. The pipe ends by
+# itself after ten seconds when the signal does not end it.
+# A shell started with SIGINT ignored, as an asynchronous command of a
+# non-interactive shell is ("tests/run.sh &" in a script), passes that on
+# to the pipe, which job control cannot undo: the INT case would see the
+# pipe run to its end. Say why instead.
+[ "$(trap -p INT)" != "trap -- '' SIGINT" ] ||
+    fail 'SIGINT is ignored in this shell, so the INT case cannot stop the progress: run the suite in the foreground'
+for signal in INT HUP TERM; do
+    set -m
+    # shellcheck disable=SC2016  # The inner shell expands $1.
+    PATH="$TEST_DIR/uutils:$PATH" TMPDIR="$TEST_DIR/progress-tmp" bash -c '
+        source "$1"
+        sleep 10 | import_rsync_progress 0 0 no > /dev/null
+    ' _ "$ROOT_DIR/docker/lib/import.sh" &
+    progress_pid=$!
+    set +m
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [ -z "$(find "$TEST_DIR/progress-tmp" -name '.tmp*' -print -quit)" ] || break
+        sleep 0.05
+    done
+    [ -n "$(find "$TEST_DIR/progress-tmp" -name '.tmp*' -print -quit)" ] || {
+        kill -KILL -- "-$progress_pid"
+        fail "the stand-in for stdbuf did not run ($signal)"
+    }
+    kill -s "$signal" -- "-$progress_pid"
+    status=0
+    wait "$progress_pid" 2> /dev/null || status=$?
+    [ "$status" -eq $((128 + $(kill -l "$signal"))) ] || fail "$signal did not stop the progress (status $status)"
+    [ -z "$(ls -A "$TEST_DIR/progress-tmp")" ] ||
+        fail "the progress stopped by $signal left $(ls -A "$TEST_DIR/progress-tmp") in TMPDIR with the stdbuf of uutils"
+done
+echo 'PASS: the progress leaves nothing in TMPDIR, even with the stdbuf of uutils'
+
 # An unchanged mirror can check thousands of entries without copying data.
 # Growing incremental totals are discovered entries, not a whole-site total.
 out=$(

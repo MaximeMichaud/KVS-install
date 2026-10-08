@@ -1,6 +1,8 @@
-# /etc/cron.d system crontab for the privileged yt-dlp binary update.
+# /etc/cron.d system crontab for the privileged yt-dlp update.
 SHELL=/bin/sh
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# Replace the executable only after a complete download.
-0 4 * * 0 root { curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/.yt-dlp.new && chmod 0755 /usr/local/bin/.yt-dlp.new && mv -f /usr/local/bin/.yt-dlp.new /usr/local/bin/yt-dlp; } >> /var/log/yt-dlp-update.log 2>&1
+# The script installs a newer release in the yt-dlp volume once its sha256 is
+# the one the release publishes. The entrypoint removes this file when the
+# updates are off: YT_DLP_AUTO_UPDATE is no, or no yt-dlp volume is mounted.
+0 4 * * 0 root /usr/local/bin/yt-dlp-update >> /var/log/yt-dlp-update.log 2>&1

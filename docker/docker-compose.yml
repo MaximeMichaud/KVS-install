@@ -45,6 +45,18 @@ services:
       - nginx-includes:/etc/nginx/includes:ro
     depends_on:
       - php-fpm
+    healthcheck:
+      # Nginx closes the connection (444) on a request for a host it does
+      # not serve, a missing Host header included, so the probe names the
+      # site. /health on port 80 is answered by Nginx alone: the redirect to
+      # HTTPS (301) here, and 200 from the template the multi-site override
+      # mounts. It never reaches PHP-FPM, so the probe stays green while
+      # PHP-FPM restarts. curl ships with the nginx image.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "-H", "Host: ${DOMAIN}", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       kvs-network:
         aliases:
@@ -57,7 +69,12 @@ services:
       context: ./php
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
-        IONCUBE: ${IONCUBE:-YES}
+        # The base of the series, pinned by digest in docker/images.lock and
+        # written to .env by setup.sh. Empty when .env names none, and the
+        # Dockerfile then builds from the php:<PHP_VERSION>-fpm tag: a
+        # default nested in this one would stop Docker Compose older than
+        # 2.18 from reading this file.
+        PHP_BASE: ${PHP_FPM_BASE:-}
     container_name: ${SITE_PREFIX:-kvs}-php
     restart: unless-stopped
     logging: *default-logging
@@ -69,6 +86,8 @@ services:
       - internal-tls:/run/kvs-internal-tls:ro
       - ./tls:/usr/local/lib/kvs-tls:ro
       - ./geoip:/usr/share/geoip:ro
+      # The newer yt-dlp releases the cron container installs, read here.
+      - yt-dlp:/var/lib/yt-dlp:ro
     environment:
       - DOMAIN=${DOMAIN}
       - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
@@ -76,9 +95,26 @@ services:
       - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
       - PHP_POST_MAX_SIZE=${PHP_POST_MAX_SIZE:-2048M}
       - PHP_MAX_EXECUTION_TIME=${PHP_MAX_EXECUTION_TIME:-300}
+      # The loader ships in every image and the entrypoint turns it off for
+      # NO, so a change needs no rebuild, only docker compose up -d: a
+      # container keeps the environment it was created with, and
+      # docker compose restart does not recreate it.
+      - IONCUBE=${IONCUBE:-YES}
+      # Read when the container starts, like in cron: both run the newer
+      # yt-dlp of the volume, or with no both keep the one of their image.
+      - YT_DLP_AUTO_UPDATE=${YT_DLP_AUTO_UPDATE:-yes}
     depends_on:
       mariadb:
         condition: service_healthy
+    healthcheck:
+      # socat is installed in the image (php/Dockerfile) and a TCP connect
+      # proves the FastCGI master accepts requests, which "php-fpm -t" only
+      # tells about the configuration file.
+      test: ["CMD", "socat", "-u", "/dev/null", "TCP:127.0.0.1:9000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - kvs-network
 
@@ -114,6 +150,9 @@ services:
       MARIADB_PASSWORD: ${MARIADB_PASSWORD:?error}
       # Create mysql@localhost user for healthcheck (doesn't need password)
       MARIADB_MYSQL_LOCALHOST_USER: 1
+      # A release that moves the MariaDB series needs the system tables
+      # upgraded at the first start; the entrypoint does it with this set.
+      MARIADB_AUTO_UPGRADE: 1
     volumes:
       - mariadb-data:/var/lib/mysql
       - ./mariadb/init:/docker-entrypoint-initdb.d:ro
@@ -122,6 +161,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      # Failures inside the start period do not count, and the first probe
+      # that passes marks the container healthy. It covers the first start
+      # on a new series, when a temporary server with no TCP port (the
+      # probe connects over TCP) upgrades the system tables first
+      # (MARIADB_AUTO_UPGRADE), and any long first start: five failed probes
+      # would otherwise mark MariaDB unhealthy, and Compose then refuses to
+      # start the services that wait for it to be healthy.
+      start_period: 10m
     networks:
       - kvs-network
 
@@ -194,6 +241,32 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
+    healthcheck:
+      # searchd answers SHOW STATUS on the MySQL port, and the image carries
+      # the MariaDB client for the indexer. The client never asks for TLS:
+      # the probe stays on the loopback, and at some starts searchd offers
+      # TLS it cannot complete, which failed every probe of that start. The
+      # entrypoint builds the indexes before it starts searchd while a table
+      # has no files in the manticore-data volume (the first start, or a
+      # table added to the configuration) and when a rebuild was requested
+      # because the database changed under the indexes the volume keeps. The
+      # start period keeps the container reported as starting instead of
+      # unhealthy during that build, whose length grows with the site. Every
+      # other start, a recreate included, serves the indexes the volume keeps
+      # within seconds and rebuilds them behind searchd, so the probe passes
+      # as soon as searchd is up. A build of a start that fails on some
+      # tables leaves its reason in /var/run/manticore: kvs-build-failed for
+      # the build before searchd, which then starts with what that build left
+      # until a later start builds every table, and kvs-rebuild-failed for
+      # the rebuild behind searchd, which keeps the previous files of those
+      # tables until a later rebuild succeeds. The probe prints the reason,
+      # which Docker keeps in the health log, and fails while either file is
+      # there. A failed hourly rotation is only logged.
+      test: ["CMD-SHELL", "mariadb --skip-ssl -h 127.0.0.1 -P 9306 -e 'SHOW STATUS' > /dev/null && if [ -e /var/run/manticore/kvs-build-failed ] || [ -e /var/run/manticore/kvs-rebuild-failed ]; then cat /var/run/manticore/kvs-build-failed /var/run/manticore/kvs-rebuild-failed 2> /dev/null; exit 1; fi"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
     networks:
       kvs-network:
         aliases:
@@ -221,7 +294,8 @@ services:
       context: ./cron
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
-        IONCUBE: ${IONCUBE:-YES}
+        # Empty when .env names no base, like PHP_BASE of php-fpm.
+        PHP_BASE: ${PHP_CLI_BASE:-}
     container_name: ${SITE_PREFIX:-kvs}-cron
     # cron -f installs no SIGTERM handler, and the kernel drops such a signal
     # sent to PID 1, so docker stop waited out its whole timeout before
@@ -234,12 +308,32 @@ services:
       - ./geoip:/usr/share/geoip:ro
       - internal-tls:/run/kvs-internal-tls:ro
       - ./tls:/usr/local/lib/kvs-tls:ro
+      # yt-dlp-update installs the newer yt-dlp releases here, for both
+      # containers; a named volume, so they outlive a recreated container.
+      - yt-dlp:/var/lib/yt-dlp
     environment:
       - DOMAIN=${DOMAIN}
       - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+      - IONCUBE=${IONCUBE:-YES}
+      # yes: look for a newer yt-dlp at start and every Sunday; no: keep the
+      # release of the image. Read when the container starts.
+      - YT_DLP_AUTO_UPDATE=${YT_DLP_AUTO_UPDATE:-yes}
     depends_on:
-      - php-fpm
-      - mariadb
+      # Started, never healthy: the KVS tasks run PHP in this container and
+      # waiting for the PHP-FPM socket would only delay the first tick.
+      php-fpm:
+        condition: service_started
+      mariadb:
+        condition: service_started
+    healthcheck:
+      # The container listens on nothing, so the daemon itself is the signal.
+      # procps is installed (cron/Dockerfile) for pgrep, which finds the
+      # daemon by name: with init: true, PID 1 is Docker's init, not cron.
+      test: ["CMD", "pgrep", "-x", "cron"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - kvs-network
 
@@ -268,6 +362,11 @@ services:
       # The domain an imported site was served from: storage URLs on it move
       # to this installation's host (see 40-configure-database.sh).
       - IMPORT_SOURCE_DOMAIN=${IMPORT_SOURCE_DOMAIN:-}
+      # Where the Manticore plugin comes from and the sha256 it must have:
+      # set, a download with another one stops the init (80-manticore.sh).
+      # Empty, the vendor's address and no check.
+      - MANTICORE_PLUGIN_URL=${MANTICORE_PLUGIN_URL:-}
+      - MANTICORE_PLUGIN_SHA256=${MANTICORE_PLUGIN_SHA256:-}
     depends_on:
       mariadb:
         condition: service_healthy
@@ -277,7 +376,10 @@ services:
       - setup
 
   phpmyadmin-init:
-    image: alpine:latest
+    # The Alpine of docker/images.lock, whose BusyBox tools the tests run
+    # init.sh with and which a release pins too: resolve-bases.sh keeps this
+    # line on the lock.
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     container_name: ${SITE_PREFIX:-kvs}-phpmyadmin-init
     logging: *default-logging
     entrypoint: ["/usr/local/bin/init-phpmyadmin"]
@@ -317,3 +419,4 @@ volumes:
   nginx-logs:
   nginx-includes:
   manticore-data:
+  yt-dlp:

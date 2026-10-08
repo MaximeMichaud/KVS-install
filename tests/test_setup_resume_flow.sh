@@ -11,6 +11,7 @@ cat > "$fixture/bin/docker" <<'SH'
 #!/bin/bash
 set -euo pipefail
 case "$*" in
+    'compose version') echo 'Docker Compose version v2.32.2' ;;
     'compose ps -a -q mariadb')
         if [ "${HANG_METADATA:-no}" = yes ]; then exec /usr/bin/sleep 30; fi
         # A host still loaded by the import answers one check late, as the

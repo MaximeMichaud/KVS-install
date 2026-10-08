@@ -18,7 +18,12 @@ printf 'docker %s\n' "$*" >> "$CALLS"
 case "$*" in
     --version) echo 'Docker version 29.1.0, build stub' ;;
     'compose version') echo 'Docker Compose version v2.40.3' ;;
-    info*|ps*|'volume ls'*|'compose config'|stop*|rm*) exit 0 ;;
+    info*|ps*|'volume ls'*|'compose config'|'compose config --quiet'|stop*|rm*) exit 0 ;;
+    # A checkout: Compose builds every service the setup names.
+    'compose config '*)
+        echo services:
+        printf '  %s:\n    build:\n      context: .\n' "${@:3}"
+        ;;
     'compose build'*) echo build >> "$CALLS" ;;
     'compose up -d --force-recreate mariadb') echo mariadb-start >> "$CALLS" ;;
     *) echo "unexpected:docker $*" >> "$CALLS"; exit 97 ;;

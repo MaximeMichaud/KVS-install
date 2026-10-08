@@ -74,11 +74,6 @@ done
 [ -n "$output" ] || exit 64
 
 case "$url" in
-    https://www.phpmyadmin.net/downloads/)
-        printf '%s\n' \
-            '<a href="https://files.phpmyadmin.net/phpMyAdmin/9.9.9/phpMyAdmin-9.9.9-all-languages.tar.gz">Download</a>' \
-            > "$output"
-        ;;
     https://files.phpmyadmin.net/phpMyAdmin/9.9.9/phpMyAdmin-9.9.9-all-languages.tar.gz)
         case "${MOCK_CURL_MODE:?}" in
             download-failure)
@@ -90,7 +85,7 @@ case "$url" in
             unexpected-host)
                 cp "$MOCK_UNEXPECTED_HOST_ARCHIVE" "$output"
                 ;;
-            valid)
+            valid|checksum-mismatch)
                 cp "$MOCK_VALID_ARCHIVE" "$output"
                 ;;
             *)
@@ -193,6 +188,15 @@ assert_no_transients() {
     fi
 }
 
+archive_sha256() {
+    case "$1" in
+        incomplete) sha256sum "$INCOMPLETE_ARCHIVE" | cut -d' ' -f1 ;;
+        unexpected-host) sha256sum "$UNEXPECTED_HOST_ARCHIVE" | cut -d' ' -f1 ;;
+        checksum-mismatch) printf '%064d\n' 0 ;;
+        *) sha256sum "$VALID_ARCHIVE" | cut -d' ' -f1 ;;
+    esac
+}
+
 run_init() {
     local mode="$1"
     local target="$2"
@@ -212,6 +216,8 @@ run_init() {
     MOCK_MV_FAIL_AT="$mv_fail_at" \
     MOCK_MV_STATE="${output}.mv-state" \
     PHPMYADMIN_TARGET_DIR="$target" \
+    PHPMYADMIN_VERSION=9.9.9 \
+    PHPMYADMIN_SHA256="$(archive_sha256 "$mode")" \
     TMPDIR="$temp_root" \
     PATH="${MOCK_BIN}:$PATH" \
         "$INIT_SCRIPT" > "$output" 2>&1
@@ -244,6 +250,7 @@ assert_failure_preserves_installation() {
 }
 
 assert_failure_preserves_installation download-failure
+assert_failure_preserves_installation checksum-mismatch
 assert_failure_preserves_installation incomplete
 assert_failure_preserves_installation unexpected-host
 grep -Fq 'phpMyAdmin sample configuration has no localhost server entry' \
@@ -472,13 +479,28 @@ grep -Fq 'ERROR: Could not point phpMyAdmin at the mariadb service' \
     fail "a repair that could not remove the completion marker was not reported"
 assert_no_transients "$kept_target" "$kept_temp"
 
-# Exercise the same script with Alpine's BusyBox tools when the project image
-# is already available locally. Image pulls are deliberately forbidden here.
-if docker image inspect alpine:latest >/dev/null 2>&1; then
+# Exercise the same script with Alpine's BusyBox tools, in the Alpine image
+# the release pins for phpmyadmin-init (docker/images.lock), never whatever
+# alpine:latest a machine has cached. It is pulled when missing, and only
+# that image: the runs below never pull. Without it the check is skipped and
+# says so, except under CI, where that is a failure.
+ALPINE_IMAGE=$("${ROOT_DIR}/docker/bin/resolve-bases.sh" --get alpine -)
+alpine_ready=false
+if docker image inspect "$ALPINE_IMAGE" >/dev/null 2>&1 ||
+    docker pull -q "$ALPINE_IMAGE" >/dev/null 2>&1; then
+    alpine_ready=true
+elif [ "${CI:-}" = true ]; then
+    fail "the Alpine image ${ALPINE_IMAGE} is neither on this machine nor pullable"
+else
+    echo "SKIP: the BusyBox runtime check, ${ALPINE_IMAGE} is neither on this machine nor pullable"
+fi
+if [ "$alpine_ready" = true ]; then
     RUNTIME_VOLUME="kvs-phpmyadmin-hardening-${RANDOM}-$$"
     docker volume create "$RUNTIME_VOLUME" >/dev/null
-    docker run --rm --network none \
+    docker run --rm --pull never --network none \
         -e MOCK_CURL_MODE=valid \
+        -e PHPMYADMIN_VERSION=9.9.9 \
+        -e PHPMYADMIN_SHA256="$(archive_sha256 valid)" \
         -e MOCK_VALID_ARCHIVE=/archives/phpMyAdmin-valid.tar.gz \
         -e MOCK_INCOMPLETE_ARCHIVE=/archives/phpMyAdmin-incomplete.tar.gz \
         -e MOCK_CURL_LOG=/tmp/curl.log \
@@ -490,10 +512,10 @@ if docker image inspect alpine:latest >/dev/null 2>&1; then
         -v "${MOCK_BIN}:/mock:ro" \
         -v "${ARCHIVE_DIR}:/archives:ro" \
         --entrypoint /usr/local/bin/init-phpmyadmin \
-        alpine:latest >/dev/null || fail "the initializer failed with Alpine BusyBox"
-    docker run --rm --network none \
+        "$ALPINE_IMAGE" >/dev/null || fail "the initializer failed with Alpine BusyBox"
+    docker run --rm --pull never --network none \
         -v "${RUNTIME_VOLUME}:/usr/share/phpmyadmin:ro" \
-        alpine:latest sh -ceu '
+        "$ALPINE_IMAGE" sh -ceu '
             [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/.kvs-install-complete)" = 0:0:600 ]
             [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/config.inc.php)" = 1000:1000:600 ]
             [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/tmp)" = 1000:1000:700 ]
@@ -501,7 +523,7 @@ if docker image inspect alpine:latest >/dev/null 2>&1; then
         ' || fail "the Alpine runtime produced unsafe phpMyAdmin metadata"
     # Put back the localhost line of earlier installations. Its repair runs
     # before apk, so BusyBox alone has to rewrite it in place.
-    docker run --rm --network none \
+    docker run --rm --pull never --network none \
         -e MOCK_CURL_MODE=download-failure \
         -e MOCK_CURL_LOG=/tmp/curl.log \
         -e MOCK_APK_LOG=/tmp/apk.log \
@@ -512,7 +534,7 @@ if docker image inspect alpine:latest >/dev/null 2>&1; then
         -v "${RUNTIME_VOLUME}:/usr/share/phpmyadmin" \
         -v "${INIT_SCRIPT}:/usr/local/bin/init-phpmyadmin:ro" \
         -v "${MOCK_BIN}:/mock:ro" \
-        alpine:latest sh -ceu '
+        "$ALPINE_IMAGE" sh -ceu '
             config=/usr/share/phpmyadmin/config.inc.php
             grep -Fqx "$EXPECTED_HOST_LINE" "$config"
             printf "%s\n" "<?php" "$LEGACY_HOST_LINE" "// $LEGACY_HOST_LINE" > "$config"
@@ -567,8 +589,9 @@ assert_rendered_initializer() {
     local rendered="$1"
     local expected_source="$2"
 
-    jq -e '.services["phpmyadmin-init"].image == "alpine:latest"' "$rendered" \
-        >/dev/null || fail "rendered Compose does not use the Alpine initializer image"
+    # The Alpine the BusyBox check above runs init.sh in, not alpine:latest.
+    jq -e --arg image "$ALPINE_IMAGE" '.services["phpmyadmin-init"].image == $image' "$rendered" \
+        >/dev/null || fail "rendered Compose does not run the initializer on ${ALPINE_IMAGE}: $(jq -r '.services["phpmyadmin-init"].image' "$rendered")"
     jq -e '.services["phpmyadmin-init"].entrypoint == ["/usr/local/bin/init-phpmyadmin"]' \
         "$rendered" >/dev/null || fail "rendered Compose has the wrong initializer entrypoint"
     jq -e --arg source "$expected_source" '

@@ -1,0 +1,120 @@
+name: docker images
+
+on:
+  push:
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  # docker/images.lock pins every base and runtime image by digest, so an
+  # upstream rebuild of a tag (a security fix, usually) reaches the stack only
+  # when a maintainer refreshes the lock. The weekly lock job fails while the
+  # lock is stale, which is the reminder; it also runs on demand.
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hadolint:
+    name: hadolint
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: lint every Dockerfile
+        run: |
+          files=$(find docker -name Dockerfile | sort)
+          echo "$files"
+          # Word splitting is what passes one argument per Dockerfile.
+          # shellcheck disable=SC2086
+          docker run --rm -v "$PWD:/repo:ro" -w /repo \
+            hadolint/hadolint:v2.14.0 hadolint $files
+
+  build:
+    name: build ${{ matrix.service }}${{ matrix.php && format(' php{0}', matrix.php) || '' }}${{ matrix.arch && format(' {0}', matrix.arch) || '' }}
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    # An entry without arch builds linux/amd64. The PHP-FPM and cron images
+    # also build for linux/arm64, on GitHub's arm64 runner: their ionCube
+    # loader and yt-dlp are native code pinned per architecture, and the
+    # build runs both, which needs the architecture itself, not an emulation.
+    # GitHub has no floating label for its arm64 runners: those entries name
+    # a release, which moves by hand when ubuntu-latest moves to a newer one.
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { service: nginx, context: docker/nginx, base: "", php: "" }
+          - { service: init, context: docker/init, base: "", php: "" }
+          - { service: manticore, context: docker/manticore, base: "", php: "" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.1" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.2" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.3" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.4" }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.1" }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.2" }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.3" }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.4" }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.1", arch: arm64, runner: ubuntu-24.04-arm }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.2", arch: arm64, runner: ubuntu-24.04-arm }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.3", arch: arm64, runner: ubuntu-24.04-arm }
+          - { service: php, context: docker/php, base: php-fpm, php: "8.4", arch: arm64, runner: ubuntu-24.04-arm }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.1", arch: arm64, runner: ubuntu-24.04-arm }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.2", arch: arm64, runner: ubuntu-24.04-arm }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.3", arch: arm64, runner: ubuntu-24.04-arm }
+          - { service: cron, context: docker/cron, base: php-cli, php: "8.4", arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: build arguments
+        id: args
+        env:
+          PHP_SERIES: ${{ matrix.php }}
+          BASE_NAME: ${{ matrix.base }}
+        run: |
+          {
+            echo 'value<<ARGS_EOF'
+            if [ -n "$PHP_SERIES" ]; then
+              echo "PHP_VERSION=${PHP_SERIES}"
+              echo "PHP_BASE=$(./docker/bin/resolve-bases.sh --get "$BASE_NAME" "$PHP_SERIES")"
+            fi
+            echo 'ARGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+      - name: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/${{ matrix.arch || 'amd64' }}
+          push: false
+          load: false
+          provenance: false
+          sbom: false
+          build-args: ${{ steps.args.outputs.value }}
+          tags: kvs-install/${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}${{ matrix.php }}${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}${{ matrix.php }}${{ matrix.arch }}
+
+  # Reads every pinned tag from its registry again (docker buildx imagetools,
+  # which the runner has) and compares with the lock. A difference means an
+  # upstream image moved: run docker/bin/resolve-bases.sh, review the diff and
+  # commit the lock, so the next release builds on the new bases.
+  lock:
+    name: images.lock is current
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: resolve every pinned tag again
+        run: ./docker/bin/resolve-bases.sh --check

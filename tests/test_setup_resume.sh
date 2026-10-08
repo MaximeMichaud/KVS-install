@@ -86,6 +86,10 @@ timeout() {
 }
 docker() {
     case "$*" in
+        'compose version')
+            [ -n "${COMPOSE_VERSION-2.32.2}" ] || return 1
+            printf 'Docker Compose version v%s\n' "${COMPOSE_VERSION-2.32.2}"
+            ;;
         'compose ps -a -q mariadb') printf '%s\n' "${CONTAINER_ID:-0123456789abcdef}" ;;
         'compose config --services') printf 'mariadb\nphp-fpm\nnginx\ncron\nmemcached\ncustom-worker\nkvs-init\nphpmyadmin-init\n' ;;
         'inspect --format {{index .Config.Labels '*)
@@ -108,9 +112,15 @@ DOMAIN=wrong.example.com MARIADB_VERSION=99 COMPOSE_FILE=/wrong.yml VOLUME_CHOIC
 [ "$IMPORT_RAW_DUMP" = '' ]
 [ "${SETUP_RUN_FLAGS[*]}" = '--pull missing' ]
 # Parse the actual recovery flags with Compose when it is installed. Help
-# exits before contacting the daemon or creating any container.
+# exits before contacting the daemon or creating any container. Without
+# Compose the check is skipped and says so, except under CI, where that is a
+# failure.
 if [ -n "$docker_cli" ] && "$docker_cli" compose version >/dev/null 2>&1; then
     "$docker_cli" compose --profile setup run --rm --no-deps "${SETUP_RUN_FLAGS[@]}" --help >/dev/null
+elif [ "${CI:-}" = true ]; then
+    echo 'FAIL: Docker Compose is required to parse the recovery flags'; exit 1
+else
+    echo 'SKIP: the recovery flags were not parsed, Docker Compose is not installed'
 fi
 expected=$'discover\nwait:0\nmarker\ntoken\nverify'
 [ "$(cat "$CALLS")" = "$expected" ]
@@ -151,6 +161,27 @@ fi
 MARIADB_WAIT_SECONDS=42 setup_resume_import >/dev/null
 grep -Fxq wait:42 "$CALLS"
 unset MARIADB_WAIT_SECONDS
+# The initializers run with "docker compose run --pull", which Compose has
+# from 2.32.2 on: an older one, or none, stops recovery before it inspects
+# or waits for anything.
+for old_compose in 2.32.1 2.24.4 ''; do
+    : > "$CALLS"
+    : > "$METADATA_CALLS"
+    if COMPOSE_VERSION=$old_compose setup_resume_import > "$fixture/compose-failure.log" 2>&1; then
+        echo "FAIL: recovery must refuse Docker Compose '${old_compose}'"; exit 1
+    fi
+    grep -Fq "ERROR: --resume-import needs Docker Compose 2.32.2 or newer, the first whose docker compose run takes --pull; found ${old_compose:-none}." "$fixture/compose-failure.log" || {
+        echo "FAIL: the refusal must name the Compose found: $(cat "$fixture/compose-failure.log")"; exit 1
+    }
+    if [ -s "$METADATA_CALLS" ] || [ -s "$CALLS" ] || grep -q '^Inspecting' "$fixture/compose-failure.log"; then
+        echo "FAIL: an old Compose must stop recovery before anything is inspected: $(cat "$CALLS" "$METADATA_CALLS")"; exit 1
+    fi
+done
+: > "$CALLS"
+COMPOSE_VERSION=5.6.0 setup_resume_import > "$fixture/compose-current.log" 2>&1 || {
+    echo "FAIL: Compose 5.6.0 must resume: $(cat "$fixture/compose-current.log")"; exit 1
+}
+[ "$(cat "$CALLS")" = "$expected" ] || { echo "FAIL: Compose 5.6.0 must resume: $(cat "$CALLS")"; exit 1; }
 # Compose would reject a saved stop grace period without its unit in every
 # command: recovery stops on it before any Docker call.
 : > "$CALLS"

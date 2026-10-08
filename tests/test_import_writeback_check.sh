@@ -304,6 +304,7 @@ choose() (
     import_validate_site() { :; }
     import_inspect_archive() { echo 'archive inspected'; }
     import_check_kvs_archive_version() { :; }
+    refuse_unbuildable_kvs_php() { :; }
     import_record_source_domain() { :; }
     import_check_domain() { :; }
     import_confirm() { :; }

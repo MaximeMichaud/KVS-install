@@ -775,6 +775,11 @@ EOF
     "Failed to restore www-data crontab" "a failed rollback was not reported" || return 1
 }
 
+# The new clone takes the .env and the archive before it replaces the
+# installation, and the backup stays until it has: a restore that fails (no
+# docker directory in the clone) and one that succeeds both keep it. Once
+# the new copy is in place the backup goes, and the restore is said only
+# when there was something to restore, which a first installation lacks.
 test_restore_preserves_backup_until_success() {
   local temp_dir
   local install_dir
@@ -800,7 +805,16 @@ test_restore_preserves_backup_until_success() {
   assert_equal "0" "$status" "restore failed with a valid clone destination" || return 1
   assert_file_contains "$install_dir/docker/.env" "configuration" "restore did not copy .env" || return 1
   [[ -f "$install_dir/docker/kvs-archive/KVS_7.0.2_[example.com].zip" ]] || fail "restore did not copy the KVS archive" || return 1
-  [[ ! -e "$backup_dir" ]] || fail "successful restore did not remove its temporary backup" || return 1
+  [[ -f "$backup_dir/.env" && -f "$backup_dir/kvs-archive/KVS_7.0.2_[example.com].zip" ]] ||
+    fail "the backup went before the new copy replaced the installation" || return 1
+
+  drop_user_data_backup "$backup_dir" >"$temp_dir/out"
+  [[ ! -e "$backup_dir" ]] || fail "the temporary backup was not removed once the new copy was in place" || return 1
+  assert_file_contains "$temp_dir/out" "Restored .env and kvs-archive" "the restore was not said" || return 1
+  mkdir "$backup_dir"
+  drop_user_data_backup "$backup_dir" >"$temp_dir/out"
+  [[ ! -e "$backup_dir" ]] || fail "an empty temporary backup was not removed" || return 1
+  [[ ! -s "$temp_dir/out" ]] || fail "a first installation was told its .env and archive were restored: $(cat "$temp_dir/out")" || return 1
 }
 
 test_failed_clone_keeps_user_backup() {
@@ -1026,7 +1040,7 @@ run_test "port check accepts the installer nginx" test_port_check_accepts_the_in
 run_test "KVS servers follow the site URL" test_kvs_servers_follow_the_site_url || failures=$((failures + 1))
 run_test "domain validation respects MariaDB limits" test_domain_validation_respects_database_limit || failures=$((failures + 1))
 run_test "KVS cron privilege and multi-site idempotence" test_cron_is_unprivileged_and_multisite_idempotent || failures=$((failures + 1))
-run_test "backup survives failed restore" test_restore_preserves_backup_until_success || failures=$((failures + 1))
+run_test "the backup stays until the new copy is in place" test_restore_preserves_backup_until_success || failures=$((failures + 1))
 run_test "backup survives failed clone" test_failed_clone_keeps_user_backup || failures=$((failures + 1))
 run_test "phpMyAdmin failure is non-destructive" test_phpmyadmin_failure_preserves_installation || failures=$((failures + 1))
 run_test "phpMyAdmin staged update succeeds" test_phpmyadmin_success_swaps_staged_installation || failures=$((failures + 1))

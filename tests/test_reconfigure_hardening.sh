@@ -1660,6 +1660,131 @@ assert_eq old-reservation \
 assert_not_contains "$LAST_DIR/docker.calls" 'site-manager primary-config' \
     "Caddy activation ran before the plugin check completed"
 
+# kvsctl backup and kvsctl restore run on any installation, and every kvsctl
+# run that changes one holds kvsctl/lock, beside the docker directory; one
+# that did not finish leaves kvsctl/journal.json for kvsctl recover. No
+# reconfiguration changes the stack meanwhile: it stops before any docker
+# command and names the reason, for the journal with the way out when
+# recover leaves the run to be finished by hand, and a run that holds the
+# lock while its journal is there is running, not interrupted. A check that
+# cannot take the lock (flock fails) cannot tell, and stops too; a lock held
+# shared, as kvsctl status holds it while it reads, is no run. The status
+# options only read and run anyway, here through stand-ins for
+# lib/manticore.sh, lib/database.sh and lib/import.sh. Each case has an
+# installation root of its own.
+kvsctl_case() {
+    local name="$1"
+    local files="$2"
+    local root="$TEST_ROOT/$name"
+
+    create_fixture "$name/docker"
+    mkdir -p "$root/kvsctl" "$root/docker/lib" "$root/docker/state"
+    : > "$root/kvsctl/lock"
+    case "$files" in
+        both | interrupted) printf '{"action":"upgrade"}\n' > "$root/kvsctl/journal.json" ;;
+        unknown)
+            # A flock that fails other than on a held lock: it cannot open the file.
+            printf '#!/bin/bash\necho "flock: cannot open lock file" >&2\nexit 66\n' > "$root/docker/bin/flock"
+            chmod +x "$root/docker/bin/flock"
+            ;;
+    esac
+    # shellcheck disable=SC2016
+    printf '%s\n' 'manticore_manage() { echo "manticore_manage $1"; }' > "$root/docker/lib/manticore.sh"
+    # shellcheck disable=SC2016
+    printf '%s\n' 'database_wait_ready() { echo "database_wait_ready once=$2"; }' > "$root/docker/lib/database.sh"
+    # shellcheck disable=SC2016
+    printf '%s\n' 'import_writeback_check() { echo "import_writeback_check $2"; }' > "$root/docker/lib/import.sh"
+    cp "$root/docker/.env" "$root/env.before"
+}
+
+# kvsctl_reconfigure <case> <kvsctl files> [arguments]
+kvsctl_reconfigure() {
+    local name="$1"
+    local files="$2"
+    shift 2
+
+    LAST_DIR="$TEST_ROOT/$name/docker"
+    : > "$LAST_DIR/docker.calls"
+    set +e
+    (
+        case "$files" in
+            # Held as kvsctl holds it, on a descriptor of its own.
+            running | both) exec 9< "$TEST_ROOT/$name/kvsctl/lock" && flock --exclusive 9 ;;
+            # Held as kvsctl status holds it while it reads.
+            watched) exec 9< "$TEST_ROOT/$name/kvsctl/lock" && flock --shared 9 ;;
+        esac
+        cd "$LAST_DIR" &&
+            env PATH="$LAST_DIR/bin:/usr/bin:/bin" MOCK_CALLS="$LAST_DIR/docker.calls" \
+                MOCK_STATE="$LAST_DIR/state" ./reconfigure.sh "$@"
+    ) > "$LAST_DIR/output.log" 2>&1
+    LAST_STATUS=$?
+    set -e
+}
+
+for files in running both interrupted unknown; do
+    for action in '' 'enable' 'disable'; do
+        name="kvsctl-${files}-${action:-apply}"
+        kvsctl_case "$name" "$files"
+        if [ -n "$action" ]; then
+            kvsctl_reconfigure "$name" "$files" --manticore "$action"
+        else
+            kvsctl_reconfigure "$name" "$files"
+        fi
+        assert_failure "reconfigure.sh ${action:+--manticore $action }beside a $files kvsctl run"
+        if [ "$files" = interrupted ]; then
+            assert_contains "$LAST_DIR/output.log" \
+                "ERROR: an interrupted kvsctl run left $TEST_ROOT/$name/kvsctl/journal.json: run 'kvsctl recover' first. Where recover says to finish by hand and that takes reconfigure.sh, remove that file, then run reconfigure.sh again. Nothing was changed." \
+                "reconfigure.sh ${action:+--manticore $action }does not name the interrupted kvsctl run: $(cat "$LAST_DIR/output.log")"
+        elif [ "$files" = unknown ]; then
+            assert_contains "$LAST_DIR/output.log" \
+                "ERROR: could not tell whether kvsctl is running: flock $TEST_ROOT/$name/kvsctl/lock failed with status 66. Nothing was changed." \
+                "reconfigure.sh ${action:+--manticore $action }does not say it could not tell whether kvsctl runs: $(cat "$LAST_DIR/output.log")"
+        else
+            assert_contains "$LAST_DIR/output.log" \
+                "ERROR: kvsctl is running on this installation (it holds $TEST_ROOT/$name/kvsctl/lock): wait until it is done; 'kvsctl status' shows what it does. Nothing was changed." \
+                "reconfigure.sh ${action:+--manticore $action }does not say kvsctl is running ($files): $(cat "$LAST_DIR/output.log")"
+        fi
+        assert_eq '' "$(cat "$LAST_DIR/docker.calls")" \
+            "reconfigure.sh ${action:+--manticore $action }ran docker beside a $files kvsctl run"
+        assert_not_contains "$LAST_DIR/output.log" 'manticore_manage' \
+            "reconfigure.sh --manticore $action ran beside a $files kvsctl run"
+        assert_eq "$(cat "$TEST_ROOT/$name/env.before")" "$(cat "$LAST_DIR/.env")" \
+            "reconfigure.sh ${action:+--manticore $action }changed .env beside a $files kvsctl run"
+    done
+    name="kvsctl-${files}-status"
+    kvsctl_case "$name" "$files"
+    kvsctl_reconfigure "$name" "$files" --manticore status
+    assert_success "reconfigure.sh --manticore status beside a $files kvsctl run: $(cat "$LAST_DIR/output.log")"
+    assert_contains "$LAST_DIR/output.log" 'manticore_manage status' \
+        "the status of Manticore did not run beside a $files kvsctl run: $(cat "$LAST_DIR/output.log")"
+    assert_not_contains "$LAST_DIR/output.log" 'ERROR' \
+        "the status of Manticore was refused beside a $files kvsctl run: $(cat "$LAST_DIR/output.log")"
+    for option in import-status writeback-status; do
+        case "$option" in
+            import-status) ran='database_wait_ready once=yes' ;;
+            writeback-status) ran='import_writeback_check 5' ;;
+        esac
+        name="kvsctl-${files}-${option}"
+        kvsctl_case "$name" "$files"
+        kvsctl_reconfigure "$name" "$files" "--$option"
+        assert_success "reconfigure.sh --$option beside a $files kvsctl run: $(cat "$LAST_DIR/output.log")"
+        assert_contains "$LAST_DIR/output.log" "$ran" \
+            "reconfigure.sh --$option did not run beside a $files kvsctl run: $(cat "$LAST_DIR/output.log")"
+        assert_not_contains "$LAST_DIR/output.log" 'ERROR' \
+            "reconfigure.sh --$option was refused beside a $files kvsctl run: $(cat "$LAST_DIR/output.log")"
+    done
+done
+for action in enable disable; do
+    name="kvsctl-watched-${action}"
+    kvsctl_case "$name" watched
+    kvsctl_reconfigure "$name" watched --manticore "$action"
+    assert_success "reconfigure.sh --manticore $action beside a shared hold of the kvsctl lock: $(cat "$LAST_DIR/output.log")"
+    assert_contains "$LAST_DIR/output.log" "manticore_manage $action" \
+        "reconfigure.sh --manticore $action did not run beside a shared hold of the kvsctl lock: $(cat "$LAST_DIR/output.log")"
+    assert_not_contains "$LAST_DIR/output.log" 'kvsctl' \
+        "reconfigure.sh --manticore $action took a shared hold of the kvsctl lock for a run: $(cat "$LAST_DIR/output.log")"
+done
+
 # Static checks retain the cryptographic and atomic-update invariants exercised
 # through the full-script mocks above.
 # shellcheck disable=SC2016

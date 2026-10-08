@@ -1029,6 +1029,59 @@ test_preflight_disk_check_measures_the_tightest_filesystem() {
     pass "preflight disk check measures the site, Docker root and containerd root filesystems"
 }
 
+# A command the setup needs and the host lacks is named with the Debian
+# package that installs it, which apt accepts: ss comes with iproute2, and
+# awk is a virtual package apt installs only by the name of an
+# implementation, mawk on Debian and Ubuntu. The other names are packages.
+test_preflight_names_the_packages_of_missing_commands() {
+    local functions_file="$TMP_ROOT/preflight-commands.sh"
+    local output
+    local missing
+    local expected
+
+    awk '
+        $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { capture = 0 }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    grep -q '^preflight_checks() {' "$functions_file" || fail "preflight_checks not found in setup.sh"
+
+    for missing in "ss awk:awk ss:mawk iproute2" "unzip:unzip:unzip" "curl sed grep:curl sed grep:curl sed grep"; do
+        output=$(
+            # shellcheck source=/dev/null
+            source "$functions_file"
+            # shellcheck disable=SC2034  # Read by the extracted production function.
+            RED='' GREEN='' YELLOW='' CYAN='' NC=''
+            # shellcheck disable=SC2034  # Read by the extracted production function.
+            DEV_MODE='' PREFLIGHT_BYPASS='' IMPORT_MODE=false
+            absent=" ${missing%%:*} "
+            # shellcheck disable=SC2329  # Stubs consumed by the extracted function.
+            command() {
+                if [ "$1" = -v ] && [[ "$absent" == *" $2 "* ]]; then return 1; fi
+                builtin command "$@"
+            }
+            # shellcheck disable=SC2329
+            docker() {
+                case "$1" in
+                    --version) echo 'Docker version 29.0.0, build test' ;;
+                    compose) echo 'Docker Compose version v2.35.0' ;;
+                esac
+            }
+            # shellcheck disable=SC2329
+            preflight_free_disk_gb() { echo '40 /'; }
+            # shellcheck disable=SC2329
+            check_internet() { return 0; }
+            preflight_checks < /dev/null
+        ) && fail "the preflight went on without ${missing%%:*}: $output"
+        expected=${missing#*:}
+        grep -Fxq "✗ Missing commands: ${expected%%:*}" <<< "$output" ||
+            fail "the missing commands must be named: $output"
+        grep -Fxq "  Install: apt update && apt install -y ${expected#*:}" <<< "$output" ||
+            fail "the hint must name packages apt installs (${expected#*:}): $output"
+    done
+    pass "preflight names the package of each missing command"
+}
+
 test_failed_step_shows_its_last_lines_and_a_full_disk() {
     local functions_file="$TMP_ROOT/report-step-failure.sh"
     local logfile="$TMP_ROOT/failed-step.log"
@@ -1120,39 +1173,46 @@ test_setup_rebuilds_init_and_optional_manticore_images() {
     local disabled_calls="$TMP_ROOT/build-disabled.log"
 
     awk '
-        /^progress_bar "Building Nginx and initialization containers"$/ { capture = 1 }
+        $0 == "setup_build_images() {" { capture = 1 }
         capture { print }
-        capture && /docker compose build .*"\$\{BUILD_TARGETS\[@\]\}"/ { exit }
+        capture && /^}$/ { exit }
     ' "$REPO_ROOT/docker/setup.sh" > "$block_file"
 
     (
         # shellcheck disable=SC2329  # Called by the sourced production block.
         progress_bar() { :; }
         # shellcheck disable=SC2329  # Called by the sourced production block.
-        run_step() { printf '%s\n' "$*" > "$enabled_calls"; }
+        run_step() { printf '%s\n' "$*" >> "$enabled_calls"; }
+        # A checkout: Compose builds every service.
+        # shellcheck disable=SC2329  # Called by the sourced production block.
+        compose_services_to_build() { printf '%s\n' "$@"; }
         # shellcheck disable=SC2034  # Read by the sourced production block.
         ENABLE_MANTICORE=true
         # shellcheck disable=SC2034  # Read by the sourced production block.
         DOCKER_BUILD_FLAGS=''
         # shellcheck source=/dev/null
         source "$block_file"
+        setup_build_images
     )
-    grep -Fq 'docker compose build nginx kvs-init manticore' "$enabled_calls" ||
+    grep -Fxq 'Building Nginx and initialization containers docker compose build nginx kvs-init manticore' "$enabled_calls" ||
         fail "setup does not rebuild the enabled Manticore image"
 
     (
         # shellcheck disable=SC2329  # Called by the sourced production block.
         progress_bar() { :; }
         # shellcheck disable=SC2329  # Called by the sourced production block.
-        run_step() { printf '%s\n' "$*" > "$disabled_calls"; }
+        run_step() { printf '%s\n' "$*" >> "$disabled_calls"; }
+        # shellcheck disable=SC2329  # Called by the sourced production block.
+        compose_services_to_build() { printf '%s\n' "$@"; }
         # shellcheck disable=SC2034  # Read by the sourced production block.
         ENABLE_MANTICORE=false
         # shellcheck disable=SC2034  # Read by the sourced production block.
         DOCKER_BUILD_FLAGS=''
         # shellcheck source=/dev/null
         source "$block_file"
+        setup_build_images
     )
-    grep -Fq 'docker compose build nginx kvs-init' "$disabled_calls" ||
+    grep -Fxq 'Building Nginx and initialization containers docker compose build nginx kvs-init' "$disabled_calls" ||
         fail "setup does not rebuild the KVS initialization image"
     if grep -Fq 'manticore' "$disabled_calls"; then
         fail "setup rebuilds Manticore when the feature is disabled"
@@ -1346,6 +1406,155 @@ EOF
     pass "PHP password escaping preserves ampersands, backslashes, apostrophes and separators"
 }
 
+# Compose and kvsctl both tell a container that is up from a service that
+# answers through the health checks, so every probe has to be a liveness test
+# and has to use a command the built image really carries.
+test_services_declare_health_checks() {
+    local case_dir="$TMP_ROOT/health-checks"
+    local env_file="$case_dir/env"
+    local single_json="$case_dir/single.json"
+    local site_json="$case_dir/site.json"
+    local service
+
+    command -v docker >/dev/null 2>&1 || fail "docker compose is required"
+    command -v jq >/dev/null 2>&1 || fail "jq is required"
+
+    mkdir -p "$case_dir/site"
+    sed -e 's/^MARIADB_ROOT_PASSWORD=.*/MARIADB_ROOT_PASSWORD=root-password/' \
+        -e 's/^MARIADB_PASSWORD=.*/MARIADB_PASSWORD=kvs-password/' \
+        "$REPO_ROOT/docker/.env.example" > "$env_file"
+    docker compose --env-file "$env_file" \
+        --profile dragonfly --profile direct-tls --profile manticore \
+        -f "$REPO_ROOT/docker/docker-compose.yml" \
+        config --format json > "$single_json" ||
+        fail "docker compose rejected the single-site stack"
+    cp "$REPO_ROOT/docker/multi-site/docker-compose.site.yml.template" \
+        "$case_dir/site/docker-compose.yml"
+    docker compose --env-file "$env_file" \
+        -f "$case_dir/site/docker-compose.yml" \
+        config --format json > "$site_json" ||
+        fail "docker compose rejected the multi-site site template"
+
+    for service in nginx php-fpm cron mariadb manticore; do
+        jq -e --arg service "$service" '
+            .services[$service].healthcheck |
+            (.test | length > 0) and .interval != null and .timeout != null and
+            .retries != null' "$single_json" >/dev/null ||
+            fail "$service declares no complete health check in docker-compose.yml"
+    done
+    for service in nginx php-fpm cron mariadb; do
+        jq -e --arg service "$service" '.services[$service].healthcheck.test | length > 0' \
+            "$site_json" >/dev/null ||
+            fail "$service declares no health check in the multi-site site template"
+    done
+
+    # Every probe below has to exist in the image that runs it. Nginx closes
+    # the connection on a host it does not serve, so its probe names the
+    # site; tests/integration_nginx_healthcheck.sh runs it against the
+    # rendered configurations.
+    jq -e '.services.nginx.healthcheck.test ==
+        ["CMD", "curl", "-fsS", "-o", "/dev/null", "-H", "Host: example.com", "http://127.0.0.1/health"]' \
+        "$single_json" >/dev/null ||
+        fail "Nginx must be probed over HTTP for the site's host, which it answers without PHP-FPM"
+    jq -e '.services.nginx.healthcheck.test ==
+        ["CMD", "curl", "-fsS", "-o", "/dev/null", "-H", "Host: example.com", "http://127.0.0.1/health"]' \
+        "$site_json" >/dev/null ||
+        fail "the Nginx of a multi-site site must be probed like the primary site's"
+    grep -Eq '^(FROM nginx:|ARG NGINX_BASE=nginx:)' "$REPO_ROOT/docker/nginx/Dockerfile" ||
+        fail "the Nginx image no longer builds on the base that ships curl"
+    jq -e '.services["php-fpm"].healthcheck.test ==
+        ["CMD", "socat", "-u", "/dev/null", "TCP:127.0.0.1:9000"]' \
+        "$single_json" >/dev/null ||
+        fail "PHP-FPM must be probed by connecting to its FastCGI socket"
+    grep -Fq 'socat' "$REPO_ROOT/docker/php/Dockerfile" ||
+        fail "the PHP image no longer installs socat, its health check would fail"
+    jq -e '.services.cron.healthcheck.test == ["CMD", "pgrep", "-x", "cron"]' \
+        "$single_json" >/dev/null ||
+        fail "cron must be probed through its daemon, the container listens on nothing"
+    grep -Fq 'procps' "$REPO_ROOT/docker/cron/Dockerfile" ||
+        fail "the cron image no longer installs procps, pgrep would be missing"
+    jq -e '.services.manticore.healthcheck.test ==
+        ["CMD-SHELL", "mariadb --skip-ssl -h 127.0.0.1 -P 9306 -e '\''SHOW STATUS'\'' > /dev/null && if [ -e /var/run/manticore/kvs-build-failed ] || [ -e /var/run/manticore/kvs-rebuild-failed ]; then cat /var/run/manticore/kvs-build-failed /var/run/manticore/kvs-rebuild-failed 2> /dev/null; exit 1; fi"]' \
+        "$single_json" >/dev/null ||
+        fail "Manticore must be probed with a query on its MySQL port, without TLS, and fail while a build failure is recorded"
+    # The probe as Docker runs it, against a stand-in for the MariaDB client
+    # and a directory of its own for the recorded failures. At some starts
+    # searchd offers TLS it cannot complete: a client that accepts the
+    # offer fails there, as the image's client does by default.
+    local probe
+    probe=$(jq -r '.services.manticore.healthcheck.test[1]' "$single_json")
+    probe=${probe//\/var\/run\/manticore/$case_dir\/run}
+    mkdir -p "$case_dir/probe-bin" "$case_dir/run"
+    cat > "$case_dir/probe-bin/mariadb" <<'STUB'
+#!/bin/sh
+case " $* " in
+    *' --skip-ssl '*) ;;
+    *) echo 'ERROR 2026 (HY000): TLS/SSL error: sslv3 alert handshake failure' >&2; exit 1 ;;
+esac
+exit "${TEST_SEARCHD_DOWN:-0}"
+STUB
+    chmod +x "$case_dir/probe-bin/mariadb"
+    PATH="$case_dir/probe-bin:$PATH" sh -c "$probe" > /dev/null 2>&1 ||
+        fail "the Manticore probe fails on a searchd that answers, or that offers TLS it cannot complete"
+    if TEST_SEARCHD_DOWN=1 PATH="$case_dir/probe-bin:$PATH" sh -c "$probe" > /dev/null 2>&1; then
+        fail "the Manticore probe passes on a searchd that does not answer"
+    fi
+    # The entrypoint records why a build before searchd, or a rebuild behind
+    # it, failed, and searchd answers without a table, or from older files:
+    # the probe fails and prints why, for either file.
+    local failure_file failure_name failure_text
+    for failure_name in kvs-build-failed kvs-rebuild-failed; do
+        failure_text="2026-10-06T10:00:00Z ${failure_name} recorded"
+        rm -f "$case_dir/run/"*
+        echo "$failure_text" > "$case_dir/run/$failure_name"
+        if PATH="$case_dir/probe-bin:$PATH" sh -c "$probe" > "$case_dir/probe.out" 2>&1; then
+            fail "the Manticore probe passes while $failure_name is recorded"
+        fi
+        grep -Fxq "$failure_text" "$case_dir/probe.out" ||
+            fail "the Manticore probe does not print why the build failed ($failure_name): $(cat "$case_dir/probe.out")"
+    done
+    for failure_file in BUILD_FAILED REBUILD_FAILED; do
+        failure_file=$(sed -n "s/^${failure_file}=//p" "$REPO_ROOT/docker/manticore/docker-entrypoint.sh")
+        [ -n "$failure_file" ] &&
+            [[ "$(jq -r '.services.manticore.healthcheck.test[1]' "$single_json")" == *"[ -e $failure_file ]"* ]] ||
+            fail "the Manticore probe does not read every file the entrypoint records a failed build in"
+    done
+    # The package itself, not a comment that names it: the base image ships
+    # MySQL's client without the mariadb command that the entrypoint, this
+    # probe and the rebuild run. A RUN line is joined with its continuations;
+    # comment lines inside it are dropped, as Docker drops them.
+    awk '
+        /^[[:space:]]*#/ { next }
+        { line = line $0 }
+        /\\$/ { sub(/\\$/, "", line); next }
+        { print line; line = "" }
+    ' "$REPO_ROOT/docker/manticore/Dockerfile" |
+        grep -Eq '^RUN .*apt-get install[^&;|]*[[:space:]]mariadb-client([[:space:]]|$)' ||
+        fail "the Manticore image no longer installs the MariaDB client"
+
+    # The first Manticore run, and a start asked to rebuild from a changed
+    # database, build every index before searchd starts, so the probe has to
+    # stay in its start period for far longer than a web server.
+    jq -e '.services.manticore.healthcheck.start_period == "5m0s"' "$single_json" \
+        >/dev/null || fail "Manticore lost the start period its initial indexing needs"
+    # cron runs PHP itself; waiting for a healthy PHP-FPM would only delay it.
+    jq -e '.services.cron.depends_on["php-fpm"].condition == "service_started"' \
+        "$single_json" >/dev/null ||
+        fail "cron must wait for PHP-FPM to start, never for it to be healthy"
+    jq -e '.services["php-fpm"].depends_on.mariadb.condition == "service_healthy"' \
+        "$single_json" >/dev/null ||
+        fail "PHP-FPM no longer waits for a healthy MariaDB"
+    # The first start of a new MariaDB series upgrades the system tables
+    # with no TCP port open; five failed probes would mark it unhealthy and
+    # stop the services that wait for it.
+    jq -e '.services.mariadb.healthcheck.start_period == "10m0s"' "$single_json" \
+        >/dev/null || fail "MariaDB lost the start period a series upgrade needs"
+    jq -e '.services.mariadb.healthcheck.start_period == "10m0s"' "$site_json" \
+        >/dev/null || fail "the MariaDB of a multi-site site lost the start period a series upgrade needs"
+
+    pass "every long-running service declares a liveness health check"
+}
+
 # A network lookup that times out returned its status through the plain
 # assignment and set -e ended the setup with a bare exit code: seen on a
 # one CPU VM when endoflife.date did not answer within five seconds.
@@ -1481,6 +1690,7 @@ test_help_is_side_effect_free_without_root
 test_network_lookups_may_fail_without_ending_the_setup
 test_remote_site_size_bounds_warn_instead_of_blocking
 test_remote_entries_are_shown_and_their_patterns_reach_the_transfer
+test_services_declare_health_checks
 test_root_guard_precedes_logs_and_preflight
 test_secure_logs_env_and_headless_overrides
 test_headless_override_validation
@@ -1497,6 +1707,7 @@ test_setup_rebuilds_init_and_optional_manticore_images
 test_final_compose_failure_is_fatal
 test_optional_gum_install_failure_is_nonfatal
 test_preflight_disk_check_measures_the_tightest_filesystem
+test_preflight_names_the_packages_of_missing_commands
 test_failed_step_shows_its_last_lines_and_a_full_disk
 test_cache_settings_follow_small_hosts
 test_reconfigure_fails_when_container_inspection_fails

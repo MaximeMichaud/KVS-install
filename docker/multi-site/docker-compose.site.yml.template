@@ -60,7 +60,10 @@ services:
           - n.${DOMAIN}
       site-internal:
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-H", "Host: ${DOMAIN}", "http://localhost/health"]
+      # Nginx closes the connection (444) on a request for a host it does
+      # not serve, a missing Host header included, so the probe names the
+      # site. Nginx answers /health itself (200), without PHP-FPM.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "-H", "Host: ${DOMAIN}", "http://127.0.0.1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -74,7 +77,11 @@ services:
       context: ../../../php
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
-        IONCUBE: ${IONCUBE:-YES}
+        # Empty when the site's .env names no base (a site added before the
+        # lock): the Dockerfile then builds from the php:<PHP_VERSION>-fpm
+        # tag. A default nested in this one would stop Docker Compose older
+        # than 2.18 from reading this file.
+        PHP_BASE: ${PHP_FPM_BASE:-}
     container_name: ${SITE_PREFIX}-php
     restart: unless-stopped
     logging: *default-logging
@@ -83,14 +90,29 @@ services:
       - manticore-api:/var/www/manticore-api
       - phpmyadmin-data:/usr/share/phpmyadmin
       - ../../../php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
+      # The newer yt-dlp releases the cron container installs, read here.
+      - yt-dlp:/var/lib/yt-dlp:ro
     environment:
       - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-512M}
       - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
       - PHP_POST_MAX_SIZE=${PHP_POST_MAX_SIZE:-2048M}
       - PHP_MAX_EXECUTION_TIME=${PHP_MAX_EXECUTION_TIME:-300}
+      - IONCUBE=${IONCUBE:-YES}
+      # Read when the container starts, like in cron: both run the newer
+      # yt-dlp of the volume, or with no both keep the one of their image.
+      - YT_DLP_AUTO_UPDATE=${YT_DLP_AUTO_UPDATE:-yes}
     depends_on:
       mariadb:
         condition: service_healthy
+    healthcheck:
+      # socat is installed in the image (php/Dockerfile) and a TCP connect
+      # proves the FastCGI master accepts requests, which "php-fpm -t" only
+      # tells about the configuration file.
+      test: ["CMD", "socat", "-u", "/dev/null", "TCP:127.0.0.1:9000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - site-internal
 
@@ -125,6 +147,7 @@ services:
       MARIADB_USER: ${DOMAIN}
       MARIADB_PASSWORD: ${MARIADB_PASSWORD:?error}
       MARIADB_MYSQL_LOCALHOST_USER: 1
+      MARIADB_AUTO_UPGRADE: 1
     volumes:
       - mariadb-data:/var/lib/mysql
       - ../../../mariadb/init:/docker-entrypoint-initdb.d:ro
@@ -133,7 +156,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      # Failures inside the start period do not count, and the first probe
+      # that passes marks the container healthy. It covers the first start
+      # on a new series, when a temporary server with no TCP port (the
+      # probe connects over TCP) upgrades the system tables first
+      # (MARIADB_AUTO_UPGRADE), and any long first start: five failed probes
+      # would otherwise mark MariaDB unhealthy, and Compose then refuses to
+      # start the services that wait for it to be healthy.
+      start_period: 10m
     networks:
       - site-internal
 
@@ -179,6 +209,7 @@ services:
       context: ../../../cron
       args:
         PHP_VERSION: ${PHP_VERSION:-8.1}
+        PHP_BASE: ${PHP_CLI_BASE:-}
     container_name: ${SITE_PREFIX}-cron
     # cron -f installs no SIGTERM handler, and the kernel drops such a signal
     # sent to PID 1, so docker stop waited out its whole timeout before
@@ -188,8 +219,28 @@ services:
     logging: *default-logging
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
+      # yt-dlp-update installs the newer yt-dlp releases here, for both
+      # containers; a named volume, so they outlive a recreated container.
+      - yt-dlp:/var/lib/yt-dlp
+    environment:
+      - IONCUBE=${IONCUBE:-YES}
+      # yes: look for a newer yt-dlp at start and every Sunday; no: keep the
+      # release of the image. Read when the container starts.
+      - YT_DLP_AUTO_UPDATE=${YT_DLP_AUTO_UPDATE:-yes}
     depends_on:
-      - php-fpm
+      # Started, never healthy: the KVS tasks run PHP in this container and
+      # waiting for the PHP-FPM socket would only delay the first tick.
+      php-fpm:
+        condition: service_started
+    healthcheck:
+      # The container listens on nothing, so the daemon itself is the signal.
+      # procps is installed (cron/Dockerfile) for pgrep, which finds the
+      # daemon by name: with init: true, PID 1 is Docker's init, not cron.
+      test: ["CMD", "pgrep", "-x", "cron"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - site-internal
 
@@ -218,6 +269,12 @@ services:
       - PROJECT_HTTPS_PORT=443
       - KVS_ADMIN_PASSWORD=${KVS_ADMIN_PASSWORD:-}
       - DISABLE_KVS_SUPPORT_ACCESS=${DISABLE_KVS_SUPPORT_ACCESS:-false}
+      # Unused on a site made from this template, which runs no Manticore:
+      # kvs-init installs the plugin only with ENABLE_MANTICORE=true, which
+      # this template does not pass. Kept in step with the main site's
+      # kvs-init, like the manticore-api volume above.
+      - MANTICORE_PLUGIN_URL=${MANTICORE_PLUGIN_URL:-}
+      - MANTICORE_PLUGIN_SHA256=${MANTICORE_PLUGIN_SHA256:-}
     depends_on:
       mariadb:
         condition: service_healthy
@@ -230,7 +287,10 @@ services:
   # phpMyAdmin Init
   # ===========================================================================
   phpmyadmin-init:
-    image: alpine:latest
+    # The Alpine of docker/images.lock, whose BusyBox tools the tests run
+    # init.sh with and which a release pins too: resolve-bases.sh keeps this
+    # line on the lock.
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     container_name: ${SITE_PREFIX}-phpmyadmin-init
     logging: *default-logging
     entrypoint: ["/usr/local/bin/init-phpmyadmin"]
@@ -258,3 +318,4 @@ volumes:
   phpmyadmin-data:
   nginx-includes:
   nginx-logs:
+  yt-dlp:

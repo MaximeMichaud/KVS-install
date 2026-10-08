@@ -53,8 +53,12 @@ OPTIONS:
     --help      Show this help message
     --manticore enable|disable|status
                 Manage search on an installed site without rerunning setup.
-                Enable waits for indexing, configures KVS and verifies it.
+                Enable builds every index from the current database before
+                Manticore answers, configures KVS and verifies it; run
+                again while that build runs, it waits for it.
                 Disable restores KVS search and keeps the index volume.
+                Status also fails, and prints why, when a build of the
+                indexes at a start failed.
     --import-status [--watch]
                 Inspect MariaDB startup/import activity without changing it.
                 --watch refreshes until TCP is ready, without a deadline
@@ -68,7 +72,12 @@ OPTIONS:
 
 REQUIREMENTS:
     Run it from the docker directory of the installation. The .env file
-    must exist and the stack must already be running.
+    must exist and the stack must already be running. --manticore enable
+    and disable need Docker Compose 2.13.0 or newer. Nothing is changed
+    while kvsctl runs on the installation, nor while a kvsctl run that did
+    not finish left kvsctl/journal.json: run 'kvsctl recover', or remove
+    that file where recover says to finish by hand. The status options
+    run anyway.
 EOF
             exit 0
             ;;
@@ -96,6 +105,42 @@ if [ ! -f "docker-compose.yml" ]; then
     echo -e "${RED}ERROR: Run from docker directory${NC}"
     exit 1
 fi
+
+# kvsctl changes the stack under its lock, kvsctl/lock beside the docker
+# directory, and a run of it that did not finish leaves kvsctl/journal.json,
+# from which kvsctl recover finishes or undoes that run: containers changed
+# meanwhile, or before that recover, are not the ones kvsctl expects. Both
+# are refused before anything changes; an installation kvsctl never ran on
+# has neither file. When recover cannot finish a run, it leaves the run to
+# be finished by hand and the journal to be removed: the refusal says so,
+# or this script and recover would each send the operator to the other.
+# setup.sh and kvs-install.sh check the same.
+refuse_during_kvsctl_run() {
+    local root="$1"
+    local lock="$1/kvsctl/lock"
+    local status=0
+
+    # A shared lock is refused exactly while a kvsctl run holds its own.
+    if [ -e "$lock" ]; then
+        flock --shared --nonblock "$lock" true || status=$?
+        if [ "$status" -eq 1 ]; then
+            echo "ERROR: kvsctl is running on this installation (it holds ${lock}): wait until it is done; 'kvsctl status' shows what it does. Nothing was changed." >&2
+            return 1
+        elif [ "$status" -ne 0 ]; then
+            echo "ERROR: could not tell whether kvsctl is running: flock ${lock} failed with status ${status}. Nothing was changed." >&2
+            return 1
+        fi
+    fi
+    if [ -e "$root/kvsctl/journal.json" ]; then
+        echo "ERROR: an interrupted kvsctl run left ${root}/kvsctl/journal.json: run 'kvsctl recover' first. Where recover says to finish by hand and that takes reconfigure.sh, remove that file, then run reconfigure.sh again. Nothing was changed." >&2
+        return 1
+    fi
+}
+# The status options only read, as kvsctl status does during a run.
+case "${RUNTIME_ACTION}:${MANTICORE_ACTION}" in
+    import-status:* | writeback-status:* | manticore:status) ;;
+    *) refuse_during_kvsctl_run "$(cd .. && pwd)" || exit 1 ;;
+esac
 
 # Must have .env
 if [ ! -f ".env" ]; then

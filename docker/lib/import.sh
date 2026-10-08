@@ -2439,6 +2439,19 @@ import_disk_sampler() {
     rm -f -- "$file.reading" "$file.previous" "$file.tmp"
 }
 
+# Turns the carriage returns of rsync into newlines, unbuffered so that awk
+# gets each progress record at once. uutils stdbuf, the coreutils of Ubuntu
+# 26.04, makes a directory in TMPDIR for the library it preloads and leaves
+# it there at every run: it gets a TMPDIR of its own, which goes with the
+# pipe, an interrupted one too.
+import_progress_lines() (
+    local buffer_dir
+
+    buffer_dir=$(mktemp -d "${TMPDIR:-/tmp}/kvs-stdbuf.XXXXXX" 2>/dev/null) || exec stdbuf -o0 tr '\r' '\n'
+    trap 'rm -rf -- "$buffer_dir"' EXIT
+    TMPDIR=$buffer_dir stdbuf -o0 tr '\r' '\n'
+)
+
 # import_rsync_progress <bytes to transfer> <files to transfer> [terminal yes|no] [state file]
 # Reads the output of rsync --info=progress2 and shows the transfer, one
 # line a topic. Copied: the bytes and files done, out of the totals of the
@@ -2501,7 +2514,7 @@ import_rsync_progress() {
     # mawk otherwise waits for a full input buffer. Its interactive mode
     # requires newline records, so normalize rsync carriage returns first.
     if awk -W version 2>&1 | grep -q '^mawk '; then awk_options=(-W interactive); fi
-    stdbuf -o0 tr '\r' '\n' | awk "${awk_options[@]}" -v total_bytes="$total_bytes" -v total_files="$total_files" \
+    import_progress_lines | awk "${awk_options[@]}" -v total_bytes="$total_bytes" -v total_files="$total_files" \
         -v terminal="$terminal" -v state="$state" -v entries="$entries" -v counted="$counted" -v disks="$disks" \
         -v stats="$stats" -v columns="$columns" -v pace="$pace" '
         function now() { return systime() }

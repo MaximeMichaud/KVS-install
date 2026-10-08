@@ -50,9 +50,16 @@ normal=""
 on_red=""
 alert=""
 
+# Everything the installer prints also goes to the log, LOG_FILE unless
+# another file is given (the tests). Ctrl-C reaches the tee as well, and
+# bash 5.2 leaves it at its default in a coprocess, where 5.3 ignores it:
+# the tee ignores it itself (-i), so what the installer prints once
+# interrupted, before it stops, still reaches the screen and the log.
 initialize_runtime_output() {
+  local log_file="${1:-$LOG_FILE}"
+
   exec 3<&1
-  coproc mytee { tee "${LOG_FILE}" >&3; }
+  coproc mytee { tee -i "$log_file" >&3; }
   exec >&"${mytee[1]}" 2>&1
 
   red=$(tput setaf 1)
@@ -1603,15 +1610,185 @@ function chooseInstallationType() {
   esac
 }
 
+# kvsctl writes beside docker/: its backups in backups/, its logs and its
+# lock in kvsctl/. kvsctl backup and kvsctl restore need no adoption, so a
+# stack this installer updates can hold them too, and a new clone has
+# neither: they move from the copy it replaces into the new one, as the .env
+# and the archive do. A backup is as large as the database, so they are
+# renamed, never copied, through a directory beside the installation that
+# nothing else removes, <install dir>.kvsctl.XXXXXX, where kvsctl does not
+# look: an interrupted update moves them back before it stops, and the next
+# run moves back what one stopped outright left there.
+KVSCTL_DATA_DIRS=(kvsctl backups)
+
+# set_aside_kvsctl_data <install dir>: moves the directories of kvsctl out
+# of the installation and prints the directory that holds them, or nothing
+# when there are none. One on another filesystem than that directory (a disk
+# mounted there) would be copied: it stops the swap, with the installation
+# as it was.
+set_aside_kvsctl_data() {
+  local install_dir="$1"
+  local holding
+  local name
+  local back
+  local -a found=()
+  local -a moved=()
+
+  for name in "${KVSCTL_DATA_DIRS[@]}"; do
+    if [[ -e "$install_dir/$name" || -L "$install_dir/$name" ]]; then
+      found+=("$name")
+    fi
+  done
+  ((${#found[@]} > 0)) || return 0
+  holding=$(mktemp -d "${install_dir}.kvsctl.XXXXXX") || return 1
+  for name in "${found[@]}"; do
+    if [[ "$(stat -c %d -- "$install_dir/$name")" != "$(stat -c %d -- "$holding")" ]]; then
+      echo "${red}$install_dir/$name is on another filesystem than $(dirname -- "$install_dir"), so a new clone could only copy it. Move it out of $install_dir, run the installer again, then move it back.${normal}" >&2
+      rmdir "$holding"
+      return 1
+    fi
+  done
+  for name in "${found[@]}"; do
+    if ! mv -- "$install_dir/$name" "$holding/$name"; then
+      echo "${red}$install_dir/$name could not be moved aside for the new clone${normal}" >&2
+      for back in "${moved[@]}"; do
+        mv -T -- "$holding/$back" "$install_dir/$back" ||
+          echo "${red}$holding/$back could not go back to $install_dir/$back: move it there${normal}" >&2
+      done
+      rmdir "$holding" 2>/dev/null
+      return 1
+    fi
+    moved+=("$name")
+  done
+  printf '%s\n' "$holding"
+}
+
+# bring_back_kvsctl_data <holding directory> <install dir>: moves them into
+# the new clone, or back into the copy a swap that failed left. One that
+# does not move, or that the installation has again, stays where it is,
+# named, and the others still go.
+bring_back_kvsctl_data() {
+  local holding="$1"
+  local install_dir="$2"
+  local name
+  local status=0
+
+  for name in "${KVSCTL_DATA_DIRS[@]}"; do
+    [[ -e "$holding/$name" || -L "$holding/$name" ]] || continue
+    # An empty directory there goes, as it would under a rename.
+    if [[ -d "$install_dir/$name" && ! -L "$install_dir/$name" ]]; then
+      rmdir -- "$install_dir/$name" 2>/dev/null
+    fi
+    if [[ -e "$install_dir/$name" || -L "$install_dir/$name" ]]; then
+      echo "${red}$holding/$name could not go back: $install_dir/$name exists again. Keep what you need of both, then remove $holding/$name${normal}" >&2
+      status=1
+    elif ! mv -T -- "$holding/$name" "$install_dir/$name"; then
+      echo "${red}$holding/$name could not go back to $install_dir/$name: move it there${normal}" >&2
+      status=1
+    fi
+  done
+  ((status == 0)) || return 1
+  rmdir "$holding"
+}
+
+# recover_kvsctl_data <install dir>: moves back what an update that did not
+# finish left in <install dir>.kvsctl.XXXXXX, into whatever copy stands
+# there: the old one, part of it, the new one, or none yet.
+recover_kvsctl_data() {
+  local install_dir="$1"
+  local holding
+
+  for holding in "$install_dir".kvsctl.??????; do
+    [[ -d "$holding" && ! -L "$holding" ]] || continue
+    # Empty: the update stopped before it set anything aside.
+    if rmdir -- "$holding" 2>/dev/null; then
+      continue
+    fi
+    if mkdir -p -- "$install_dir" && bring_back_kvsctl_data "$holding" "$install_dir"; then
+      echo "${cyan}Moved the files of kvsctl back into $install_dir from $holding, where an update that did not finish had set them aside${normal}"
+    fi
+  done
+}
+
+# recover_user_data <install dir> <backup dir>: a swap cut short once it
+# began to remove the old copy leaves the installation without all or part
+# of its .env and archive. Their backup is under /tmp unless KVS_BACKUP_DIR
+# names another place, which a reboot can empty and the next run does not
+# know: that run would write a new .env. What the copy that stands there
+# lacks goes back into it, where the next run backs it up again; the backup
+# stays, named.
+recover_user_data() {
+  local install_dir="$1"
+  local backup_dir="$2"
+  local saved
+  local target
+  local -a back=()
+
+  [[ -n "$backup_dir" && -d "$backup_dir" ]] || return 0
+  for saved in "$backup_dir/.env" "$backup_dir"/kvs-archive/*; do
+    [[ -e "$saved" || -L "$saved" ]] || continue
+    target="$install_dir/docker/${saved#"$backup_dir"/}"
+    [[ ! -e "$target" && ! -L "$target" ]] || continue
+    if mkdir -p -- "${target%/*}" && cp -r -- "$saved" "$target"; then
+      back+=("${saved#"$backup_dir"/}")
+    else
+      echo "${red}$saved could not go back to $target: copy it there before you run the installer again${normal}" >&2
+    fi
+  done
+  if ((${#back[@]} > 0)); then
+    echo "${cyan}Put back into $install_dir/docker what the update had saved in $backup_dir: ${back[*]}${normal}"
+  fi
+  echo "${yellow}User data also remains in $backup_dir${normal}"
+}
+
+# swap_interrupted <install dir> <backup dir> <status>, the trap of the
+# swap: what was set aside, and the .env and the archive the installation
+# lost, go back before the installer stops, and a second signal does not
+# cut that short.
+swap_interrupted() {
+  trap '' INT HUP TERM
+  recover_kvsctl_data "$1"
+  recover_user_data "$1" "$2"
+  exit "$3"
+}
+
+# swap_kvs_install <install dir> <staging>: replaces the installation with
+# the new clone, the files of kvsctl moved across.
+swap_kvs_install() {
+  local install_dir="$1"
+  local staging="$2"
+  local holding
+
+  if ! holding=$(set_aside_kvsctl_data "$install_dir"); then
+    rm -rf "$staging"
+    return 1
+  fi
+  if ! rm -rf "$install_dir" || ! mv "$staging" "$install_dir"; then
+    [[ -z "$holding" ]] || bring_back_kvsctl_data "$holding" "$install_dir" || :
+    return 1
+  fi
+  # The new copy is in place: what kvsctl wrote and cannot go back into it
+  # is named, and the update goes on, which does not need it.
+  if [[ -n "$holding" ]] && bring_back_kvsctl_data "$holding" "$install_dir"; then
+    echo "${cyan}Kept the files of kvsctl in the new copy${normal}"
+  fi
+  return 0
+}
+
 # Clone the repository next to the installation directory and swap it in
 # only once the clone succeeded. A failed pull followed by a failed clone
 # (GitHub unreachable) must leave the Compose files of a running site in
 # place instead of deleting the directory first. The branch is main unless
-# KVS_INSTALL_BRANCH names another one.
+# KVS_INSTALL_BRANCH names another one. The .env and the archive saved in
+# the backup directory, when one is given, go into the new copy before it
+# replaces the old one: a new copy never stands without them.
+# shellcheck disable=SC2064  # Each trap holds the paths of this run, quoted.
 clone_kvs_install() {
   local install_dir="$1"
+  local backup_dir="${2:-}"
   local staging="${install_dir}.clone"
   local branch="${KVS_INSTALL_BRANCH:-main}"
+  local quoted
   local status
 
   rm -rf "$staging" || return $?
@@ -1621,8 +1798,25 @@ clone_kvs_install() {
     rm -rf "$staging"
     return "$status"
   fi
-  rm -rf "$install_dir" || return $?
-  mv "$staging" "$install_dir"
+  if [[ -n "$backup_dir" ]] && ! restore_user_data "$staging" "$backup_dir"; then
+    rm -rf "$staging"
+    return 1
+  fi
+  # From the set-aside of the files of kvsctl until they are back, an
+  # interrupt, a closed terminal or a kill moves them back first, and puts
+  # back the .env and the archive the installation lost. SIGPIPE is ignored
+  # meanwhile: a closed terminal or a kill of the whole process group ends
+  # the tee of the log too, and the report of the command the signal stopped
+  # would otherwise end the installer before its trap runs.
+  printf -v quoted '%q %q' "$install_dir" "$backup_dir"
+  trap "swap_interrupted $quoted 130" INT
+  trap "swap_interrupted $quoted 129" HUP
+  trap "swap_interrupted $quoted 143" TERM
+  trap '' PIPE
+  swap_kvs_install "$install_dir" "$staging"
+  status=$?
+  trap - INT HUP TERM PIPE
+  return "$status"
 }
 
 # Bring an installed copy to the latest commit of its branch, or of the
@@ -1659,6 +1853,61 @@ reset_kvs_install() {
   git checkout --force -B "$branch" FETCH_HEAD
 }
 
+# kvsctl keeps its state in <install dir>/kvsctl/state.json from the moment
+# it adopts an installation, which it then upgrades from releases: their
+# files replace those under docker/ and conf/, and their images are pinned
+# by docker-compose.release.yml and .env. The update below would put the
+# files of the branch back while the release images stay pinned. Such an
+# installation is refused before anything changes. Either file marks it,
+# the test kvsctl_manages_stack of docker/setup.sh makes too. A stack kvsctl
+# only backed up or restored has neither: it is updated, and a new clone
+# keeps what kvsctl wrote there (set_aside_kvsctl_data).
+refuse_kvsctl_managed_install() {
+  local install_dir="$1"
+  local marker
+
+  for marker in "$install_dir/kvsctl/state.json" "$install_dir/docker/docker-compose.release.yml"; do
+    [[ -e "$marker" ]] || continue
+    echo "${red}kvsctl manages the installation in $install_dir ($marker); this installer does not update it.${normal}" >&2
+    echo "Upgrade it with: kvsctl upgrade" >&2
+    return 1
+  done
+  return 0
+}
+
+# kvsctl changes an installation under its lock, <install dir>/kvsctl/lock,
+# kvsctl backup and kvsctl restore included, and a run of it that did not
+# finish leaves kvsctl/journal.json, from which kvsctl recover finishes or
+# undoes that run. The update would change the files under it, and the
+# setup the containers. Both are refused before anything moves: an
+# installation kvsctl never ran on has neither file. When recover cannot
+# finish a run, it leaves the run to be finished by hand and the journal to
+# be removed: the refusal says so, or the installer and recover would each
+# send the operator to the other. docker/setup.sh and docker/reconfigure.sh
+# check the same.
+refuse_during_kvsctl_run() {
+  local install_dir="$1"
+  local lock="$1/kvsctl/lock"
+  local status=0
+
+  # A shared lock is refused exactly while a kvsctl run holds its own.
+  if [[ -e "$lock" ]]; then
+    flock --shared --nonblock "$lock" true || status=$?
+    if ((status == 1)); then
+      echo "${red}kvsctl is running on the installation in $install_dir (it holds $lock): wait until it is done; 'kvsctl status' shows what it does. Nothing was changed.${normal}" >&2
+      return 1
+    elif ((status != 0)); then
+      echo "${red}Could not tell whether kvsctl is running: flock $lock failed with status $status. Nothing was changed.${normal}" >&2
+      return 1
+    fi
+  fi
+  if [[ -e "$install_dir/kvsctl/journal.json" ]]; then
+    echo "${red}An interrupted kvsctl run left $install_dir/kvsctl/journal.json: run 'kvsctl recover' first. Where recover says to finish by hand and that takes this installer, remove that file, then run the installer again. Nothing was changed.${normal}" >&2
+    return 1
+  fi
+  return 0
+}
+
 backup_user_data() {
   local install_dir="$1"
   local backup_dir="$2"
@@ -1679,6 +1928,9 @@ backup_user_data() {
   echo "${cyan}Backed up .env and kvs-archive${normal}"
 }
 
+# restore_user_data <copy> <backup dir>: puts the .env and the archive saved
+# in <backup dir> into the docker directory of <copy>, the new clone before
+# it replaces the installation. The backup stays until it has.
 restore_user_data() {
   local install_dir="$1"
   local backup_dir="$2"
@@ -1695,9 +1947,18 @@ restore_user_data() {
   if [[ -d "$backup_dir/kvs-archive" ]]; then
     cp -r "$backup_dir/kvs-archive" "$install_dir/docker/" || return $?
   fi
+}
 
-  rm -rf "$backup_dir" || return $?
-  echo "${green}Restored .env and kvs-archive${normal}"
+# drop_user_data_backup <backup dir>: once the new copy that holds them is
+# in place, the saved .env and archive go, named only when there were any.
+drop_user_data_backup() {
+  local backup_dir="$1"
+
+  [[ -d "$backup_dir" ]] || return 0
+  if [[ -e "$backup_dir/.env" || -e "$backup_dir/kvs-archive" ]]; then
+    echo "${green}Restored .env and kvs-archive${normal}"
+  fi
+  rm -rf "$backup_dir"
 }
 
 # A minimal Debian or Ubuntu ships neither git, which the clone below needs,
@@ -1746,6 +2007,21 @@ function dockerInstall() {
   echo ""
   echo "${cyan}=== Docker Installation ===${normal}"
 
+  INSTALL_DIR="${KVS_INSTALL_DIR:-/opt/kvs}"
+  # Without its trailing slashes: a new clone, and the files of kvsctl it
+  # keeps, wait beside the installation, never inside the directory it
+  # replaces.
+  while [[ $INSTALL_DIR == ?*/ ]]; do
+    INSTALL_DIR=${INSTALL_DIR%/}
+  done
+  refuse_during_kvsctl_run "$INSTALL_DIR" || return $?
+  # What an earlier update set aside and did not move back comes back
+  # first, where kvsctl looks for it, whatever this run does next. The
+  # journal of a kvsctl run may be among it.
+  recover_kvsctl_data "$INSTALL_DIR"
+  refuse_during_kvsctl_run "$INSTALL_DIR" || return $?
+  refuse_kvsctl_managed_install "$INSTALL_DIR" || return $?
+
   # Check if Docker is installed
   if ! command -v docker &> /dev/null; then
     echo "Docker is not installed. Installing Docker..."
@@ -1767,7 +2043,6 @@ function dockerInstall() {
   ensure_docker_prerequisites || return $?
 
   # Clone or update KVS-install repo
-  INSTALL_DIR="${KVS_INSTALL_DIR:-/opt/kvs}"
   if [[ -n "${KVS_BACKUP_DIR:-}" ]]; then
     BACKUP_DIR="$KVS_BACKUP_DIR"
   else
@@ -1790,26 +2065,26 @@ function dockerInstall() {
       echo "${red}Git pull failed, re-cloning...${normal}"
       backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
       cd "${INSTALL_DIR%/*}" || return $?
-      clone_kvs_install "$INSTALL_DIR"
+      clone_kvs_install "$INSTALL_DIR" "$BACKUP_DIR"
       clone_status=$?
       if ((clone_status != 0)); then
-        echo "${red}Clone failed; the installed copy in $INSTALL_DIR is left untouched${normal}" >&2
+        echo "${red}No new copy was installed; the installed copy in $INSTALL_DIR is left untouched${normal}" >&2
         [[ -d "$BACKUP_DIR" ]] && echo "${yellow}User data also remains in $BACKUP_DIR${normal}" >&2
         return "$clone_status"
       fi
-      restore_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
+      drop_user_data_backup "$BACKUP_DIR" || return $?
     fi
   else
     # Directory doesn't exist or is not a git repo
     backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
     echo "Cloning KVS-install${KVS_INSTALL_BRANCH:+ (branch $KVS_INSTALL_BRANCH)}..."
-    clone_kvs_install "$INSTALL_DIR"
+    clone_kvs_install "$INSTALL_DIR" "$BACKUP_DIR"
     clone_status=$?
     if ((clone_status != 0)); then
-      [[ -d "$BACKUP_DIR" ]] && echo "${yellow}Clone failed; user data remains in $BACKUP_DIR${normal}" >&2
+      [[ -d "$BACKUP_DIR" ]] && echo "${yellow}No new copy was installed; user data remains in $BACKUP_DIR${normal}" >&2
       return "$clone_status"
     fi
-    restore_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
+    drop_user_data_backup "$BACKUP_DIR" || return $?
   fi
 
   cd "$INSTALL_DIR/docker" || { echo "${red}Failed to enter docker directory${normal}"; exit 1; }

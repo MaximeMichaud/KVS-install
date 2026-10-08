@@ -69,6 +69,8 @@ test_docker_path_installs_git_and_unzip_before_the_clone() {
   make_host "$bin"
   export KVS_INSTALL_DIR="$temp_dir/install"
   export KVS_BACKUP_DIR="$temp_dir/backup"
+  # Empty, as mktemp makes it when KVS_BACKUP_DIR is not set.
+  mkdir "$KVS_BACKUP_DIR"
 
   (PATH="$bin"; dockerInstall) >"$temp_dir/out" 2>&1
   status=$?
@@ -81,6 +83,9 @@ test_docker_path_installs_git_and_unzip_before_the_clone() {
     fail "unzip was not installed for the setup preflight" || return 1
   [[ -d "$KVS_INSTALL_DIR/.git" ]] || fail "the repository was not cloned" || return 1
   grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run after the clone" || return 1
+  # A first installation has no .env or archive to keep.
+  ! grep -q 'Restored .env and kvs-archive' "$temp_dir/out" ||
+    fail "a first installation was told its .env and archive were restored" || return 1
 }
 
 test_docker_path_leaves_apt_alone_when_the_tools_exist() {

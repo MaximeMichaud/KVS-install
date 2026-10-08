@@ -21,19 +21,23 @@ fail() {
 }
 
 command -v docker >/dev/null 2>&1 || fail "Docker is required"
-docker image inspect alpine:latest >/dev/null 2>&1 ||
-    fail "The local alpine:latest image is required"
+# The Alpine image the release pins for phpmyadmin-init, pulled when this
+# machine lacks it, rather than whatever alpine:latest happens to be cached.
+ALPINE_IMAGE=$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get alpine -)
+docker image inspect "$ALPINE_IMAGE" >/dev/null 2>&1 ||
+    docker pull -q "$ALPINE_IMAGE" >/dev/null ||
+    fail "the Alpine image $ALPINE_IMAGE is neither on this machine nor pullable"
 
-cat > "$TEST_DIR/compose.yml" <<'EOF'
+cat > "$TEST_DIR/compose.yml" <<EOF
 services:
   phpmyadmin-init:
-    image: alpine:latest
+    image: ${ALPINE_IMAGE}
     pull_policy: never
     network_mode: none
     command: ["sh", "-c", "exit 42"]
     profiles: ["setup"]
   kvs-init:
-    image: alpine:latest
+    image: ${ALPINE_IMAGE}
     pull_policy: never
     network_mode: none
     command: ["sh", "-c", "exit 43"]

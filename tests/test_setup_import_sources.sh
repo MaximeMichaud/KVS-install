@@ -852,6 +852,16 @@ EOF
     pass "the rewrite recovery follows the includes of the server block"
 }
 
+# The progress counts whole seconds from the moment its awk starts, and the
+# first record reaches awk some milliseconds later, through tr: a pipe
+# started late in a second shows it at 0:00:01. Started at the top of a
+# second, it shows 0:00:00 unless the record takes most of a second.
+start_of_a_second() {
+    local left=$((1000000 - 10#${EPOCHREALTIME: -6}))
+
+    sleep "$((left / 1000000)).$(printf '%06d' $((left % 1000000)))"
+}
+
 test_the_transfer_is_counted_first_and_shown_against_the_count() {
     local stats out status
 
@@ -870,6 +880,7 @@ test_the_transfer_is_counted_first_and_shown_against_the_count() {
     # message in between, shown as a log (no terminal): the first record
     # against the totals with the scan counted, the message as it is, the
     # end summed up.
+    start_of_a_second
     out=$(printf '\r              0   0%%    0.00kB/s    0:00:00 (xfr#0, ir-chk=1000/3012)\r        4000000  10%%    4.03MB/s    0:00:00 (xfr#1, ir-chk=1007/3012)\rskipping non-regular file "x"\n       32042000  84%%    3.91MB/s    0:00:07 (xfr#2029, ir-chk=979/3012)\r       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' |
         import_rsync_progress 38000000 3008 no)
     [ "$(head -n 4 <<< "$out")" = "  Copied:  0 B of 36.2 MB (0%), 0 of 3,008 files
@@ -887,6 +898,7 @@ test_the_transfer_is_counted_first_and_shown_against_the_count() {
     grep -q '^  Time:    0:00:0[0-9] elapsed, time left unknown yet$' <<< "$out" || fail "no time left before five seconds: $out"
     # Without a scan figure (a record inside a file) nothing tells what is
     # left.
+    start_of_a_second
     out=$(printf '       32768   0%%    0.00kB/s    0:00:00  \n' | import_rsync_progress 0 0 no)
     [ "$(head -n 3 <<< "$out")" = "  Copied:  32 kB, 0 files
   Rates:   0 B/s, 0 files/s copied
@@ -1649,7 +1661,14 @@ EOF
     INTERRUPTED_PLAN="$plan" PATH="$bin:$PATH" timeout --preserve-status -k 5s 2s \
         bash -c 'source "$1"; import_rsync_workers "$2" 4 unused' _ "$REPO_ROOT/docker/lib/import.sh" "$plan" \
         > "$TMP_ROOT/interrupted.out" 2>&1 || status=$?
-    [ "$status" -eq 143 ] || fail "interruption must return TERM, got $status"
+    # The shell killed by TERM: GNU timeout --preserve-status returns 143,
+    # as a shell reports such a command, the timeout of uutils (the
+    # coreutils Ubuntu 26.04 defaults to) the number of the signal alone.
+    case "$status" in
+        143) ;;
+        15) timeout --version 2>/dev/null | grep -q uutils || fail "interruption must return TERM, got $status" ;;
+        *) fail "interruption must return TERM, got $status" ;;
+    esac
     [ "$(wc -l < "$plan/pids")" -eq 8 ] || fail "four rsync workers and their children must have started"
     while read -r pid; do
         # timeout returns once the shell it started is gone, a millisecond

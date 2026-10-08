@@ -32,7 +32,7 @@ Docker installation is the recommended method. It provides:
 
 Requirements:
 
-- Docker with the Compose plugin (both installed by the script when Docker is missing; a Docker without the Compose plugin stops the installer)
+- Docker with the Compose plugin (both installed by the script when Docker is missing; a Docker without the Compose plugin stops the installer). `setup.sh` needs Docker Compose 2.10.0 or newer, which it checks before it touches the installation: an older one lacks `docker compose up --pull`, which it starts the services with, or lets `.env` override the values it passes to Compose (2.8.0 and 2.9.0). Multi-site mode needs 2.24.4 or newer, an installation on which [kvsctl](#upgrading-the-docker-stack-with-kvsctl-preview) has installed a release 2.19.0 or newer, the first that applies the `build: !reset null` of its release override (2.18 reads it as a build from a directory named `null`), `setup.sh --resume-import` 2.32.2 or newer, the first whose `docker compose run` takes `--pull`, and `reconfigure.sh --manticore enable` or `disable` 2.13.0 or newer, the first whose `docker compose run` takes `--build`, which `reconfigure.sh` checks before it changes anything
 - KVS archive file (`KVS_X.X.X_[domain.tld].zip`) in `/root`
 
 The script will:
@@ -68,9 +68,25 @@ docker compose build
 docker compose up -d
 ```
 
+Once kvsctl has installed a release, the services run the images of that release, and neither `docker compose build` nor `setup.sh` builds any of them (`setup.sh` says `its image is pinned, nothing to build`): the rotations come with the images of a release, which `kvsctl upgrade` installs, and `docker compose up -d` alone applies a changed cap.
+
 In multi-site, the Caddy proxy belongs to a Compose project of its own, which these commands leave as it is: `./multi-site/site-manager.sh caddy-start`, run from the same directory, recreates it with the cap. An additional site runs the `docker-compose.yml` copied from `multi-site/docker-compose.site.yml.template` when it was added: copy the template over it again, carrying over any local change, then run the same commands in `multi-site/sites/<domain>`. Its site logs then live in a volume, as those of the main site do; the ones it wrote before stay in the replaced container and go with it.
 
 Troubleshooting: the requests of the site are in `<domain>.access.log` (`docker compose exec nginx tail -F /var/log/nginx/example.com.access.log`, which keeps following the log across a rotation), not in `access.log`, which is the container output shown by `docker compose logs nginx`.
+
+#### IonCube
+
+The ionCube loader ships in every PHP-FPM and cron image, and `IONCUBE` in `docker/.env` decides whether it runs. The containers read it when they start, so a change takes `docker compose up -d`, not a rebuild. `yes`, `true`, `1` and `on`, in any case, enable the loader, and so does an empty value; anything else disables it, and a value other than `no`, `false`, `0`, `off` and `disabled` is reported as a warning in the container log. `setup.sh` sets it from the encoding of the site's files: IonCube encoded files need the loader.
+
+With the loader disabled, the PHP-FPM entrypoint turns on opcache JIT on PHP 8 and newer (the loader and JIT do not run together), which `setup.sh` used to append to `docker/php/php.ini`.
+
+#### yt-dlp
+
+KVS runs yt-dlp in the PHP-FPM container (the Grabbers plugin page) and in the cron container (the imports). Both images carry the yt-dlp release their Dockerfiles pin, checked against the sha256 the release publishes: the build yt-dlp makes for Linux on the server's architecture, which brings its own Python and the optional libraries yt-dlp uses, browser impersonation (`curl_cffi`) included. Sites change what yt-dlp parses, and an old release stops downloading from them, so the cron container looks for a newer release when it starts and every Sunday at 04:00 UTC, and installs it in the `yt-dlp` volume once its sha256 is the one the release publishes in `SHA2-256SUMS` and it runs as `www-data`, the user PHP-FPM and the KVS task run it as (the update itself runs as root). Both containers mount that volume and run the newer of its release and the one of their image: they run the same yt-dlp, an update outlives a recreated container, and a newer image is never held back by an older release left in the volume. The cron container logs the updates in `/var/log/yt-dlp-update.log` (`docker compose exec cron cat /var/log/yt-dlp-update.log`).
+
+`YT_DLP_AUTO_UPDATE=no` in `docker/.env`, or in the `.env` of an additional multi-site site, stops the updates (also `false`, `0`, `off` or `disabled`), and both containers run the release of their image, the one the Dockerfiles pin. `yes`, `true`, `1`, `on` and an empty value keep them; any other value is reported in the container log and counts as `no`. The containers read it when they start, so a change takes `docker compose up -d`.
+
+The updates need the `yt-dlp` volume, which a `docker-compose.yml` older than it does not mount: the containers of such a stack keep the release of their image and say so in their log, rather than leave an update in the cron container, where PHP-FPM would not run it and a recreated container would lose it. An additional multi-site site runs the `docker-compose.yml` copied from `multi-site/docker-compose.site.yml.template` when it was added, so a site added before the volume gets it the way it gets the log caps (see [Logs](#logs)): copy the template over its `docker-compose.yml` again, carrying over any local change, then run `docker compose build` and `docker compose up -d` in `multi-site/sites/<domain>`.
 
 ### Standalone Installation
 
@@ -121,7 +137,7 @@ MODE_CHOICE=1 \
 | `STOP_EXISTING` | `Y`/`n` | `Y` | Stop existing KVS containers |
 | `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry, 2=Continue anyway, 3=Exit |
 | `DISABLE_KVS_SUPPORT_ACCESS` | `true`/`false` | `false` | Turn off KVS support access (Kernel Team login with kvs_support); the admin dashboard re-enables it |
-| `KVS_PHP_VERSION` | `7.4`, `8.1`-`8.4` | detected | PHP release for an unencoded archive (IONCUBE_CHOICE=2 or IONCUBE=NO); an encoded archive keeps the release KVS documents |
+| `KVS_PHP_VERSION` | `8.1`-`8.4` | detected | PHP release for an unencoded archive (IONCUBE_CHOICE=2 or IONCUBE=NO); an encoded archive keeps the release KVS documents. KVS 6.2.0 and older needs PHP 7.4, which the Docker installation does not build: `setup.sh` stops on such an archive unless this names a release for its unencoded files |
 | `KVS_INSTALL_BRANCH` | branch | `main` | Branch of this repository installed into `/opt/kvs`, to try a change before it is merged (run the `kvs-install.sh` of that branch); works outside headless mode too |
 
 #### Standalone Headless (Legacy)
@@ -147,7 +163,7 @@ An existing KVS site moves into the Docker stack from two inputs: its files and 
 
 Procedure:
 
-1. No KVS archive is needed: the site brings its version (`admin/include/version.php`, which picks the PHP release), its encoding (`admin/include/functions_base.php`, IonCube or plain PHP, which decides whether the PHP image gets the loader) and its nginx rewrite rules (see below). An archive in `docker/kvs-archive/` is only a fallback for the rewrites and must then be of the site's version.
+1. No KVS archive is needed: the site brings its version (`admin/include/version.php`, which picks the PHP release), its encoding (`admin/include/functions_base.php`, IonCube or plain PHP, which sets [`IONCUBE`](#ioncube)) and its nginx rewrite rules (see below). An archive in `docker/kvs-archive/` is only a fallback for the rewrites and must then be of the site's version.
 2. For the archive source, run the exporter on the old server. It finds the site, checks the database access with the credentials of `admin/include/setup_db.php`, dumps the database (zstd when installed, gzip otherwise) and writes one tar with the files, the dump and a manifest. Copy the result to the new server. The site size is measured first, a few entries at a time with a progress line every ten seconds; `--size-timeout SECONDS` bounds that and `--no-size` skips it, since millions of files take long to count. The summary lists every directory at the root, under `contents/` and the few under `admin/` that grow on their own, with its size and whether it travels: temporary files and compiled templates KVS rebuilds (`tmp`, `admin/data/tmp`, `admin/smarty/*`) travel as empty directories, hidden entries, network mounts (a storage server's content, on a KVS server) and the query logs of the KVS debug switch (`admin/logs/debug_sql_*.txt`, gigabytes on a busy site) stay behind, anything else at the root that is not KVS is reported as such; `--exclude PATH` leaves a directory behind (`contents/videos_sources`, an old `backup`), `--include PATH` takes a hidden entry or a mount along. The storage servers of the site are listed too: a local one outside the site directory is not carried and its path is not rewritten, a remote one stays where it is.
 
    ```bash
@@ -216,7 +232,7 @@ The explicit file takes priority over all automatic sources, including on re-run
 
 Automatic recovery accepts server-level rewrites from matching server blocks and their dumped includes. Nested rewrites, control-flow dependencies, unresolved includes or syntax that cannot be parsed safely stop recovery without writing a partial fragment; provide `IMPORT_NGINX_REWRITES` to continue. Recovery does not migrate an arbitrary nginx vhost. Review any saved fragment generated by an older installer before reusing it. The chosen rules are restored to `_INSTALL/nginx_config.txt` after the transfer and kept outside the webroot for later runs.
 
-A site whose search ran through the KVS External Search plugin (Sphinx or Manticore on the old server) is announced: with Manticore enabled (`MANTICORE_CHOICE=1`) the init points the plugin at the stack's own Manticore (used always and replacing the internal search, as the plugin form advises for Manticore, the internal fallback kept for when Manticore is down), which indexes the imported database when its container starts and every hour, its three search scripts kept outside the KVS tree in the `manticore-api` volume shared by nginx, php-fpm and the init (the KVS audit plugin reports every file or directory it does not know inside the site as suspicious); without it the init removes the plugin configuration and KVS falls back to its MySQL search. A reindex by hand runs as the container's own user (`docker compose exec -u manticore manticore indexer --rotate --all`): run as root it leaves rotation files searchd cannot read, which the hourly job clears before indexing.
+A site whose search ran through the KVS External Search plugin (Sphinx or Manticore on the old server) is announced: with Manticore enabled (`MANTICORE_CHOICE=1`) the init points the plugin at the stack's own Manticore (used always and replacing the internal search, as the plugin form advises for Manticore, the internal fallback kept for when Manticore is down), which builds its indexes from the imported database before it answers (the setup asks for that build whenever it imports a database or starts a fresh one, as the indexes its volume kept were built from another, and when it switches search on again over the database it keeps; a setup run that stops before Manticore starts leaves that request to the next one), serves the indexes its volume kept at once on any other start, a restart or an upgrade, while it rebuilds them in the background, and rebuilds them every hour (a build of a start that fails on some tables turns the container unhealthy and is reported by `./reconfigure.sh --manticore status` while searchd answers with the tables it has: until a start builds them all when the build before it answers failed, until a later rebuild succeeds when the one in the background failed; an hourly rebuild that fails is only written to `/var/log/manticore/indexer-cron.log`), its three search scripts kept outside the KVS tree in the `manticore-api` volume shared by nginx, php-fpm and the init (the KVS audit plugin reports every file or directory it does not know inside the site as suspicious); without it the init removes the plugin configuration and KVS falls back to its MySQL search. A reindex by hand runs as the container's own user and takes the lock the start-up rebuild and the hourly job take (`docker compose exec -u manticore manticore flock /var/run/manticore/indexer.lock indexer --rotate --all`): run as root it leaves rotation files searchd cannot read, which the hourly job clears before indexing.
 
 After installation or import, run these commands from the installation's `docker` directory:
 
@@ -226,7 +242,7 @@ After installation or import, run these commands from the installation's `docker
 ./reconfigure.sh --manticore disable
 ```
 
-Enable builds/starts the search service, waits for the videos, albums and searches indexes, then configures the KVS plugin and verifies its saved configuration through PHP. It does not rerun the database import or the full installation. Disable restores KVS built-in search and stops Manticore while keeping its index volume. Both choices persist in `.env`; later setup runs keep enabled search unless `MANTICORE_CHOICE=2` explicitly disables it. Initial indexing reports activity while waiting (up to `MANTICORE_WAIT_SECONDS`, default 3600 seconds). A failed start or index build leaves the KVS search configuration unchanged.
+Enable builds the search service, or, on an installation where kvsctl has installed a release, runs the manticore image the release pins and builds nothing, and starts it with every index built from the current database before it answers, since the volume may keep indexes from before search was disabled or from another database, waits for the videos, albums and searches indexes, then configures the KVS plugin and verifies its saved configuration through PHP. It does not rerun the database import or the full installation. Disable restores KVS built-in search and stops Manticore while keeping its index volume. Both choices persist in `.env`; later setup runs keep enabled search unless `MANTICORE_CHOICE=2` explicitly disables it, and a setup run that enables it again builds the indexes from the current database the same way. Indexing reports activity while waiting (up to `MANTICORE_WAIT_SECONDS`, default 3600 seconds). When the wait runs out first, the build goes on: run enable again and it waits for that build instead of starting it over. A failed start or index build, one that fails on a single table included, leaves the KVS search configuration unchanged. Status also fails, and prints why, when the build of a start failed, before searchd answers or behind it.
 
 During MariaDB initialization, setup reports its state immediately and keeps a five-second status heartbeat visible while readiness or activity probes are pending. Activity samples include elapsed time, tables created, the actual InnoDB buffer pool size and the current SQL operation. An already-ready server proceeds directly to completion verification without another activity scan. Where the reader is available, it also reports the dump bytes read, including compressed input. This percentage measures input consumed, not SQL committed: 100% read can still mean MariaDB is executing or committing statements. TCP readiness and the dump's unique final marker are checked before declaring the import complete. Inspect an ongoing import without restarting it:
 
@@ -243,7 +259,7 @@ After an import wait times out, update the installer files and resume from the e
 ./setup.sh --resume-import
 ```
 
-Resume uses the saved configuration and the existing container, volume, site files and staged dump. It waits for the ongoing replay, checks the dump's unique final marker, then completes site initialization and service startup without recreating MariaDB or transferring the source again. It preserves the staged dump and marker if finalization fails, so the same resume command can be retried. It cannot be combined with `--dev`.
+Resume uses the saved configuration and the existing container, volume, site files and staged dump. It waits for the ongoing replay, checks the dump's unique final marker, then completes site initialization and service startup without recreating MariaDB or transferring the source again. It preserves the staged dump and marker if finalization fails, so the same resume command can be retried. It cannot be combined with `--dev`, and it needs Docker Compose 2.32.2 or newer, which it checks before anything else.
 
 For older compressed SQL dumps, verifying the expected marker requires reading the compressed dump once after MariaDB is ready; this does not replay SQL. This verification reports its elapsed time immediately and every three seconds until the check finishes. A missing or mismatched marker stops recovery without replacing the database. Older installers could lose the final marker if a dump left autocommit disabled, so a missing marker requires investigation rather than an automatic fresh import.
 
@@ -287,6 +303,50 @@ cd /opt/kvs/docker
 docker compose start
 ```
 
+### Upgrading the Docker stack with kvsctl (preview)
+
+`kvsctl`, in `cli/`, upgrades a single-site Docker installation from the
+signed releases of this repository: it backs up the database, pulls the
+images of the release, installs its files, restarts the stack, checks the
+containers and the site, and rolls back by itself when the new version does
+not come up. [cli/README.md](cli/README.md) describes the commands, and
+[docs/releasing.md](docs/releasing.md) how a release is made.
+
+An installation kvsctl manages, from `kvsctl adopt` on (its record is
+`kvsctl/state.json`), is upgraded with `kvsctl upgrade` only:
+`kvs-install.sh` refuses to update it, and `setup.sh` keeps its MariaDB
+series (`kvsctl upgrade --mariadb-series` changes it, after a backup) and
+its PHP series: a new `PHP_VERSION` set in `docker/.env` reaches the site
+with `kvsctl upgrade`, which installs the images of that series. Until the
+first `kvsctl upgrade`, an adopted installation still builds its images with
+`setup.sh` and `docker compose build`; once kvsctl has installed a release,
+`docker/docker-compose.release.yml` pins its images, and neither
+`docker compose build` nor `setup.sh` builds any of its services (`setup.sh`
+says `its image is pinned, nothing to build`).
+
+An installation where kvsctl only took or replayed backups (`kvsctl backup`
+and `kvsctl restore` need no adoption) is not managed: `kvs-install.sh`
+updates it. When the update has to clone the repository again, it moves
+`backups/` and `kvsctl/` into the new copy, renamed through
+`<install dir>.kvsctl.XXXXXX` beside the installation, never copied; one of
+them on another filesystem than the directory above the installation stops
+the update, with nothing changed. An update interrupted while it moves them
+(Ctrl-C, a closed terminal, SIGTERM) puts them back before it stops. One
+killed outright (`kill -9`, a power cut) leaves them in
+`<install dir>.kvsctl.XXXXXX`, and the next run of `kvs-install.sh` moves
+them back before anything else; one the installation holds again by then,
+a newer `backups/` for instance, stays there, named.
+
+On any installation, managed or not, `kvs-install.sh`, `docker/setup.sh`
+and `docker/reconfigure.sh` change nothing while a kvsctl run holds
+`kvsctl/lock`, since the containers they would change meanwhile are not
+the ones kvsctl expects. Nor do they after a run that did not finish left
+`kvsctl/journal.json`, until `kvsctl recover` has finished or undone that
+run; where recover says to finish by hand, remove `kvsctl/journal.json`
+before running them for it. `reconfigure.sh --import-status`,
+`--writeback-status` and `--manticore status` still run, and
+`kvsctl status`, which only reads the lock, stops none of them.
+
 ## Compatibility
 
 The latest versions are more stable and we recommend using Debian 13 for the best support.
@@ -299,6 +359,10 @@ This script supports the following Linux distributions:
 | Debian 13 | ✅ |
 
 At present, non-Debian-based distros are not a priority. We recommend using the latest stable version of Debian as it was the development platform for this script. If you wish to use another distro, please open an issue on GitHub with a valid reason for consideration. Your case will be studied, and may provide support through Docker to achieve similar results.
+
+### CPU architectures
+
+The Docker stack builds and runs on amd64 (x86-64) and arm64 (aarch64) servers. Every image it builds on or runs is published for both, and the ionCube loader and yt-dlp the PHP-FPM and cron images download are the builds of the architecture being built, each checked against a sha256 pinned for that architecture. The CI builds the PHP-FPM and cron images, for every PHP series, on both architectures, and the nginx, init and Manticore images on amd64 only. The images and binaries a [kvsctl](#upgrading-the-docker-stack-with-kvsctl-preview) release publishes are linux/amd64 only, so kvsctl manages amd64 servers only, and an arm64 server builds its images from the Dockerfiles with `setup.sh`. The standalone installation fetches the x86-64 ionCube loader.
 
 
 ### Hardware Recommendations
@@ -333,7 +397,7 @@ In a 2023 test, a standard installation left 6.3GB free out of 10GB. Watch demo 
 - **MariaDB Latest LTS**: Installs the latest LTS version of MariaDB, offering more up-to-date solutions than standard repository versions with options to select preferred LTS versions.
 - **Resource Monitoring Tools**: Includes additional packages like ncdu, vnstat, and nload for resource monitoring.
 - **Optional IonCube Installation**: Provides the option to install or skip IonCube depending on licensing needs.
-- **YT-DLP Installation**: Installs the latest version of yt-dlp, a fork of youtube-dl, ensuring up-to-date media downloading capabilities.
+- **YT-DLP Installation**: Installs yt-dlp, a fork of youtube-dl, and keeps it current. The standalone installation fetches the latest release and replaces it every night; the Docker images carry a checked release and install each newer one once it is checked (see [yt-dlp](#yt-dlp)).
 
 ## To-Do
 
@@ -343,15 +407,15 @@ If you have suggestions or questions, please feel free to open an issue on GitHu
 
 Current priorities include increasing SSL flexibility to support configurations such as Cloudflare, improving NGINX configurations (e.g., handling `CF-Connecting-IP`), and integrating Cloudflare settings via API. We are also focused on enhancing testing protocols to identify bugs more efficiently and verifying that the installation is functional and optimized across all script components after completion.
 
-Your input is valuable— if you believe certain enhancements should be prioritized, please let us know.
+Your input is valuable: if you believe certain enhancements should be prioritized, please let us know.
 
 ## Supports
 
 The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them. (For example, PHP 8.3/8.4 is not yet officially supported by KVS and thus not recommended.)
 
-- NGINX 1.29.x mainline
+- NGINX mainline: the image `docker/images.lock` pins for Docker, the nginx.org mainline packages for the standalone installation
 - MariaDB 11.4 LTS, 11.8 LTS or 12.3 LTS (Default)
-- PHP 7.4 or PHP 8.1 (since 6.2.0)
+- PHP 8.1 for KVS 6.2.1 and newer; PHP 7.4 for older KVS, with the standalone installation only (the Docker installation builds 8.1 to 8.4)
 - phpMyAdmin 5.2.3 (or newer)
 
 ## Customization and Limitations

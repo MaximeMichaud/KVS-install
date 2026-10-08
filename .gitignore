@@ -8,3 +8,15 @@ KVS_*.zip
 # Database dumps staged for an import (never commit)
 docker/mariadb/init/*kvs-import*
 docker/import/
+
+# What an installation writes beside docker/, which kvs-install.sh keeps when
+# it updates the checkout: the backups of kvsctl, its state, logs and lock,
+# and the logs of setup.sh (/opt/kvs/logs). Anchored: cli/cmd/kvsctl/ is code.
+/backups/
+/kvsctl/
+/logs/
+
+# Release signing keys (kvsctl-release keygen). Generate them outside the
+# checkout; these lines only guard against a copy landing here by mistake.
+keys/
+*.key

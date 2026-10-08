@@ -97,8 +97,14 @@ common_log="$TEST_DIR/common.log"
 assert_secret_is_not_an_argument "$common_log" "$SECRET" \
     "the shared MariaDB password was exposed through process arguments"
 
+# The settings script reads the table prefix from the setup.php of the site,
+# which it finds under KVS_PATH: a site of the test's own, so the script
+# has no fallback to warn about.
 settings_script="$TEST_DIR/70-system-settings.sh"
-sed "s|source /init/lib/common.sh|source $ROOT_DIR/docker/init/lib/common.sh|" \
+mkdir -p "$TEST_DIR/kvs/admin/include"
+# shellcheck disable=SC2016
+printf '<?php\n$config["tables_prefix"] = "ktvs_";\n' > "$TEST_DIR/kvs/admin/include/setup.php"
+sed "s|source /init/lib/common.sh|source $ROOT_DIR/docker/init/lib/common.sh; KVS_PATH=$TEST_DIR/kvs|" \
     "$ROOT_DIR/docker/init/docker-entrypoint.d/70-system-settings.sh" \
     > "$settings_script"
 chmod +x "$settings_script"
@@ -114,7 +120,9 @@ export -f mariadb
 
 DOMAIN=example.com \
 MARIADB_PASSWORD="$SECRET" \
-    bash "$settings_script" >/dev/null
+    bash "$settings_script" >/dev/null 2> "$TEST_DIR/settings.err"
+[ ! -s "$TEST_DIR/settings.err" ] ||
+    fail "the system settings update wrote on stderr: $(cat "$TEST_DIR/settings.err")"
 
 [ "$(count_env_line "$settings_log" password "$SECRET")" -eq 1 ] ||
     fail "the system settings update did not authenticate through MYSQL_PWD"

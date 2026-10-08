@@ -139,6 +139,40 @@ YAML
 done
 echo 'PASS: effective command override detected before persistence'
 
+# Compose before 2.22.0 writes the items of a list at the level of its key
+# ("    - item") and 2.22.0 and newer indent them under it, as 2.21.0 and
+# 2.22.0 render the MariaDB service. The check reads both layouts, and the
+# command ends at the next key of the service: an item of a later list is
+# not one of its arguments.
+render_mariadb() {
+    local item="$1"
+    printf 'name: kvs-resources\nservices:\n  mariadb:\n    command:\n'
+    printf '%s- --innodb-buffer-pool-size=%s\n' "$item" "${MARIADB_BUFFER_POOL_SIZE:-128M}"
+    printf '%s- --innodb-log-file-size=%s\n' "$item" "${MARIADB_REDO_LOG_SIZE:-128M}"
+    printf '%s- --max-allowed-packet=1G\n' "$item"
+    printf '%s' "${command_extra:-}"
+    printf '    container_name: kvs-resources-mariadb\n    entrypoint:\n'
+    printf '%s- --innodb-buffer-pool-size=24G\n' "$item"
+    printf '    image: mariadb:12.3\n'
+}
+for item in '    ' '      '; do
+    layout='the layout of Compose 2.22.0 and newer'
+    [ "$item" != '    ' ] || layout='the layout of Compose before 2.22.0'
+    (
+        # shellcheck disable=SC2329  # Called by the functions under test.
+        docker() { [ "$*" = 'compose config' ] || return 97; render_mariadb "$item"; }
+        reset_case
+        command_extra=''
+        database_configure_resources > layout.log 2>&1 ||
+            fail "$layout: the MariaDB command was not recognized: $(cat layout.log)"
+        [ "$(read_saved)" = '12288M 2048M' ] || fail "$layout: sizes not persisted: $(read_saved)"
+        reset_case
+        command_extra="${item}- --loose-innodb-buffer-pool-size=24G"$'\n'
+        assert_unchanged_failure "$layout: a late loose buffer pool argument"
+    )
+done
+echo 'PASS: the MariaDB command check reads the list layout of every Compose release'
+
 reset_case
 MARIADB_BUFFER_POOL_SIZE=512M
 MARIADB_REDO_LOG_SIZE=128M

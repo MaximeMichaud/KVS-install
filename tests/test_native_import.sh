@@ -541,7 +541,9 @@ batch_proof() (
         touch "$state/$table.started"
         case "$table" in
             first|second)
-                for ((attempt=0; attempt<100; attempt++)); do
+                # Up to ten seconds for the other worker of the wave: a
+                # loaded host can start it more than a second late.
+                for ((attempt=0; attempt<1000; attempt++)); do
                     [ -f "$state/first.started" ] && [ -f "$state/second.started" ] && break
                     sleep 0.01
                 done
@@ -583,6 +585,12 @@ batch_proof success > "$TEST_DIR/batch-success.log"
 batch_proof failure > "$TEST_DIR/batch-failure.log"
 batch_proof cancel-first > "$TEST_DIR/batch-cancel-first.log"
 batch_proof cancel-third > "$TEST_DIR/batch-cancel-third.log"
+# A shell started with SIGINT ignored, as an asynchronous command of a
+# non-interactive shell is ("tests/run.sh &" in a script), cannot trap it,
+# and neither can the batch it runs: the INT case below would report the
+# cancellation as ignored. Say why instead.
+[ "$(trap -p INT)" != "trap -- '' SIGINT" ] ||
+    fail 'SIGINT is ignored in this shell, so the INT case cannot interrupt the batch: run the suite in the foreground'
 for signal in HUP INT TERM; do batch_proof "cancel-active-$signal" > "$TEST_DIR/batch-cancel-active-$signal.log"; done
 echo 'PASS: preserved-index workers overlap, respect the bound, drain failures and handle HUP/INT/TERM without another launch'
 echo 'PASS: native bundle integrity, safe extraction, schema mapping, concurrency and completion gates'

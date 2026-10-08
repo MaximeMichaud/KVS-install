@@ -24,11 +24,28 @@ if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh" ]; then
     source "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh"
 fi
 
-# The commit that runs, shown in the setup header and with the file
-# transfer: a server left on an older checkout shows it in the lines an
-# operator copies from the terminal. Empty outside a git checkout.
-KVS_INSTALL_VERSION=$(git -C "$(dirname "${BASH_SOURCE[0]}")" log -1 --format='%h, %cd' --date=short 2>/dev/null) ||
-    KVS_INSTALL_VERSION=""
+# The version that runs, shown in the setup header and with the file
+# transfer: a server left on an older version shows it in the lines an
+# operator copies from the terminal. A release kvsctl laid names itself on
+# the first line of docker/RELEASE, also in a git checkout, whose commit
+# then no longer says what runs; any other git checkout gives its commit.
+# Empty otherwise. The header prints it with echo -e, so a first line that
+# is not a plain version name is ignored.
+kvs_install_version() {
+    local dir release=""
+
+    dir=$(dirname "${BASH_SOURCE[0]}")
+    if [ -f "$dir/RELEASE" ]; then
+        IFS= read -r release 2>/dev/null < "$dir/RELEASE" || true
+        release=${release%$'\r'}
+        if [[ "$release" =~ ^[0-9A-Za-z][0-9A-Za-z.+_-]*$ ]]; then
+            printf '%s\n' "$release"
+            return 0
+        fi
+    fi
+    git -C "$dir" log -1 --format='%h, %cd' --date=short 2>/dev/null || true
+}
+KVS_INSTALL_VERSION=$(kvs_install_version)
 
 #################################################################
 # Dev mode flag parsing
@@ -37,6 +54,9 @@ KVS_INSTALL_VERSION=$(git -C "$(dirname "${BASH_SOURCE[0]}")" log -1 --format='%
 DEV_MODE=false
 RESUME_IMPORT=false
 DOCKER_BUILD_FLAGS=""
+# What the end of the setup repeats when the PHP series selected differs
+# from the one an installation kvsctl manages keeps (kvsctl_note_php_change).
+KVSCTL_PHP_CHANGE=""
 SETUP_RUN_FLAGS=()
 # shellcheck disable=SC2034  # Read by lib/database.sh after .env is loaded.
 MARIADB_BUFFER_POOL_SIZE_REQUEST="${MARIADB_BUFFER_POOL_SIZE:-}"
@@ -226,6 +246,38 @@ if [ "$EUID" -ne 0 ]; then
     echo "ERROR: Please run as root" >&2
     exit 1
 fi
+
+# kvsctl changes the stack under its lock, kvsctl/lock beside the docker
+# directory, and a run of it that did not finish leaves kvsctl/journal.json,
+# from which kvsctl recover finishes or undoes that run: containers started
+# meanwhile, or before that recover, are not the ones kvsctl expects. Both
+# are refused before anything changes; an installation kvsctl never ran on
+# has neither file. When recover cannot finish a run, it leaves the run to
+# be finished by hand and the journal to be removed: the refusal says so,
+# or the setup and recover would each send the operator to the other.
+# reconfigure.sh and kvs-install.sh check the same.
+refuse_during_kvsctl_run() {
+    local root="$1"
+    local lock="$1/kvsctl/lock"
+    local status=0
+
+    # A shared lock is refused exactly while a kvsctl run holds its own.
+    if [ -e "$lock" ]; then
+        flock --shared --nonblock "$lock" true || status=$?
+        if [ "$status" -eq 1 ]; then
+            echo "ERROR: kvsctl is running on this installation (it holds ${lock}): wait until it is done; 'kvsctl status' shows what it does. Nothing was changed." >&2
+            return 1
+        elif [ "$status" -ne 0 ]; then
+            echo "ERROR: could not tell whether kvsctl is running: flock ${lock} failed with status ${status}. Nothing was changed." >&2
+            return 1
+        fi
+    fi
+    if [ -e "$root/kvsctl/journal.json" ]; then
+        echo "ERROR: an interrupted kvsctl run left ${root}/kvsctl/journal.json: run 'kvsctl recover' first. Where recover says to finish by hand and that takes setup.sh, remove that file, then run setup.sh again. Nothing was changed." >&2
+        return 1
+    fi
+}
+refuse_during_kvsctl_run "$(cd .. && pwd)" || exit 1
 
 # Create logs only after the privilege requirement has been satisfied.
 mkdir -p "$LOG_DIR" 2>/dev/null || true
@@ -730,7 +782,15 @@ setup_resume_require_init_image() {
 }
 
 setup_resume_import() {
-    local key site_info snapshot state project marker resume_library wait_budget="${MARIADB_WAIT_SECONDS:-0}"
+    local key site_info snapshot state project marker resume_library wait_budget="${MARIADB_WAIT_SECONDS:-0}" compose_version
+    # The initializers run with "docker compose run --pull missing", which
+    # Docker Compose has from 2.32.2 on. A resume skips the pre-flight
+    # checks, so say it here rather than after the wait for the replay.
+    compose_version=$(docker compose version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -n 1)
+    if [ "$(printf '%s\n' 2.32.2 "${compose_version:-0}" | sort -V | head -n 1)" != 2.32.2 ]; then
+        echo "ERROR: --resume-import needs Docker Compose 2.32.2 or newer, the first whose docker compose run takes --pull; found ${compose_version:-none}. Nothing was changed: upgrade Docker Compose, then resume again." >&2
+        return 1
+    fi
     echo "Inspecting the saved import configuration and existing MariaDB container..."
     resume_library="$(dirname "${BASH_SOURCE[0]}")/lib/import-resume.sh"
 
@@ -1074,6 +1134,96 @@ import_check_leftover_dump() {
     exit 1
 }
 
+# PHP version selection based on KVS version
+# Official requirements from kvs-cli CheckCommand.php
+# Versions with an official php:<version>-fpm image this stack can build.
+# PHP 7.4 is not one of them (refuse_unbuildable_kvs_php says why).
+readonly SUPPORTED_PHP_VERSIONS="8.1 8.2 8.3 8.4"
+
+php_version_is_supported() {
+    local candidate="$1"
+    local supported
+
+    for supported in $SUPPORTED_PHP_VERSIONS; do
+        [ "$candidate" = "$supported" ] && return 0
+    done
+    return 1
+}
+
+# Read the version KVS documents for the archive in kvs-archive/, or for
+# the imported site when no archive is there, or for the site in place
+# (imported without the archive, or installed from one since removed):
+# the site says its version itself. Prints nothing and fails when none
+# gives a version.
+kvs_documented_php_version() {
+    local site="${1:-/var/www/${DOMAIN:-}}"
+    local kvs_file
+    local kvs_version=""
+    local major
+    local minor
+    local patch
+
+    kvs_file=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
+    if [ -n "$kvs_file" ]; then
+        kvs_version=$(basename "$kvs_file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    fi
+    if [ -z "$kvs_version" ] && [ "${IMPORT_MODE:-false}" = true ]; then
+        kvs_version=$(printf '%s' "${IMPORT_SITE_VERSION:-}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    fi
+    if [ -z "$kvs_version" ] && [ -f "$site/admin/include/version.php" ] &&
+        declare -F import_read_kvs_version > /dev/null; then
+        kvs_version=$(import_read_kvs_version "$site" 2>/dev/null | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    fi
+    [ -n "$kvs_version" ] || return 1
+
+    major=$(echo "$kvs_version" | cut -d. -f1)
+    minor=$(echo "$kvs_version" | cut -d. -f2)
+    patch=$(echo "$kvs_version" | cut -d. -f3)
+
+    # 7.0.x, 6.4, 6.3, 6.2.1+ -> PHP 8.1
+    # 6.2.0, 6.1, 6.0, 5.x    -> PHP 7.4
+    if [ "$major" -lt 6 ] ||
+        { [ "$major" -eq 6 ] && [ "$minor" -lt 2 ]; } ||
+        { [ "$major" -eq 6 ] && [ "$minor" -eq 2 ] && [ "$patch" -eq 0 ]; }; then
+        printf '%s\t%s\n' "$kvs_version" "7.4"
+    else
+        printf '%s\t%s\n' "$kvs_version" "8.1"
+    fi
+}
+
+# KVS 6.2.0 and older documents PHP 7.4, which this stack does not build:
+# the php:7.4 images are Debian 11, which lacks packages the PHP-FPM and cron
+# images install, and PHP 7.4 no longer receives security fixes. Such a site
+# is refused before anything is stopped or built, unless KVS_PHP_VERSION
+# names a version this stack builds, which only unencoded files can run on.
+# It runs once the version of the site can be known (the archive, the site
+# of an import, or the site in place) and again when the PHP version is
+# selected, since the archive may be copied in meanwhile. Fails with the
+# reason printed; succeeds for any other site, or when no version is known.
+refuse_unbuildable_kvs_php() {
+    local marker kvs_version documented
+
+    if [ -n "${KVS_PHP_VERSION:-}" ]; then
+        php_version_is_supported "$KVS_PHP_VERSION" && return 0
+        echo -e "${RED}ERROR: Unsupported PHP version: $KVS_PHP_VERSION${NC}"
+        echo "Supported versions: $SUPPORTED_PHP_VERSIONS"
+        return 1
+    fi
+    marker=$(kvs_documented_php_version) || return 0
+    kvs_version=${marker%%$'\t'*}
+    documented=${marker#*$'\t'}
+    php_version_is_supported "$documented" && return 0
+    echo -e "${RED}ERROR: KVS ${kvs_version} needs PHP ${documented}, which this Docker installation does not build.${NC}"
+    echo "The php:${documented} images are based on Debian 11, which lacks packages the PHP-FPM and cron"
+    echo "images install, and PHP ${documented} no longer receives security fixes. Nothing was stopped or built."
+    echo "  - Use an archive, or for an import a site, of KVS 6.2.1 or newer, which runs on PHP 8.1."
+    echo "  - Or install KVS ${kvs_version} without Docker: the standalone installation of kvs-install.sh"
+    echo "    installs PHP ${documented}."
+    echo "  - Or, only if its files are not IonCube encoded, run setup.sh again with KVS_PHP_VERSION set"
+    echo "    to one of ${SUPPORTED_PHP_VERSIONS}, which Kernel Team has not tested with this release."
+    return 1
+}
+
 # The questionnaire: which source, then what it holds. Headless runs come
 # here with the source already chosen through the environment.
 select_import_source() {
@@ -1154,6 +1304,9 @@ select_import_source() {
         remote) import_inspect_remote ;;
     esac
     import_check_kvs_archive_version
+    # Before the operator is asked to confirm, and before .env records the
+    # source: a site this stack cannot run stops here.
+    refuse_unbuildable_kvs_php || exit 1
     import_record_source_domain
     import_check_domain
     import_confirm
@@ -1626,8 +1779,8 @@ import_inspect_remote() {
     fi
     encoding=$(import_kv "$IMPORT_REMOTE_REPORT" ioncube)
     case "$encoding" in
-        yes) echo "  Encoding:        IonCube (the PHP image gets the loader)" ;;
-        no) echo "  Encoding:        plain PHP (no IonCube loader)" ;;
+        yes) echo "  Encoding:        IonCube (the ionCube loader runs)" ;;
+        no) echo "  Encoding:        plain PHP (the ionCube loader is disabled)" ;;
     esac
     nginx_lines=$(import_kv "$IMPORT_REMOTE_REPORT" nginx_config_lines)
     nginx_files=$(import_kv "$IMPORT_REMOTE_REPORT" nginx_site_files)
@@ -2338,6 +2491,18 @@ preflight_kernel_writeback_warning() {
     echo "  millions of files: upgrade it first, see \"After the last pass of a large site\" in README.md"
 }
 
+# An installation kvsctl manages, from the moment kvsctl adopts it: kvsctl
+# keeps its record in ../kvsctl/state.json, beside this directory, and once
+# it has installed a release, docker-compose.release.yml pins the images of
+# that release (COMPOSE_FILE loads it; set_compose_file keeps it there).
+# kvs-install.sh refuses to update an installation on the same test
+# (refuse_kvsctl_managed_install). An adopted stack still builds its images
+# here until its first kvsctl upgrade, so nothing that relies on this test
+# may assume the release override exists.
+kvsctl_manages_stack() {
+    [ -e ../kvsctl/state.json ] || [ -e docker-compose.release.yml ]
+}
+
 # Pre-flight checks before installation
 preflight_checks() {
     echo ""
@@ -2360,11 +2525,37 @@ preflight_checks() {
         critical_failed=$((critical_failed + 1))
     fi
 
-    # 2. Docker Compose installed
+    # 2. Docker Compose installed, 2.10.0 or newer. This script starts the
+    # services with "docker compose up --pull missing", which Compose has
+    # from 2.8.0 on: an older one would fail there, after the running
+    # containers were stopped. And it hands Compose values it has not saved
+    # yet through the environment (the MariaDB sizes it checks before it
+    # saves them), which 2.8.0 and 2.9.0 let .env override: that check fails
+    # on them whenever the sizes change, a first installation included.
+    # 2.8.0 also names the volumes of a project <project>-<volume>, which
+    # would start a site on new, empty ones. The release override kvsctl
+    # lays once it has installed a release stops the build of its pinned
+    # services with "build: !reset null", which Compose applies from 2.19.0
+    # on (2.18 reads it as a build from a directory named null); an adopted
+    # stack has no such file yet. A release asks kvsctl for the same version
+    # (COMPOSE_MIN in .github/release.env). Multi-site mode checks its own
+    # minimum once the mode is known (require_multi_compose_version), and
+    # --resume-import its own (setup_resume_import).
     if docker compose version >/dev/null 2>&1; then
-        local compose_version
+        local compose_version compose_minimum=2.10.0
+        local compose_reason="this script starts the services with docker compose up --pull missing (Docker Compose 2.8.0 and newer) and passes values to Compose through the environment, which 2.8.0 and 2.9.0 let .env override"
         compose_version=$(docker compose version | grep -oP '\d+\.\d+\.\d+' | head -1)
-        echo -e "${GREEN}✓${NC} Docker Compose installed: ${compose_version}"
+        if [ -e docker-compose.release.yml ]; then
+            compose_minimum=2.19.0
+            compose_reason="kvsctl manages this installation, and its release override needs Docker Compose 2.19.0 or newer"
+        fi
+        if [ "$(printf '%s\n' "$compose_minimum" "${compose_version:-0}" | sort -V | head -n 1)" != "$compose_minimum" ]; then
+            echo -e "${RED}✗${NC} Docker Compose ${compose_version:-unknown} is too old"
+            echo "  ${compose_reason}"
+            critical_failed=$((critical_failed + 1))
+        else
+            echo -e "${GREEN}✓${NC} Docker Compose installed: ${compose_version}"
+        fi
     else
         echo -e "${RED}✗${NC} Docker Compose not installed"
         echo "  Docker Compose v2 is required (plugin, not standalone)"
@@ -2437,12 +2628,19 @@ preflight_checks() {
         warnings=$((warnings + 1))
     fi
 
-    # 7. Required commands
+    # 7. Required commands, and the packages that install them: ss comes
+    # with iproute2, and apt installs awk only by the name of an
+    # implementation, mawk on Debian and Ubuntu.
     local required_cmds=("curl" "unzip" "sed" "awk" "grep" "ss")
-    local missing_cmds=()
+    local missing_cmds=() missing_packages=()
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             missing_cmds+=("$cmd")
+            case "$cmd" in
+                ss) missing_packages+=(iproute2) ;;
+                awk) missing_packages+=(mawk) ;;
+                *) missing_packages+=("$cmd") ;;
+            esac
         fi
     done
 
@@ -2450,7 +2648,7 @@ preflight_checks() {
         echo -e "${GREEN}✓${NC} Required commands: all present"
     else
         echo -e "${RED}✗${NC} Missing commands: ${missing_cmds[*]}"
-        echo "  Install: apt update && apt install -y ${missing_cmds[*]}"
+        echo "  Install: apt update && apt install -y ${missing_packages[*]}"
         critical_failed=$((critical_failed + 1))
     fi
 
@@ -2831,6 +3029,61 @@ export DOMAIN EMAIL
 IMPORT_DATABASE_FORMAT=$IMPORT_DATABASE_FORMAT_REQUEST
 select_import_source
 import_check_leftover_dump
+# The KVS version of the site is known from here (the archive, the site of
+# an import, or the site in place): one this stack cannot build PHP for
+# stops before anything is stopped, built or deleted.
+refuse_unbuildable_kvs_php || exit 1
+
+# The compose files and the .env must parse before anything of a running
+# stack is stopped or deleted. Compose reads them anew for each command, and
+# the stop of the containers falls back to docker stop by project label when
+# a down cannot read them: a Compose too old for these files, or a broken
+# docker-compose.override.yml, would stop the site and then fail to build or
+# start it again. Without an argument the refusal says that nothing was
+# stopped; a check that runs once this run may have removed a container
+# passes what is true there instead.
+require_compose_config() {
+    local output compose_version
+
+    if output=$(docker compose config --quiet 2>&1); then
+        return 0
+    fi
+    compose_version=$(docker compose version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -n 1)
+    echo -e "${RED}ERROR: Docker Compose ${compose_version:-of an unknown version} cannot read the compose files of this installation:${NC}"
+    printf '%s\n' "$output" | sed 's/^/  /'
+    echo "${1:-Nothing was stopped: the running containers keep serving.}"
+    echo "Fix what the error names, or upgrade Docker Compose, then run setup.sh again."
+    return 1
+}
+
+# The compose files of a mode, in the order set_compose_file records them
+# in COMPOSE_FILE. kvsctl pins the images of the installed release in
+# docker-compose.release.yml and records that file in COMPOSE_FILE, so the
+# list keeps it while COMPOSE_FILE names it: without it Compose rebuilds
+# every service from the Dockerfiles while kvsctl still reports the release
+# as installed. In multi mode docker-compose.multi.yml stays last so nothing
+# can publish Nginx on Caddy's ports again. The override and the release
+# pins count only while their file exists, so one deleted by hand since the
+# last run drops out of the list instead of failing every Compose command.
+compose_files_for() {
+    local mode="$1"
+    local compose_files="docker-compose.yml"
+    local current
+
+    if [ -f docker-compose.override.yml ]; then
+        compose_files="${compose_files}:docker-compose.override.yml"
+    fi
+    if [ -f docker-compose.release.yml ]; then
+        current=$(sed -n 's/^COMPOSE_FILE=//p' .env | tail -n 1)
+        case ":${current}:" in
+            *":docker-compose.release.yml:"*) compose_files="${compose_files}:docker-compose.release.yml" ;;
+        esac
+    fi
+    if [ "$mode" = "multi" ]; then
+        compose_files="${compose_files}:docker-compose.multi.yml"
+    fi
+    printf '%s\n' "$compose_files"
+}
 
 # An import under a new domain gets its own stack: the prefix follows the
 # domain, and the containers of the earlier stack (a development subdomain
@@ -2842,6 +3095,10 @@ if [ "$IMPORT_MODE" = true ] && [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN
     PREVIOUS_PROJECT=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env 2>/dev/null | tail -n 1)
     if [ -n "$PREVIOUS_PROJECT" ] && [ "$PREVIOUS_PROJECT" != kvs ] &&
         docker ps -aq --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | grep -q .; then
+        # The new stack is built from the same compose files: when Compose
+        # cannot read them, the earlier site keeps its containers. They are
+        # the files configure_mode records, not the COMPOSE_FILE of .env.
+        COMPOSE_FILE=$(compose_files_for "$MODE") require_compose_config || exit 1
         echo -e "${YELLOW}Removing the containers of ${PREVIOUS_PROJECT} (${PREVIOUS_DOMAIN}); its volumes stay: docker volume ls --filter name=${PREVIOUS_PROJECT}_${NC}"
         docker ps -q --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | xargs -r docker stop >/dev/null 2>&1 || true
         docker ps -aq --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | xargs -r docker rm >/dev/null 2>&1 || true
@@ -3090,12 +3347,12 @@ detect_ioncube() {
     case "${IMPORT_SITE_IONCUBE:-}" in
         yes)
             echo -e "${GREEN}✓ IonCube encoded files detected in the imported site${NC}"
-            sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+            sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
             return
             ;;
         no)
             echo -e "${GREEN}✓ Plain PHP files detected in the imported site (no IonCube)${NC}"
-            sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+            sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
             return
             ;;
     esac
@@ -3107,12 +3364,12 @@ detect_ioncube() {
         case "$(import_site_ioncube "$site")" in
             yes)
                 echo -e "${GREEN}✓ IonCube encoded files detected in the site under $site${NC}"
-                sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+                sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
                 return
                 ;;
             no)
                 echo -e "${GREEN}✓ Plain PHP files detected in the site under $site (no IonCube)${NC}"
-                sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+                sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
                 return
                 ;;
         esac
@@ -3142,10 +3399,10 @@ detect_ioncube() {
            grep -q "_il_exec" "$TEST_FILE" 2>/dev/null || \
            head -n 1 "$TEST_FILE" | grep -qE '^\s*<\?php\s+//[0-9a-f]{5,6}'; then
             echo -e "${GREEN}✓ IonCube encoded files detected${NC}"
-            sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+            sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
         else
             echo -e "${GREEN}✓ Plain PHP files detected (no IonCube)${NC}"
-            sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+            sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
         fi
     else
         # Fallback: try admin/index.php
@@ -3156,10 +3413,10 @@ detect_ioncube() {
                grep -q "_il_exec" "$TEST_FILE" 2>/dev/null || \
                head -n 1 "$TEST_FILE" | grep -qE '^\s*<\?php\s+//[0-9a-f]{5,6}'; then
                 echo -e "${GREEN}✓ IonCube encoded files detected${NC}"
-                sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+                sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
             else
                 echo -e "${GREEN}✓ Plain PHP files detected (no IonCube)${NC}"
-                sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+                sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
             fi
         else
             echo -e "${YELLOW}Could not extract PHP files for inspection. Defaulting to IonCube=YES${NC}"
@@ -3171,62 +3428,6 @@ detect_ioncube() {
 
     # Reload .env to get detected value
     source .env
-}
-
-# PHP version selection based on KVS version
-# Official requirements from kvs-cli CheckCommand.php
-# Versions with an official php:<version>-fpm image this stack can build.
-readonly SUPPORTED_PHP_VERSIONS="7.4 8.1 8.2 8.3 8.4"
-
-php_version_is_supported() {
-    local candidate="$1"
-    local supported
-
-    for supported in $SUPPORTED_PHP_VERSIONS; do
-        [ "$candidate" = "$supported" ] && return 0
-    done
-    return 1
-}
-
-# Read the version KVS documents for the archive in kvs-archive/, or for
-# the imported site when no archive is there, or for the site in place
-# (imported without the archive, or installed from one since removed):
-# the site says its version itself. Prints nothing and fails when none
-# gives a version.
-kvs_documented_php_version() {
-    local site="${1:-/var/www/${DOMAIN:-}}"
-    local kvs_file
-    local kvs_version=""
-    local major
-    local minor
-    local patch
-
-    kvs_file=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
-    if [ -n "$kvs_file" ]; then
-        kvs_version=$(basename "$kvs_file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-    fi
-    if [ -z "$kvs_version" ] && [ "${IMPORT_MODE:-false}" = true ]; then
-        kvs_version=$(printf '%s' "${IMPORT_SITE_VERSION:-}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-    fi
-    if [ -z "$kvs_version" ] && [ -f "$site/admin/include/version.php" ] &&
-        declare -F import_read_kvs_version > /dev/null; then
-        kvs_version=$(import_read_kvs_version "$site" 2>/dev/null | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-    fi
-    [ -n "$kvs_version" ] || return 1
-
-    major=$(echo "$kvs_version" | cut -d. -f1)
-    minor=$(echo "$kvs_version" | cut -d. -f2)
-    patch=$(echo "$kvs_version" | cut -d. -f3)
-
-    # 7.0.x, 6.4, 6.3, 6.2.1+ -> PHP 8.1
-    # 6.2.0, 6.1, 6.0, 5.x    -> PHP 7.4
-    if [ "$major" -lt 6 ] ||
-        { [ "$major" -eq 6 ] && [ "$minor" -lt 2 ]; } ||
-        { [ "$major" -eq 6 ] && [ "$minor" -eq 2 ] && [ "$patch" -eq 0 ]; }; then
-        printf '%s\t%s\n' "$kvs_version" "7.4"
-    else
-        printf '%s\t%s\n' "$kvs_version" "8.1"
-    fi
 }
 
 # Apply the PHP version to build the PHP-FPM and cron images with.
@@ -3260,12 +3461,10 @@ select_php_version() {
         echo -e "${YELLOW}Could not read the KVS version. Using PHP $documented${NC}"
     fi
 
-    if [ -n "$requested" ] &&
-        ! php_version_is_supported "$requested"; then
-        echo -e "${RED}ERROR: Unsupported PHP version: $requested${NC}"
-        echo "Supported versions: $SUPPORTED_PHP_VERSIONS"
-        exit 1
-    fi
+    # An unsupported KVS_PHP_VERSION, or a KVS that needs PHP 7.4 without
+    # one, stops here; past this point the documented version is one this
+    # stack builds, or KVS_PHP_VERSION names one.
+    refuse_unbuildable_kvs_php || exit 1
 
     if [ "${IONCUBE:-YES}" = "YES" ]; then
         if [ -n "$requested" ] &&
@@ -3279,12 +3478,7 @@ select_php_version() {
             return
         fi
 
-        if [ "$documented" = "7.4" ]; then
-            echo -e "${YELLOW}KVS $kvs_version requires PHP 7.4${NC}"
-            echo -e "${YELLOW}Warning: PHP 7.x is EOL. Consider upgrading KVS.${NC}"
-        else
-            echo "KVS ${kvs_version:-archive} requires PHP $documented"
-        fi
+        echo "KVS ${kvs_version:-archive} requires PHP $documented"
         set_env_value PHP_VERSION "$documented"
         echo -e "${GREEN}Set PHP $documented${NC}"
         return
@@ -3314,6 +3508,45 @@ select_php_version() {
     echo -e "${GREEN}Set PHP $choice${NC}"
 }
 
+# The build bases of the chosen PHP series, pinned by digest in images.lock,
+# so the images setup.sh builds are the bytes the release CI builds from.
+set_php_bases() {
+    local series fpm cli resolver
+    resolver="$(dirname "${BASH_SOURCE[0]}")/bin/resolve-bases.sh"
+    series=$(grep -E '^PHP_VERSION=' .env | tail -n 1 | cut -d= -f2)
+    if ! fpm=$("$resolver" --get php-fpm "$series") ||
+        ! cli=$("$resolver" --get php-cli "$series"); then
+        echo -e "${RED}ERROR: PHP $series has no pinned base in docker/images.lock${NC}"
+        exit 1
+    fi
+    set_env_value PHP_FPM_BASE "$fpm" || exit 1
+    set_env_value PHP_CLI_BASE "$cli" || exit 1
+}
+
+# On an installation kvsctl manages, the PHP series is kvsctl's to change,
+# like the MariaDB series: kvsctl upgrade installs the PHP-FPM and cron
+# images of the series PHP_VERSION names, and takes the previous ones back
+# when they do not come up. So the PHP_VERSION the installation had before
+# select_php_version stays. An adopted stack still builds those images here
+# until its first kvsctl upgrade, and building the series picked above
+# would move it outside kvsctl. Said here and again at the end.
+kvsctl_note_php_change() {
+    local before="$1"
+    local after
+
+    kvsctl_manages_stack || return 0
+    after=$(sed -n 's/^PHP_VERSION=//p' .env | tail -n 1)
+    if [ -z "$before" ] || [ "$after" = "$before" ]; then
+        return 0
+    fi
+    if ! set_env_value PHP_VERSION "$before"; then
+        echo -e "${RED}ERROR: could not write PHP_VERSION=${before} back to .env${NC}" >&2
+        return 1
+    fi
+    KVSCTL_PHP_CHANGE="kvsctl manages this installation, so PHP stays on ${before} instead of the ${after} selected above. To move the site to PHP ${after}, set PHP_VERSION=${after} in .env and run 'kvsctl upgrade', which installs the images of that series."
+    echo -e "${YELLOW}${KVSCTL_PHP_CHANGE}${NC}"
+}
+
 # IonCube selection
 select_ioncube() {
     echo ""
@@ -3321,44 +3554,85 @@ select_ioncube() {
     echo "KVS requires IonCube for encoded files."
     # Skip prompt if already set (headless mode)
     if [[ -z "$IONCUBE_CHOICE" ]]; then
-        echo "  1) Yes - Install IonCube (required for KVS) (default)"
-        echo "  2) No - Skip (only if you have unencoded KVS)"
-        echo -n "Install IonCube? [1-2] (default: 1): "
+        echo "  1) Yes - Run the IonCube loader (required for KVS) (default)"
+        echo "  2) No - Disable it (only if you have unencoded KVS)"
+        echo -n "Run the IonCube loader? [1-2] (default: 1): "
         read -r IONCUBE_CHOICE
     fi
 
     case $IONCUBE_CHOICE in
         2)
-            sed -i "s/IONCUBE=.*/IONCUBE=NO/" .env
+            sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
             echo -e "${YELLOW}IonCube disabled${NC}"
             ;;
         *)
-            sed -i "s/IONCUBE=.*/IONCUBE=YES/" .env
+            sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
             echo -e "${GREEN}IonCube enabled${NC}"
             ;;
     esac
 }
 
+# On an installation kvsctl manages, MariaDB stays on the series it runs.
+# The data files of a newer series cannot be opened by an older one, so a
+# series change is a step of its own, kvsctl upgrade --mariadb-series, which
+# backs up the database first: that backup is the way back. The release
+# override runs the image kvsctl writes to KVS_MARIADB_IMAGE, whose tag names
+# that series, and MARIADB_VERSION is made to name it too: once kvsctl has
+# moved the series forward, the check of the data volume further down would
+# otherwise take the newer volume for a downgrade and offer to delete it.
+# Without such an image, MARIADB_VERSION is left as it is.
+kvsctl_keep_mariadb_series() {
+    local tag_series=':([0-9]+\.[0-9]+)(\.[0-9]+)*(@|$)' running="" recorded=""
+
+    if [[ "${KVS_MARIADB_IMAGE:-}" =~ $tag_series ]]; then
+        running=${BASH_REMATCH[1]}
+    fi
+    if [[ "${MARIADB_VERSION:-}" =~ ^([0-9]+\.[0-9]+) ]]; then
+        recorded=${BASH_REMATCH[1]}
+    fi
+    echo ""
+    echo -e "${CYAN}MariaDB${NC}"
+    if [ -n "$running" ] && [ "$running" != "$recorded" ]; then
+        if ! set_env_value MARIADB_VERSION "$running"; then
+            echo -e "${RED}ERROR: could not write MARIADB_VERSION=${running} to .env${NC}" >&2
+            return 1
+        fi
+        echo "MARIADB_VERSION read ${MARIADB_VERSION:-nothing}; it now reads ${running}, the series of the image"
+        echo "kvsctl runs (KVS_MARIADB_IMAGE)."
+        MARIADB_VERSION=$running
+    fi
+    echo "kvsctl manages this installation, so MariaDB stays on ${MARIADB_VERSION:-the series it runs}."
+    echo "kvsctl upgrade --mariadb-series <series> changes the series: it backs up the"
+    echo "database first, and that backup is the way back to ${MARIADB_VERSION:-this series}."
+}
+
 # Run version selections
 # Always ask for MariaDB version in interactive mode (allow changing from previous install)
-if [[ -z "$MARIADB_VERSION_CONFIRMED" ]]; then
-    if [ "$MARIADB_VERSION" != "$MARIADB_DEFAULT_VERSION" ]; then
-        # Skip prompt if KEEP_VERSION already set (headless mode)
-        if [[ -z "$KEEP_VERSION" ]]; then
-            echo ""
-            echo "Current MariaDB version in .env: ${MARIADB_VERSION}"
-            echo -n "Keep this version? [Y/n]: "
-            read -r KEEP_VERSION
-        fi
-        if [[ "$KEEP_VERSION" =~ ^[Nn]$ ]]; then
-            select_mariadb_version
-        else
-            echo "Keeping MariaDB ${MARIADB_VERSION}"
-        fi
-    else
-        select_mariadb_version
+choose_mariadb_version() {
+    if kvsctl_manages_stack; then
+        kvsctl_keep_mariadb_series || return 1
+        return 0
     fi
-fi
+    if [[ -z "$MARIADB_VERSION_CONFIRMED" ]]; then
+        if [ "$MARIADB_VERSION" != "$MARIADB_DEFAULT_VERSION" ]; then
+            # Skip prompt if KEEP_VERSION already set (headless mode)
+            if [[ -z "$KEEP_VERSION" ]]; then
+                echo ""
+                echo "Current MariaDB version in .env: ${MARIADB_VERSION}"
+                echo -n "Keep this version? [Y/n]: "
+                read -r KEEP_VERSION
+            fi
+            if [[ "$KEEP_VERSION" =~ ^[Nn]$ ]]; then
+                select_mariadb_version
+            else
+                echo "Keeping MariaDB ${MARIADB_VERSION}"
+            fi
+        else
+            select_mariadb_version
+        fi
+    fi
+}
+choose_mariadb_version
 
 # Check for KVS archive first (needed for PHP version detection)
 echo ""
@@ -3407,33 +3681,38 @@ fi
 source .env
 
 # Select PHP last: the IonCube decision above constrains which versions run.
+# On an installation kvsctl manages, the series it had stays, so the bases
+# are those of the series this run builds.
+PHP_VERSION_BEFORE_SETUP=$(sed -n 's/^PHP_VERSION=//p' .env | tail -n 1)
 select_php_version
+kvsctl_note_php_change "$PHP_VERSION_BEFORE_SETUP" || exit 1
+set_php_bases
 
-# Configure JIT if IonCube is disabled (PHP 8.0+ only, incompatible with IonCube)
-if [ "$IONCUBE" = "NO" ]; then
-    echo ""
-    echo -e "${CYAN}PHP JIT Configuration${NC}"
-    echo "IonCube disabled - enabling JIT compilation for better performance"
-    echo ""
+# Earlier versions of this script appended an opcache JIT block to
+# php/php.ini when IONCUBE was NO, which left that tracked file modified. The
+# PHP-FPM entrypoint now turns JIT on whenever the IonCube loader is off, so
+# the block is removed when it still ends php.ini, byte for byte as it was
+# appended. Cutting those bytes off restores the file the append found, in
+# place, the way the append wrote it: php.ini keeps its owner, its mode and
+# the inode the php-fpm container mounts.
+remove_appended_jit_block() {
+    local ini="php/php.ini"
+    local block=$'\n; JIT Configuration (PHP 8.0+ without IonCube)\n; Note: JIT is incompatible with IonCube Loader\nopcache.jit_buffer_size = 256M\nopcache.jit = 1255\n'
+    local size=${#block}
 
-    # Check if JIT config already exists
-    if ! grep -q "opcache.jit_buffer_size" php/php.ini 2>/dev/null; then
-        cat >> php/php.ini << 'EOF'
-
-; JIT Configuration (PHP 8.0+ without IonCube)
-; Note: JIT is incompatible with IonCube Loader
-opcache.jit_buffer_size = 256M
-opcache.jit = 1255
-EOF
-        echo -e "${GREEN}✓ JIT enabled${NC}"
-        echo "  - Buffer: 256M"
-        echo "  - Mode: 1255 (tracing with all optimizations)"
-        echo ""
-        echo -e "${YELLOW}Note: JIT provides 10-30% performance boost for compute-intensive code.${NC}"
-    else
-        echo -e "${GREEN}✓ JIT already configured in php.ini${NC}"
+    [ -f "$ini" ] || return 0
+    # The x keeps the final newline, which the command substitution drops.
+    [ "$(tail -c "$size" "$ini"; echo x)" = "${block}x" ] || return 0
+    # Left in place, the block keeps the JIT settings the stack ran with
+    # until now, so a file that cannot be changed is no reason to stop.
+    if ! truncate -s "-${size}" "$ini"; then
+        echo -e "${YELLOW}WARNING: could not remove the opcache JIT block from php/php.ini${NC}"
+        return 0
     fi
-fi
+    echo -e "${GREEN}✓ Removed the opcache JIT block from php/php.ini: the PHP-FPM entrypoint now enables JIT whenever the IonCube loader is off${NC}"
+}
+
+remove_appended_jit_block
 
 # Dragonfly and memcached take CACHE_MEMORY as a hard ceiling. The value in
 # .env.example suits hosts with 2 GB of RAM or more; below that, keep the
@@ -3514,6 +3793,13 @@ select_cache() {
     fi
 }
 
+# The cache, TLS and search choices below remove the containers they
+# retire, so Compose reads the files first, with the PHP bases set above:
+# those configure_mode records for the mode of the last run, not the
+# COMPOSE_FILE that run left in .env, which may still name an override
+# deleted by hand since. The check before the volume question reads them
+# again once the mode and the profiles are settled.
+COMPOSE_FILE=$(compose_files_for "$MODE") require_compose_config || exit 1
 select_cache
 
 # Mode selection (single/multi)
@@ -3527,9 +3813,32 @@ require_multi_compose_version() {
     fi
 }
 
-select_mode() {
+# COMPOSE_FILE is rebuilt from scratch every time the mode is configured,
+# from compose_files_for. A single site without release pins records none:
+# Compose finds docker-compose.yml and its override by itself.
+set_compose_file() {
+    local mode="$1"
     local compose_files
+    local release_pins=no
 
+    compose_files=$(compose_files_for "$mode")
+    case ":${compose_files}:" in
+        *":docker-compose.release.yml:"*) release_pins=yes ;;
+    esac
+    if [ "$mode" != "multi" ] && [ "$release_pins" = no ]; then
+        remove_env_value COMPOSE_FILE || return 1
+        unset COMPOSE_FILE
+        return 0
+    fi
+    set_env_value COMPOSE_FILE "$compose_files" || return 1
+    COMPOSE_FILE="$compose_files"
+    export COMPOSE_FILE
+    if [ "$release_pins" = yes ]; then
+        echo -e "${GREEN}Kept the kvsctl release image pins (docker-compose.release.yml) in COMPOSE_FILE${NC}"
+    fi
+}
+
+select_mode() {
     echo ""
     echo -e "${CYAN}Installation Mode${NC}"
     # Skip prompt if already set (headless mode)
@@ -3550,17 +3859,9 @@ select_mode() {
 
             echo -e "${YELLOW}Multi-site mode uses Caddy reverse proxy${NC}"
             MODE="multi"
-            compose_files="docker-compose.yml"
-            if [ -f docker-compose.override.yml ]; then
-                compose_files="${compose_files}:docker-compose.override.yml"
-            fi
-            # Keep the hardening override last so a user override cannot
-            # accidentally publish Nginx on Caddy's ports again.
-            compose_files="${compose_files}:docker-compose.multi.yml"
             set_env_value MODE "$MODE"
-            set_env_value COMPOSE_FILE "$compose_files"
-            COMPOSE_FILE="$compose_files"
-            export MODE COMPOSE_FILE
+            set_compose_file multi || return 1
+            export MODE
             echo -e "${GREEN}Multi-site mode configured for the primary site${NC}"
             ;;
         1|'')
@@ -3582,8 +3883,7 @@ select_mode() {
 
             MODE="single"
             set_env_value MODE "$MODE"
-            remove_env_value COMPOSE_FILE
-            unset COMPOSE_FILE
+            set_compose_file single || return 1
             export MODE
             echo -e "${GREEN}Single site mode (direct nginx)${NC}"
             ;;
@@ -3632,13 +3932,8 @@ configure_mode() {
         select_mode || return $?
     elif [ "$MODE" = "multi" ]; then
         require_multi_compose_version || return $?
-        COMPOSE_FILE="docker-compose.yml"
-        if [ -f docker-compose.override.yml ]; then
-            COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.override.yml"
-        fi
-        COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.multi.yml"
-        set_env_value COMPOSE_FILE "$COMPOSE_FILE"
-        export MODE COMPOSE_FILE
+        set_compose_file multi || return 1
+        export MODE
     else
         echo -e "${RED}ERROR: Invalid installation mode in .env: $MODE${NC}"
         return 1
@@ -3827,7 +4122,23 @@ select_manticore() {
     fi
 }
 
-select_manticore
+# Search switched on finds in the manticore-data volume the indexes of the
+# last time it was on, if any: the start of Manticore must build them from
+# the database instead. That need goes to .env before .env says search is
+# on, so a run that stops before Manticore starts leaves it to the next run,
+# and stays there until setup_request_manticore_rebuild has asked for the
+# build. Search left off needs none: switching it on later asks again.
+setup_select_manticore() {
+    if [ "$(sed -n 's/^ENABLE_MANTICORE=//p' .env | tail -n 1)" != true ]; then
+        set_env_value MANTICORE_REBUILD_PENDING true || exit 1
+    fi
+    select_manticore
+    if [ "$ENABLE_MANTICORE" != true ]; then
+        remove_env_value MANTICORE_REBUILD_PENDING || exit 1
+    fi
+}
+
+setup_select_manticore
 
 # Check for existing MariaDB volume and ask what to do
 delete_database_volume() {
@@ -3895,6 +4206,8 @@ import_require_empty_volume() {
 }
 
 ask_existing_volume() {
+    local probe_image
+
     echo ""
     echo -e "${CYAN}Checking for existing database...${NC}"
 
@@ -3910,8 +4223,14 @@ ask_existing_volume() {
     # Check if volume exists
     if docker volume ls -q | grep -q "^${VOLUME_NAME}$"; then
         # Detect MariaDB version in volume by reading upgrade info file
-        # MariaDB 11.0+ uses mariadb_upgrade_info, 10.x uses mysql_upgrade_info
-        VOLUME_VERSION=$(docker run --rm -v "$VOLUME_NAME:/data:ro" alpine sh -c 'cat /data/mariadb_upgrade_info 2>/dev/null || cat /data/mysql_upgrade_info 2>/dev/null' || echo "")
+        # MariaDB 11.0+ uses mariadb_upgrade_info, 10.x uses mysql_upgrade_info.
+        # It is read with the Alpine images.lock pins, the one phpmyadmin-init
+        # runs, never whatever alpine:latest is on the day it pulls: without
+        # that entry, the version stays unknown.
+        VOLUME_VERSION=""
+        if probe_image=$("$(dirname "${BASH_SOURCE[0]}")/bin/resolve-bases.sh" --get alpine); then
+            VOLUME_VERSION=$(docker run --rm -v "$VOLUME_NAME:/data:ro" "$probe_image" sh -c 'cat /data/mariadb_upgrade_info 2>/dev/null || cat /data/mysql_upgrade_info 2>/dev/null' || echo "")
+        fi
         VOLUME_MAJOR_MINOR=""
         if [ -n "$VOLUME_VERSION" ]; then
             # Extract major.minor (e.g., "10.6.24-MariaDB" → "10.6")
@@ -4152,12 +4471,29 @@ ask_existing_volume() {
     fi
 }
 
+# Before the volume question and the stop of the running containers: from
+# here COMPOSE_FILE, COMPOSE_PROFILES and the .env are settled, so the check
+# reads what every Compose command below reads. The choices made since the
+# first check may have removed a container they retire.
+require_compose_config "The site was not stopped. The choices made above may already have removed the containers they retire: the other cache server, the ACME client when direct TLS is off, Manticore when it is disabled." || exit 1
 import_require_empty_volume
 if [ "$IMPORT_MODE" = true ]; then
     KEEP_EXISTING_DB=false
 else
     ask_existing_volume
 fi
+
+# A database this run imports or starts fresh does not match the indexes
+# the manticore-data volume kept either: the need goes to .env the same
+# way, before an import replaces the database volume. A fresh start has
+# deleted it already, and a run stopped in between finds no database the
+# next time, which is a fresh start again.
+setup_note_manticore_rebuild() {
+    [ "${ENABLE_MANTICORE:-false}" = true ] && [ "${KEEP_EXISTING_DB:-false}" != true ] || return 0
+    set_env_value MANTICORE_REBUILD_PENDING true || exit 1
+}
+
+setup_note_manticore_rebuild
 
 # A fresh database gets a one-time admin password. An imported database
 # brings its own admin credentials: only the KVS default is rotated, by the
@@ -4419,29 +4755,73 @@ fi
 # Create SSL directory structure (certificates will be generated later)
 mkdir -p "nginx/ssl/${DOMAIN}"
 
-# Step 1: Build images
-progress_bar "Building PHP-FPM container"
-# shellcheck disable=SC2086  # Intentional word splitting for optional --no-cache flag
-if ! run_step "Building PHP-FPM container" docker compose build $DOCKER_BUILD_FLAGS php-fpm; then
-    echo -e "${RED}Docker build failed${NC}"
-    echo -e "${YELLOW}If error mentions 'parent snapshot does not exist', run:${NC}"
-    echo "  docker builder prune -af"
-    echo "Then re-run this script."
-    exit 1
-fi
+# The services Compose builds on this stack among the named ones and those
+# they depend on, one a line. On a stack kvsctl installed a release on,
+# docker-compose.release.yml pins the image of each service the release
+# builds and clears its build section ("build: !reset null"): Compose
+# builds none of them, and asking it to only warns that there is nothing
+# to build. A configuration Compose cannot read keeps all the named ones:
+# the build then says why.
+compose_services_to_build() {
+    local config
 
-progress_bar "Building Cron container"
-# shellcheck disable=SC2086  # Intentional word splitting for optional --no-cache flag
-run_step "Building Cron container" docker compose build $DOCKER_BUILD_FLAGS cron
+    if ! config=$(docker compose config "$@" 2>/dev/null); then
+        printf '%s\n' "$@"
+        return 0
+    fi
+    awk '
+        /^[^ ]/ { services = ($0 == "services:"); service = ""; next }
+        services && /^  [^ #]/ { service = substr($0, 3); sub(/:$/, "", service); next }
+        service != "" && /^    build:/ { print service }
+    ' <<< "$config"
+}
 
-progress_bar "Building Nginx and initialization containers"
-BUILD_TARGETS=(nginx kvs-init)
-if [ "${ENABLE_MANTICORE:-false}" = "true" ]; then
-    BUILD_TARGETS+=(manticore)
-fi
+# Step 1: Build images, those Compose builds here: all of them on a
+# checkout, none on a stack that runs the images of a release, which says
+# so instead.
 # shellcheck disable=SC2086  # Intentional word splitting for optional --no-cache flag
-run_step "Building Nginx and initialization containers" \
-    docker compose build $DOCKER_BUILD_FLAGS "${BUILD_TARGETS[@]}"
+setup_build_images() {
+    local -a targets built rest=()
+    local service
+
+    targets=(php-fpm cron nginx kvs-init)
+    if [ "${ENABLE_MANTICORE:-false}" = "true" ]; then
+        targets+=(manticore)
+    fi
+    mapfile -t built < <(compose_services_to_build "${targets[@]}")
+
+    progress_bar "Building PHP-FPM container"
+    if [[ " ${built[*]} " != *" php-fpm "* ]]; then
+        echo -e "  ${GREEN}✓${NC} PHP-FPM container: its image is pinned, nothing to build"
+    elif ! run_step "Building PHP-FPM container" docker compose build $DOCKER_BUILD_FLAGS php-fpm; then
+        echo -e "${RED}Docker build failed${NC}"
+        echo -e "${YELLOW}If error mentions 'parent snapshot does not exist', run:${NC}"
+        echo "  docker builder prune -af"
+        echo "Then re-run this script."
+        exit 1
+    fi
+
+    progress_bar "Building Cron container"
+    if [[ " ${built[*]} " != *" cron "* ]]; then
+        echo -e "  ${GREEN}✓${NC} Cron container: its image is pinned, nothing to build"
+    else
+        run_step "Building Cron container" docker compose build $DOCKER_BUILD_FLAGS cron
+    fi
+
+    progress_bar "Building Nginx and initialization containers"
+    for service in "${targets[@]:2}"; do
+        if [[ " ${built[*]} " == *" ${service} "* ]]; then
+            rest+=("$service")
+        fi
+    done
+    if [ "${#rest[@]}" -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} Nginx and initialization containers: their images are pinned, nothing to build"
+    else
+        run_step "Building Nginx and initialization containers" \
+            docker compose build $DOCKER_BUILD_FLAGS "${rest[@]}"
+    fi
+}
+setup_build_images
 
 # Create bind mount directory
 mkdir -p /var/www/"$DOMAIN"
@@ -4972,8 +5352,54 @@ else
     configure_direct_acme_certificate || exit $?
 fi
 
+# The indexes the manticore-data volume kept were built from another
+# database when this run, or an earlier one that stopped before this point,
+# imported one or started a fresh one, and from an older state of this one
+# when search was switched on again: .env says so (setup_select_manticore,
+# setup_note_manticore_rebuild), and an import always does. The start below
+# then builds them from this database before Manticore answers, instead of
+# serving them (lib/manticore.sh), and the note goes once the request is in
+# the volume. A kept database that kept search on keeps its indexes. A
+# resumed import builds no image, as Compose run would for a missing one:
+# the image of the interrupted run must still be there.
+setup_request_manticore_rebuild() {
+    local images image
+    [ "${ENABLE_MANTICORE:-false}" = true ] || return 0
+    [ "$IMPORT_MODE" = true ] ||
+        [ "$(sed -n 's/^MANTICORE_REBUILD_PENDING=//p' .env | tail -n 1)" = true ] || return 0
+    if [ "${RESUME_IMPORT:-false}" = true ]; then
+        # The images of the service and of those it depends on, one per line.
+        images=$(setup_resume_docker_query "Checking the saved Manticore image..." \
+            compose --profile manticore config --images manticore) || return 1
+        if [ -z "$images" ]; then
+            echo "ERROR: the saved Manticore image could not be resolved; recovery stopped. MariaDB and the imported database are preserved." >&2
+            return 1
+        fi
+        while IFS= read -r image; do
+            [ -n "$image" ] || continue
+            if ! setup_resume_docker_query "Checking cached Manticore images..." \
+                image inspect --format '{{.Id}}' "$image" > /dev/null; then
+                echo "ERROR: an image built before the import is unavailable ($image); recovery will not rebuild it. MariaDB and the imported database are preserved." >&2
+                return 1
+            fi
+        done <<< "$images"
+    fi
+    echo "  Manticore builds its indexes from this database before it answers; KVS uses its own search until then."
+    # shellcheck source=lib/manticore.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/manticore.sh" || return 1
+    log_command manticore_request_rebuild || return 1
+    # remove_env_value, like the rest of the questionnaire, is not defined
+    # on a resume.
+    sed -i '/^MANTICORE_REBUILD_PENDING=/d' .env
+}
+
 # Step 6: Start runtime services without restarting MariaDB or starting cron.
 progress_bar "Starting runtime services"
+if ! setup_request_manticore_rebuild; then
+    echo -e "${RED}ERROR: Manticore could not be asked to build its indexes from this database${NC}"
+    echo "    Debug: tail -50 $DEBUG_LOG"
+    exit 1
+fi
 # Don't use gum spin for docker compose up - it can timeout on slow operations
 echo "  Starting runtime services..."
 if [ "$RESUME_IMPORT" != true ]; then
@@ -5037,6 +5463,10 @@ if [ "$IMPORT_MODE" = true ]; then
         *) echo -e "${CYAN}Imported site:${NC} $IMPORT_SITE_DIR (KVS $IMPORT_SITE_VERSION), database from $IMPORT_DB_DUMP" ;;
     esac
     echo "  Row counts: $LOG_DIR/import-rows.txt"
+    echo ""
+fi
+if [ -n "${KVSCTL_PHP_CHANGE:-}" ]; then
+    echo -e "${YELLOW}${KVSCTL_PHP_CHANGE}${NC}"
     echo ""
 fi
 echo -e "${CYAN}Debug logs:${NC}"
