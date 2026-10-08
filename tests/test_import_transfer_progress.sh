@@ -5,6 +5,10 @@
 # what is measured or says it is unknown, and how busy the disks of the
 # old server are. Synthetic rsync and ssh, no network.
 # Put a different awk on PATH to run the same checks with Debian mawk.
+# The progress counts whole seconds from the start of its awk, which comes
+# a little after the first record: records a second apart for N seconds
+# show N - 1 or N seconds elapsed, and the rates and the time left move
+# with it. A runner that starts awk late gets the lower one.
 # Arguments name the tests to run, all of them otherwise.
 # shellcheck disable=SC2034,SC2329,SC2030,SC2031
 set -euo pipefail
@@ -197,11 +201,12 @@ test_every_line_holds_within_79_columns() {
     last_block "$TEST_DIR/wide.yes" > "$TEST_DIR/wide.block"
     has "$TEST_DIR/wide.block" '^  Copied:  10240.00 GB of 10240.00 GB (100%), 999,999,999 of 999,999,999 files$' "the largest copy"
     has "$TEST_DIR/wide.block" '^  Checked: 999,999,998 of about 999,999,999 entries (99%), count of 2026-09-28$' "the largest check"
-    # The rates depend on where the records fall in the seconds.
-    has "$TEST_DIR/wide.block" '^  Rates:   [0-9.]* MB/s, 1[0-9][0-9],[0-9]* files/s copied, 1[0-9][0-9],[0-9]* entries/s checked$' "the largest rates"
+    # The rates depend on where the records fall in the seconds: past
+    # 1 GB/s when the clock shows 5 s.
+    has "$TEST_DIR/wide.block" '^  Rates:   [0-9.]* [MG]B/s, 1[0-9][0-9],[0-9]* files/s copied, 1[0-9][0-9],[0-9]* entries/s checked$' "the largest rates"
     has "$TEST_DIR/wide.block" '^  Disks:   old server busy nvme10n1 100%, nvme11n1 99%, 11 more (last 120 s)$' "the most disks"
     last_block "$TEST_DIR/slow.yes" > "$TEST_DIR/slow.block"
-    has "$TEST_DIR/slow.block" '^  Time:    0:00:0[6-9] elapsed, over 10,000 hours left (pace so far)$' \
+    has "$TEST_DIR/slow.block" '^  Time:    0:00:0[5-9] elapsed, over 10,000 hours left (pace so far)$' \
         "a time left of years must say so in a few words"
     echo 'PASS: every line holds within 79 columns, on a terminal and in a log'
 }
@@ -241,10 +246,10 @@ test_an_earlier_count_measures_the_progress() {
     has "$TEST_DIR/earlier.block" '^  Copied:  6.0 MB, 540 files$' "the copy alone, without a total"
     has "$TEST_DIR/earlier.block" '^  Checked: 700 of about 2,100 entries (33%), count of 2026-09-28$' \
         "the earlier count must measure the checks, dated"
-    has "$TEST_DIR/earlier.block" '^  Time:    0:00:0[6-9] elapsed, about 0:00:[0-9][0-9] left (pace so far)$' \
+    has "$TEST_DIR/earlier.block" '^  Time:    0:00:0[5-9] elapsed, about 0:00:[0-9][0-9] left (pace so far)$' \
         "the entries left must give a time left"
     left=$(left_seconds "$TEST_DIR/earlier.raw")
-    [ "$left" -ge 10 ] && [ "$left" -le 30 ] || fail "1,400 entries left at about 100 a second must take about 14 s, not $left"
+    [ "$left" -ge 8 ] && [ "$left" -le 30 ] || fail "1,400 entries left at about 100 a second must take about 14 s, not $left"
     echo 'PASS: an earlier count measures the progress of a pass whose count ran out of time'
 }
 
@@ -328,12 +333,13 @@ test_a_figure_at_rest_keeps_its_average() {
     done
     for pid in "${pids[@]}"; do wait "$pid"; done
     # 36,000 bytes left at the 4,000 of the first two seconds over about
-    # seven: about 63 s, where the 1,300 entries left take 13 s.
+    # seven: about 63 s, 54 s when the clock shows six, where the 1,300
+    # entries left take 13 s.
     left=$(left_seconds "$TEST_DIR/rest.bursts")
     [ -n "$left" ] && [ "$left" -ge 50 ] && [ "$left" -le 90 ] ||
         fail "bytes at rest while the walk goes on must keep their average: ${left:-none}: $(last_block "$TEST_DIR/rest.bursts")"
     last_block "$TEST_DIR/rest.bursts" > "$TEST_DIR/rest.block"
-    has "$TEST_DIR/rest.block" '^  Time:    0:00:0[6-9] elapsed, about 0:01:[0-9][0-9] left (pace of the last 2 s)$' "an estimate"
+    has "$TEST_DIR/rest.block" '^  Time:    0:00:0[6-9] elapsed, about 0:0[01]:[0-9][0-9] left (pace of the last 2 s)$' "an estimate"
     last_block "$TEST_DIR/rest.untouched" > "$TEST_DIR/rest.block"
     has "$TEST_DIR/rest.block" '^  Time:    0:00:0[6-9] elapsed, at least 0:00:[1-3][0-9] left (pace of the last 2 s)$' \
         "bytes that never moved leave the time of the checks as a floor"
