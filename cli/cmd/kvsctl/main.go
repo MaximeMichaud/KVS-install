@@ -42,7 +42,7 @@ const DefaultManifestURL = manifest.DefaultURL
 // signature by any of them is enough, so a new key ships in kvsctl before
 // it signs. KVSCTL_RELEASE_KEY replaces the whole list for a lab that signs
 // with its own key.
-var ReleasePublicKey = "KZYznVR68TMpw0wm0G3ASwQkJ6xyj0pQAO7oR4RStjs=" // pragma: allowlist secret
+var ReleasePublicKey = "7WdTh7yZdgLKTLRLGdglgcvayrU7J5Hgbp5nWJuef7A=" // pragma: allowlist secret
 
 // Exit codes, so a cron job or a CI step can tell what happened without
 // reading the output. exitCodes below says the same to the operator.

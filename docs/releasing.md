@@ -45,13 +45,11 @@ commit. It has six stages.
    approval. It reads each signing secret with `kvsctl-release`, the way the
    publish job signs with it, and checks that its public half is a key of
    `ReleasePublicKey` in the tagged commit, and that a key `ANNOUNCE_KEY`
-   names is one of them. It refuses a `ReleasePublicKey` that still lists
+   names is one of them. It refuses a `ReleasePublicKey` that lists
    `c23d8b96`, the key `kvsctl` was developed with, whatever the secrets
-   hold, which this repository does until its maintainer puts the release
-   key there: every run stops at this job until then (step 2 of the
-   one-time setup). The images wait for it: a secret `kvsctl-release`
-   cannot sign with, or a key the released `kvsctl` would not trust, stops
-   the run before anything is pushed.
+   hold (step 2 of the one-time setup). The images wait for it: a secret
+   `kvsctl-release` cannot sign with, or a key the released `kvsctl` would
+   not trust, stops the run before anything is pushed.
 4. **images** builds eleven linux/amd64 images and pushes them to GHCR:
    `nginx`, `init` and `manticore` once, tagged with the version, and `php`
    and `cron` once per PHP series from 8.1 to 8.4, tagged
@@ -114,11 +112,11 @@ all jobs on its page).
    `release.pub`, in a commit that comes before the first tag. Every
    installed `kvsctl` verifies the manifest with the keys of that string,
    and the signing keys job refuses a secret whose key it does not list,
-   before any image is pushed. Until then the string holds `c23d8b96`, the
-   key `kvsctl` was developed with, whose private half is not kept as a
-   release key is: the signing keys job refuses every release while
-   `ReleasePublicKey` lists it, so every run of the release workflow stops
-   at that job until this step is done.
+   before any image is pushed. In this repository the string holds the
+   release key, `eab0209b`. Before it, the string held `c23d8b96`, the key
+   `kvsctl` was developed with, whose private half is not kept as a release
+   key is: the signing keys job refuses every release whose
+   `ReleasePublicKey` lists it.
    Keep it a single string on one line, with its
    `// pragma: allowlist secret` comment: the workflow reads the keys from
    that line (`.github/scripts/release-public-keys.sh`), and the comment
