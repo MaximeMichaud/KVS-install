@@ -300,6 +300,16 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+# read for a question the setup asks again until the answer is valid. At
+# the end of its input (answers piped in that ran out, a detached run) the
+# question has no answer, and asking it again would never end.
+prompt_read() {
+    read -r "$@" && return 0
+    echo ""
+    echo -e "${RED}ERROR: no answer left on standard input for the question above. Run the setup from a terminal, or set HEADLESS=y with the variables the README lists.${NC}" >&2
+    exit 1
+}
 PROGRESS_TOTAL=12
 PROGRESS_CURRENT=0
 
@@ -570,6 +580,20 @@ configure_disk_space_limit() {
     echo -e "${CYAN}│${NC} ${YELLOW}ℹ${NC}  KVS needs disk space for thumbnails, screenshots, and        ${CYAN}│${NC}"
     echo -e "${CYAN}│${NC}    temporary files. Upgrade disk if hosting many videos.        ${CYAN}│${NC}"
     echo -e "${CYAN}└──────────────────────────────────────────────────────────────────┘${NC}"
+}
+
+# One KVS archive at most in kvs-archive/. Every step that reads the
+# archive takes the first one find lists, an order nothing fixes: with two
+# archives (an older download kept beside the new one) one step could
+# read one version and the extraction install the other.
+require_single_kvs_archive() {
+    local -a archives
+
+    mapfile -t archives < <(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null | sort)
+    [ "${#archives[@]}" -le 1 ] && return 0
+    echo -e "${RED}ERROR: kvs-archive/ holds ${#archives[@]} KVS archives; keep the one to install and remove the others:${NC}" >&2
+    printf '  %s\n' "${archives[@]}" >&2
+    return 1
 }
 
 validate_domain() {
@@ -1262,25 +1286,25 @@ select_import_source() {
                 IMPORT_SOURCE=archive
                 while [ -z "$IMPORT_ARCHIVE" ]; do
                     echo -n "Path to the archive: "
-                    read -r IMPORT_ARCHIVE
+                    prompt_read IMPORT_ARCHIVE
                 done
                 ;;
             3)
                 IMPORT_SOURCE=directory
                 while [ -z "$IMPORT_SITE_DIR" ]; do
                     echo -n "Path to the site directory (the one holding admin/include/setup.php): "
-                    read -r IMPORT_SITE_DIR
+                    prompt_read IMPORT_SITE_DIR
                 done
                 while [ -z "$IMPORT_DB_DUMP" ]; do
                     echo -n "Path to the database dump (.sql, .sql.gz, .sql.xz or .sql.zst): "
-                    read -r IMPORT_DB_DUMP
+                    prompt_read IMPORT_DB_DUMP
                 done
                 ;;
             4)
                 IMPORT_SOURCE=remote
                 while [ -z "$IMPORT_REMOTE_HOST" ]; do
                     echo -n "Old server host name or IP address: "
-                    read -r IMPORT_REMOTE_HOST
+                    prompt_read IMPORT_REMOTE_HOST
                 done
                 echo -n "SSH port [22]: "
                 read -r answer
@@ -2966,7 +2990,14 @@ caddy_publishes_required_multi_site_ports() {
 }
 
 
+# The ports the stack publishes: the public ones, and the services it
+# publishes on the loopback for the tools of the host (each with the
+# variable that moves it). A MariaDB, Memcached or Manticore already
+# listening on the host, an earlier native install for instance, made
+# "docker compose up" fail with "Bind for 127.0.0.1:3306 failed: port is
+# already allocated" once the images were built and the site imported.
 public_port_conflicts_exist() {
+    local service name variable port
     PUBLIC_PORT_CONFLICTS=()
 
     if publish_endpoint_is_listening "$PUBLIC_HTTP_ENDPOINT" tcp; then
@@ -2978,6 +3009,23 @@ public_port_conflicts_exist() {
     if [ "$MODE" = "multi" ] && publish_endpoint_is_listening 443 udp; then
         PUBLIC_PORT_CONFLICTS+=("443/udp")
     fi
+    for service in \
+        "MariaDB:MARIADB_HOST_PORT:3306" \
+        "the cache:CACHE_HOST_PORT:11211" \
+        "Manticore:MANTICORE_MYSQL_HOST_PORT:9306" \
+        "Manticore HTTP:MANTICORE_HTTP_HOST_PORT:9308"; do
+        name=${service%%:*}
+        variable=${service#*:}
+        variable=${variable%%:*}
+        port=${service##*:}
+        case "$variable" in
+            MANTICORE_*) [ "${ENABLE_MANTICORE:-false}" = true ] || continue ;;
+        esac
+        port=${!variable:-$port}
+        if publish_endpoint_is_listening "127.0.0.1:${port}" tcp; then
+            PUBLIC_PORT_CONFLICTS+=("127.0.0.1:${port}/tcp (${name}; ${variable}=<port> publishes it elsewhere)")
+        fi
+    done
 
     [ "${#PUBLIC_PORT_CONFLICTS[@]}" -gt 0 ]
 }
@@ -3011,7 +3059,7 @@ if [ "$DOMAIN" = "example.com" ]; then
 
     while true; do
         echo -n "Enter your domain (e.g., mysite.com): "
-        read -r DOMAIN
+        prompt_read DOMAIN
         DOMAIN=${DOMAIN,,}
         if validate_domain "$DOMAIN"; then
             break
@@ -3039,6 +3087,7 @@ if [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] && grep -q '
     echo -e "${YELLOW}The domain changes from $PREVIOUS_DOMAIN to $DOMAIN: the import completed under the old one does not count for it.${NC}"
     remove_env_value KVS_IMPORT_COMPLETED
 fi
+require_single_kvs_archive || exit 1
 set_env_value DOMAIN "$DOMAIN"
 export DOMAIN EMAIL
 
@@ -3159,7 +3208,7 @@ select_site_prefix() {
         3)
             while true; do
                 echo -n "Enter custom prefix (e.g., kvs-mysite): "
-        read -r SITE_PREFIX
+                prompt_read SITE_PREFIX
                 # Validate: lowercase, alphanumeric and hyphens only
                 if validate_site_prefix "$SITE_PREFIX"; then
                     break
@@ -3273,7 +3322,7 @@ else
 
         while true; do
             echo -n "Enter your email (required for $SSL_PROVIDER): "
-            read -r EMAIL
+            prompt_read EMAIL
             if validate_email "$EMAIL"; then
                 break
             fi
@@ -3681,6 +3730,7 @@ else
     fi
     echo -e "${GREEN}KVS archive found${NC}"
 fi
+require_single_kvs_archive || exit 1
 
 # The table prefix reaches .env once the archive it may come from is here.
 set_env_value TABLES_PREFIX "$(kvs_tables_prefix)" || exit 1
@@ -4659,11 +4709,14 @@ check_dns() {
     echo ""
     echo -e "${CYAN}Checking DNS configuration...${NC}"
     SERVER_IP=$(public_ipv4) || SERVER_IP=""
-    # Use getent instead of dig (more portable)
-    DOMAIN_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
+    # getent, which needs no dnsutils, and its ahostsv4 database: "getent
+    # hosts" answers the AAAA record first when the name has one, an IPv6
+    # address that never equals the public IPv4 compared here, so a server
+    # whose A and AAAA records both point at it was reported as a MISMATCH.
+    DOMAIN_IP=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR == 1 { print $1 }')
     WWW_IP=""
     if include_www_for_domain; then
-        WWW_IP=$(getent hosts "www.$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
+        WWW_IP=$(getent ahostsv4 "www.$DOMAIN" 2>/dev/null | awk 'NR == 1 { print $1 }')
     fi
 
     dns_ok=true
@@ -4679,14 +4732,14 @@ check_dns() {
     if [ "$DOMAIN_IP" = "$SERVER_IP" ]; then
         echo -e "  $DOMAIN: ${GREEN}OK${NC} -> $DOMAIN_IP"
     else
-        echo -e "  $DOMAIN: ${RED}MISMATCH${NC} -> $DOMAIN_IP (expected: $SERVER_IP)"
+        echo -e "  $DOMAIN: ${RED}MISMATCH${NC} -> ${DOMAIN_IP:-no A record} (expected: $SERVER_IP)"
         dns_ok=false
     fi
     if include_www_for_domain; then
         if [ "$WWW_IP" = "$SERVER_IP" ]; then
             echo -e "  www.$DOMAIN: ${GREEN}OK${NC} -> $WWW_IP"
         else
-            echo -e "  www.$DOMAIN: ${RED}MISMATCH${NC} -> $WWW_IP (expected: $SERVER_IP)"
+            echo -e "  www.$DOMAIN: ${RED}MISMATCH${NC} -> ${WWW_IP:-no A record} (expected: $SERVER_IP)"
             dns_ok=false
         fi
     fi
@@ -4726,12 +4779,16 @@ while true; do
         echo "  1) Retry DNS check"
         echo "  2) Continue anyway (SSL will fail)"
         echo "  3) Exit"
-        # Skip prompt if already set (headless mode)
-        if [[ -z "$DNS_CHOICE" ]]; then
+        # DNS_CHOICE set beforehand (headless mode) answers every time. The
+        # question is asked again after a retry that still mismatches and
+        # after an answer it does not know: it once kept the first answer
+        # and looped on it without asking.
+        dns_answer=$DNS_CHOICE
+        if [[ -z "$dns_answer" ]]; then
             echo -n "Select [1-3]: "
-        read -r DNS_CHOICE
+            prompt_read dns_answer
         fi
-        case $DNS_CHOICE in
+        case $dns_answer in
             1) continue ;;
             2) echo "Continuing without valid DNS..."; break ;;
             3) exit 1 ;;

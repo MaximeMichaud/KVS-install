@@ -1178,6 +1178,122 @@ test_failed_build_step_shows_its_output_not_the_dockerfile_echo() {
     pass "a failed build step shows its own last lines, its name and its exit code"
 }
 
+# A question the setup asks again until the answer is valid never ends when
+# the input is over (answers piped in that ran out, a detached run): the
+# setup stops and says so instead of asking forever.
+# Two KVS archives in kvs-archive/ (an older download kept beside the new
+# one): every step took the first one find listed, an order nothing fixes,
+# so one step could read one version and the extraction install the other.
+# The setup now stops and names them.
+test_two_kvs_archives_stop_the_setup() {
+    local case_dir="$TMP_ROOT/setup-two-archives"
+    local work_dir="$case_dir/work"
+    local mock_bin="$case_dir/bin"
+    local output="$case_dir/output.log"
+    local setup_copy="$case_dir/setup.sh"
+    local status
+
+    mkdir -p "$work_dir/kvs-archive" "$case_dir/logs"
+    cp "$REPO_ROOT/docker/.env.example" "$work_dir/.env"
+    chmod 600 "$work_dir/.env"
+    : > "$work_dir/kvs-archive/KVS_7.0.1_[mysite.test].zip"
+    : > "$work_dir/kvs-archive/KVS_7.0.2_[mysite.test].zip"
+    make_preflight_mocks "$mock_bin"
+    make_setup_test_copy "$setup_copy" "$case_dir/logs"
+
+    set +e
+    (
+        cd "$work_dir"
+        PATH="$mock_bin:/usr/bin:/bin" \
+            HEADLESS=y \
+            PREFLIGHT_BYPASS=y \
+            DOMAIN=mysite.test \
+            EMAIL=ops@mysite.test \
+            timeout 60 "$setup_copy" < /dev/null
+    ) > "$output" 2>&1
+    status=$?
+    set -e
+
+    [ "$status" -eq 1 ] || fail "two archives must stop the setup with status 1 (status $status): $(tail -n 3 "$output")"
+    assert_file_contains "$output" "kvs-archive/ holds 2 KVS archives"
+    assert_file_contains "$output" "kvs-archive/KVS_7.0.1_[mysite.test].zip"
+    assert_file_contains "$output" "kvs-archive/KVS_7.0.2_[mysite.test].zip"
+    assert_file_not_contains "$output" "Detecting IonCube"
+    pass "two KVS archives stop the setup"
+}
+
+test_a_question_with_no_answer_left_stops_the_setup() {
+    local case_dir="$TMP_ROOT/setup-no-answer"
+    local work_dir="$case_dir/work"
+    local mock_bin="$case_dir/bin"
+    local output="$case_dir/output.log"
+    local setup_copy="$case_dir/setup.sh"
+    local status
+
+    mkdir -p "$work_dir" "$case_dir/logs"
+    cp "$REPO_ROOT/docker/.env.example" "$work_dir/.env"
+    chmod 600 "$work_dir/.env"
+    make_preflight_mocks "$mock_bin"
+    make_setup_test_copy "$setup_copy" "$case_dir/logs"
+
+    set +e
+    (
+        cd "$work_dir"
+        PATH="$mock_bin:/usr/bin:/bin" \
+            PREFLIGHT_BYPASS=y \
+            timeout 60 "$setup_copy" < /dev/null
+    ) > "$output" 2>&1
+    status=$?
+    set -e
+
+    [ "$status" -ne 124 ] || fail "the setup kept asking for the domain after the end of its input"
+    [ "$status" -eq 1 ] || fail "the setup must stop with status 1 at the end of its input (status $status): $(tail -n 3 "$output")"
+    assert_file_contains "$output" "no answer left on standard input"
+    [ "$(grep -c "Enter your domain" "$output")" -eq 1 ] || fail "the domain question must be asked once, not again and again"
+    pass "a question with no answer left stops the setup"
+}
+
+test_port_check_covers_the_loopback_services() {
+    local functions_file="$TMP_ROOT/port-conflicts.sh"
+    local output
+
+    awk '
+        $0 == "public_port_conflicts_exist() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    # shellcheck disable=SC2016
+    run_port_check() {
+        LISTENING="$1" ENABLE_MANTICORE="$2" MARIADB_HOST_PORT="${3:-}" bash -c '
+            publish_endpoint_is_listening() { [[ " $LISTENING " == *" $1/$2 "* ]]; }
+            PUBLIC_HTTP_ENDPOINT=80 PUBLIC_HTTPS_ENDPOINT=443 MODE=single
+            [ -n "$MARIADB_HOST_PORT" ] || unset MARIADB_HOST_PORT
+            source "$1"
+            if public_port_conflicts_exist; then echo "conflicts=${#PUBLIC_PORT_CONFLICTS[@]}"; else echo "conflicts=0"; fi
+            printf "%s\n" "${PUBLIC_PORT_CONFLICTS[@]}"
+        ' _ "$functions_file"
+    }
+
+    output=$(run_port_check "127.0.0.1:3306/tcp 127.0.0.1:9306/tcp" true)
+    grep -Fxq "conflicts=2" <<< "$output" || fail "MariaDB and Manticore listening on the loopback must both be conflicts: $output"
+    grep -Fq "127.0.0.1:3306/tcp (MariaDB; MARIADB_HOST_PORT=<port> publishes it elsewhere)" <<< "$output" ||
+        fail "the MariaDB conflict must name the service and the variable that moves it: $output"
+    grep -Fq "127.0.0.1:9306/tcp (Manticore; MANTICORE_MYSQL_HOST_PORT=<port>" <<< "$output" ||
+        fail "the Manticore conflict must name its variable: $output"
+
+    output=$(run_port_check "127.0.0.1:9306/tcp 127.0.0.1:9308/tcp" false)
+    grep -Fxq "conflicts=0" <<< "$output" || fail "the Manticore ports do not count when Manticore is off: $output"
+
+    output=$(run_port_check "127.0.0.1:3306/tcp" true 13306)
+    grep -Fxq "conflicts=0" <<< "$output" || fail "a moved MariaDB port is checked where it was moved: $output"
+
+    output=$(run_port_check "127.0.0.1:13306/tcp 80/tcp" true 13306)
+    grep -Fxq "conflicts=2" <<< "$output" || fail "the moved port and the public port must both be conflicts: $output"
+    grep -Fxq "80/tcp" <<< "$output" || fail "the public port conflict keeps its form: $output"
+
+    pass "the port check covers the services published on the loopback and names the variable that moves each"
+}
+
 test_cache_settings_follow_small_hosts() {
     local functions_file="$TMP_ROOT/cache-settings.sh"
 
@@ -1767,6 +1883,9 @@ test_preflight_disk_check_measures_the_tightest_filesystem
 test_preflight_names_the_packages_of_missing_commands
 test_failed_step_shows_its_last_lines_and_a_full_disk
 test_failed_build_step_shows_its_output_not_the_dockerfile_echo
+test_port_check_covers_the_loopback_services
+test_a_question_with_no_answer_left_stops_the_setup
+test_two_kvs_archives_stop_the_setup
 test_cache_settings_follow_small_hosts
 test_reconfigure_fails_when_container_inspection_fails
 test_reconfigure_issues_the_exact_requested_sans_and_installs

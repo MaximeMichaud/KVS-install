@@ -136,6 +136,7 @@ MODE_CHOICE=1 \
 | `MANTICORE_CHOICE` | `1`/`2` | `2` | 1=Manticore Search (the External Search plugin is pointed at it), 2=KVS search |
 | `STOP_EXISTING` | `Y`/`n` | `Y` | Stop existing KVS containers |
 | `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry, 2=Continue anyway, 3=Exit |
+| `MARIADB_HOST_PORT`, `CACHE_HOST_PORT`, `MANTICORE_MYSQL_HOST_PORT`, `MANTICORE_HTTP_HOST_PORT` | port | `3306`, `11211`, `9306`, `9308` | Loopback ports the stack publishes for the host's tools (MariaDB, cache, Manticore); move one when a service of the host already listens there |
 | `DISABLE_KVS_SUPPORT_ACCESS` | `true`/`false` | `false` | Turn off KVS support access (Kernel Team login with kvs_support); the admin dashboard re-enables it |
 | `KVS_PHP_VERSION` | `8.1`-`8.4` | detected | PHP release for an unencoded archive (IONCUBE_CHOICE=2 or IONCUBE=NO); an encoded archive keeps the release KVS documents. KVS 6.2.0 and older needs PHP 7.4, which the Docker installation does not build: `setup.sh` stops on such an archive unless this names a release for its unencoded files |
 | `KVS_INSTALL_BRANCH` | branch | `main` | Branch of this repository installed into `/opt/kvs`, to try a change before it is merged (run the `kvs-install.sh` of that branch); works outside headless mode too |
