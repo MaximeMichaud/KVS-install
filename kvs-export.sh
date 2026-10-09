@@ -30,11 +30,15 @@
 #################################################################
 set -u
 set -o pipefail
+# Old servers run bash 4.2 (CentOS 7) or 4.3 (Ubuntu 16.04, Debian 8), where
+# "${array[@]}" of an empty array is an unbound variable under set -u. Every
+# array expansion here is written ${array[@]+"${array[@]}"}, which expands
+# to nothing in that case; tests/test_kvs_export.sh refuses the bare form.
 
 # Roots walked when the caller names no site directory. Overridable with
 # KVS_EXPORT_SEARCH_ROOTS, colon separated, so an install outside the usual
 # places can still be found without editing this file.
-KVS_DEFAULT_SEARCH_ROOTS="/var/www:/home:/srv:/usr/share/nginx:/usr/local/www"
+KVS_DEFAULT_SEARCH_ROOTS="/var/www:/home:/srv:/usr/share/nginx:/usr/local/www:/www/wwwroot"
 
 # Names the importer looks for inside the archive; changing them breaks it.
 KVS_MANIFEST_NAME="kvs-export.manifest"
@@ -433,7 +437,11 @@ kvs_find_sites() {
                 continue
             fi
             SITE_CANDIDATES+=("$candidate")
-        done < <(find "$root" -maxdepth 6 -name contents -prune -o -path '*/admin/include/setup.php' -print 2> /dev/null < /dev/null)
+        # Depth 7 reaches the control panel layouts: ISPConfig
+        # (clients/client1/web1/web), DirectAdmin (user/domains/domain/
+        # public_html) and Hestia (user/web/domain/public_html) put
+        # admin/include/setup.php seven levels under /var/www or /home.
+        done < <(find "$root" -maxdepth 7 -name contents -prune -o -path '*/admin/include/setup.php' -print 2> /dev/null < /dev/null)
     done
 }
 
@@ -466,7 +474,12 @@ kvs_resolve_site_dir() {
         return 0
     fi
     if [ "$count" -eq 0 ]; then
-        kvs_error "no KVS site found under $(kvs_search_roots); name its directory as an argument, or set KVS_SITE_DIR or KVS_EXPORT_SEARCH_ROOTS"
+        if [ "$OPT_COMMAND" = "detect" ]; then
+            # detect is what the kvs-install setup runs over SSH.
+            kvs_error "no KVS site found under $(kvs_search_roots); set IMPORT_REMOTE_DIR to its directory on this server"
+        else
+            kvs_error "no KVS site found under $(kvs_search_roots); name its directory as an argument, or set KVS_SITE_DIR or KVS_EXPORT_SEARCH_ROOTS"
+        fi
         return 2
     fi
     if [ "$OPT_COMMAND" = "detect" ]; then
@@ -602,7 +615,7 @@ kvs_probe_database() {
         # password must not stay in the environment of this script.
         export MYSQL_PWD="$DB_PASSWORD"
         kvs_ignore_user_option_files
-        "$DB_CLIENT" --connect-timeout=10 "${DB_CONN_ARGS[@]}" -N -B -e "$query" "$DB_NAME" 2> "$TEMP_ERR_FILE" < /dev/null
+        "$DB_CLIENT" --connect-timeout=10 ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} -N -B -e "$query" "$DB_NAME" 2> "$TEMP_ERR_FILE" < /dev/null
     )
     status=$?
     err=$(< "$TEMP_ERR_FILE")
@@ -700,7 +713,7 @@ kvs_list_measure_units() {
         find -L "$SITE_DIR" -mindepth 1 -maxdepth "$((depth - 1))" ! -type d -print0 2> /dev/null
         find -L "$SITE_DIR" -mindepth "$depth" -maxdepth "$depth" -print0 2> /dev/null
     } < /dev/null | cat > "$file" 2> /dev/null
-    statuses=("${PIPESTATUS[@]}")
+    statuses=(${PIPESTATUS[@]+"${PIPESTATUS[@]}"})
     return "${statuses[1]}"
 }
 
@@ -1077,10 +1090,10 @@ kvs_collect_entries() {
         case $kind in
             transient | hidden | network:* | debuglog) state="excluded" ;;
         esac
-        if kvs_path_listed "$rel" "${OPT_EXCLUDES[@]}"; then
+        if kvs_path_listed "$rel" ${OPT_EXCLUDES[@]+"${OPT_EXCLUDES[@]}"}; then
             state="excluded"
         fi
-        if [ "$kind" != "transient" ] && kvs_path_listed "$rel" "${OPT_INCLUDES[@]}"; then
+        if [ "$kind" != "transient" ] && kvs_path_listed "$rel" ${OPT_INCLUDES[@]+"${OPT_INCLUDES[@]}"}; then
             state="copied"
         fi
         mb=""
@@ -1100,7 +1113,7 @@ kvs_collect_entries() {
     # An excluded path that is no listed entry (one bucket of contents/, a
     # directory deeper down) still leaves, with its size when the walk
     # counted it apart.
-    for rel in "${OPT_EXCLUDES[@]}"; do
+    for rel in ${OPT_EXCLUDES[@]+"${OPT_EXCLUDES[@]}"}; do
         if kvs_entry_index "$rel" > /dev/null; then
             continue
         fi
@@ -1159,7 +1172,7 @@ kvs_probe_servers() {
         # shellcheck disable=SC2030,SC2031  # Same deliberate subshell as the probe.
         export MYSQL_PWD="$DB_PASSWORD"
         kvs_ignore_user_option_files
-        "$DB_CLIENT" --connect-timeout=10 "${DB_CONN_ARGS[@]}" -N -B -e "$query" "$DB_NAME" 2> /dev/null < /dev/null
+        "$DB_CLIENT" --connect-timeout=10 ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} -N -B -e "$query" "$DB_NAME" 2> /dev/null < /dev/null
     ) || return 0
     while IFS=$'\t' read -r title path remote urls; do
         [ -n "$title$path" ] || continue
@@ -1222,7 +1235,7 @@ kvs_print_servers() {
 
     [ "${#SERVER_LINES[@]}" -gt 0 ] || return 0
     kvs_say "  Storage servers:"
-    for line in "${SERVER_LINES[@]}"; do
+    for line in ${SERVER_LINES[@]+"${SERVER_LINES[@]}"}; do
         IFS='|' read -r title path remote placement urls <<< "$line"
         if [ "$remote" = "1" ]; then
             kvs_say "    $title: remote (${urls:-no URL}), stays where it is"
@@ -1281,6 +1294,33 @@ kvs_available_mb() {
     printf '%s' "$avail"
 }
 
+# kvs_dirname <path>: the directory part of a path, without dirname (the
+# old server may offer few tools; the tests run with a minimal PATH).
+kvs_dirname() {
+    local path=$1
+
+    case $path in
+        */*)
+            path=${path%/*}
+            printf '%s' "${path:-/}"
+            ;;
+        *) printf '.' ;;
+    esac
+}
+
+# kvs_path_inside_site <path>: the output would land under the site directory.
+kvs_path_inside_site() {
+    local directory
+
+    directory=$(kvs_dirname "$1")
+    directory=$(readlink -f -- "$directory" < /dev/null 2> /dev/null) || directory=""
+    [ -n "$directory" ] && [ -n "$SITE_DIR" ] || return 1
+    case "$directory/" in
+        "$SITE_DIR"/*) return 0 ;;
+    esac
+    return 1
+}
+
 kvs_check_free_space() {
     local needed="$1"
     local path="$2"
@@ -1328,9 +1368,22 @@ kvs_dump_extension() {
     esac
 }
 
+# zstd 1.1.2 (Debian 9) has no -T option: it prints its usage, exits 1 and
+# the dump pipeline leaves a truncated file. Probe it on empty input and
+# compress on one thread there; the archive is the same format.
+kvs_zstd_accepts_threads() {
+    printf '' | zstd -T0 -q -c > /dev/null 2>&1
+}
+
 kvs_compressor_args() {
     case $COMPRESSOR in
-        zstd) COMPRESS_CMD=(zstd -T0 -3 -q -c) ;;
+        zstd)
+            if kvs_zstd_accepts_threads; then
+                COMPRESS_CMD=(zstd -T0 -3 -q -c)
+            else
+                COMPRESS_CMD=(zstd -3 -q -c)
+            fi
+            ;;
         pigz) COMPRESS_CMD=(pigz -6 -c) ;;
         *) COMPRESS_CMD=(gzip -6 -c) ;;
     esac
@@ -1387,7 +1440,7 @@ kvs_build_dump_args() {
     fi
     # No --routines: KVS has none and the site user rarely has the privilege.
     # No --databases: the importer drops CREATE DATABASE and USE anyway.
-    DUMP_ARGS+=("${DB_CONN_ARGS[@]}" "$DB_NAME")
+    DUMP_ARGS+=(${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} "$DB_NAME")
 }
 
 # Write the compressed dump on stdout. pipefail carries a failure of the
@@ -1395,15 +1448,15 @@ kvs_build_dump_args() {
 kvs_stream_dump() {
     if [ "$DB_DUMP_FORMAT" = directory ]; then
         kvs_prepare_directory_dump || return 1
-        kvs_stream_directory_bundle | "${COMPRESS_CMD[@]}"
+        kvs_stream_directory_bundle | ${COMPRESS_CMD[@]+"${COMPRESS_CMD[@]}"}
         return $?
     fi
     (
         # shellcheck disable=SC2030,SC2031  # Same deliberate subshell as the probe.
         export MYSQL_PWD="$DB_PASSWORD"
         kvs_ignore_user_option_files
-        "$DB_DUMP_TOOL" "${DUMP_ARGS[@]}" < /dev/null
-    ) | "${COMPRESS_CMD[@]}"
+        "$DB_DUMP_TOOL" ${DUMP_ARGS[@]+"${DUMP_ARGS[@]}"} < /dev/null
+    ) | ${COMPRESS_CMD[@]+"${COMPRESS_CMD[@]}"}
 }
 
 # Native exports contain files written by the server itself. A private
@@ -1420,7 +1473,7 @@ kvs_directory_query() {
         kvs_ignore_user_option_files
         local defaults=()
         if [ "$DB_DIRECTORY_AUTH" = root-socket ]; then defaults=(--no-defaults); fi
-        "$DB_CLIENT" "${defaults[@]}" --connect-timeout=10 "${DB_DIRECTORY_CONN_ARGS[@]}" \
+        "$DB_CLIENT" ${defaults[@]+"${defaults[@]}"} --connect-timeout=10 ${DB_DIRECTORY_CONN_ARGS[@]+"${DB_DIRECTORY_CONN_ARGS[@]}"} \
             --batch --skip-column-names --raw "$DB_NAME" -e "$1" < /dev/null
     )
 }
@@ -1446,7 +1499,7 @@ kvs_directory_decode_path() {
 # Never grant FILE to the site account or read root passwords from option files.
 kvs_directory_try_root() {
     local query=$1 expected=$2 socket_path=$3 actual
-    local saved_args=("${DB_DIRECTORY_CONN_ARGS[@]}")
+    local saved_args=(${DB_DIRECTORY_CONN_ARGS[@]+"${DB_DIRECTORY_CONN_ARGS[@]}"})
 
     DB_DIRECTORY_ROOT_REASON=""
     if [ "$(id -u)" != 0 ] || [ -z "$socket_path" ]; then
@@ -1464,7 +1517,7 @@ kvs_directory_try_root() {
         kvs_say "Native export uses the existing local root socket login; source server and schema verified."
         return 0
     fi
-    DB_DIRECTORY_CONN_ARGS=("${saved_args[@]}")
+    DB_DIRECTORY_CONN_ARGS=(${saved_args[@]+"${saved_args[@]}"})
     DB_DIRECTORY_PASSWORD=$DB_PASSWORD
     DB_DIRECTORY_AUTH=site
     return 1
@@ -1492,7 +1545,7 @@ kvs_select_database_format() {
 
     DB_DUMP_FORMAT=sql
     DB_DIRECTORY_TABLES=()
-    DB_DIRECTORY_CONN_ARGS=("${DB_CONN_ARGS[@]}")
+    DB_DIRECTORY_CONN_ARGS=(${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"})
     DB_DIRECTORY_PASSWORD=$DB_PASSWORD
     DB_DIRECTORY_AUTH=site
     DB_DIRECTORY_ROOT_REASON=""
@@ -1707,7 +1760,7 @@ kvs_prepare_directory_dump() {
             export MYSQL_PWD="$DB_DIRECTORY_PASSWORD"
         fi
         kvs_ignore_user_option_files
-        "$DB_DUMP_TOOL" --no-defaults "${native_args[@]}" "${DB_DIRECTORY_CONN_ARGS[@]}" "$DB_NAME" < /dev/null
+        "$DB_DUMP_TOOL" --no-defaults ${native_args[@]+"${native_args[@]}"} ${DB_DIRECTORY_CONN_ARGS[@]+"${DB_DIRECTORY_CONN_ARGS[@]}"} "$DB_NAME" < /dev/null
     ) >&2; then
         kvs_error "native export failed before any bundle was streamed"
         return 1
@@ -1740,7 +1793,7 @@ kvs_prepare_directory_dump() {
         kvs_error "native export file count differs from the source table list"
         return 1
     fi
-    for table in "${DB_DIRECTORY_TABLES[@]}"; do
+    for table in ${DB_DIRECTORY_TABLES[@]+"${DB_DIRECTORY_TABLES[@]}"}; do
         if [ ! -s "$NATIVE_STAGING_DIR/bundle/data/$table.sql" ] || [ ! -f "$NATIVE_STAGING_DIR/bundle/data/$table.txt" ]; then
             kvs_error "native export is incomplete for table $table"
             return 1
@@ -2046,7 +2099,7 @@ kvs_probe_web_server_config() {
     if [ -n "${KVS_EXPORT_NGINX_BIN:-}" ]; then
         candidates=("$KVS_EXPORT_NGINX_BIN")
     fi
-    for nginx in "${candidates[@]}"; do
+    for nginx in ${candidates[@]+"${candidates[@]}"}; do
         command -v "$nginx" > /dev/null 2>&1 || continue
         if NGINX_CONFIG=$("$nginx" -T 2> /dev/null < /dev/null) && [ -n "$NGINX_CONFIG" ]; then
             NGINX_CONFIG_SOURCE="nginx -T"
@@ -2179,7 +2232,7 @@ kvs_archive_excludes() {
     TAR_EXCLUDES=()
     [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] || return 0
     TAR_EXCLUDES=(--anchored)
-    for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+    for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
         TAR_EXCLUDES+=("--exclude=${KVS_ARCHIVE_SITE_DIR}${pattern}")
     done
 }
@@ -2209,6 +2262,10 @@ kvs_command_archive() {
         fi
     fi
     if [ "$output" != "-" ]; then
+        if kvs_path_inside_site "$output"; then
+            kvs_error "$output is inside the site, where its web server would serve the export; write it elsewhere with --output"
+            return 1
+        fi
         kvs_say "Output: $output"
     fi
     if ! kvs_confirm "Continue? [Y/n]"; then
@@ -2219,7 +2276,9 @@ kvs_command_archive() {
         if [ "$OPT_DUMP_ONLY" = "yes" ]; then
             needed=$DB_SIZE_MB
         else
-            needed=$((SITE_SIZE_MB + DB_SIZE_MB))
+            # The dump is staged next to the archive and copied into it, so
+            # both exist at once; its compressed size is below DB_SIZE_MB.
+            needed=$((SITE_SIZE_MB + 2 * DB_SIZE_MB))
             case $SITE_SIZE_STATUS in
                 exact) ;;
                 incomplete) kvs_warn "the site size is a lower bound, the free space check can pass on a disk that is too small" ;;
@@ -2253,10 +2312,21 @@ kvs_command_archive() {
         return 0
     fi
 
-    STAGING_DIR=$(mktemp -d 2> /dev/null) || STAGING_DIR=""
-    if [ -z "$STAGING_DIR" ]; then
-        kvs_error "cannot create a temporary directory, set TMPDIR to a writable filesystem"
-        return 1
+    if [ "$output" = "-" ]; then
+        STAGING_DIR=$(mktemp -d 2> /dev/null) || STAGING_DIR=""
+        if [ -z "$STAGING_DIR" ]; then
+            kvs_error "cannot create a temporary directory, set TMPDIR to a writable filesystem"
+            return 1
+        fi
+        kvs_check_free_space "$DB_SIZE_MB" "$STAGING_DIR" || return 1
+    else
+        # Next to the archive, on the filesystem checked above: TMPDIR is
+        # often a small tmpfs that cannot hold the dump of a large site.
+        STAGING_DIR=$(mktemp -d "$(kvs_dirname "$output")/.kvs-export.XXXXXX" 2> /dev/null) || STAGING_DIR=""
+        if [ -z "$STAGING_DIR" ]; then
+            kvs_error "cannot create a staging directory next to $output"
+            return 1
+        fi
     fi
     dump_name="database.$(kvs_dump_extension)"
     dump_path="$STAGING_DIR/$dump_name"
@@ -2273,13 +2343,13 @@ kvs_command_archive() {
     kvs_say "Writing the archive, this takes as long as reading the site files..."
     kvs_archive_excludes
     if [ "$output" = "-" ]; then
-        if ! tar -chf - "${TAR_EXCLUDES[@]}" -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
+        if ! tar -chf - ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
             kvs_error "tar failed, the archive on stdout is incomplete"
             return 1
         fi
         return 0
     fi
-    if ! tar -chf "$output" "${TAR_EXCLUDES[@]}" -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
+    if ! tar -chf "$output" ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
         kvs_error "tar failed"
         rm -f -- "$output"
         return 1

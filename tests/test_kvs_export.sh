@@ -358,8 +358,11 @@ make_extra_bin() {
     mkdir -p "$EXTRA_BIN"
     cat > "$EXTRA_BIN/zstd" <<'EOF'
 #!/bin/bash
+# The file this compressor writes tells where the dump was staged.
+zstd_target=$(readlink "/proc/$$/fd/1" 2> /dev/null || true)
 {
     printf 'zstd argv:%s\n' "$(printf ' [%s]' "$@")"
+    printf 'zstd stdout: [%s]\n' "$zstd_target"
 } >> "${STUB_LOG:-/dev/null}"
 exec cat
 EOF
@@ -884,6 +887,29 @@ test_the_dump_uses_the_compressor_that_is_installed() {
 
     run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" --gzip detect "$site" || fail "detect must succeed"
     assert_key "$out" compressor gzip
+
+    # zstd 1.1.2 (Debian 9) has no -T option: it prints its usage, exits 1
+    # and the dump pipeline leaves a truncated file.
+    mkdir -p "$TMP_ROOT/bin-old-zstd"
+    cat > "$TMP_ROOT/bin-old-zstd/zstd" <<'EOF'
+#!/bin/bash
+{
+    printf 'zstd argv:%s\n' "$(printf ' [%s]' "$@")"
+} >> "${STUB_LOG:-/dev/null}"
+for arg in "$@"; do
+    if [ "$arg" = -T0 ]; then
+        echo "Usage: zstd [args] [FILE(s)] [-o file]" >&2
+        exit 1
+    fi
+done
+exec cat
+EOF
+    chmod +x "$TMP_ROOT/bin-old-zstd/zstd"
+    run_export "$TMP_ROOT/bin-old-zstd:$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" ||
+        fail "the dump must succeed with a zstd that has no -T option: $(cat "$err")"
+    argv_lines | grep -Fq -- 'zstd argv: [-3] [-q] [-c]' ||
+        fail "a zstd without -T must compress on one thread: $(argv_lines)"
+    grep -Fq -- '-- Dump completed' "$out" || fail "the dump must pass through the one-thread zstd"
     pass "the dump uses the compressor that is installed"
 }
 
@@ -1330,6 +1356,47 @@ test_dump_only_writes_a_dump_next_to_the_archive() {
     pass "--dump-only writes a dump next to the archive"
 }
 
+test_the_dump_is_staged_next_to_the_archive_and_outside_the_site() {
+    local site="$TMP_ROOT/staging-site"
+    local work="$TMP_ROOT/staging-work"
+    local out="$TMP_ROOT/staging.out"
+    local err="$TMP_ROOT/staging.err"
+    local status=0
+
+    make_site "$site"
+    mkdir -p "$work"
+    # TMPDIR is often a small tmpfs: the dump goes next to the archive, on
+    # the filesystem the free space check looked at, and leaves no trace.
+    run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$work/export.tar" archive "$site" ||
+        fail "the archive must be written: $(cat "$err")"
+    grep -Eq "^zstd stdout: \[$work/\.kvs-export\.[^/]+/database\.sql\.zst\]$" "$STUB_LOG" ||
+        fail "the dump must be staged next to the archive: $(grep 'stdout:' "$STUB_LOG")"
+    find "$work" -maxdepth 1 -name '.kvs-export.*' | grep -q . && fail "the staging directory must be removed: $(ls -A "$work")"
+    tar -tf "$work/export.tar" | grep -Fxq "database.sql.zst" || fail "the archive must hold the dump"
+
+    # An archive or a dump inside the site would be served by its web server.
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$site/export.tar" archive "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "an archive inside the site must be refused, got $status"
+    grep -q "inside the site" "$err" || fail "the refusal must explain: $(cat "$err")"
+    [ ! -e "$site/export.tar" ] || fail "nothing must be written inside the site"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --dump-only -o "$site/contents/dump.sql.gz" "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a dump inside the site must be refused, got $status"
+    [ ! -e "$site/contents/dump.sql.gz" ] || fail "no dump may be written inside the site"
+    pass "the dump is staged next to the archive and outside the site"
+}
+
+test_array_expansions_are_guarded_for_old_bash() {
+    local bare
+
+    # bash 4.2 (CentOS 7) and 4.3 (Ubuntu 16.04, Debian 8) stop on "${a[@]}"
+    # of an empty array under set -u; the guarded form expands to nothing.
+    bare=$(grep -nE '^[^#]*(^|[^+])"\$\{[A-Za-z_][A-Za-z_0-9]*\[@\]\}"' "$EXPORT_SCRIPT" || true)
+    [ -z "$bare" ] || fail "array expansions must be written \${a[@]+\"\${a[@]}\"} for bash 4.2 and 4.3: $bare"
+    pass "array expansions are guarded for old bash"
+}
+
 test_the_site_is_searched_under_the_configured_roots() {
     local roots="$TMP_ROOT/roots"
     local out="$TMP_ROOT/search.out"
@@ -1366,6 +1433,24 @@ test_the_site_is_searched_under_the_configured_roots() {
         run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect || status=$?
     [ "$status" -eq 2 ] || fail "no site must exit 2, got $status"
     grep -q "no KVS site found" "$err" || fail "the failed search must be explained: $(cat "$err")"
+    grep -q "set IMPORT_REMOTE_DIR" "$err" ||
+        fail "detect runs for the kvs-install setup, whose variable names the directory: $(cat "$err")"
+    status=0
+    KVS_EXPORT_SEARCH_ROOTS="$roots/empty-root" \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" archive || status=$?
+    [ "$status" -eq 2 ] || fail "no site must exit 2 for the archive too, got $status"
+    grep -q "KVS_SITE_DIR or KVS_EXPORT_SEARCH_ROOTS" "$err" ||
+        fail "the archive command must name its own variables: $(cat "$err")"
+
+    # Control panels put the site seven levels under the root: ISPConfig
+    # (/var/www/clients/client1/web1/web), DirectAdmin and Hestia under /home.
+    make_site "$roots/panel/clients/client1/web1/web" "https://panel.example.com"
+    KVS_EXPORT_SEARCH_ROOTS="$roots/panel" \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect ||
+        fail "a site seven levels under the root must be found: $(cat "$err")"
+    assert_key "$out" site_dir "$roots/panel/clients/client1/web1/web"
+    grep -q '^KVS_DEFAULT_SEARCH_ROOTS=.*:/www/wwwroot"' "$EXPORT_SCRIPT" ||
+        fail "the aaPanel root /www/wwwroot must be searched by default"
 
     status=0
     KVS_EXPORT_SEARCH_ROOTS="$roots/first" \
@@ -1512,6 +1597,8 @@ test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent
 test_the_archive_holds_the_site_the_dump_and_the_manifest
 test_the_archive_can_be_written_on_stdout
 test_dump_only_writes_a_dump_next_to_the_archive
+test_the_dump_is_staged_next_to_the_archive_and_outside_the_site
+test_array_expansions_are_guarded_for_old_bash
 test_the_site_is_searched_under_the_configured_roots
 test_a_site_without_its_config_files_is_refused
 test_the_script_works_when_bash_reads_it_from_stdin
