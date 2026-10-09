@@ -2585,6 +2585,21 @@ kvsctl_manages_stack() {
 }
 
 # Pre-flight checks before installation
+# docker_is_the_snap: Docker installed from the snap store, which Ubuntu
+# Server offers at installation time. Its confinement reaches files under
+# /home only: a bind mount of /var/www or of this directory does not reach
+# the containers, or reaches them empty without a word, and the site cannot
+# run. The snap's command and its data root both tell it apart.
+docker_is_the_snap() {
+    local root
+
+    case "$(command -v docker 2>/dev/null)" in
+        /snap/*) return 0 ;;
+    esac
+    root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null) || root=""
+    [[ "$root" == /var/snap/docker/* ]]
+}
+
 preflight_checks() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
@@ -2600,6 +2615,11 @@ preflight_checks() {
         local docker_version
         docker_version=$(docker --version | grep -oP '\d+\.\d+\.\d+' | head -1)
         echo -e "${GREEN}✓${NC} Docker installed: ${docker_version}"
+        if docker_is_the_snap; then
+            echo -e "${RED}✗${NC} Docker comes from the snap store: its confinement reaches files under /home only, and this stack mounts /var/www and $PWD into the containers"
+            echo "  Replace it with Docker Engine: snap remove docker, then curl -fsSL https://get.docker.com | sh, and run the setup again"
+            critical_failed=$((critical_failed + 1))
+        fi
     else
         echo -e "${RED}✗${NC} Docker not installed"
         echo "  Install: curl -fsSL https://get.docker.com | sh"

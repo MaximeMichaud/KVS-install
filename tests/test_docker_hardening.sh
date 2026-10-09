@@ -1040,7 +1040,7 @@ test_preflight_names_the_packages_of_missing_commands() {
     local expected
 
     awk '
-        $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" { capture = 1 }
+        $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" || $0 == "docker_is_the_snap() {" { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
     ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
@@ -1091,7 +1091,7 @@ test_preflight_tells_a_small_host_without_swap() {
     local host
 
     awk '
-        $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" { capture = 1 }
+        $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" || $0 == "docker_is_the_snap() {" { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
     ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
@@ -1512,6 +1512,59 @@ test_setup_moves_to_its_directory_when_started_elsewhere() {
     assert_file_contains "$case_dir/output.log" "Working in $case_dir/stack"
     [ ! -e "$case_dir/elsewhere/.env" ] || fail "nothing may be written where the command was typed"
     pass "the setup moves to its directory when started elsewhere"
+}
+
+test_the_docker_snap_is_refused_before_anything_is_built() {
+    local case_dir="$TMP_ROOT/docker-snap"
+    local functions_file="$case_dir/functions.sh"
+    local work_dir="$case_dir/work" mock_bin="$case_dir/bin" output status
+
+    mkdir -p "$case_dir" "$work_dir" "$case_dir/logs"
+    awk '
+        $0 == "docker_is_the_snap() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    # shellcheck disable=SC2016
+    probe() {
+        DOCKER_ROOT="$1" bash -c '
+            docker() { [ "$1" = info ] && printf "%s\n" "$DOCKER_ROOT"; return 0; }
+            source "$1"
+            if docker_is_the_snap; then echo snap; else echo engine; fi
+        ' _ "$functions_file"
+    }
+    [ "$(probe /var/snap/docker/common/var-lib-docker)" = snap ] || fail "the snap's data root must be recognised"
+    [ "$(probe /var/lib/docker)" = engine ] || fail "Docker Engine must pass"
+    [ "$(probe "")" = engine ] || fail "a daemon that answers nothing is not called a snap"
+
+    # The whole preflight: the snap is a critical failure, nothing is built.
+    make_preflight_mocks "$mock_bin"
+    cat > "$mock_bin/docker" <<'EOF'
+#!/bin/bash
+case "${1:-} ${2:-}" in
+    "--version ") echo "Docker version 28.1.1, build snap" ;;
+    "compose version") echo "Docker Compose version v2.35.0" ;;
+    "info "*) echo "/var/snap/docker/common/var-lib-docker" ;;
+esac
+exit 0
+EOF
+    chmod +x "$mock_bin/docker"
+    cp "$REPO_ROOT/docker/.env.example" "$work_dir/.env"
+    chmod 600 "$work_dir/.env"
+    make_setup_test_copy "$case_dir/setup.sh" "$case_dir/logs"
+    set +e
+    (
+        cd "$work_dir"
+        PATH="$mock_bin:/usr/bin:/bin" HEADLESS=y DOMAIN=mysite.test EMAIL=ops@mysite.test \
+            timeout 60 "$case_dir/setup.sh"
+    ) > "$case_dir/output.log" 2>&1
+    status=$?
+    set -e
+    [ "$status" -eq 1 ] || fail "the setup must stop on the Docker snap (status $status): $(tail -n 3 "$case_dir/output.log")"
+    assert_file_contains "$case_dir/output.log" "Docker comes from the snap store"
+    assert_file_contains "$case_dir/output.log" "snap remove docker"
+    assert_file_not_contains "$case_dir/output.log" "All pre-flight checks passed"
+    pass "the Docker snap is refused before anything is built"
 }
 
 test_files_for_the_containers_survive_a_strict_umask() {
@@ -2184,6 +2237,7 @@ test_system_settings_keep_the_limits_an_admin_raised
 test_manticore_scripts_survive_a_failed_download_once_installed
 test_cache_settings_follow_small_hosts
 test_setup_moves_to_its_directory_when_started_elsewhere
+test_the_docker_snap_is_refused_before_anything_is_built
 test_files_for_the_containers_survive_a_strict_umask
 test_reconfigure_fails_when_container_inspection_fails
 test_reconfigure_issues_the_exact_requested_sans_and_installs
