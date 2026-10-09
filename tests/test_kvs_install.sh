@@ -967,6 +967,76 @@ test_runtime_input_stays_quiet_without_a_terminal() {
   assert_equal "stdin=piped" "$output" "a detached run must keep its piped stdin without complaining"
 }
 
+# The gum repository must never stay in the apt sources without its key:
+# apt-get update then fails with "is not signed" for every later step.
+test_gum_repository_leaves_with_its_key() {
+  local temp_dir
+  local keyring list
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  mkdir -p "$temp_dir/bin" "$temp_dir/keyrings" "$temp_dir/sources"
+  ln -s "$(command -v mkdir)" "$temp_dir/bin/mkdir"
+  ln -s "$(command -v rm)" "$temp_dir/bin/rm"
+  ln -s "$(command -v cat)" "$temp_dir/bin/cat"
+  # The function sees only the stubs below and the few tools it needs: gum
+  # and gpg are found through functions or not at all.
+  run_install_gum() {
+    local PATH="$temp_dir/bin"
+    install_gum
+  }
+  APT_KEYRINGS_DIR="$temp_dir/keyrings"
+  APT_SOURCES_DIR="$temp_dir/sources"
+  keyring="$temp_dir/keyrings/charm.gpg"
+  list="$temp_dir/sources/charm.list"
+  PROGRESS_GUM_AVAILABLE=false
+  apt-get() {
+    printf '%s\n' "$*" >>"$temp_dir/apt-calls"
+    [[ "$1" == update && -e "$temp_dir/apt-update-fails" ]] && return 100
+    return 0
+  }
+  apt_install() { printf 'install %s\n' "$*" >>"$temp_dir/apt-calls"; }
+
+  # No gpg on the host: nothing is written, the run goes on.
+  curl() { fail "curl must not run without gpg"; }
+  run_install_gum >/dev/null || fail "install_gum must not fail the installer" || return 1
+  [[ ! -e "$list" && ! -e "$keyring" ]] || fail "no list nor keyring must be written without gpg" || return 1
+  [[ ! -e "$temp_dir/apt-calls" ]] || fail "apt must not run without gpg" || return 1
+
+  # The key cannot be fetched: no list is written, so later apt runs are safe.
+  curl() { return 7; }
+  gpg() { return 2; }
+  run_install_gum >/dev/null || fail "a failed key fetch must not fail the installer" || return 1
+  [[ ! -e "$list" ]] || fail "the list must not be written when the key fetch fails" || return 1
+  [[ ! -e "$keyring" ]] || fail "an empty keyring must not be left behind" || return 1
+  [[ ! -e "$temp_dir/apt-calls" ]] || fail "apt must not run without the key" || return 1
+  assert_equal false "$PROGRESS_GUM_AVAILABLE" "gum must not be reported available" || return 1
+
+  # The key is there but the repository does not install gum: both leave.
+  curl() { printf 'KEY\n'; }
+  gpg() {
+    local output
+    while [[ $# -gt 0 ]]; do
+      [[ "$1" == -o ]] && output="$2"
+      shift
+    done
+    cat >"$output"
+  }
+  : >"$temp_dir/apt-update-fails"
+  run_install_gum >/dev/null || fail "a failed apt update must not fail the installer" || return 1
+  [[ ! -e "$list" ]] || fail "the list must leave when apt-get update fails" || return 1
+  [[ ! -e "$keyring" ]] || fail "the keyring must leave with the list" || return 1
+  assert_equal false "$PROGRESS_GUM_AVAILABLE" "gum must not be reported available after a failed update" || return 1
+
+  # Everything works: the list names the keyring and gum is available.
+  rm -f "$temp_dir/apt-update-fails" "$temp_dir/apt-calls"
+  run_install_gum >/dev/null || fail "install_gum failed although everything works" || return 1
+  [[ -s "$keyring" ]] || fail "the keyring must be written" || return 1
+  assert_file_contains "$list" "deb [signed-by=$keyring] https://repo.charm.sh/apt/ * *" \
+    "the list must name the keyring it was written with" || return 1
+  assert_file_contains "$temp_dir/apt-calls" "install -qq gum" "gum must be installed" || return 1
+  assert_equal true "$PROGRESS_GUM_AVAILABLE" "gum must be reported available" || return 1
+}
+
 run_test() {
   local name="$1"
   local function_name="$2"
@@ -977,6 +1047,84 @@ run_test() {
   fi
   echo "FAIL: $name" >&2
   return 1
+}
+
+# Ubuntu ships /etc/debian_version too: the OS check read its VERSION_ID
+# through the Debian release gate and stopped on "Debian 24.04 is not
+# supported". The distribution id of os-release decides, and every
+# distribution but Debian takes the Docker installation.
+test_os_check_sends_ubuntu_to_the_docker_installation() {
+  local temp_dir
+  local output
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+
+  printf 'ID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"\n' >"$temp_dir/os-release"
+  output=$(
+    OS_RELEASE_FILE="$temp_dir/os-release" checkOS >"$temp_dir/out" 2>&1 || exit $?
+    printf '%s %s\n' "$IS_DEBIAN" "$OS"
+  )
+  status=$?
+  [[ $status -eq 0 ]] || fail "the OS check refused Ubuntu 24.04 (status $status): $(cat "$temp_dir/out")" || return 1
+  assert_equal "false ubuntu" "$output" "Ubuntu must take the Docker installation as a non-Debian system" || return 1
+  grep -q 'Detected: ubuntu' "$temp_dir/out" || fail "the detected distribution was not shown" || return 1
+  ! grep -q 'Debian 24.04' "$temp_dir/out" || fail "Ubuntu was reported as a Debian release" || return 1
+
+  printf 'ID=debian\nVERSION_ID="13"\n' >"$temp_dir/os-release"
+  output=$(
+    OS_RELEASE_FILE="$temp_dir/os-release" checkOS >"$temp_dir/out" 2>&1 || exit $?
+    printf '%s %s\n' "$IS_DEBIAN" "$OS"
+  )
+  status=$?
+  [[ $status -eq 0 ]] || fail "the OS check refused Debian 13 (status $status)" || return 1
+  assert_equal "true debian" "$output" "Debian 13 must keep both installations" || return 1
+
+  printf 'ID=debian\nVERSION_ID="11"\n' >"$temp_dir/os-release"
+  (OS_RELEASE_FILE="$temp_dir/os-release" checkOS) >"$temp_dir/out" 2>&1
+  status=$?
+  [[ $status -eq 1 ]] || fail "Debian 11 must stop the installer (status $status)" || return 1
+  grep -q 'Debian 11 is not supported' "$temp_dir/out" || fail "the unsupported Debian release was not named" || return 1
+
+  output=$(
+    OS_RELEASE_FILE="$temp_dir/missing" checkOS >"$temp_dir/out" 2>&1 || exit $?
+    printf '%s %s\n' "$IS_DEBIAN" "$OS"
+  )
+  status=$?
+  [[ $status -eq 0 ]] || fail "a host without os-release must still get the Docker installation (status $status)" || return 1
+  assert_equal "false unknown" "$output" "a host without os-release is unknown and takes the Docker installation" || return 1
+}
+
+# A question asked again until the answer is valid never ends when the
+# input is over (answers piped in that ran out, a detached run): the
+# installer stops and says so instead.
+test_a_question_with_no_answer_left_stops_the_installer() {
+  local output
+  local status
+
+  # shellcheck disable=SC2016  # The inner shell expands $1.
+  output=$(timeout 20 bash -c 'source "$1"; IS_DEBIAN=true; INSTALL_TYPE=""; HEADLESS=""; chooseInstallationType' _ "$INSTALLER" </dev/null 2>&1)
+  status=$?
+  [[ $status -eq 1 ]] || fail "the installer must stop at the end of its input (status $status): $(tail -n 3 <<< "$output")" || return 1
+  grep -q 'no answer left on standard input' <<< "$output" || fail "the end of the input was not reported" || return 1
+  [[ $(grep -c 'Choose installation type:' <<< "$output") -eq 1 ]] || fail "the question must be asked once, not again and again" || return 1
+}
+
+# sh kvs-install.sh runs dash on Debian and Ubuntu, which stopped on a
+# syntax error further down the file: the installer says it needs bash.
+test_the_installer_says_it_needs_bash() {
+  local output
+  local status
+
+  if ! command -v dash >/dev/null 2>&1; then
+    echo "  (dash is not installed here, the case is left to the CI runner)"
+    return 0
+  fi
+  output=$(dash "$INSTALLER" 2>&1 </dev/null)
+  status=$?
+  [[ $status -eq 1 ]] || fail "dash must be refused with status 1 (status $status): $(head -n 2 <<< "$output")" || return 1
+  grep -q 'needs bash' <<< "$output" || fail "the installer must say it needs bash: $output" || return 1
+  ! grep -q 'Syntax error' <<< "$output" || fail "dash must not reach a syntax error" || return 1
 }
 
 failures=0
@@ -1024,6 +1172,7 @@ test_the_wrapper_installs_the_requested_branch() {
 }
 
 run_test "installation failures stop the pipeline" test_install_failure_stops_pipeline || failures=$((failures + 1))
+run_test "gum repository leaves with its key" test_gum_repository_leaves_with_its_key || failures=$((failures + 1))
 run_test "visual progress failures are non-fatal" test_visual_progress_failure_is_nonfatal || failures=$((failures + 1))
 run_test "headless PHP detection" test_headless_php_detection || failures=$((failures + 1))
 run_test "PHP choice for unencoded archives" test_php_version_choice_for_unencoded_archive || failures=$((failures + 1))
@@ -1048,6 +1197,9 @@ run_test "NGINX cleanup is scoped" test_nginx_cleanup_uses_scoped_paths || failu
 run_test "runtime input stays quiet without a terminal" test_runtime_input_stays_quiet_without_a_terminal || failures=$((failures + 1))
 run_test "an import source needs no archive" test_import_source_given_needs_no_archive || failures=$((failures + 1))
 run_test "the wrapper installs the requested branch" test_the_wrapper_installs_the_requested_branch || failures=$((failures + 1))
+run_test "the OS check sends Ubuntu to the Docker installation" test_os_check_sends_ubuntu_to_the_docker_installation || failures=$((failures + 1))
+run_test "a question with no answer left stops the installer" test_a_question_with_no_answer_left_stops_the_installer || failures=$((failures + 1))
+run_test "the installer says it needs bash" test_the_installer_says_it_needs_bash || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2

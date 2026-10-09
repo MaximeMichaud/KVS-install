@@ -16,6 +16,14 @@
 #################################################################
 # shellcheck disable=SC1091
 #################################################################
+
+# Everything below is bash. Another shell (sh kvs-install.sh on Debian and
+# Ubuntu runs dash) would stop on a syntax error further down instead.
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "kvs-install.sh needs bash: run it as 'bash kvs-install.sh'." >&2
+  exit 1
+fi
+
 SETUP_ARGS=()
 parse_arguments() {
   SETUP_ARGS=()
@@ -81,6 +89,16 @@ initialize_runtime_input() {
     exec < /dev/tty
   fi
 }
+
+# read for a question the installer asks again until the answer is valid.
+# At the end of its input (answers piped in that ran out, a detached run)
+# the question has no answer, and asking it again would never end.
+prompt_read() {
+  read -r "$@" && return 0
+  echo ""
+  echo "${red}ERROR: no answer left on standard input for the question above. Run the installer from a terminal, or set HEADLESS=y with the variables the README lists.${normal}" >&2
+  exit 1
+}
 #################################################################
 # Progress Tracking (gum-based with fallback)
 #################################################################
@@ -88,19 +106,42 @@ PROGRESS_TOTAL_STEPS=17
 PROGRESS_CURRENT_STEP=0
 PROGRESS_GUM_AVAILABLE=false
 
+# gum only draws the progress. Its repository enters the apt sources once
+# its key is in place, and leaves with the key when gum does not install: a
+# list whose key is missing (no gpg on the host, or the key could not be
+# fetched) made every later "apt-get update" fail with "is not signed", the
+# one the Docker install runs among them.
 install_gum() {
+  local keyrings_dir="${APT_KEYRINGS_DIR:-/etc/apt/keyrings}"
+  local sources_dir="${APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
+  local keyring="$keyrings_dir/charm.gpg"
+  local list="$sources_dir/charm.list"
+
   if command -v gum &> /dev/null; then
     PROGRESS_GUM_AVAILABLE=true
     return 0
   fi
-  if command -v apt-get &> /dev/null; then
-    echo "Installing gum for progress display..."
-    mkdir -p /etc/apt/keyrings
-    curl -fsSL https://repo.charm.sh/apt/gpg.key | gpg --dearmor -o /etc/apt/keyrings/charm.gpg 2>/dev/null
-    echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | tee /etc/apt/sources.list.d/charm.list > /dev/null
-    apt-get update -qq && apt_install -qq gum
-    PROGRESS_GUM_AVAILABLE=true
+  command -v apt-get &> /dev/null || return 0
+  if ! command -v gpg &> /dev/null; then
+    echo "gum not installed (gpg is missing): plain progress output"
+    return 0
   fi
+  echo "Installing gum for progress display..."
+  mkdir -p "$keyrings_dir"
+  if ! curl -fsSL https://repo.charm.sh/apt/gpg.key | gpg --yes --dearmor -o "$keyring" 2>/dev/null ||
+    [[ ! -s "$keyring" ]]; then
+    rm -f "$keyring"
+    echo "gum not installed (its repository key could not be fetched): plain progress output"
+    return 0
+  fi
+  echo "deb [signed-by=$keyring] https://repo.charm.sh/apt/ * *" > "$list"
+  if apt-get update -qq && apt_install -qq gum; then
+    PROGRESS_GUM_AVAILABLE=true
+    return 0
+  fi
+  rm -f "$list" "$keyring"
+  echo "gum not installed: plain progress output"
+  return 0
 }
 
 progress_step() {
@@ -200,16 +241,26 @@ function initialCheck() {
   checkOS
 }
 
+# Debian offers both installations; every other distribution, Ubuntu among
+# them, gets the Docker one. The distribution id of os-release decides, not
+# /etc/debian_version: Ubuntu ships that file too, so an Ubuntu host went
+# through the Debian release check with its own VERSION_ID and stopped on
+# "Debian 24.04 is not supported".
 function checkOS() {
-  IS_DEBIAN=false
-  if [[ -e /etc/debian_version ]]; then
-    OS="debian"
-    IS_DEBIAN=true
-    source /etc/os-release
+  local os_release="${OS_RELEASE_FILE:-/etc/os-release}"
 
+  IS_DEBIAN=false
+  OS="unknown"
+  if [[ -e $os_release ]]; then
+    # shellcheck source=/dev/null
+    source "$os_release"
+    OS="${ID:-unknown}"
+  fi
+  if [[ $OS == debian ]]; then
+    IS_DEBIAN=true
     # Only the Debian releases still maintained are supported; an older one
     # (11 ended on 2026-08-31) stops here instead of failing later in apt.
-    if [[ ! $VERSION_ID =~ ^(12|13)$ ]]; then
+    if [[ ! ${VERSION_ID:-} =~ ^(12|13)$ ]]; then
       echo ""
       echo "⚠️ ${alert}Debian ${VERSION_ID:-unknown} is not supported by KVS-install.${normal}"
       echo "Use Debian 12 (bookworm) or Debian 13 (trixie)."
@@ -217,13 +268,6 @@ function checkOS() {
       exit 1
     fi
   else
-    # Non-Debian: Docker only
-    if [[ -e /etc/os-release ]]; then
-      source /etc/os-release
-      OS="$ID"
-    else
-      OS="unknown"
-    fi
     echo "${cyan}Detected: $OS${normal}"
     echo "Standalone installation requires Debian. Docker installation is available."
   fi
@@ -414,7 +458,7 @@ function installQuestions() {
     echo "   1) Yes"
     echo "   2) No"
     until [[ "$AUTOPACKAGEUPDATE" =~ ^[1-2]$ ]]; do
-      read -rp "[1-2]: " -e -i 1 AUTOPACKAGEUPDATE
+      prompt_read -p "[1-2]: " -e -i 1 AUTOPACKAGEUPDATE
     done
     case $AUTOPACKAGEUPDATE in
     1)
@@ -431,7 +475,7 @@ function installQuestions() {
     echo "   1) Yes"
     echo "   2) No"
     until [[ "$IONCUBE" =~ ^[1-2]$ ]]; do
-      read -rp "[1-2]: " -e -i 1 IONCUBE
+      prompt_read -p "[1-2]: " -e -i 1 IONCUBE
     done
     case $IONCUBE in
     1)
@@ -466,7 +510,7 @@ function installQuestions() {
     echo "Some have done so, but the end result was never studied thoroughly."
     echo "The risk taken is probably not worth the performance difference if the case."
     until [[ "$DATABASE_VER" =~ ^[1-3]$ ]]; do
-      read -rp "Version [1-3]: " -e -i 1 DATABASE_VER
+      prompt_read -p "Version [1-3]: " -e -i 1 DATABASE_VER
     done
     case $DATABASE_VER in
     1)
@@ -486,7 +530,7 @@ function installQuestions() {
     echo "   2) ZeroSSL"
     echo "   3) Self-signed (dev/testing or behind reverse proxy)"
     until [[ "$SSL_CHOICE" =~ ^[1-3]$ ]]; do
-      read -rp "Select [1-3]: " -e -i 1 SSL_CHOICE
+      prompt_read -p "Select [1-3]: " -e -i 1 SSL_CHOICE
     done
     case $SSL_CHOICE in
     1)
@@ -505,7 +549,7 @@ function installQuestions() {
       echo "Email for SSL ($SSL_PROVIDER)"
       echo "Required for certificate notifications."
       while true; do
-        read -rp "Email: " EMAIL
+        prompt_read -p "Email: " EMAIL
         if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
           break
         else
@@ -519,7 +563,7 @@ function installQuestions() {
     echo "   1) No - https://domain.com (recommended)"
     echo "   2) Yes - https://www.domain.com"
     until [[ "$WWW_CHOICE" =~ ^[1-2]$ ]]; do
-      read -rp "Select [1-2]: " -e -i 1 WWW_CHOICE
+      prompt_read -p "Select [1-2]: " -e -i 1 WWW_CHOICE
     done
     case $WWW_CHOICE in
     1)
@@ -802,7 +846,7 @@ function check_dns_configuration() {
       echo "  3) Exit to configure DNS first (recommended)"
 
       until [[ "$DNS_ACTION" =~ ^[1-3]$ ]]; do
-        read -rp "Select [1-3]: " DNS_ACTION
+        prompt_read -p "Select [1-3]: " DNS_ACTION
       done
 
       case $DNS_ACTION in
@@ -1597,7 +1641,7 @@ function chooseInstallationType() {
     echo "   1) Docker (recommended)"
     echo "   2) Standalone (legacy - will be deprecated)"
     until [[ "$INSTALL_TYPE" =~ ^[1-2]$ ]]; do
-      read -rp "Select an option [1-2] : " -e -i 1 INSTALL_TYPE
+      prompt_read -p "Select an option [1-2] : " -e -i 1 INSTALL_TYPE
     done
   fi
   case $INSTALL_TYPE in
@@ -2025,7 +2069,16 @@ function dockerInstall() {
   # Check if Docker is installed
   if ! command -v docker &> /dev/null; then
     echo "Docker is not installed. Installing Docker..."
+    # The script of get.docker.com stops on a distribution it does not
+    # support or on a package error, and when get.docker.com is out of
+    # reach sh has nothing to run and succeeds: the docker command, not
+    # the pipeline, says whether Docker is there.
     curl -fsSL https://get.docker.com | sh
+    if ! command -v docker &> /dev/null; then
+      echo "${red}Docker was not installed: see the output of its installation script above.${normal}"
+      echo "Install Docker Engine with its Compose plugin (https://docs.docker.com/engine/install/), then run this script again."
+      return 1
+    fi
     systemctl enable docker
     systemctl start docker
     echo "${green}Docker installed successfully${normal}"
@@ -2167,7 +2220,7 @@ function manageMenu() {
     echo "   4) Update the Script"
     echo "   5) Quit"
     until [[ "$MENU_OPTION" =~ ^[1-5]$ ]]; do
-      read -rp "Select an option [1-5] : " MENU_OPTION
+      prompt_read -p "Select an option [1-5] : " MENU_OPTION
     done
   fi
   case $MENU_OPTION in

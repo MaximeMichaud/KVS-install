@@ -122,9 +122,57 @@ run_test() {
   return 1
 }
 
+# get.docker.com runs as a pipeline whose status is the shell's, and the
+# shell has nothing to run when curl brings nothing back: the installer
+# must look for the docker command afterwards instead of announcing a
+# success and then blaming the missing Compose plugin.
+test_docker_path_stops_when_the_docker_script_installs_nothing() {
+  local temp_dir
+  local bin
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  bin="$temp_dir/bin"
+  make_host "$bin"
+  rm "$bin/docker"
+  ln -s "$(command -v sh)" "$bin/sh"
+  # get.docker.com out of reach: curl fails and the pipeline feeds sh nothing.
+  printf '#!/bin/bash\necho "curl: (6) Could not resolve host: get.docker.com" >&2\nexit 6\n' >"$bin/curl"
+  chmod +x "$bin/curl"
+  export KVS_INSTALL_DIR="$temp_dir/install"
+  export KVS_BACKUP_DIR="$temp_dir/backup"
+  mkdir "$KVS_BACKUP_DIR"
+
+  (PATH="$bin"; dockerInstall) >"$temp_dir/out" 2>&1
+  status=$?
+
+  [[ $status -ne 0 ]] || fail "the Docker path went on although Docker was not installed" || return 1
+  grep -q 'Docker was not installed' "$temp_dir/out" ||
+    fail "the failed Docker installation was not reported: $(tail -n 3 "$temp_dir/out")" || return 1
+  ! grep -q 'Docker installed successfully' "$temp_dir/out" ||
+    fail "a success was announced for an installation that did nothing" || return 1
+  ! grep -q 'Docker Compose plugin not found' "$temp_dir/out" ||
+    fail "the missing Docker was blamed on the Compose plugin" || return 1
+  [[ ! -e "$bin/apt-get.log" ]] || fail "the installer went on to the prerequisites without Docker" || return 1
+
+  # The script installed Docker: the path goes on as before.
+  printf '#!/bin/bash\nexit 0\n' >"$bin/docker.stub"
+  chmod +x "$bin/docker.stub"
+  printf '#!/bin/bash\necho "cp %s/docker.stub %s/docker"\n' "$bin" "$bin" >"$bin/curl"
+
+  (PATH="$bin"; dockerInstall) >"$temp_dir/out" 2>&1
+  status=$?
+
+  [[ $status -eq 0 ]] ||
+    fail "the Docker path failed after its script installed Docker (status $status): $(tail -n 3 "$temp_dir/out")" || return 1
+  grep -q 'Docker installed successfully' "$temp_dir/out" || fail "the installed Docker was not announced" || return 1
+  grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run after the installation" || return 1
+}
+
 failures=0
 run_test "Docker path installs git and unzip before the clone" test_docker_path_installs_git_and_unzip_before_the_clone || failures=$((failures + 1))
 run_test "Docker path leaves apt alone when the tools exist" test_docker_path_leaves_apt_alone_when_the_tools_exist || failures=$((failures + 1))
+run_test "Docker path stops when the Docker script installs nothing" test_docker_path_stops_when_the_docker_script_installs_nothing || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2
