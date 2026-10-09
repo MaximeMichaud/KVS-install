@@ -47,6 +47,12 @@ fix_file() {
     fi
 }
 
+# --- The site root itself: nginx enters it to serve anything ---
+# An import creates it under the umask of the shell that runs the setup
+# (027 on a hardened host gives 750) and rsync keeps that mode; the
+# passes below start under it. Missing bits only, as below.
+find "$KVS_PATH" -maxdepth 0 -type d ! -perm -0755 -exec chmod u+rwx,go+rx {} + 2>/dev/null || true
+
 # --- Directories that must be 777 ---
 fix_dir "$KVS_PATH/tmp" "777" "true"
 fix_dir "$KVS_PATH/admin/smarty/cache" "777"
@@ -100,8 +106,13 @@ fix_dir "$KVS_PATH/admin/data/tmp" "777" "true"
 fix_dir "$KVS_PATH/admin/data/engine" "777" "true"
 
 # Final ownership, as chown -R gives it (-h: a link itself, never what
-# it points to), on the entries owned by anyone else only.
-find "$KVS_PATH" \( ! -uid 1000 -o ! -gid 1000 \) -exec chown -h 1000:1000 {} +
+# it points to), on the entries owned by anyone else only. A mount that
+# refuses the change (NFS with root_squash, CIFS, FUSE) or an entry
+# removed during the walk must not end the init: those entries keep
+# their owner and are reported.
+if ! chown_errors=$(find "$KVS_PATH" \( ! -uid 1000 -o ! -gid 1000 \) -exec chown -h 1000:1000 {} + 2>&1 >/dev/null); then
+    log_warn "Some entries keep their owner, chown refused them ($(printf '%s\n' "$chown_errors" | grep -c .) errors, the first: $(printf '%s\n' "$chown_errors" | head -n 1))"
+fi
 
 # Run the archive's permission script once at the end, on a site this
 # init extracted from the KVS archive (the cleanup step removes _INSTALL

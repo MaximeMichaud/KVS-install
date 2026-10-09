@@ -29,7 +29,7 @@ expected_fingerprint() {
     local hash
 
     hash=$(md5_hex "pass:$(md5_hex "$1")")
-    printf 'admin%s' "$hash" | md5sum | cut -c1-20
+    printf '%s%s' "${2:-admin}" "$hash" | md5sum | cut -c1-20
 }
 
 fingerprint_file() {
@@ -41,7 +41,7 @@ make_case() {
     local case_dir="$TEST_DIR/$name"
 
     mkdir -p "$case_dir/www/admin/data/system"
-    printf '%s\n' 1 > "$case_dir/admin-count"
+    printf '%s\n' admin > "$case_dir/admin-login"
     printf '%s\n' 1 > "$case_dir/admin-default"
     printf '%s\n' 1 > "$case_dir/support-option"
     printf '{"admins":[{"id":"1","hash":"%s"},{"id":"2","hash":"%s"}]}' \
@@ -57,8 +57,8 @@ db_query() {
     local query="$1"
 
     case "$query" in
-        *"user_id=1 AND login='admin' AND pass="*) cat "$TEST_STATE/admin-default" ;;
-        *"user_id=1 AND login='admin'"*) cat "$TEST_STATE/admin-count" ;;
+        *"user_id=1 AND pass="*) cat "$TEST_STATE/admin-default" ;;
+        *"SELECT login FROM"*"user_id=1"*) cat "$TEST_STATE/admin-login" ;;
         *"variable='ENABLE_KVS_SUPPORT_ACCESS'"*) cat "$TEST_STATE/support-option" ;;
         *) return 90 ;;
     esac
@@ -67,7 +67,7 @@ db_query() {
 db_exec() {
     local query="$1"
 
-    if [[ "$query" == *"user_id=1 AND login='admin'"* ]]; then
+    if [[ "$query" == *"SET pass="*"WHERE user_id=1"* ]]; then
         if [ "${TEST_DB_EXEC_FAIL:-none}" = admin ]; then
             return 41
         fi
@@ -143,11 +143,21 @@ grep -Fq 'still uses the archive default credential' "$case_dir/output.log" ||
     fail "default admin credential failure was not explicit"
 
 case_dir=$(make_case missing-admin)
-printf '%s\n' 0 > "$case_dir/admin-count"
+: > "$case_dir/admin-login"
 if TEST_STATE="$case_dir" KVS_ADMIN_PASSWORD="$valid_password" \
     bash "$case_dir/script.sh" > "$case_dir/output.log" 2>&1; then
     fail "missing primary admin account was accepted"
 fi
+
+# An imported site whose owner renamed the primary account: the password is
+# replaced all the same, and the fingerprint is made of the login it has.
+case_dir=$(make_case renamed-admin)
+printf '%s\n' owner > "$case_dir/admin-login"
+TEST_STATE="$case_dir" KVS_ADMIN_PASSWORD="$valid_password" \
+    bash "$case_dir/script.sh" > "$case_dir/output.log" 2>&1 ||
+    fail "a renamed primary admin account was refused: $(cat "$case_dir/output.log")"
+[ -f "$case_dir/admin-updated" ] || fail "the renamed admin's password was not applied"
+assert_fingerprints "$case_dir" "$(expected_fingerprint "$valid_password" owner)"
 
 case_dir=$(make_case sql-failure)
 if TEST_STATE="$case_dir" TEST_DB_EXEC_FAIL=admin KVS_ADMIN_PASSWORD="$valid_password" \

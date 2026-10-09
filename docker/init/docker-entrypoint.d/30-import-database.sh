@@ -171,7 +171,7 @@ EXPECTED_INITIAL_VERSION=${DUMP_MARKER#*$'\t'}
 
 # Import database
 if ! MYSQL_PWD="$MARIADB_PASSWORD" \
-    mariadb -h mariadb -u "$DOMAIN" "$DOMAIN" < "$IMPORT_SQL"; then
+    mariadb --skip-ssl-verify-server-cert -h mariadb -u "$DOMAIN" "$DOMAIN" < "$IMPORT_SQL"; then
     log_error "Database import failed; preserving $KVS_PATH/_INSTALL for troubleshooting"
     exit 1
 fi

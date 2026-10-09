@@ -32,7 +32,9 @@ log_step() {
 # Find KVS archive (used in multiple scripts)
 # Returns path to archive or empty string if not found
 find_kvs_archive() {
-    find "$KVS_ARCHIVE_DIR" -name "KVS_*.zip" -type f 2>/dev/null | head -1
+    # The directory itself, as setup.sh reads it: an older archive kept in
+    # a subdirectory must not be the one this init extracts.
+    find "$KVS_ARCHIVE_DIR" -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1
 }
 
 # Check if KVS is already installed
@@ -40,24 +42,31 @@ kvs_is_installed() {
     [ -f "$KVS_PATH/admin/include/setup.php" ]
 }
 
+# The MariaDB client of this image (11.4 and later) requires TLS with a
+# verified certificate by default. A server without TLS, a MariaDB 10.x
+# volume kept from an earlier install, answered "SSL is required, but the
+# server does not support it", which the wait below reported as wrong
+# credentials. Without the verification the client keeps TLS where the
+# server offers it and connects where it does not; the network is the
+# stack's own.
 # Execute SQL query against MariaDB
 # Usage: db_exec "SELECT 1"
 db_exec() {
     MYSQL_PWD="$MARIADB_PASSWORD" \
-        mariadb -h mariadb -u "$DOMAIN" "$DOMAIN" -e "$1" 2>/dev/null
+        mariadb --skip-ssl-verify-server-cert -h mariadb -u "$DOMAIN" "$DOMAIN" -e "$1" 2>/dev/null
 }
 
 # Execute SQL query and capture output
 # Usage: result=$(db_query "SELECT COUNT(*) FROM table")
 db_query() {
     MYSQL_PWD="$MARIADB_PASSWORD" \
-        mariadb -h mariadb -u "$DOMAIN" -N -e "$1" "$DOMAIN" 2>/dev/null
+        mariadb --skip-ssl-verify-server-cert -h mariadb -u "$DOMAIN" -N -e "$1" "$DOMAIN" 2>/dev/null
 }
 
 # Check if database connection works
 db_is_ready() {
     MYSQL_PWD="$MARIADB_PASSWORD" \
-        mariadb -h mariadb -u "$DOMAIN" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1
+        mariadb --skip-ssl-verify-server-cert -h mariadb -u "$DOMAIN" -e "SELECT 1" "$DOMAIN" > /dev/null 2>&1
 }
 
 # Get project URL based on USE_WWW setting

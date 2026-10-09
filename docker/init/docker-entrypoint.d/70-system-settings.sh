@@ -31,7 +31,7 @@ log_info "Configuring system settings..."
 GEOIP_UPDATE_CLAUSE=", '\$.geoip_database', '$GEOIP_DB'"
 
 if SQL_OUTPUT=$(MYSQL_PWD="$MARIADB_PASSWORD" \
-    mariadb -h mariadb -u "$DOMAIN" "$DOMAIN" 2>&1 <<-EOSQL
+    mariadb --skip-ssl-verify-server-cert -h mariadb -u "$DOMAIN" "$DOMAIN" 2>&1 <<-EOSQL
 	INSERT INTO ${TABLES_PREFIX}settings (section, satellite_prefix, value, added_date, version_control)
 	VALUES (
 		'system',
@@ -62,17 +62,17 @@ if SQL_OUTPUT=$(MYSQL_PWD="$MARIADB_PASSWORD" \
 	ON DUPLICATE KEY UPDATE
 		value = JSON_SET(
 			value,
-			'$.server_type', 'nginx',
-			'$.memory_limit_default', 256,
-			'$.file_upload_max_size', 2048$GEOIP_UPDATE_CLAUSE
+			'$.server_type', 'nginx'$GEOIP_UPDATE_CLAUSE
 		),
 		version_control = version_control + 1;
 	EOSQL
 ); then
+    # The memory and upload limits above are first-run values: on an
+    # existing row they stay as the admin left them, this step once put
+    # them back at every run.
     log_info "System settings optimized:"
     log_info "  - Server type: nginx"
-    log_info "  - Memory limit: 256 MB"
-    log_info "  - Upload limit: 2048 MB"
+    log_info "  - Memory limit: 256 MB and upload limit: 2048 MB on a first run, kept as set afterwards"
     if [ -n "$GEOIP_DB" ]; then
         log_info "  - GeoIP: $GEOIP_DB"
     fi

@@ -1239,6 +1239,160 @@ test_failed_build_step_shows_its_output_not_the_dockerfile_echo() {
 # one): every step took the first one find listed, an order nothing fixes,
 # so one step could read one version and the extraction install the other.
 # The setup now stops and names them.
+# The init took the first KVS archive find listed anywhere under
+# kvs-archive/, while setup.sh reads the directory itself: an older archive
+# kept in a subdirectory could be the one extracted. Both read the top level.
+test_init_archive_lookup_reads_the_top_level_only() {
+    local case_dir="$TMP_ROOT/init-archive-lookup"
+    local functions_file="$case_dir/find.sh"
+    local output
+
+    mkdir -p "$case_dir/kvs-archive/old"
+    awk '
+        $0 == "find_kvs_archive() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/init/lib/common.sh" > "$functions_file"
+    grep -q '^find_kvs_archive() {' "$functions_file" || fail "find_kvs_archive not found in common.sh"
+    : > "$case_dir/kvs-archive/old/KVS_7.0.1_[mysite.test].zip"
+
+    output=$(
+        # shellcheck source=/dev/null
+        source "$functions_file"
+        # shellcheck disable=SC2034  # Read by the extracted production function.
+        KVS_ARCHIVE_DIR="$case_dir/kvs-archive"
+        find_kvs_archive
+    )
+    [ -z "$output" ] || fail "an archive in a subdirectory must not be picked: $output"
+
+    : > "$case_dir/kvs-archive/KVS_7.0.2_[mysite.test].zip"
+    output=$(
+        # shellcheck source=/dev/null
+        source "$functions_file"
+        # shellcheck disable=SC2034  # Read by the extracted production function.
+        KVS_ARCHIVE_DIR="$case_dir/kvs-archive"
+        find_kvs_archive
+    )
+    [ "$output" = "$case_dir/kvs-archive/KVS_7.0.2_[mysite.test].zip" ] ||
+        fail "the archive of the directory itself must be picked: $output"
+    pass "the init archive lookup reads the top level only"
+}
+
+# The site root an import created under a hardened umask (750) kept nginx
+# out of every static file, and a chown the mount refused (NFS with
+# root_squash) ended the init: the root gets its missing bits, and refused
+# entries keep their owner with a warning.
+test_permission_pass_opens_the_root_and_survives_a_refused_chown() {
+    local case_dir="$TMP_ROOT/permissions-root-chown"
+    local site_dir="$case_dir/site"
+    local common_mock="$case_dir/common.sh"
+    local script_copy="$case_dir/60-permissions.sh"
+    local stub_bin="$case_dir/bin"
+
+    mkdir -p "$site_dir/tmp" "$site_dir/admin/data/tmp" "$site_dir/admin/data/engine" \
+        "$site_dir/contents/videos" "$stub_bin"
+    printf 'shot\n' > "$site_dir/contents/videos/1.jpg"
+    chmod 750 "$site_dir"
+    make_init_common_mock "$common_mock"
+    # Every entry belongs to the account running the test, so an ownership
+    # of 0:0 selects them all; the chown stub refuses the way a mount does.
+    sed -e "s|source /init/lib/common.sh|source ${common_mock}|" \
+        -e "s/1000:1000/0:0/g" -e "s/-uid 1000/-uid 0/" -e "s/-gid 1000/-gid 0/" \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/60-permissions.sh" > "$script_copy"
+    # shellcheck disable=SC2016  # The stub expands its own arguments.
+    printf '#!/bin/bash\necho "chown: changing ownership of ${*: -1}: Operation not permitted" >&2\nexit 1\n' > "$stub_bin/chown"
+    chmod +x "$stub_bin/chown"
+
+    PATH="$stub_bin:$PATH" TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/pass.log" 2>&1 ||
+        fail "a refused chown must not end the permission pass: $(cat "$case_dir/pass.log")"
+    [ "$(stat -c %a "$site_dir")" = 755 ] ||
+        fail "the site root must become enterable by nginx, got $(stat -c %a "$site_dir")"
+    assert_file_contains "$case_dir/pass.log" "keep their owner, chown refused them"
+    assert_file_contains "$case_dir/pass.log" "Operation not permitted"
+    pass "the permission pass opens the root and survives a refused chown"
+}
+
+# The MariaDB client of the trixie images (11.8) requires TLS with a verified
+# certificate by default and refused a server without TLS, a 10.x volume
+# kept from an earlier install, with "SSL is required": every client call
+# of the containers leaves the verification out.
+test_container_mariadb_clients_accept_a_server_without_tls() {
+    local file line count=0
+
+    for file in docker/init/lib/common.sh docker/init/docker-entrypoint.d/30-import-database.sh \
+        docker/init/docker-entrypoint.d/70-system-settings.sh docker/manticore/docker-entrypoint.sh; do
+        while IFS= read -r line; do
+            count=$((count + 1))
+            [[ "$line" == *"--skip-ssl-verify-server-cert"* ]] ||
+                fail "$file runs the MariaDB client without --skip-ssl-verify-server-cert: $line"
+        done < <(grep -E '(^|[[:space:]])mariadb .*-h mariadb' "$REPO_ROOT/$file")
+    done
+    [ "$count" -ge 6 ] || fail "expected at least 6 MariaDB client calls in the containers, found $count"
+    pass "the containers' MariaDB clients accept a server without TLS"
+}
+
+# The system settings step wrote memory_limit_default and
+# file_upload_max_size at every init run, so the limits an admin raised went
+# back to 256 and 2048 at each setup re-run: they are set on the first run
+# only, with the row.
+test_system_settings_keep_the_limits_an_admin_raised() {
+    local script="$REPO_ROOT/docker/init/docker-entrypoint.d/70-system-settings.sh"
+    local update_clause
+
+    update_clause=$(awk '/ON DUPLICATE KEY UPDATE/ { capture = 1 } capture { print } /EOSQL/ { capture = 0 }' "$script")
+    [ -n "$update_clause" ] || fail "the ON DUPLICATE KEY UPDATE clause of 70-system-settings.sh was not found"
+    grep -q "server_type" <<< "$update_clause" || fail "the server type must still be set on an existing row"
+    ! grep -q "memory_limit_default" <<< "$update_clause" || fail "memory_limit_default is reset on every run"
+    ! grep -q "file_upload_max_size" <<< "$update_clause" || fail "file_upload_max_size is reset on every run"
+    pass "the system settings step keeps the limits an admin raised"
+}
+
+# The Manticore search scripts were downloaded from the vendor at every init
+# run, and a download that failed ended the init even with the scripts
+# installed: a setup re-run during a vendor outage left the stack down. The
+# installed scripts stay; a first install still needs the download.
+test_manticore_scripts_survive_a_failed_download_once_installed() {
+    local case_dir="$TMP_ROOT/manticore-download"
+    local site_dir="$case_dir/site"
+    local mock_bin="$case_dir/bin"
+    local common_mock="$case_dir/common.sh"
+    local script_copy="$case_dir/80-manticore.sh"
+    local kind
+
+    mkdir -p "$site_dir" "$mock_bin" "$case_dir/tmp" "$case_dir/api"
+    make_init_common_mock "$common_mock"
+    sed \
+        -e "s|/tmp/|${case_dir}/tmp/|g" \
+        -e "s|source /init/lib/common.sh|source ${common_mock}|" \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/80-manticore.sh" > "$script_copy"
+    printf '#!/bin/bash\necho "curl: (6) Could not resolve host" >&2\nexit 6\n' > "$mock_bin/curl"
+    chmod +x "$mock_bin/curl"
+
+    if PATH="$mock_bin:/usr/bin:/bin" TEST_KVS_PATH="$site_dir" MANTICORE_API_DIR="$case_dir/api" \
+        DOMAIN=mysite.test PROJECT_HTTPS_PORT=443 ENABLE_MANTICORE=true \
+        bash "$script_copy" > "$case_dir/first.log" 2>&1; then
+        fail "a first install must not go on without the search scripts"
+    fi
+    assert_file_contains "$case_dir/first.log" "are not installed yet"
+
+    for kind in videos albums searches; do
+        printf '<?php // installed %s\n' "$kind" > "$case_dir/api/kvs_manticore_search_${kind}.php"
+    done
+    PATH="$mock_bin:/usr/bin:/bin" TEST_KVS_PATH="$site_dir" MANTICORE_API_DIR="$case_dir/api" \
+        DOMAIN=mysite.test PROJECT_HTTPS_PORT=443 ENABLE_MANTICORE=true \
+        bash "$script_copy" > "$case_dir/rerun.log" 2>&1 ||
+        fail "a failed download must not end the init once the scripts are installed: $(cat "$case_dir/rerun.log")"
+    assert_file_contains "$case_dir/rerun.log" "the installed ones stay"
+    assert_file_contains "$case_dir/rerun.log" "External Search plugin configured"
+    for kind in videos albums searches; do
+        grep -Fq "installed $kind" "$case_dir/api/kvs_manticore_search_${kind}.php" ||
+            fail "the installed $kind script was replaced or removed"
+    done
+    [ -s "$site_dir/admin/data/plugins/external_search/data.dat" ] ||
+        fail "the plugin configuration was not written on the re-run"
+    pass "installed Manticore scripts survive a failed download"
+}
+
 test_two_kvs_archives_stop_the_setup() {
     local case_dir="$TMP_ROOT/setup-two-archives"
     local work_dir="$case_dir/work"
@@ -1941,6 +2095,11 @@ test_failed_build_step_shows_its_output_not_the_dockerfile_echo
 test_port_check_covers_the_loopback_services
 test_a_question_with_no_answer_left_stops_the_setup
 test_two_kvs_archives_stop_the_setup
+test_init_archive_lookup_reads_the_top_level_only
+test_permission_pass_opens_the_root_and_survives_a_refused_chown
+test_container_mariadb_clients_accept_a_server_without_tls
+test_system_settings_keep_the_limits_an_admin_raised
+test_manticore_scripts_survive_a_failed_download_once_installed
 test_cache_settings_follow_small_hosts
 test_reconfigure_fails_when_container_inspection_fails
 test_reconfigure_issues_the_exact_requested_sans_and_installs

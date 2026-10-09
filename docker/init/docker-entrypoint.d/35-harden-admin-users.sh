@@ -59,9 +59,12 @@ register_admin_fingerprint() {
     ' -- "$ADMIN_FINGERPRINT_FILE" "$fingerprint"
 }
 
-ADMIN_COUNT=$(db_query "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_users WHERE user_id=1 AND login='admin'" || echo 0)
-if [ "$ADMIN_COUNT" -ne 1 ]; then
-    log_error "Expected exactly one primary KVS admin account"
+# The primary account is user_id 1 whatever its login: an imported site
+# whose owner renamed it (a usual hardening) once failed here, and its
+# fingerprint is made of the login it has.
+ADMIN_LOGIN=$(db_query "SELECT login FROM ${TABLES_PREFIX}admin_users WHERE user_id=1" || true)
+if [ -z "$ADMIN_LOGIN" ]; then
+    log_error "Expected the primary KVS admin account (user_id 1)"
     exit 1
 fi
 
@@ -81,20 +84,20 @@ if [ -n "${KVS_ADMIN_PASSWORD:-}" ]; then
     )
     unset KVS_ADMIN_PASSWORD
     ADMIN_FINGERPRINT=$(
-        printf '%s' "admin${ADMIN_HASH}" |
+        printf '%s' "${ADMIN_LOGIN}${ADMIN_HASH}" |
             php -r 'echo substr(md5(stream_get_contents(STDIN)), 0, 20);'
     )
     # Register the fingerprint first: if it fails, the database still holds
     # the default credential and the next run repeats the whole replacement.
     register_admin_fingerprint "$ADMIN_FINGERPRINT"
     unset ADMIN_FINGERPRINT
-    db_exec "UPDATE ${TABLES_PREFIX}admin_users SET pass='${ADMIN_HASH}', last_session_id='' WHERE user_id=1 AND login='admin';" \
+    db_exec "UPDATE ${TABLES_PREFIX}admin_users SET pass='${ADMIN_HASH}', last_session_id='' WHERE user_id=1;" \
         >/dev/null
     unset ADMIN_HASH
     log_info "Primary KVS admin credential replaced and registered for the admin login"
 fi
 
-DEFAULT_ADMIN_COUNT=$(db_query "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_users WHERE user_id=1 AND login='admin' AND pass='${DEFAULT_ADMIN_HASH}'" || echo 1)
+DEFAULT_ADMIN_COUNT=$(db_query "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_users WHERE user_id=1 AND pass='${DEFAULT_ADMIN_HASH}'" || echo 1)
 unset DEFAULT_ADMIN_HASH
 
 if [ "$DEFAULT_ADMIN_COUNT" -ne 0 ]; then

@@ -82,13 +82,16 @@ SSL_SKIP_VALUE=0
 if [ "$SSL_PROVIDER" = "selfsigned" ] && [ "${MODE:-single}" = multi ]; then
     SSL_SKIP_VALUE=1
 fi
+# The servers this stack serves only: a storage server on another host
+# keeps the verification its own certificate needs, as its owner set it.
+LOCAL_SERVER_CONDITION="urls REGEXP '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/'"
 if ! db_exec \
-    "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = ${SSL_SKIP_VALUE};"; then
+    "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = ${SSL_SKIP_VALUE} WHERE ${LOCAL_SERVER_CONDITION};"; then
     log_error "Could not synchronize server TLS verification"
     exit 1
 fi
 if ! SSL_MISMATCH_COUNT=$(db_query \
-    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${SSL_SKIP_VALUE};") ||
+    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE ${LOCAL_SERVER_CONDITION} AND COALESCE(streaming_skip_ssl_check,-1)<>${SSL_SKIP_VALUE};") ||
     [[ ! "$SSL_MISMATCH_COUNT" =~ ^[0-9]+$ ]] ||
     [ "$SSL_MISMATCH_COUNT" -ne 0 ]; then
     log_error "Server TLS verification does not match the selected certificate mode"

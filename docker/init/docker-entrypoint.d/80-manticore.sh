@@ -55,64 +55,79 @@ log_info "Downloading Manticore search scripts..."
 work=$(mktemp -d /tmp/kvs-manticore.XXXXXX)
 plugin_temp=""
 trap 'rm -rf -- "$work"; [ -z "$plugin_temp" ] || rm -f -- "$plugin_temp"' EXIT
-curl --connect-timeout 15 --max-time 300 -fsSL "$MANTICORE_PLUGIN_URL" -o "$work/manticore.zip"
-
-PLUGIN_SHA256=$(sha256sum "$work/manticore.zip" | cut -d' ' -f1)
-if [ -n "${MANTICORE_PLUGIN_SHA256:-}" ]; then
-    if [ "$PLUGIN_SHA256" != "$MANTICORE_PLUGIN_SHA256" ]; then
-        log_error "Manticore plugin checksum mismatch"
-        log_error "  expected: $MANTICORE_PLUGIN_SHA256"
-        log_error "  received: $PLUGIN_SHA256"
-        log_error "  from:     $MANTICORE_PLUGIN_URL"
-        exit 1
-    fi
-    log_info "Manticore plugin checksum verified ($PLUGIN_SHA256)"
-else
-    log_info "Manticore plugin sha256: $PLUGIN_SHA256"
-    log_info "Set MANTICORE_PLUGIN_SHA256 to refuse anything else."
+# The vendor out of reach during a setup re-run (an outage, a host that
+# filters its egress) must not end the init when the scripts are already
+# installed: they stay, and the plugin below is configured all the same.
+SEARCH_SCRIPTS_SKIPPED=no
+if ! curl --connect-timeout 15 --max-time 300 -fsSL "$MANTICORE_PLUGIN_URL" -o "$work/manticore.zip"; then
+    for kind in videos albums searches; do
+        [ -s "$SCRIPT_DIR/kvs_manticore_search_${kind}.php" ] || {
+            log_error "Manticore search scripts could not be downloaded from $MANTICORE_PLUGIN_URL and are not installed yet"
+            exit 1
+        }
+    done
+    log_warn "Manticore search scripts could not be downloaded from $MANTICORE_PLUGIN_URL; the installed ones stay"
+    SEARCH_SCRIPTS_SKIPPED=yes
 fi
 
-unzip -q -o "$work/manticore.zip" -d "$work/"
-# A failed or incomplete download must leave the existing search configured.
-for kind in videos albums searches; do
-    [ -s "$work/kvs_manticore_search_${kind}.php" ] || {
-        log_error "Missing Manticore $kind script in the downloaded archive"
-        exit 1
-    }
-done
-
-# Update host and index names in PHP files
-for file in "$work"/kvs_manticore_search_*.php; do
-    [ -f "$file" ] || continue
-
-    sed -i "s/\$manticore_host = '127.0.0.1'/\$manticore_host = 'searchd'/" "$file"
-
-    if [[ "$file" == *"videos"* ]]; then
-        sed -i "s/\$manticore_index = 'projectname_videos'/\$manticore_index = '${DOMAIN_SAFE}_videos'/" "$file"
-    elif [[ "$file" == *"albums"* ]]; then
-        sed -i "s/\$manticore_index = 'projectname_albums'/\$manticore_index = '${DOMAIN_SAFE}_albums'/" "$file"
-    elif [[ "$file" == *"searches"* ]]; then
-        sed -i "s/\$manticore_index = 'projectname_searches'/\$manticore_index = '${DOMAIN_SAFE}_searches'/" "$file"
+if [ "$SEARCH_SCRIPTS_SKIPPED" = no ]; then
+    PLUGIN_SHA256=$(sha256sum "$work/manticore.zip" | cut -d' ' -f1)
+    if [ -n "${MANTICORE_PLUGIN_SHA256:-}" ]; then
+        if [ "$PLUGIN_SHA256" != "$MANTICORE_PLUGIN_SHA256" ]; then
+            log_error "Manticore plugin checksum mismatch"
+            log_error "  expected: $MANTICORE_PLUGIN_SHA256"
+            log_error "  received: $PLUGIN_SHA256"
+            log_error "  from:     $MANTICORE_PLUGIN_URL"
+            exit 1
+        fi
+        log_info "Manticore plugin checksum verified ($PLUGIN_SHA256)"
+    else
+        log_info "Manticore plugin sha256: $PLUGIN_SHA256"
+        log_info "Set MANTICORE_PLUGIN_SHA256 to refuse anything else."
     fi
 
-    # Manticore identifiers that start with a digit must be quoted. Domains
-    # may legally start with a digit, so quote the generated index variable in
-    # every downloaded query rather than changing existing index names.
-    # shellcheck disable=SC2016
-    sed -E -i 's/(from[[:space:]]+)\$manticore_index/\1`$manticore_index`/Ig' "$file"
+    unzip -q -o "$work/manticore.zip" -d "$work/"
+    # A failed or incomplete download must leave the existing search configured.
+    for kind in videos albums searches; do
+        [ -s "$work/kvs_manticore_search_${kind}.php" ] || {
+            log_error "Missing Manticore $kind script in the downloaded archive"
+            exit 1
+        }
+    done
 
-    # Fix error handling to return XML instead of fatal error
-    sed -i "s/header('Content-type: text\/plain/header('Content-type: text\/xml/" "$file"
-    sed -i "s/http_response_code(503);/\/\/ Return empty XML on error/" "$file"
-    sed -E -i "s|^[[:space:]]*die\\(.*FATAL.*$|    die('<search_feed total_count=\"0\" from=\"0\" query=\"\"></search_feed>');|" "$file"
+    # Update host and index names in PHP files
+    for file in "$work"/kvs_manticore_search_*.php; do
+        [ -f "$file" ] || continue
 
-    php -l "$file" >/dev/null
-done
-mkdir -p "$SCRIPT_DIR"
-cp "$work"/kvs_manticore_search_*.php "$SCRIPT_DIR/"
-remove_legacy_scripts
+        sed -i "s/\$manticore_host = '127.0.0.1'/\$manticore_host = 'searchd'/" "$file"
 
-log_info "Manticore PHP scripts installed in $SCRIPT_DIR"
+        if [[ "$file" == *"videos"* ]]; then
+            sed -i "s/\$manticore_index = 'projectname_videos'/\$manticore_index = '${DOMAIN_SAFE}_videos'/" "$file"
+        elif [[ "$file" == *"albums"* ]]; then
+            sed -i "s/\$manticore_index = 'projectname_albums'/\$manticore_index = '${DOMAIN_SAFE}_albums'/" "$file"
+        elif [[ "$file" == *"searches"* ]]; then
+            sed -i "s/\$manticore_index = 'projectname_searches'/\$manticore_index = '${DOMAIN_SAFE}_searches'/" "$file"
+        fi
+
+        # Manticore identifiers that start with a digit must be quoted. Domains
+        # may legally start with a digit, so quote the generated index variable in
+        # every downloaded query rather than changing existing index names.
+        # shellcheck disable=SC2016
+        sed -E -i 's/(from[[:space:]]+)\$manticore_index/\1`$manticore_index`/Ig' "$file"
+
+        # Fix error handling to return XML instead of fatal error
+        sed -i "s/header('Content-type: text\/plain/header('Content-type: text\/xml/" "$file"
+        sed -i "s/http_response_code(503);/\/\/ Return empty XML on error/" "$file"
+        sed -E -i "s|^[[:space:]]*die\\(.*FATAL.*$|    die('<search_feed total_count=\"0\" from=\"0\" query=\"\"></search_feed>');|" "$file"
+
+        php -l "$file" >/dev/null
+    done
+    mkdir -p "$SCRIPT_DIR"
+    cp "$work"/kvs_manticore_search_*.php "$SCRIPT_DIR/"
+    remove_legacy_scripts
+
+    log_info "Manticore PHP scripts installed in $SCRIPT_DIR"
+fi
 
 # Configure External Search plugin automatically
 log_info "Configuring External Search plugin..."

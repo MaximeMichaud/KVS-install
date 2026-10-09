@@ -119,14 +119,19 @@ db_exec() {
         fi
         return 0
     fi
-    if [[ "$query" == *'streaming_skip_ssl_check = 1'* ]]; then
+    if [[ "$query" == *'streaming_skip_ssl_check = '* ]]; then
         [ "${TEST_TLS_UPDATE_FAIL:-false}" != true ] || return 43
-        printf '1\n' > "$CONFIG_STATE/ssl-skip"
-        return 0
-    fi
-    if [[ "$query" == *'streaming_skip_ssl_check = 0'* ]]; then
-        [ "${TEST_TLS_UPDATE_FAIL:-false}" != true ] || return 43
-        printf '0\n' > "$CONFIG_STATE/ssl-skip"
+        # The one server of this mock: the update names the servers this
+        # stack serves, an external one keeps its flag.
+        if [[ "$query" == *'WHERE urls REGEXP'* ]]; then
+            pattern=$(query_pattern "$query")
+            [[ "$(<"$CONFIG_STATE/url")" =~ $pattern ]] || return 0
+        fi
+        if [[ "$query" == *'streaming_skip_ssl_check = 1'* ]]; then
+            printf '1\n' > "$CONFIG_STATE/ssl-skip"
+        else
+            printf '0\n' > "$CONFIG_STATE/ssl-skip"
+        fi
         return 0
     fi
     return 0
@@ -175,6 +180,13 @@ db_query() {
         return 0
     fi
     if [[ "$query" == *'COALESCE(streaming_skip_ssl_check'* ]]; then
+        if [[ "$query" == *'urls REGEXP'* ]]; then
+            pattern=$(query_pattern "$query")
+            if [[ ! "$current_url" =~ $pattern ]]; then
+                printf '0\n'
+                return 0
+            fi
+        fi
         expected=${query##*<>}
         expected=${expected%%;*}
         if [ "$current_skip" = "$expected" ]; then
@@ -848,6 +860,36 @@ test_existing_database_url_and_tls_state_are_synchronized() {
     pass "existing server URLs and TLS verification synchronize bidirectionally and idempotently"
 }
 
+# A storage server on another host (a CDN, a separate storage box) keeps
+# the TLS verification its owner set: the update once covered every
+# server, so a re-run turned verification back on for a self-signed
+# remote server, and multi-site turned it off for every remote one.
+test_external_storage_servers_keep_their_tls_verification() {
+    local case_dir="$TMP_ROOT/database-configuration-external"
+    local site_dir="$case_dir/site"
+    local state="$case_dir/state"
+    local common_mock="$case_dir/common.sh"
+    local script_copy="$case_dir/40-configure-database.sh"
+
+    mkdir -p "$site_dir/admin/data" "$state"
+    printf '%s\n' 'https://cdn.example.net/contents/videos' > "$state/url"
+    printf '1\n' > "$state/ssl-skip"
+    make_configure_database_common_mock "$common_mock"
+    make_script_copy \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/40-configure-database.sh" \
+        "$common_mock" "$script_copy"
+
+    TEST_KVS_PATH="$site_dir" TEST_CONFIG_STATE="$state" \
+        DOMAIN=7.0.2.example.org USE_WWW=false PROJECT_HTTPS_PORT=443 \
+        SSL_PROVIDER=letsencrypt \
+        bash "$script_copy" > "$case_dir/external.log" 2>&1 ||
+        fail "an external storage server must not fail the configuration: $(cat "$case_dir/external.log")"
+    [ "$(<"$state/ssl-skip")" = 1 ] ||
+        fail "the external server's TLS verification setting was overwritten"
+    assert_file_contains "$case_dir/external.log" 'Storage servers use external hosts'
+    pass "external storage servers keep their TLS verification setting"
+}
+
 test_storage_urls_on_the_source_domain_follow_the_installation() {
     local case_dir="$TMP_ROOT/source-domain"
     local site_dir="$case_dir/site"
@@ -1003,6 +1045,7 @@ test_dump_without_final_marker_is_rejected
 test_marker_mismatch_after_import_is_fatal
 test_database_inspection_failure_is_not_treated_as_empty
 test_existing_database_url_and_tls_state_are_synchronized
+test_external_storage_servers_keep_their_tls_verification
 test_storage_urls_on_the_source_domain_follow_the_installation
 test_database_configuration_errors_are_propagated
 
