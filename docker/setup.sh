@@ -332,7 +332,23 @@ report_step_failure() {
 
     [ -s "$logfile" ] || return 0
     echo "    Error (last lines, full output in ${DEBUG_LOG:-the debug log}):"
-    tail -n 20 "$logfile" | sed 's/^/    /'
+    if grep -q '^------$' "$logfile"; then
+        # A failed BuildKit step ends with the Dockerfile lines of the
+        # instruction and its whole command once more, which push the cause
+        # out of a tail. Between the ------ lines before them, BuildKit names
+        # the step and repeats the last lines of its output: show that, then
+        # the exit code without the command.
+        awk '
+            /^------$/ { block++; next }
+            block % 2 == 0 { next }
+            $1 == ">" && length($0) > 120 { $0 = substr($0, 1, 117) "..." }
+            { print }
+        ' "$logfile" | tail -n 20 | sed 's/^/    /'
+        grep -E '^(ERROR: )?failed to solve' "$logfile" | tail -n 1 |
+            sed 's/process ".*" did not complete successfully: //; s/^/    /'
+    else
+        tail -n 20 "$logfile" | sed 's/^/    /'
+    fi
     if grep -q 'No space left on device' "$logfile"; then
         echo "    The filesystem is full: free space on the Docker image store (docker system df,"
         echo "    docker builder prune) or move it to a larger disk (README, Disk layout)."

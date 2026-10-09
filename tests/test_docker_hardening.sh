@@ -1121,6 +1121,63 @@ test_failed_step_shows_its_last_lines_and_a_full_disk() {
     pass "failed step reports its last lines and a full disk"
 }
 
+test_failed_build_step_shows_its_output_not_the_dockerfile_echo() {
+    local functions_file="$TMP_ROOT/report-step-failure.sh"
+    local logfile="$TMP_ROOT/failed-build.log"
+    local output
+    local command='/bin/bash -o pipefail -c set -eux;     curl -fsSL -o /tmp/ioncube.tar.gz https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64_15.5.1.tar.gz;     tar -xzf /tmp/ioncube.tar.gz -C /tmp;     php -m | grep -q ionCube'
+
+    awk '
+        $0 == "report_step_failure() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    # What docker compose build writes when a RUN step fails, as BuildKit
+    # prints it without a terminal: the step's output, the block that repeats
+    # its last lines, the Dockerfile lines of the instruction, then the whole
+    # command once more. The Dockerfile echo alone is longer than a tail.
+    {
+        echo "#1 [internal] load build definition from Dockerfile"
+        echo "#1 DONE 0.0s"
+        echo "#12 [cron 5/9] RUN $command"
+        echo "#12 2.345 + php -m"
+        echo "#12 2.345 + grep -q 'ionCube Loader'"
+        echo "#12 ERROR: process \"$command\" did not complete successfully: exit code: 255"
+        echo "------"
+        echo " > [cron 5/9] RUN $command:"
+        echo "2.345 + php -m"
+        echo "2.345 + grep -q 'ionCube Loader'"
+        echo "------"
+        echo "Dockerfile:134"
+        echo "--------------------"
+        seq 134 158 | sed 's/^/ /; s/$/ | >>>     a line of the instruction; \\/'
+        echo "--------------------"
+        echo "failed to solve: process \"$command\" did not complete successfully: exit code: 255"
+    } > "$logfile"
+
+    output=$(
+        # shellcheck source=/dev/null
+        source "$functions_file"
+        # shellcheck disable=SC2034  # Read by the extracted production function.
+        DEBUG_LOG="$TMP_ROOT/setup-debug.log"
+        report_step_failure "$logfile"
+    )
+    grep -Fq "+ grep -q 'ionCube Loader'" <<< "$output" ||
+        fail "the last lines of the failed step must be shown: $output"
+    grep -Fq " > [cron 5/9] RUN " <<< "$output" || fail "the failed step must be named: $output"
+    grep -Fq ">>>" <<< "$output" && fail "the Dockerfile echo must not crowd out the cause: $output"
+    grep -Fq "load build definition" <<< "$output" && fail "the BuildKit preamble must not be shown: $output"
+    grep -Fxq "    failed to solve: exit code: 255" <<< "$output" ||
+        fail "the exit code must be shown without the command: $output"
+    grep -Fq "did not complete successfully" <<< "$output" && fail "the command must not be repeated: $output"
+    while IFS= read -r line; do
+        [ "${#line}" -le 124 ] || fail "a line of the report is longer than a terminal: $line"
+    done <<< "$output"
+    grep -Fq "$TMP_ROOT/setup-debug.log" <<< "$output" || fail "the debug log must be named"
+
+    pass "a failed build step shows its own last lines, its name and its exit code"
+}
+
 test_cache_settings_follow_small_hosts() {
     local functions_file="$TMP_ROOT/cache-settings.sh"
 
@@ -1709,6 +1766,7 @@ test_optional_gum_install_failure_is_nonfatal
 test_preflight_disk_check_measures_the_tightest_filesystem
 test_preflight_names_the_packages_of_missing_commands
 test_failed_step_shows_its_last_lines_and_a_full_disk
+test_failed_build_step_shows_its_output_not_the_dockerfile_echo
 test_cache_settings_follow_small_hosts
 test_reconfigure_fails_when_container_inspection_fails
 test_reconfigure_issues_the_exact_requested_sans_and_installs
