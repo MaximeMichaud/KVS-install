@@ -2635,6 +2635,21 @@ preflight_checks() {
         echo -e "${YELLOW}⚠${NC} RAM: ${total_ram_mb} MB total (recommended 2 GB minimum)"
     fi
 
+    # Swap (informational only, like the RAM). Without any, a memory peak
+    # does not slow the host down: the kernel kills the largest process,
+    # MariaDB first, with no clean stop. An import loading a large dump is
+    # such a peak, so a small host without swap is told before it starts.
+    local swap_mb
+    swap_mb=$(free -m | awk 'NR==3 {print $2}')
+    [[ "$swap_mb" =~ ^[0-9]+$ ]] || swap_mb=0
+    if (( swap_mb > 0 )); then
+        echo -e "${GREEN}✓${NC} Swap: ${swap_mb} MB"
+    elif (( total_ram_mb < 8192 )); then
+        echo -e "${YELLOW}⚠${NC} Swap: none; a memory peak kills the largest process (MariaDB first) instead of slowing the host down. Add a swap file on the system disk before importing a large site."
+    else
+        echo "  Swap: none"
+    fi
+
     # 5. Kernel writeback fixes (informational only, like the RAM: no
     # question, so a headless run goes on). They matter after the last pass
     # of an import, so only an import gets the warning: here when the

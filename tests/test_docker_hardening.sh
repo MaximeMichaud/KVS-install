@@ -1082,6 +1082,60 @@ test_preflight_names_the_packages_of_missing_commands() {
     pass "preflight names the package of each missing command"
 }
 
+# A host without swap cannot slow down under a memory peak: the kernel
+# kills the largest process, MariaDB during an import. The preflight says so
+# on a small host, and only names the swap on a large one.
+test_preflight_tells_a_small_host_without_swap() {
+    local functions_file="$TMP_ROOT/preflight-swap.sh"
+    local output
+    local host
+
+    awk '
+        $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { capture = 0 }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    grep -q '^preflight_checks() {' "$functions_file" || fail "preflight_checks not found in setup.sh"
+
+    # Each host: RAM MB, swap MB, the expected line.
+    for host in "2048:0:⚠ Swap: none; a memory peak kills the largest process (MariaDB first) instead of slowing the host down. Add a swap file on the system disk before importing a large site." \
+        "16384:0:  Swap: none" \
+        "2048:2048:✓ Swap: 2048 MB"; do
+        output=$(
+            # shellcheck source=/dev/null
+            source "$functions_file"
+            # shellcheck disable=SC2034  # Read by the extracted production function.
+            RED='' GREEN='' YELLOW='' CYAN='' NC=''
+            # shellcheck disable=SC2034  # Read by the extracted production function.
+            DEV_MODE='' PREFLIGHT_BYPASS='' IMPORT_MODE=false
+            ram=${host%%:*}
+            swap=${host#*:}
+            swap=${swap%%:*}
+            # shellcheck disable=SC2329  # Stubs consumed by the extracted function.
+            free() {
+                printf '      total used free shared buff/cache available\n'
+                printf 'Mem: %s 1 1 1 1 %s\n' "$ram" "$ram"
+                printf 'Swap: %s 0 %s\n' "$swap" "$swap"
+            }
+            # shellcheck disable=SC2329
+            docker() {
+                case "$1" in
+                    --version) echo 'Docker version 29.0.0, build test' ;;
+                    compose) echo 'Docker Compose version v2.35.0' ;;
+                esac
+            }
+            # shellcheck disable=SC2329
+            preflight_free_disk_gb() { echo '40 /'; }
+            # shellcheck disable=SC2329
+            check_internet() { return 0; }
+            preflight_checks < /dev/null
+        ) || true
+        grep -Fxq "${host#*:*:}" <<< "$output" ||
+            fail "a host with ${host%%:*} MB of RAM and ${host#*:} of swap must get its swap line: $output"
+    done
+    pass "preflight tells a small host without swap"
+}
+
 test_failed_step_shows_its_last_lines_and_a_full_disk() {
     local functions_file="$TMP_ROOT/report-step-failure.sh"
     local logfile="$TMP_ROOT/failed-step.log"
@@ -1881,6 +1935,7 @@ test_final_compose_failure_is_fatal
 test_optional_gum_install_failure_is_nonfatal
 test_preflight_disk_check_measures_the_tightest_filesystem
 test_preflight_names_the_packages_of_missing_commands
+test_preflight_tells_a_small_host_without_swap
 test_failed_step_shows_its_last_lines_and_a_full_disk
 test_failed_build_step_shows_its_output_not_the_dockerfile_echo
 test_port_check_covers_the_loopback_services
