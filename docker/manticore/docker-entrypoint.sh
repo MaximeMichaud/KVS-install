@@ -25,7 +25,11 @@ echo "Table prefix: $TABLES_PREFIX"
 echo "Generating configuration..."
 # Keep the allowlist literal for envsubst.
 # shellcheck disable=SC2016
-envsubst '${DOMAIN_SAFE} ${DOMAIN} ${MARIADB_PASSWORD} ${TABLES_PREFIX}' \
+# A '#' starts a comment in manticore.conf, so a password holding one was
+# cut there and the indexer was refused; the parser reads '\#' as the
+# character itself.
+MARIADB_PASSWORD="${MARIADB_PASSWORD//\#/\\#}" \
+    envsubst '${DOMAIN_SAFE} ${DOMAIN} ${MARIADB_PASSWORD} ${TABLES_PREFIX}' \
     < /etc/manticoresearch/manticore.conf.template \
     > /etc/manticoresearch/manticore.conf
 chown -R manticore:manticore /var/lib/manticore /var/log/manticore
@@ -37,7 +41,7 @@ echo "Waiting for MariaDB..."
 MAX_TRIES=30
 TRIES=0
 until MYSQL_PWD="$MARIADB_PASSWORD" \
-    mariadb -h mariadb -u "$DOMAIN" -e "SELECT 1" "$DOMAIN" >/dev/null 2>&1; do
+    mariadb --skip-ssl-verify-server-cert -h mariadb -u "$DOMAIN" -e "SELECT 1" "$DOMAIN" >/dev/null 2>&1; do
     TRIES=$((TRIES + 1))
     if [ $TRIES -ge $MAX_TRIES ]; then
         echo "ERROR: Cannot connect to MariaDB after 1 minute"

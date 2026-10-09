@@ -182,6 +182,20 @@ grep -Fq 'source example_com_videos' "$generated_config" ||
     fail "DOMAIN_SAFE was not substituted"
 grep -Fq 'sql_pass = test-password' "$generated_config" ||
     fail "MARIADB_PASSWORD was not substituted"
+# A '#' starts a comment in manticore.conf: the password reaches it escaped,
+# the parser reads '\#' as the character (a raw one cut the password there).
+(
+    reset_logs
+    DOMAIN=example.com MARIADB_PASSWORD='test#pass#word' bash "${TEST_DIR}/docker-entrypoint.sh" true >/dev/null 2>&1  # pragma: allowlist secret
+) || true
+grep -Fq 'sql_pass = test\#pass\#word' "$generated_config" ||
+    fail "a '#' in MARIADB_PASSWORD must reach manticore.conf escaped: $(grep -F 'sql_pass' "$generated_config" | head -n 1)"
+(
+    reset_logs
+    DOMAIN=example.com \
+    MARIADB_PASSWORD=test-password \
+    bash "${TEST_DIR}/docker-entrypoint.sh" true >/dev/null 2>&1
+) || true
 grep -Fq 'FROM ktvs_videos' "$generated_config" ||
     fail "the default table prefix ktvs_ was not applied"
 if grep -Fq 'TABLES_PREFIX' "$generated_config"; then
