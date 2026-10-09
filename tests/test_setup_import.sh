@@ -188,6 +188,24 @@ test_a_dump_of_several_databases_is_refused() {
     pass "a dump of several databases is refused"
 }
 
+test_an_old_rsync_on_the_old_server_runs_one_stream() {
+    local out err
+
+    # rsync 3.0.6 (CentOS 6) answers the workers' --ignore-missing-args with
+    # "on remote machine: --ignore-missing-args: unknown option".
+    out=$(import_remote_transfer_jobs 4 3.0.6 2> "$TMP_ROOT/jobs.err") || fail "the gate must succeed"
+    [ "$out" = 1 ] || fail "rsync 3.0.6 must bring the transfer to one stream, got $out"
+    grep -q "no --ignore-missing-args" "$TMP_ROOT/jobs.err" || fail "the reason must be given: $(cat "$TMP_ROOT/jobs.err")"
+    out=$(import_remote_transfer_jobs 4 3.1.2 2> "$TMP_ROOT/jobs.err") || fail "the gate must succeed"
+    [ "$out" = 4 ] && [ ! -s "$TMP_ROOT/jobs.err" ] || fail "rsync 3.1.2 keeps the workers silently, got $out: $(cat "$TMP_ROOT/jobs.err")"
+    out=$(import_remote_transfer_jobs 4 3.4.1 2>&1) && [ "$out" = 4 ] || fail "rsync 3.4.1 keeps the workers, got $out"
+    out=$(import_remote_transfer_jobs 1 3.0.6 2>&1) && [ "$out" = 1 ] || fail "one stream stays one stream silently, got $out"
+    out=$(import_remote_transfer_jobs 4 "" 2>&1) && [ "$out" = 4 ] || fail "an unknown version changes nothing, got $out"
+    err=$(import_remote_transfer_jobs 4 3.0.6 2>&1 > /dev/null)
+    [ -n "$err" ] || fail "the reason goes to stderr"
+    pass "an old rsync on the old server runs one stream"
+}
+
 test_prepared_dump_loads_into_the_container_database() {
     local dump="$TMP_ROOT/dump-prepare.sql"
     local output="$TMP_ROOT/prepared.sql.zst"
@@ -354,6 +372,8 @@ test_setup_and_init_are_wired_for_imports() {
     done
     grep -Fq 'KVS_IMPORT_COMPLETED' "$setup" || fail "a completed import must be recorded in .env"
     grep -Fq 'holds several databases' "$setup" || fail "setup.sh must refuse a dump of several databases before anything is transferred"
+    grep -Fq 'IMPORT_TRANSFER_JOBS=$(import_remote_transfer_jobs "$IMPORT_TRANSFER_JOBS" "$IMPORT_REMOTE_RSYNC_VERSION")' "$setup" ||
+        fail "setup.sh must bring the transfer to one stream for an rsync older than 3.1.0 on the old server"
     grep -q 'prepare_import' "$setup" && fail "the early validation moved into the questionnaire; no call to prepare_import may remain"
     grep -Fq 'importing again (VOLUME_CHOICE=1 replaces the database)' "$setup" || fail "VOLUME_CHOICE=1 must repeat a completed import"
     grep -Fq 'the import source is ignored for this run' "$setup" || fail "without VOLUME_CHOICE=1 a completed import must turn into a re-run"
@@ -453,6 +473,7 @@ test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip
 test_dump_inspection_counts_tables_and_finds_the_markers
 test_a_dump_of_several_databases_is_refused
+test_an_old_rsync_on_the_old_server_runs_one_stream
 test_prepared_dump_loads_into_the_container_database
 test_sql_escaping_survives_quotes_and_like_wildcards
 test_site_placement_copies_once_and_refuses_a_used_directory

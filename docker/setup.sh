@@ -1084,6 +1084,7 @@ IMPORT_ARCHIVE_MANIFEST=""
 IMPORT_ARCHIVE_MB=""
 IMPORT_ARCHIVE_IGNORED=""
 IMPORT_REMOTE_RSYNC=""
+IMPORT_REMOTE_RSYNC_VERSION=""
 IMPORT_REMOTE_COMPRESSOR=""
 IMPORT_REMOTE_REPORT=""
 # yes, no or empty: what the imported site's own files say of their encoding.
@@ -1787,6 +1788,10 @@ import_inspect_remote() {
     IMPORT_OLD_PATH=$(import_kv "$IMPORT_REMOTE_REPORT" project_path)
     IMPORT_DETECTED_DOMAIN=$(import_kv "$IMPORT_REMOTE_REPORT" domain)
     IMPORT_REMOTE_RSYNC=$(import_kv "$IMPORT_REMOTE_REPORT" rsync)
+    IMPORT_REMOTE_RSYNC_VERSION=$(import_kv "$IMPORT_REMOTE_REPORT" rsync_version)
+    if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
+        IMPORT_TRANSFER_JOBS=$(import_remote_transfer_jobs "$IMPORT_TRANSFER_JOBS" "$IMPORT_REMOTE_RSYNC_VERSION")
+    fi
     IMPORT_REMOTE_COMPRESSOR=$(import_kv "$IMPORT_REMOTE_REPORT" compressor)
     IMPORT_REMOTE_DATABASE_FORMAT=$(import_kv "$IMPORT_REMOTE_REPORT" db_dump_format)
     IMPORT_REMOTE_DATABASE_FORMAT=${IMPORT_REMOTE_DATABASE_FORMAT:-sql}
@@ -1820,7 +1825,7 @@ import_inspect_remote() {
         echo -e "  Database access: ${RED}failed${NC} ($(import_kv "$IMPORT_REMOTE_REPORT" db_error))"
     fi
     if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
-        echo "  Transfer:        rsync, dump compressed with ${IMPORT_REMOTE_COMPRESSOR:-gzip}"
+        echo "  Transfer:        rsync${IMPORT_REMOTE_RSYNC_VERSION:+ $IMPORT_REMOTE_RSYNC_VERSION}, dump compressed with ${IMPORT_REMOTE_COMPRESSOR:-gzip}"
     else
         echo "  Transfer:        tar over ssh (install rsync on the old server for progress and resumable transfers), dump compressed with ${IMPORT_REMOTE_COMPRESSOR:-gzip}"
     fi

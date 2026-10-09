@@ -2835,6 +2835,22 @@ import_rsync_progress() {
     '
 }
 
+# import_remote_transfer_jobs <jobs> <rsync version on the old server>
+# The parallel workers pass rsync --ignore-missing-args, which rsync knows
+# from 3.1.0 (2013); the 3.0.x of CentOS 6 or Debian 7 answers "unknown
+# option" and every worker fails. Prints the streams to use: one for such
+# a server, with the reason on stderr, else the number given.
+import_remote_transfer_jobs() {
+    local jobs="$1" version="$2"
+
+    if [ "$jobs" -gt 1 ] && [[ "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] &&
+        [ "$(printf '%s\n' 3.1.0 "$version" | sort -V | head -n 1)" != 3.1.0 ]; then
+        echo "  rsync $version on the old server has no --ignore-missing-args (rsync 3.1.0): the parallel workers would fail, so the transfer runs in one stream" >&2
+        jobs=1
+    fi
+    printf '%s\n' "$jobs"
+}
+
 # import_remote_files <site directory> <destination> <rsync yes|no> [patterns...]
 # Mirror the site files. rsync when both sides have it (resumable through
 # the partial directory, a repeat only transfers the changes), a tar

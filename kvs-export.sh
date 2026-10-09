@@ -78,6 +78,7 @@ DB_SERVER_VERSION=""
 DB_TABLES="0"
 DB_SIZE_MB="0"
 DB_NON_TRANSACTIONAL="0"
+DB_UTF8MB4="yes"
 DB_DUMP_FORMAT="sql"
 DB_DIRECTORY_REASON="not checked"
 DB_DIRECTORY_TABLES=()
@@ -103,6 +104,7 @@ EXCLUDE_PATTERNS=()
 SERVER_LINES=()
 COMPRESSOR=""
 HAS_RSYNC="no"
+RSYNC_VERSION=""
 HOST_NAME=""
 # The encoding of the site and the web server configuration it runs under:
 # what the new server needs when the KVS archive is not at hand.
@@ -526,6 +528,9 @@ kvs_detect_tools() {
     fi
     if command -v rsync > /dev/null 2>&1; then
         HAS_RSYNC="yes"
+        # The setup reads it: rsync before 3.1.0 refuses an option its
+        # parallel workers pass.
+        RSYNC_VERSION=$(rsync --version 2> /dev/null < /dev/null | sed -n '1s/^rsync[[:space:]]*version[[:space:]]*\([0-9][0-9.]*\).*/\1/p')
     else
         HAS_RSYNC="no"
     fi
@@ -586,6 +591,7 @@ kvs_probe_database() {
     local err
     local status
     local line
+    local utf8mb4_count
 
     DB_OK="no"
     DB_ERROR=""
@@ -593,6 +599,7 @@ kvs_probe_database() {
     DB_TABLES="0"
     DB_SIZE_MB="0"
     DB_NON_TRANSACTIONAL="0"
+    DB_UTF8MB4="yes"
     if [ -z "$DB_CLIENT" ]; then
         DB_ERROR="no mariadb or mysql client on this server"
         return 0
@@ -602,7 +609,7 @@ kvs_probe_database() {
         return 0
     fi
     like=$(kvs_sql_like_escape "$TABLES_PREFIX")
-    query="SELECT VERSION(), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE '${like}%'), (SELECT ROUND(COALESCE(SUM(data_length + index_length), 0) / 1048576) FROM information_schema.tables WHERE table_schema = DATABASE()), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND engine IS NOT NULL AND engine NOT IN ('InnoDB'))"
+    query="SELECT VERSION(), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE '${like}%'), (SELECT ROUND(COALESCE(SUM(data_length + index_length), 0) / 1048576) FROM information_schema.tables WHERE table_schema = DATABASE()), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND engine IS NOT NULL AND engine NOT IN ('InnoDB')), (SELECT COUNT(*) FROM information_schema.character_sets WHERE character_set_name = 'utf8mb4')"
     TEMP_ERR_FILE=$(mktemp 2> /dev/null) || TEMP_ERR_FILE=""
     if [ -z "$TEMP_ERR_FILE" ]; then
         DB_ERROR="cannot create a temporary file"
@@ -629,7 +636,7 @@ kvs_probe_database() {
         return 0
     fi
     line=${out%%$'\n'*}
-    IFS=$'\t' read -r DB_SERVER_VERSION DB_TABLES DB_SIZE_MB DB_NON_TRANSACTIONAL <<< "$line"
+    IFS=$'\t' read -r DB_SERVER_VERSION DB_TABLES DB_SIZE_MB DB_NON_TRANSACTIONAL utf8mb4_count <<< "$line"
     if [ -z "$DB_SERVER_VERSION" ]; then
         DB_ERROR="the probe query returned nothing"
         return 0
@@ -637,6 +644,11 @@ kvs_probe_database() {
     kvs_is_number "$DB_TABLES" || DB_TABLES="0"
     kvs_is_number "$DB_SIZE_MB" || DB_SIZE_MB="0"
     kvs_is_number "$DB_NON_TRANSACTIONAL" || DB_NON_TRANSACTIONAL="0"
+    # utf8mb4 exists from MySQL 5.5.3 and MariaDB 5.5; the stock MySQL 5.1
+    # of CentOS 6 has none, and its mysqldump refuses the name.
+    if [ "${utf8mb4_count:-}" = "0" ]; then
+        DB_UTF8MB4="no"
+    fi
     DB_OK="yes"
     return 0
 }
@@ -1402,6 +1414,8 @@ kvs_tool_advertises() {
 }
 
 kvs_build_dump_args() {
+    local charset
+
     # A single transaction gives a consistent dump of InnoDB tables without
     # blocking the site. It does nothing for MyISAM or Aria tables: those
     # are only consistent under a table lock, which holds the writes of the
@@ -1416,6 +1430,14 @@ kvs_build_dump_args() {
     # export layout explicitly so skip-opt/skip-extended-insert or a tiny
     # net buffer cannot silently turn the restore into small INSERTs.
     # Do not use --opt here: it also changes the table-locking choice above.
+    # A server without utf8mb4 (MySQL 5.1) is dumped as utf8, which holds
+    # everything its tables can store; its mysqldump stops on the other name
+    # ("not a compiled character set").
+    charset=utf8mb4
+    if [ "$DB_UTF8MB4" = no ]; then
+        charset=utf8
+        kvs_warn "the database server has no utf8mb4 character set: the dump uses utf8"
+    fi
     DUMP_ARGS+=(
         --quick
         --no-autocommit
@@ -1424,7 +1446,7 @@ kvs_build_dump_args() {
         --net-buffer-length=1048576
         --hex-blob
         --triggers
-        --default-character-set=utf8mb4
+        --default-character-set="$charset"
         --no-tablespaces
         --max-allowed-packet=512M
     )
@@ -1891,6 +1913,7 @@ kvs_print_detect() {
     printf 'db_tables=%s\n' "$DB_TABLES"
     printf 'db_size_mb=%s\n' "$DB_SIZE_MB"
     printf 'db_non_transactional=%s\n' "$DB_NON_TRANSACTIONAL"
+    printf 'db_utf8mb4=%s\n' "$DB_UTF8MB4"
     printf 'site_size_mb=%s\n' "$SITE_SIZE_MB"
     printf 'site_size_status=%s\n' "$SITE_SIZE_STATUS"
     printf 'site_size_seconds=%s\n' "$SITE_SIZE_SECONDS"
@@ -1900,6 +1923,7 @@ kvs_print_detect() {
     printf 'site_total_mb=%s\n' "$SITE_TOTAL_MB"
     printf 'compressor=%s\n' "$COMPRESSOR"
     printf 'rsync=%s\n' "$HAS_RSYNC"
+    printf 'rsync_version=%s\n' "$RSYNC_VERSION"
     printf 'hostname=%s\n' "$HOST_NAME"
     printf 'ioncube=%s\n' "$SITE_IONCUBE"
     printf 'nginx_config_source=%s\n' "$NGINX_CONFIG_SOURCE"

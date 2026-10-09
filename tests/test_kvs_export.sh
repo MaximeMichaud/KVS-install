@@ -218,7 +218,7 @@ for arg in "$@"; do
             ;;
     esac
 done
-printf '11.8.2-MariaDB\t127\t45\t%s\n' "${STUB_NON_TRANSACTIONAL:-0}"
+printf '11.8.2-MariaDB\t127\t45\t%s\t%s\n' "${STUB_NON_TRANSACTIONAL:-0}" "${STUB_UTF8MB4:-1}"
 EOF
     cat > "$STUB_BIN/mariadb-dump" <<'EOF'
 #!/bin/bash
@@ -368,6 +368,7 @@ exec cat
 EOF
     cat > "$EXTRA_BIN/rsync" <<'EOF'
 #!/bin/bash
+[ "${1:-}" != --version ] || echo "rsync  version 3.0.9  protocol version 30"
 exit 0
 EOF
     chmod +x "$EXTRA_BIN/zstd" "$EXTRA_BIN/rsync"
@@ -879,6 +880,7 @@ test_the_dump_uses_the_compressor_that_is_installed() {
     run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed"
     assert_key "$out" compressor zstd
     assert_key "$out" rsync yes
+    assert_key "$out" rsync_version 3.0.9
 
     run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "the dump must succeed"
     argv_lines | grep -Fq -- 'zstd argv: [-T0] [-3] [-q] [-c]' ||
@@ -911,6 +913,27 @@ EOF
         fail "a zstd without -T must compress on one thread: $(argv_lines)"
     grep -Fq -- '-- Dump completed' "$out" || fail "the dump must pass through the one-thread zstd"
     pass "the dump uses the compressor that is installed"
+}
+
+test_a_server_without_utf8mb4_is_dumped_as_utf8() {
+    local site="$TMP_ROOT/utf8-site"
+    local out="$TMP_ROOT/utf8.out"
+    local err="$TMP_ROOT/utf8.err"
+
+    make_site "$site"
+    # The stock MySQL 5.1 of CentOS 6 has no utf8mb4, and its mysqldump stops
+    # on the name: "Character set 'utf8mb4' is not a compiled character set".
+    STUB_UTF8MB4=0 run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" ||
+        fail "the dump must succeed on a server without utf8mb4: $(cat "$err")"
+    argv_lines | grep -Fq -- '[--default-character-set=utf8]' ||
+        fail "a server without utf8mb4 must be dumped as utf8: $(argv_lines)"
+    grep -q "no utf8mb4" "$err" || fail "the utf8 fallback must be announced: $(cat "$err")"
+    STUB_UTF8MB4=0 run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed"
+    assert_key "$out" db_utf8mb4 no
+
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed"
+    assert_key "$out" db_utf8mb4 yes
+    pass "a server without utf8mb4 is dumped as utf8"
 }
 
 test_native_format_selection_and_bundle_integrity() {
@@ -1589,6 +1612,7 @@ test_the_password_reaches_the_client_only_through_the_environment
 test_the_connection_follows_the_host_written_in_setup_db
 test_an_unreachable_database_is_reported_without_stopping_detect
 test_the_dump_uses_the_compressor_that_is_installed
+test_a_server_without_utf8mb4_is_dumped_as_utf8
 test_native_format_selection_and_bundle_integrity
 test_column_statistics_is_passed_only_to_a_tool_that_knows_it
 test_gtid_state_is_left_out_by_a_tool_that_records_it
