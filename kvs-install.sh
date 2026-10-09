@@ -111,6 +111,34 @@ PROGRESS_TOTAL_STEPS=17
 PROGRESS_CURRENT_STEP=0
 PROGRESS_GUM_AVAILABLE=false
 
+# apt-get waits for no one: while unattended-upgrades, apt-daily or
+# cloud-init holds the dpkg or lists lock, which a fresh Ubuntu or Debian
+# host does for its first minutes, it fails at once with "Could not get
+# lock". Every apt-get of this script goes through here: a run that meets
+# the lock waits for it (KVS_APT_LOCK_ATTEMPTS pauses of KVS_APT_LOCK_PAUSE
+# seconds, five minutes in all) and says so; any other failure comes back
+# as it is. apt's own messages are shown once the command ends.
+apt_get() {
+  local attempt=1 status errors
+  local attempts="${KVS_APT_LOCK_ATTEMPTS:-30}" pause="${KVS_APT_LOCK_PAUSE:-10}"
+
+  while :; do
+    status=0
+    { errors=$(apt-get "$@" 2>&1 >&3) || status=$?; } 3>&1
+    [[ -z "$errors" ]] || printf '%s\n' "$errors" >&2
+    if [[ $status -eq 0 || $attempt -ge $attempts ]]; then
+      return "$status"
+    fi
+    case $errors in
+      *"Could not get lock"* | *"Unable to acquire the dpkg frontend lock"* | *"Unable to lock"*) ;;
+      *) return "$status" ;;
+    esac
+    echo "Another package manager holds the apt lock (unattended-upgrades or cloud-init on a fresh host): waiting ${pause}s, attempt $attempt of $attempts"
+    sleep "$pause"
+    attempt=$((attempt + 1))
+  done
+}
+
 # gum only draws the progress. Its repository enters the apt sources once
 # its key is in place, and leaves with the key when gum does not install: a
 # list whose key is missing (no gpg on the host, or the key could not be
@@ -140,7 +168,7 @@ install_gum() {
     return 0
   fi
   echo "deb [signed-by=$keyring] https://repo.charm.sh/apt/ * *" > "$list"
-  if apt-get update -qq && apt_install -qq gum; then
+  if apt_get update -qq && apt_install -qq gum; then
     PROGRESS_GUM_AVAILABLE=true
     return 0
   fi
@@ -602,7 +630,7 @@ function installQuestions() {
 }
 
 function aptupdate() {
-apt-get update
+apt_get update
 }
 
 # Install packages without stopping at a dpkg conffile prompt: headless runs
@@ -610,7 +638,7 @@ apt-get update
 # (nginx mime.types on a pre-provisioned server) otherwise dies with "end of
 # file on stdin at conffile prompt". Local changes win, defaults elsewhere.
 apt_install() {
-  apt-get install -y \
+  apt_get install -y \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold \
     "$@"
@@ -621,7 +649,7 @@ apt_install() {
 # previous provisioning left in /etc/nginx. A CDN-trimmed mime.types kept by
 # the policy above made nginx serve stylesheets and scripts as octet-stream.
 apt_install_pristine() {
-  apt-get install -y \
+  apt_get install -y \
     -o Dpkg::Options::=--force-confnew \
     -o Dpkg::Options::=--force-confmiss \
     "$@"
@@ -945,7 +973,7 @@ function aptinstall_nginx() {
       # Stop here when the package cannot be installed or cannot serve the
       # site: the configuration directory below must not be reset for a web
       # server that is not there.
-      apt-get update && apt_install_pristine nginx || return $?
+      apt_get update && apt_install_pristine nginx || return $?
       ensure_nginx_mime_types || return $?
       reset_nginx_configuration_dirs || return $?
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -o /etc/nginx/nginx.conf
@@ -978,7 +1006,7 @@ function aptinstall_mariadb() {
     # Download GPG key, overwrite if exists
     curl -fsSL https://mariadb.org/mariadb_release_signing_key.asc | gpg --yes --dearmor -o /usr/share/keyrings/mariadb.gpg
     echo "deb [signed-by=/usr/share/keyrings/mariadb.gpg arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/$database_ver/repo/$ID $(lsb_release -sc) main" >"${APT_SOURCES_DIR:-/etc/apt/sources.list.d}/mariadb.list"
-    apt-get update && apt_install mariadb-server || return $?
+    apt_get update && apt_install mariadb-server || return $?
     systemctl enable mariadb && systemctl start mariadb
 }
 
@@ -999,7 +1027,7 @@ function aptinstall_php() {
         add-apt-repository -y ppa:ondrej/php
       fi
     fi
-    apt-get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} || return $?
+    apt_get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} || return $?
     sed -i "s|upload_max_filesize = 2M|upload_max_filesize = 2048M|
                 s|post_max_size = 8M|post_max_size = 2048M|
                 s|memory_limit = 128M|memory_limit = 512M|
@@ -1023,7 +1051,7 @@ function aptinstall_phpmyadmin() {
     randomBlowfishSecret=$(openssl rand -base64 22)
     sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "${PHPMYADMIN_INSTALL_DIR}/config.sample.inc.php" >"${PHPMYADMIN_INSTALL_DIR}/config.inc.php"
     if [[ "$webserver" =~ (nginx) ]]; then
-      apt-get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} || return $?
+      apt_get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} || return $?
       service nginx restart
     fi
 }
@@ -2028,7 +2056,7 @@ ensure_docker_prerequisites() {
     return 1
   fi
   echo "Installing ${missing[*]}..."
-  apt-get update -qq && apt_install -qq "${missing[@]}"
+  apt_get update -qq && apt_install -qq "${missing[@]}"
 }
 
 # An import source named in the environment: the setup then takes the
@@ -2074,10 +2102,15 @@ function dockerInstall() {
   # Check if Docker is installed
   if ! command -v docker &> /dev/null; then
     echo "Docker is not installed. Installing Docker..."
-    # The script of get.docker.com stops on a distribution it does not
-    # support or on a package error, and when get.docker.com is out of
+    # The script of get.docker.com runs apt-get itself and stops on a busy
+    # lock, so the lock a fresh host's unattended-upgrades holds is waited
+    # for here first (apt_get). The script stops on a distribution it does
+    # not support or on a package error, and when get.docker.com is out of
     # reach sh has nothing to run and succeeds: the docker command, not
     # the pipeline, says whether Docker is there.
+    if command -v apt-get &> /dev/null; then
+      apt_get update -qq || true
+    fi
     curl -fsSL https://get.docker.com | sh
     if ! command -v docker &> /dev/null; then
       echo "${red}Docker was not installed: see the output of its installation script above.${normal}"
@@ -2248,14 +2281,39 @@ function manageMenu() {
   esac
 }
 
+# The update of the menu: the copy that runs is replaced in place once a
+# complete script arrived, then run again; a failed download leaves it as
+# it is. It used to download into the current directory, whatever copy was
+# running, and run what was there even when curl brought nothing. A run
+# through a pipe has no file to replace: the download then lands in the
+# current directory. KVS_INSTALL_SELF names the copy for the tests.
 function update() {
-  curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh -o kvs-install.sh
-  chmod +x kvs-install.sh
+  local script temp
+
+  script=${KVS_INSTALL_SELF:-$(readlink -f -- "${BASH_SOURCE[0]}" 2> /dev/null)}
+  [[ -n "$script" && -f "$script" ]] || script="$PWD/kvs-install.sh"
+  if ! temp=$(mktemp "${script}.XXXXXX"); then
+    echo "${red}Cannot write next to $script; the copy is unchanged.${normal}" >&2
+    return 1
+  fi
+  if ! curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/kvs-install.sh -o "$temp"; then
+    rm -f "$temp"
+    echo "${red}The update could not be downloaded; the copy at $script is unchanged.${normal}" >&2
+    return 1
+  fi
+  if ! bash -n "$temp" 2> /dev/null; then
+    rm -f "$temp"
+    echo "${red}The downloaded file is not a complete script; the copy at $script is unchanged.${normal}" >&2
+    return 1
+  fi
+  if ! chmod +x "$temp" || ! mv -f "$temp" "$script"; then
+    rm -f "$temp"
+    echo "${red}The update could not replace $script.${normal}" >&2
+    return 1
+  fi
   echo ""
   echo "Update Done."
-  sleep 2
-  ./kvs-install.sh
-  exit
+  exec bash "$script"
 }
 
 function updatephpMyAdmin() {

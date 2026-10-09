@@ -32,7 +32,7 @@ make_host() {
   local tool
 
   mkdir -p "$bin"
-  for tool in mkdir mktemp rmdir rm cp mv chmod ls find head sed cat; do
+  for tool in mkdir mktemp rmdir rm cp mv chmod ls find head sed cat sleep; do
     ln -s "$(command -v "$tool")" "$bin/$tool"
   done
   for tool in docker systemctl; do
@@ -153,7 +153,7 @@ test_docker_path_stops_when_the_docker_script_installs_nothing() {
     fail "a success was announced for an installation that did nothing" || return 1
   ! grep -q 'Docker Compose plugin not found' "$temp_dir/out" ||
     fail "the missing Docker was blamed on the Compose plugin" || return 1
-  [[ ! -e "$bin/apt-get.log" ]] || fail "the installer went on to the prerequisites without Docker" || return 1
+  ! grep -q '^install' "$bin/apt-get.log" 2>/dev/null || fail "the installer went on to the prerequisites without Docker" || return 1
 
   # The script installed Docker: the path goes on as before.
   printf '#!/bin/bash\nexit 0\n' >"$bin/docker.stub"
@@ -169,8 +169,60 @@ test_docker_path_stops_when_the_docker_script_installs_nothing() {
   grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run after the installation" || return 1
 }
 
+# unattended-upgrades or cloud-init holds the dpkg lock for the first minutes
+# of a fresh host, and apt-get fails at once: the installer must wait for it
+# instead of stopping on "Could not get lock", and stop as before on any
+# other apt failure.
+test_a_busy_apt_lock_is_waited_for() {
+  local temp_dir
+  local bin
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  bin="$temp_dir/bin"
+  make_host "$bin"
+  cat >"$bin/apt-get" <<EOF
+#!/bin/bash
+printf '%s\\n' "\$*" >>"$bin/apt-get.log"
+if [[ \$(grep -c . "$bin/apt-get.log") -le 2 ]]; then
+  echo "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 1234 (unattended-upgr)" >&2
+  exit 100
+fi
+[[ "\$1" == install ]] || exit 0
+cp "$bin/git.stub" "$bin/git"
+printf '#!/bin/bash\\nexit 0\\n' >"$bin/unzip"
+chmod +x "$bin/git" "$bin/unzip"
+EOF
+  chmod +x "$bin/apt-get"
+  ln -s "$(command -v grep)" "$bin/grep"
+
+  (PATH="$bin"; KVS_APT_LOCK_PAUSE=0 ensure_docker_prerequisites) >"$temp_dir/out" 2>&1 ||
+    fail "the prerequisites must install once the lock is free: $(cat "$temp_dir/out")" || return 1
+  [[ $(grep -c '^update' "$bin/apt-get.log") -eq 3 ]] ||
+    fail "apt-get update must be run again while the lock is held: $(cat "$bin/apt-get.log")" || return 1
+  grep -q '^install .*git' "$bin/apt-get.log" || fail "the packages must be installed after the wait" || return 1
+  [[ $(grep -c 'holds the apt lock' "$temp_dir/out") -eq 2 ]] ||
+    fail "each wait must be announced: $(cat "$temp_dir/out")" || return 1
+  grep -q 'Could not get lock' "$temp_dir/out" || fail "apt's own message must stay visible" || return 1
+
+  # Any other failure comes back at once, with apt's message.
+  rm -f "$bin/git" "$bin/unzip" "$bin/apt-get.log"
+  cat >"$bin/apt-get" <<EOF
+#!/bin/bash
+printf '%s\\n' "\$*" >>"$bin/apt-get.log"
+echo "E: Unable to locate package nonsense" >&2
+exit 100
+EOF
+  chmod +x "$bin/apt-get"
+  if (PATH="$bin"; KVS_APT_LOCK_PAUSE=0 ensure_docker_prerequisites) >"$temp_dir/out" 2>&1; then
+    fail "an apt failure that is not a lock must stop the installer" || return 1
+  fi
+  [[ $(grep -c . "$bin/apt-get.log") -eq 1 ]] || fail "no second try for another failure: $(cat "$bin/apt-get.log")" || return 1
+  grep -q 'Unable to locate package' "$temp_dir/out" || fail "apt's message must be shown: $(cat "$temp_dir/out")" || return 1
+}
+
 failures=0
 run_test "Docker path installs git and unzip before the clone" test_docker_path_installs_git_and_unzip_before_the_clone || failures=$((failures + 1))
+run_test "A busy apt lock is waited for" test_a_busy_apt_lock_is_waited_for || failures=$((failures + 1))
 run_test "Docker path leaves apt alone when the tools exist" test_docker_path_leaves_apt_alone_when_the_tools_exist || failures=$((failures + 1))
 run_test "Docker path stops when the Docker script installs nothing" test_docker_path_stops_when_the_docker_script_installs_nothing || failures=$((failures + 1))
 

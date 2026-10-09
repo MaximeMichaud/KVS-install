@@ -371,6 +371,58 @@ test_nginx_step_needs_a_usable_mime_types() {
   unset APT_SOURCES_DIR NGINX_MIME_TYPES
 }
 
+# The update of the menu downloaded the script into the current directory,
+# whatever copy was running, and ran what was there even when curl brought
+# nothing: it must replace the running copy in place, and only with a
+# complete script.
+test_the_self_update_replaces_the_running_copy_or_nothing() {
+  local temp_dir script output status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  mkdir -p "$temp_dir/home" "$temp_dir/bin"
+  script="$temp_dir/bin/kvs-install.sh"
+  printf '#!/bin/bash\necho old\n' >"$script"
+  chmod +x "$script"
+  # curl writes the file named by -o, or fails, as the test asks.
+  curl() {
+    local output=""
+    while [[ $# -gt 0 ]]; do
+      [[ "$1" == -o ]] && output="$2"
+      shift
+    done
+    case ${CURL_CASE:-} in
+      fails) return 6 ;;
+      truncated) printf '#!/bin/bash\nif [ 1\n' >"$output" ;;
+      *) printf '#!/bin/bash\necho new\n' >"$output" ;;
+    esac
+  }
+
+  # The download fails: nothing changes, nothing lands where the command was typed.
+  status=0
+  output=$(cd "$temp_dir/home" && CURL_CASE=fails KVS_INSTALL_SELF="$script" update 2>&1) || status=$?
+  [[ $status -eq 1 ]] || fail "a failed download must return 1, got $status: $output" || return 1
+  [[ "$output" == *"could not be downloaded"* ]] || fail "the failed download must be explained: $output" || return 1
+  [[ "$output" != *"Update Done."* ]] || fail "no success may be announced for a failed download" || return 1
+  assert_equal old "$(bash "$script")" "the running copy must be left as it is" || return 1
+  [[ -z "$(ls -A "$temp_dir/home")" ]] || fail "nothing may be written where the command was typed: $(ls -A "$temp_dir/home")" || return 1
+  [[ "$(ls "$temp_dir/bin")" == kvs-install.sh ]] || fail "no temporary file may be left next to the copy: $(ls "$temp_dir/bin")" || return 1
+
+  # A truncated download is refused the same way.
+  status=0
+  output=$(cd "$temp_dir/home" && CURL_CASE=truncated KVS_INSTALL_SELF="$script" update 2>&1) || status=$?
+  [[ $status -eq 1 && "$output" == *"not a complete script"* ]] || fail "a truncated script must be refused: $output" || return 1
+  assert_equal old "$(bash "$script")" "a truncated download must not replace the copy" || return 1
+
+  # A complete download replaces the copy in place and runs it.
+  status=0
+  output=$(cd "$temp_dir/home" && KVS_INSTALL_SELF="$script" update 2>&1) || status=$?
+  [[ $status -eq 0 ]] || fail "the update must run the new copy, got $status: $output" || return 1
+  [[ "$output" == *"Update Done."*new* ]] || fail "the new copy must run after the replacement: $output" || return 1
+  assert_equal new "$(bash "$script")" "the running copy must be the new script" || return 1
+  [[ -z "$(ls -A "$temp_dir/home")" ]] || fail "the download must land next to the copy, not in the current directory" || return 1
+  unset -f curl
+}
+
 test_auto_updates_follow_upstream_repositories() {
   local temp_dir
   temp_dir=$(mktemp -d)
@@ -1180,6 +1232,7 @@ run_test "certificate names follow the www record" test_certificate_names_follow
 run_test "yt-dlp step is repeatable" test_yt_dlp_step_is_repeatable || failures=$((failures + 1))
 run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fails || failures=$((failures + 1))
 run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
+run_test "the self-update replaces the running copy or nothing" test_the_self_update_replaces_the_running_copy_or_nothing || failures=$((failures + 1))
 run_test "auto-updates follow upstream repositories" test_auto_updates_follow_upstream_repositories || failures=$((failures + 1))
 run_test "KVS system settings select nginx" test_kvs_system_settings_select_nginx || failures=$((failures + 1))
 run_test "archive extraction skips an installed site" test_archive_extraction_skips_an_installed_site || failures=$((failures + 1))
