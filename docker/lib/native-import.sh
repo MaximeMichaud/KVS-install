@@ -119,7 +119,8 @@ native_import_metadata() {
 }
 
 # Inspect metadata and archive structure, without extracting the data files.
-# The return fields match import_inspect_dump: tables, version, USE count, done.
+# The return fields match import_inspect_dump: tables, version, USE count,
+# done; a bundle holds one database, so its database names field is absent.
 native_import_inspect() (
     local archive="$1" prefix="$2" work tables total expected
     work=$(mktemp -d) || return 1

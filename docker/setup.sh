@@ -1368,7 +1368,7 @@ import_record_source_domain() {
 # The site and the dump, once both are on this server: version, prefix,
 # tables, and whether the dump ends where the dump tool left it.
 import_validate_local_materials() {
-    local site_info dump_info dump_initial_version dump_statements dump_completed
+    local site_info dump_info dump_initial_version dump_statements dump_completed dump_databases
 
     site_info=$(import_validate_site "$IMPORT_SITE_DIR") || exit 1
     IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
@@ -1386,10 +1386,17 @@ import_validate_local_materials() {
     dump_initial_version=$(import_field "$dump_info" 2)
     dump_statements=$(import_field "$dump_info" 3)
     dump_completed=$(import_field "$dump_info" 4)
+    dump_databases=$(import_field "$dump_info" 5)
     if [ "${IMPORT_DUMP_TABLES:-0}" -lt 1 ]; then
         echo -e "${RED}ERROR: $IMPORT_DB_DUMP holds no CREATE TABLE for the ${IMPORT_TABLES_PREFIX} tables${NC}"
         exit 1
     fi
+    case $dump_databases in
+        *,*)
+            echo -e "${RED}ERROR: $IMPORT_DB_DUMP holds several databases (${dump_databases//,/, }) and the import loads one; dump the KVS database alone (kvs-export.sh --dump-only, or mariadb-dump without --databases or --all-databases)${NC}"
+            exit 1
+            ;;
+    esac
     echo "  Database dump: $IMPORT_DB_DUMP ($IMPORT_DUMP_TABLES tables, INITIAL_VERSION ${dump_initial_version:-missing, recorded as $IMPORT_SITE_VERSION})"
     if [ "$dump_completed" != yes ]; then
         if [ "$IMPORT_SOURCE" = remote ]; then

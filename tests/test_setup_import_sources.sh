@@ -377,7 +377,7 @@ test_extraction_settles_the_site_and_takes_the_dump_out() {
         [ ! -e "$stage" ] || fail "$archive: the stage must go"
         [ "$(import_field "$result" 1)" = "$staging/database.sql.zst" ] || fail "$archive: the dump path must be printed"
         [ "$(import_field "$result" 2)" = "$staging/kvs-export.manifest" ] || fail "$archive: the manifest path must be printed"
-        [ "$(import_inspect_dump "$staging/database.sql.zst" ktvs_)" = $'1\t7.0.2\t0\tyes' ] || fail "$archive: the staged dump must be intact"
+        [ "$(import_inspect_dump "$staging/database.sql.zst" ktvs_)" = $'1\t7.0.2\t0\tyes\t' ] || fail "$archive: the staged dump must be intact"
     done
 
     layout=$(make_layout deep example.com/public_html/ dump/site.sql)
@@ -965,7 +965,7 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         grep -q '^opt BatchMode=yes$' "$bin/ssh.log" || exit 9
 
         import_remote_dump "$exporter" "$site" "$TMP_ROOT/remote.sql.gz" || exit 10
-        [ "$(import_inspect_dump "$TMP_ROOT/remote.sql.gz" ktvs_)" = $'1\t\t0\tyes' ] || exit 11
+        [ "$(import_inspect_dump "$TMP_ROOT/remote.sql.gz" ktvs_)" = $'1\t\t0\tyes\t' ] || exit 11
 
         import_remote_files "$site" "$destination" yes > "$TMP_ROOT/transfer-out.txt" 2>&1 || exit 12
         grep -Eq '^  To transfer:     [0-9,]+ files, [0-9.]+ [kMGT]B of the site'"'"'s [0-9,]+ files, [0-9.]+ [kMGT]B$' "$TMP_ROOT/transfer-out.txt" || exit 41

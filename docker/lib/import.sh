@@ -163,6 +163,8 @@ import_dump_cat() {
 }
 
 # import_inspect_dump <dump> <table prefix>
+# Prints one line: tables, INITIAL_VERSION, database statements, completed
+# (yes/no) and the database names the dump holds, comma separated.
 # One pass over the dump. Prints "<tables><TAB><initial version><TAB><database statements><TAB><completed>":
 # the number of CREATE TABLE statements for the prefix, the INITIAL_VERSION
 # value found in the options rows (empty when absent), the number of
@@ -198,18 +200,34 @@ import_inspect_dump() {
         return 1
     fi
     import_dump_cat "$dump" | awk -v prefix="$prefix" '
-        BEGIN { tables = 0; initial = ""; statements = 0; completed = "no" }
+        BEGIN { tables = 0; initial = ""; statements = 0; completed = "no"; databases = "" }
         /^-- Dump completed/ { completed = "yes"; next }
         NF { completed = "no" }
         $0 ~ ("^CREATE TABLE `?" prefix) { tables++; next }
-        /^(CREATE DATABASE|USE )/ { statements++; next }
+        /^(CREATE DATABASE|USE )/ {
+            statements++
+            # The database names, in order of appearance: a dump made with
+            # --databases or --all-databases holds several, and loading
+            # them into one database would mix the sites.
+            name = $0
+            gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, "", name)
+            sub(/^CREATE DATABASE[[:space:]]+/, "", name)
+            sub(/^IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+/, "", name)
+            sub(/^USE[[:space:]]+/, "", name)
+            sub(/[[:space:];].*$/, "", name)
+            gsub(/`/, "", name)
+            if (name != "" && index("," databases ",", "," name ",") == 0) {
+                databases = (databases == "" ? name : databases "," name)
+            }
+            next
+        }
         initial == "" && match($0, /\x27INITIAL_VERSION\x27[[:space:]]*,[[:space:]]*\x27[^\x27]*\x27/) {
             value = substr($0, RSTART, RLENGTH)
             sub(/^\x27INITIAL_VERSION\x27[[:space:]]*,[[:space:]]*\x27/, "", value)
             sub(/\x27$/, "", value)
             initial = value
         }
-        END { printf "%d\t%s\t%d\t%s\n", tables, initial, statements, completed }
+        END { printf "%d\t%s\t%d\t%s\t%s\n", tables, initial, statements, completed, databases }
     '
 }
 
@@ -307,7 +325,7 @@ import_prepare_dump() {
     local new_path="$5"
     local output="$6"
     local token="$7"
-    local inspection tables initial statements
+    local inspection tables initial statements databases
 
     inspection=${8:-}
     if [ -z "$inspection" ]; then
@@ -316,13 +334,24 @@ import_prepare_dump() {
     tables=$(import_field "$inspection" 1)
     initial=$(import_field "$inspection" 2)
     statements=$(import_field "$inspection" 3)
+    databases=$(import_field "$inspection" 5)
     if [ "${tables:-0}" -lt 1 ]; then
         echo "ERROR: $dump holds no CREATE TABLE for the ${prefix} tables" >&2
         return 1
     fi
+    case $databases in
+        *,*)
+            echo "ERROR: $dump holds several databases (${databases//,/, }) and the import loads one; dump the KVS database alone (kvs-export.sh --dump-only, or mariadb-dump without --databases or --all-databases)" >&2
+            return 1
+            ;;
+    esac
     {
         # shellcheck disable=SC2016  # The backticks are SQL quoting inside the sed program.
-        import_dump_cat "$dump" | sed -E '/^(CREATE DATABASE|USE )/d; /^SET @@(GLOBAL|SESSION)\.(GTID_PURGED|SQL_LOG_BIN)/d; /^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
+        # A MySQL dump writes GTID_PURGED over several lines when the source
+        # knew several servers (one UUID set per line, up to the semicolon).
+        import_dump_cat "$dump" | sed -E -e '/^(CREATE DATABASE|USE )/d' \
+            -e '/^SET @@(GLOBAL|SESSION)\.GTID_PURGED/{' -e ':gtid' -e '/;[[:space:]]*$/!{' -e 'N' -e 'b gtid' -e '}' -e 'd' -e '}' \
+            -e '/^SET @@(GLOBAL|SESSION)\.SQL_LOG_BIN/d' -e '/^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
             import_innodb_row_format -
         echo
         echo "-- kvs-install import"

@@ -140,28 +140,52 @@ test_dump_inspection_counts_tables_and_finds_the_markers() {
     local dump="$TMP_ROOT/dump-with.sql"
     make_dump "$dump" yes
 
-    [ "$(import_inspect_dump "$dump" ktvs_)" = $'2\t5.5.1\t2\tno' ] ||
+    [ "$(import_inspect_dump "$dump" ktvs_)" = $'2\t5.5.1\t2\tno\toldsite' ] ||
         fail "inspection must count the ktvs_ tables, the INITIAL_VERSION and the database statements: got '$(import_inspect_dump "$dump" ktvs_)'"
 
     make_dump "$TMP_ROOT/dump-without.sql" no
-    [ "$(import_inspect_dump "$TMP_ROOT/dump-without.sql" ktvs_)" = $'2\t\t2\tno' ] ||
+    [ "$(import_inspect_dump "$TMP_ROOT/dump-without.sql" ktvs_)" = $'2\t\t2\tno\toldsite' ] ||
         fail "a dump without INITIAL_VERSION must report it empty"
 
     zstd -q -f "$dump" -o "$TMP_ROOT/dump.sql.zst"
     gzip -c "$dump" > "$TMP_ROOT/dump.sql.gz"
-    [ "$(import_inspect_dump "$TMP_ROOT/dump.sql.zst" ktvs_)" = $'2\t5.5.1\t2\tno' ] || fail "a zstd dump must be read"
-    [ "$(import_inspect_dump "$TMP_ROOT/dump.sql.gz" ktvs_)" = $'2\t5.5.1\t2\tno' ] || fail "a gzip dump must be read"
+    [ "$(import_inspect_dump "$TMP_ROOT/dump.sql.zst" ktvs_)" = $'2\t5.5.1\t2\tno\toldsite' ] || fail "a zstd dump must be read"
+    [ "$(import_inspect_dump "$TMP_ROOT/dump.sql.gz" ktvs_)" = $'2\t5.5.1\t2\tno\toldsite' ] || fail "a gzip dump must be read"
 
-    [ "$(import_inspect_dump "$dump" site_)" = $'0\t5.5.1\t2\tno' ] || fail "tables of another prefix must not count"
+    [ "$(import_inspect_dump "$dump" site_)" = $'0\t5.5.1\t2\tno\toldsite' ] || fail "tables of another prefix must not count"
 
     { cat "$dump"; echo; echo "-- Dump completed on 2026-09-23 10:00:00"; echo; } > "$TMP_ROOT/dump-complete.sql"
-    [ "$(import_inspect_dump "$TMP_ROOT/dump-complete.sql" ktvs_)" = $'2\t5.5.1\t2\tyes' ] ||
+    [ "$(import_inspect_dump "$TMP_ROOT/dump-complete.sql" ktvs_)" = $'2\t5.5.1\t2\tyes\toldsite' ] ||
         fail "a dump that ends with the completion line must report it: got '$(import_inspect_dump "$TMP_ROOT/dump-complete.sql" ktvs_)'"
     { cat "$TMP_ROOT/dump-complete.sql"; echo "INSERT INTO \`ktvs_options\` VALUES ('LATE','1');"; } > "$TMP_ROOT/dump-truncated.sql"
-    [ "$(import_inspect_dump "$TMP_ROOT/dump-truncated.sql" ktvs_)" = $'2\t5.5.1\t2\tno' ] ||
+    [ "$(import_inspect_dump "$TMP_ROOT/dump-truncated.sql" ktvs_)" = $'2\t5.5.1\t2\tno\toldsite' ] ||
         fail "statements after the completion line mean the dump did not end there"
     import_inspect_dump "$TMP_ROOT/missing.sql" ktvs_ 2>/dev/null && fail "a missing dump must be refused"
     pass "dump inspection counts tables and finds the markers"
+}
+
+test_a_dump_of_several_databases_is_refused() {
+    local dump="$TMP_ROOT/dump-two-databases.sql"
+    local inspection
+
+    make_dump "$dump" yes
+    {
+        echo "CREATE DATABASE /*!32312 IF NOT EXISTS*/ \`second\` /*!40100 DEFAULT CHARACTER SET utf8mb4 */;"
+        echo "USE \`second\`;"
+        echo "CREATE TABLE \`ktvs_options\` (\`variable\` varchar(255) NOT NULL, \`value\` text NOT NULL, PRIMARY KEY (\`variable\`));"
+        echo "CREATE DATABASE IF NOT EXISTS third;"
+        echo "USE third;"
+    } >> "$dump"
+    inspection=$(import_inspect_dump "$dump" ktvs_) || fail "the dump must be inspected"
+    [ "$(import_field "$inspection" 5)" = "oldsite,second,third" ] ||
+        fail "every database of the dump must be named once: got '$(import_field "$inspection" 5)'"
+    # Loaded into one database, the second site would overwrite the first.
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/two.sql" token 2> "$TMP_ROOT/two.err" &&
+        fail "a dump of several databases must be refused"
+    grep -q "several databases (oldsite, second, third)" "$TMP_ROOT/two.err" ||
+        fail "the refusal must name the databases: $(cat "$TMP_ROOT/two.err")"
+    [ ! -e "$TMP_ROOT/two.sql" ] || fail "nothing must be prepared from a refused dump"
+    pass "a dump of several databases is refused"
 }
 
 test_prepared_dump_loads_into_the_container_database() {
@@ -199,6 +223,19 @@ test_prepared_dump_loads_into_the_container_database() {
     { cat "$dump"; echo "SET @@SESSION.SQL_LOG_BIN= 0;"; echo "SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5';"; } > "$TMP_ROOT/mysql8.sql"
     import_prepare_dump "$TMP_ROOT/mysql8.sql" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/prepared-mysql8.sql" token >/dev/null || fail "a MySQL 8 dump must be prepared"
     grep -q 'GTID_PURGED\|SQL_LOG_BIN' "$TMP_ROOT/prepared-mysql8.sql" && fail "the GTID and binary log settings of a MySQL 8 dump must be dropped"
+
+    # A source that knew several servers writes one UUID set per line.
+    {
+        cat "$dump"
+        echo "SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5,"
+        echo "4E11FA47-71CA-11E1-9E33-C80AA9429562:1-3';"
+        echo "INSERT INTO \`ktvs_options\` VALUES ('AFTER','1');"
+    } > "$TMP_ROOT/mysql8-multi.sql"
+    import_prepare_dump "$TMP_ROOT/mysql8-multi.sql" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/prepared-mysql8-multi.sql" token >/dev/null ||
+        fail "a MySQL 8 dump with several GTID sets must be prepared"
+    grep -q '4E11FA47\|GTID_PURGED' "$TMP_ROOT/prepared-mysql8-multi.sql" &&
+        fail "every line of a multi-line GTID_PURGED must be dropped, the rest is a syntax error: $(grep -n '4E11FA47\|GTID_PURGED' "$TMP_ROOT/prepared-mysql8-multi.sql")"
+    grep -Fq "('AFTER','1')" "$TMP_ROOT/prepared-mysql8-multi.sql" || fail "the statements after GTID_PURGED must stay"
 
     # Views and triggers name the user that created them on the old server,
     # which does not exist here; the row data is never touched.
@@ -316,6 +353,7 @@ test_setup_and_init_are_wired_for_imports() {
         grep -Eq "^${step}$|^    ${step}$|^${step}\$" "$setup" || grep -Eq "^\s*${step}(\s|$)" "$setup" || fail "setup.sh must call $step"
     done
     grep -Fq 'KVS_IMPORT_COMPLETED' "$setup" || fail "a completed import must be recorded in .env"
+    grep -Fq 'holds several databases' "$setup" || fail "setup.sh must refuse a dump of several databases before anything is transferred"
     grep -q 'prepare_import' "$setup" && fail "the early validation moved into the questionnaire; no call to prepare_import may remain"
     grep -Fq 'importing again (VOLUME_CHOICE=1 replaces the database)' "$setup" || fail "VOLUME_CHOICE=1 must repeat a completed import"
     grep -Fq 'the import source is ignored for this run' "$setup" || fail "without VOLUME_CHOICE=1 a completed import must turn into a re-run"
@@ -414,6 +452,7 @@ test_php_config_values_are_read_as_kvs_writes_them
 test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip
 test_dump_inspection_counts_tables_and_finds_the_markers
+test_a_dump_of_several_databases_is_refused
 test_prepared_dump_loads_into_the_container_database
 test_sql_escaping_survives_quotes_and_like_wildcards
 test_site_placement_copies_once_and_refuses_a_used_directory
