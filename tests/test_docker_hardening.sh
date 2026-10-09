@@ -1461,6 +1461,88 @@ test_a_question_with_no_answer_left_stops_the_setup() {
     pass "a question with no answer left stops the setup"
 }
 
+test_setup_moves_to_its_directory_when_started_elsewhere() {
+    local case_dir="$TMP_ROOT/setup-elsewhere"
+    local functions_file="$case_dir/stack/functions.sh"
+    local output status
+
+    mkdir -p "$case_dir/stack" "$case_dir/elsewhere" "$case_dir/logs"
+    awk '
+        $0 == "setup_enter_script_dir() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    : > "$case_dir/stack/docker-compose.yml"
+    # shellcheck disable=SC2016
+    run_enter() {
+        (cd "$1" && IMPORT_ARCHIVE="${2:-}" IMPORT_SSH_KEY=/root/.ssh/old bash -c '
+            source "$1"
+            setup_enter_script_dir || exit 9
+            printf "pwd=%s\narchive=%s\nkey=%s\n" "$PWD" "${IMPORT_ARCHIVE:-}" "$IMPORT_SSH_KEY"
+        ' _ "$functions_file")
+    }
+
+    # From the repository root or /root: the stack directory is entered and a
+    # relative path the operator typed keeps pointing where it was typed.
+    output=$(run_enter "$case_dir/elsewhere" export.tar) || fail "entering the stack directory failed: $output"
+    grep -Fxq "pwd=$case_dir/stack" <<< "$output" || fail "the setup must work in its own directory: $output"
+    grep -Fxq "archive=$case_dir/elsewhere/export.tar" <<< "$output" || fail "a relative archive path must stay relative to the start directory: $output"
+    grep -Fxq "key=/root/.ssh/old" <<< "$output" || fail "an absolute path must not change: $output"
+    grep -q "^Working in $case_dir/stack (started from $case_dir/elsewhere)$" <<< "$output" || fail "the move must be announced: $output"
+
+    # From the stack directory itself: nothing moves, nothing is said.
+    output=$(run_enter "$case_dir/stack" export.tar) || fail "a run from the stack directory failed: $output"
+    grep -Fxq "pwd=$case_dir/stack" <<< "$output" || fail "the stack directory stays the working directory: $output"
+    grep -Fxq "archive=export.tar" <<< "$output" || fail "a relative path must stay as typed from the stack directory: $output"
+    grep -q "Working in" <<< "$output" && fail "no move to announce from the stack directory: $output"
+
+    # The whole script, started from elsewhere: it works in its directory
+    # and then asks its first question there.
+    local setup_copy="$case_dir/stack/setup.sh" mock_bin="$case_dir/bin"
+    make_preflight_mocks "$mock_bin"
+    make_setup_test_copy "$setup_copy" "$case_dir/logs"
+    set +e
+    (
+        cd "$case_dir/elsewhere"
+        PATH="$mock_bin:/usr/bin:/bin" PREFLIGHT_BYPASS=y timeout 60 "$setup_copy" < /dev/null
+    ) > "$case_dir/output.log" 2>&1
+    status=$?
+    set -e
+    [ "$status" -eq 1 ] || fail "the setup must stop at the end of its input (status $status): $(tail -n 3 "$case_dir/output.log")"
+    assert_file_contains "$case_dir/output.log" "Working in $case_dir/stack"
+    [ ! -e "$case_dir/elsewhere/.env" ] || fail "nothing may be written where the command was typed"
+    pass "the setup moves to its directory when started elsewhere"
+}
+
+test_files_for_the_containers_survive_a_strict_umask() {
+    local case_dir="$TMP_ROOT/umask"
+    local functions_file="$case_dir/functions.sh"
+    local output
+
+    # A hardened host sets umask 027: the GeoIP database curl writes would be
+    # 640 root:root in a 750 directory, unreadable by www-data in the
+    # container, and the clone the installer makes would carry those modes.
+    grep -qx 'umask 022' "$REPO_ROOT/docker/setup.sh" || fail "setup.sh must set umask 022 before writing anything"
+    grep -qx 'umask 022' "$REPO_ROOT/kvs-install.sh" || fail "kvs-install.sh must set umask 022 before cloning"
+    [ "$(grep -c '^ *geoip_readable_by_php$' "$REPO_ROOT/docker/setup.sh")" -eq 2 ] ||
+        fail "select_geoip must open the database to PHP both when it downloads it and when it is already there"
+
+    mkdir -p "$case_dir"
+    awk '
+        $0 == "geoip_readable_by_php() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
+    output=$(cd "$case_dir" && umask 077 && mkdir geoip && : > geoip/GeoLite2-Country.mmdb && : > geoip/notes.txt &&
+        bash -c 'source "$1"; geoip_readable_by_php' _ "$functions_file" && stat -c '%a %n' geoip geoip/GeoLite2-Country.mmdb geoip/notes.txt)
+    grep -Fxq "755 geoip" <<< "$output" || fail "the geoip directory must be enterable by www-data: $output"
+    grep -Fxq "644 geoip/GeoLite2-Country.mmdb" <<< "$output" || fail "the database must be readable by www-data: $output"
+    grep -Fxq "600 geoip/notes.txt" <<< "$output" || fail "other files keep their mode: $output"
+    (cd "$case_dir" && rm -rf geoip && bash -c 'source "$1"; geoip_readable_by_php' _ "$functions_file") ||
+        fail "the helper must succeed without a geoip directory"
+    pass "files for the containers survive a strict umask"
+}
+
 test_port_check_covers_the_loopback_services() {
     local functions_file="$TMP_ROOT/port-conflicts.sh"
     local output
@@ -2101,6 +2183,8 @@ test_container_mariadb_clients_accept_a_server_without_tls
 test_system_settings_keep_the_limits_an_admin_raised
 test_manticore_scripts_survive_a_failed_download_once_installed
 test_cache_settings_follow_small_hosts
+test_setup_moves_to_its_directory_when_started_elsewhere
+test_files_for_the_containers_survive_a_strict_umask
 test_reconfigure_fails_when_container_inspection_fails
 test_reconfigure_issues_the_exact_requested_sans_and_installs
 test_php_password_escaping

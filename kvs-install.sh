@@ -24,6 +24,11 @@ if [ -z "${BASH_VERSION:-}" ]; then
   exit 1
 fi
 
+# The clone of the repository and the files written below are read inside
+# the containers by other users than root; a stricter umask on the host
+# (027 on a hardened one) would hide them. docker/setup.sh sets it too.
+umask 022
+
 SETUP_ARGS=()
 parse_arguments() {
   SETUP_ARGS=()

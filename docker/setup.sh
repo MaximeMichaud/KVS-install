@@ -1,6 +1,11 @@
 #!/bin/bash
 # shellcheck disable=SC1091
 set -e
+# Files written here are read inside the containers by other users than
+# root (www-data reads the GeoIP database, mysql its init files), and a
+# stricter umask on the host (027 on a hardened one) would hide them.
+# Secrets get their own 600 below.
+umask 022
 
 #################################################################
 # Debug Logging Setup
@@ -23,6 +28,30 @@ fi
 if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh" ]; then
     source "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh"
 fi
+
+# The compose file, .env and the staging directories are named relative to
+# the directory of this script. A run started elsewhere (bash
+# docker/setup.sh from the repository root, or from /root) would write
+# them where it stands and find no compose file, so it moves here first.
+# The paths an operator named stay relative to where the command was typed.
+setup_enter_script_dir() {
+    local script_dir start_dir name
+
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    if [ -f docker-compose.yml ] || [ ! -f "$script_dir/docker-compose.yml" ]; then
+        return 0
+    fi
+    start_dir=$PWD
+    for name in IMPORT_ARCHIVE IMPORT_SITE_DIR IMPORT_DB_DUMP IMPORT_SSH_KEY IMPORT_NGINX_REWRITES; do
+        case ${!name:-} in
+            '' | /*) ;;
+            *) printf -v "$name" '%s/%s' "$start_dir" "${!name}" ;;
+        esac
+    done
+    echo "Working in $script_dir (started from $start_dir)"
+    cd "$script_dir"
+}
+setup_enter_script_dir || exit 1
 
 # The version that runs, shown in the setup header and with the file
 # transfer: a server left on an older version shows it in the lines an
@@ -4062,12 +4091,23 @@ prepare_multi_site_proxy() {
 }
 
 # GeoIP database selection
+# PHP reads the database as www-data, through the read-only mount of this
+# directory: a file or directory created under a stricter umask (027 on a
+# hardened host, 750 and 640) is unreadable there and GeoIP silently stays
+# off, whatever the setting says.
+geoip_readable_by_php() {
+    [ -d geoip ] || return 0
+    chmod 755 geoip 2>/dev/null || true
+    find geoip -maxdepth 1 -type f -name '*.mmdb' -exec chmod 644 {} + 2>/dev/null || true
+}
+
 select_geoip() {
     echo ""
     echo -e "${CYAN}GeoIP Database${NC}"
 
     # Check if file already exists
     if [ -f geoip/GeoLite2-Country.mmdb ] || [ -f geoip/GeoLite2-City.mmdb ]; then
+        geoip_readable_by_php
         echo -e "${GREEN}✓ GeoIP database already configured${NC}"
         echo -e "${YELLOW}Note: Admin → Settings → System → GEOIP info may show ❌ on first page load.${NC}"
         echo -e "${YELLOW}      Refresh (F5) to see ✔️ IP, Country.${NC}"
@@ -4147,6 +4187,7 @@ select_geoip() {
         GEOIP_URL="https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb"
 
         if curl -fsSL "$GEOIP_URL" -o geoip/GeoLite2-Country.mmdb; then
+            geoip_readable_by_php
             echo -e "${GREEN}✓ GeoIP database downloaded${NC}"
             echo ""
             echo -e "${YELLOW}Note: After installation, Admin → Settings → System → GEOIP info may show ❌ on first load.${NC}"
