@@ -155,8 +155,11 @@ RUN set -eux; \
 # unless IONCUBE is unset or one of yes, true, 1 and on.
 # Clause 2.1 of the loader licence allows free redistribution provided the
 # licence travels with it, which is why LICENSE.txt stays in the image.
-# The last line loads the loader, which fails unless the tarball is the one
-# of the architecture being built and holds the series of the base.
+# The last line loads the loader and asks PHP whether it is in, which fails
+# unless the tarball is the one of the architecture being built and holds
+# the series of the base. It is not "php -m | grep -q": grep -q exits at its
+# first match, and PHP exits 255 when a write finds the pipe closed
+# (sapi/cli/php_cli.c), which failed the build at random on a busy CPU.
 RUN set -eux; \
     series="$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')"; \
     if [ "$series" != "${PHP_VERSION}" ]; then \
@@ -178,7 +181,7 @@ RUN set -eux; \
     install -D -m 0644 /tmp/ioncube/LICENSE.txt /usr/local/share/ioncube/LICENSE.txt; \
     echo "zend_extension=ioncube_loader_lin_${series}.so" > /usr/local/etc/php/conf.d/00-ioncube.ini; \
     rm -rf /tmp/ioncube /tmp/ioncube.tar.gz; \
-    php -m | grep -q 'ionCube Loader'
+    php -r 'extension_loaded("ionCube Loader") || exit(1);'
 
 # yt-dlp: the release above in /usr/local/lib/yt-dlp/<version>, its command
 # renamed yt-dlp whatever the architecture, "current" naming it, updates/

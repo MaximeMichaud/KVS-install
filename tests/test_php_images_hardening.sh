@@ -175,9 +175,12 @@ test_ioncube_loader_is_pinned_and_checked() {
         before_extract=${run%%tar -xzf*}
         [[ "$before_extract" == *'echo "${sha256}  /tmp/ioncube.tar.gz" | sha256sum -c -;'* ]] ||
             fail "$dockerfile does not check the ionCube tarball before extracting it"
-        # The build ends by loading the loader, in the architecture it builds.
-        [[ "$run" == *"; php -m | grep -q 'ionCube Loader'" ]] ||
+        # The build ends by loading the loader, in the architecture it builds,
+        # with no pipe: PHP exits 255 when a reader closes its stdout early.
+        [[ "$run" == *"; php -r 'extension_loaded(\"ionCube Loader\") || exit(1);'" ]] ||
             fail "$dockerfile must end the ionCube step by loading the loader"
+        [[ "$run" != *"php -m |"* ]] ||
+            fail "$dockerfile must not pipe php -m into a reader that may exit first"
     done
     [ "${runs[0]}" = "${runs[1]}" ] || fail "the PHP-FPM and cron images must install the loader the same way"
     pass "the ionCube loader is the versioned tarball of the architecture, checked by its sha256, then loaded"
