@@ -16,17 +16,17 @@
 # packages the PHP-FPM and cron images install, and receive no security
 # update. setup.sh refuses a KVS archive that needs it.
 #
-# Resolved on 2026-10-06.
+# Resolved on 2026-10-10.
 
 # Build bases
 php-fpm	8.1	php:8.1-fpm@sha256:a3118db1911fdd3b3ac66605122ddc859286688ced86fc860fec6d19cc2d6c55
-php-fpm	8.2	php:8.2-fpm@sha256:e6e6927a36650d475290dcfa032bc1ca2036769cc1976ccc7f69047f5ffd3cce
-php-fpm	8.3	php:8.3-fpm@sha256:97e9367af2c37708155f4f9f23bbf13283c6b8e375a1ab175dde3dff2e24038e
-php-fpm	8.4	php:8.4-fpm@sha256:14ae2e2ff06c5b60196e017cfdf4f21858f28cca794571d002171520272864f8
+php-fpm	8.2	php:8.2-fpm@sha256:faf32167826a68cb7c595793e2e508164a24cac187be60ed8de9c81b17236048
+php-fpm	8.3	php:8.3-fpm@sha256:ed67b5fcd7600614dd651621a04214fbe16d373262cb31eb50bc224c18cf0e88
+php-fpm	8.4	php:8.4-fpm@sha256:1071b5609d16d60674f78eea8cf9bd7e9e79169ecb566d015c931c5ee789bb13
 php-cli	8.1	php:8.1-cli@sha256:76e563191d1ade120313a8736df24154d21da5155c0756f147c0b01bd19d9087
-php-cli	8.2	php:8.2-cli@sha256:185eb902246c5757dbbb7e439bf92dfea32f627a401b1e2785bee0770fe0c41b
-php-cli	8.3	php:8.3-cli@sha256:005cf2ef7f7aa8c17cefa1b732e7f027065c9589d69b4abdd644a02782fbc94f
-php-cli	8.4	php:8.4-cli@sha256:43f7d0151e05f830723af673115e6e0fc0d8251d52e79597359e5e935f8112c1
+php-cli	8.2	php:8.2-cli@sha256:118ef4fb1db5e866fb604f2f260da81f819a0a1eac87a4083f9194f48e00beee
+php-cli	8.3	php:8.3-cli@sha256:aafe21201943a8a6e497ddfb471e2ce68ada76adede38c7d61fede8918b24319
+php-cli	8.4	php:8.4-cli@sha256:1d2cf2b7d715b5b3aa959f0150ccbcc7b71e0181b637e443abf40a7fb56bf79a
 nginx	-	nginx:mainline@sha256:f9ea18bfa4fad859e1ed38259d711da7ccad2c3516e875cec3351a57c859f571
 debian	-	debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 manticore	-	manticoresearch/manticore:29.9.0@sha256:461b419739a2bbbffb4be0b32db26c41d7b435bf7fd1fce95b414ca5ccbb3775
