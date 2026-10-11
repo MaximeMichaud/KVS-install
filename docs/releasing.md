@@ -138,19 +138,22 @@ all jobs on its page).
    installed binaries trust, and every installed `kvsctl` would have to be
    replaced by hand.
 
-5. **Make the five GHCR packages public during the first run.** The first
-   run creates the container packages `nginx`, `init`, `manticore`, `php` and
-   `cron` under `ghcr.io/<owner>/kvs-install/` (the repository name in lower
-   case), and GitHub makes a package private when it is first published. The
-   publish job reads the images without credentials, as `kvsctl` does on a
-   server that has none, so it fails on a private package. Once the images
-   job is done and the publish job waits for its approval, open each package
-   from the Packages tab of the account that owns the repository, then
-   Package settings, Danger Zone, Change visibility, Public, and only then
-   approve. If the job was approved too early, it fails with a message naming
-   the image: make the package public and re-run the failed job. A public
-   package cannot be made private again. Later releases push new versions
-   into the same packages, so this is done once.
+5. **Check that the five GHCR packages are public during the first run.**
+   The first run creates the container packages `nginx`, `init`,
+   `manticore`, `php` and `cron` under `ghcr.io/<owner>/kvs-install/` (the
+   repository name in lower case). The publish job reads the images without
+   credentials, as `kvsctl` does on a server that has none, so it fails on a
+   private package. GitHub documents private as the default visibility of a
+   new package of a personal account, yet the packages of this repository
+   came out public on their own with its first release, `26.10.0`: check
+   rather than assume. Once the images job is done and the publish job waits
+   for its approval, open the Packages tab of the account that owns the
+   repository, where a private package carries a Private label. Make such a
+   package public (Package settings, Danger Zone, Change visibility, Public),
+   and only then approve. If the job was approved too early, it fails with a
+   message naming the image: make the package public and re-run the failed
+   job. A public package cannot be made private again. Later releases push
+   new versions into the same packages, so this is done once.
 
 `secrets.GITHUB_TOKEN` does the rest: with `packages: write` the images job
 pushes the images, and with `contents: write` the publish job lists the

@@ -86,9 +86,9 @@ func imageLocation(ref string) (host, base, tag string, err error) {
 
 // explainRefusal says what a refused read means for a release. Every image
 // a manifest lists has to be readable without credentials, because a server
-// that upgrades with kvsctl may have none. GHCR creates a new package
-// private, so the first release of each package stops here until its owner
-// makes it public. An anonymous read GHCR refuses is a package that is
+// that upgrades with kvsctl may have none. GHCR can create a new package
+// private, and then the first release of that package stops here until its
+// owner makes it public. An anonymous read GHCR refuses is a package that is
 // private or an image that is missing, and the message names both. A rate
 // limit that outlasted every retry is the time to try later.
 func explainRefusal(host string, err error) error {
@@ -110,7 +110,7 @@ func explainRefusal(host string, err error) error {
 			why = "the package is private, or this tag was never pushed"
 		}
 		return fmt.Errorf("%w\nGHCR does not show this image to an anonymous reader: %s. "+
-			"A server may pull it without credentials, so every package a release lists must be public, and GHCR creates a new package private: "+
+			"A server may pull it without credentials, so every package a release lists must be public, and GHCR can create a new package private: "+
 			"on GitHub, open the package (the Packages tab of its owner), Package settings, Danger Zone, Change visibility, Public. "+
 			"Then re-run the publish job", err, why)
 	}

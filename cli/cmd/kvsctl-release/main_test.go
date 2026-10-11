@@ -2075,7 +2075,7 @@ func TestRegistryRefusals(t *testing.T) {
 }
 
 // GHCR gives an anonymous reader the same refusal for a private package as
-// for one that does not exist, and creates every new package private, so
+// for one that does not exist, and can create a new package private, so
 // its refusals point at the package settings and at the publish job.
 func TestExplainRefusal(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
