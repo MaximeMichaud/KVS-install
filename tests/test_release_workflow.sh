@@ -317,6 +317,9 @@ for workflow in "$RELEASE" "$ROOT_DIR/.github/workflows/go.yml"; do
     fi
 done
 has "$RELEASE" 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath' "the binaries are built for linux/amd64"
+has "$RELEASE" 'dist="${RUNNER_TEMP}/dist"' "the binaries must be built outside the checkout"
+has "$RELEASE" '-o "${dist}/${command}-linux-amd64" "./cmd/${command}"' "the binaries must be written outside the checkout"
+has "$RELEASE" '! grep -Fq "vcs.modified=false" <<<"$stamp"; then' "every binary must say it was built from unmodified sources"
 has "$RELEASE" '--cli "linux-amd64=${base}/kvsctl-linux-amd64"' "the manifest lists the linux/amd64 binary"
 for workflow in "$RELEASE" "$ROOT_DIR/.github/workflows/go.yml"; do
     has "$workflow" 'go-version-file: cli/go.mod' "setup-go must read cli/go.mod"

@@ -292,27 +292,40 @@ jobs:
           echo "building with ${have}"
 
       # linux/amd64 only, like the images of the stack: kvsctl has nothing
-      # to install on another architecture.
+      # to install on another architecture. The binaries go outside the
+      # checkout: go stamps each build with the state of the git tree, and
+      # the first binary, untracked inside it, would make the second one
+      # say it was built from modified sources. Each one has to name the
+      # checked out commit, unmodified.
       - name: build the binaries
         working-directory: cli
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          mkdir -p ../dist
+          dist="${RUNNER_TEMP}/dist"
+          mkdir -p "$dist"
+          head=$(git rev-parse HEAD)
           for command in kvsctl kvsctl-release; do
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
               -ldflags "-s -w -X main.Version=${VERSION}" \
-              -o "../dist/${command}-linux-amd64" "./cmd/${command}"
+              -o "${dist}/${command}-linux-amd64" "./cmd/${command}"
+            stamp=$(go version -m "${dist}/${command}-linux-amd64")
+            if ! grep -Fq "vcs.revision=${head}" <<<"$stamp" ||
+              ! grep -Fq "vcs.modified=false" <<<"$stamp"; then
+              echo "::error::${command} does not say it was built from ${head} unmodified"
+              printf '%s\n' "$stamp"
+              exit 1
+            fi
           done
 
       - name: checksums
-        working-directory: dist
+        working-directory: ${{ runner.temp }}/dist
         run: sha256sum kvsctl-* > SHA256SUMS
 
       - uses: actions/upload-artifact@v7
         with:
           name: cli
-          path: dist/
+          path: ${{ runner.temp }}/dist/
           if-no-files-found: error
 
   publish:
