@@ -52,7 +52,8 @@ func releasesCmd() *cobra.Command {
 				return encoder.Encode(doc.Manifest.Releases)
 			}
 			installed := installedVersion()
-			_, _ = fmt.Fprintf(stdout, "%d releases, channel %s, updated %s\n", len(doc.Manifest.Releases), doc.Manifest.Channel, doc.Manifest.Updated)
+			count := len(doc.Manifest.Releases)
+			_, _ = fmt.Fprintf(stdout, "%d %s, channel %s, updated %s\n", count, plural(count, "release", "releases"), doc.Manifest.Channel, doc.Manifest.Updated)
 			for _, line := range releaseLines(doc.Manifest, installed) {
 				_, _ = fmt.Fprintln(stdout, line)
 			}

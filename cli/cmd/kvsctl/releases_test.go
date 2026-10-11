@@ -124,3 +124,23 @@ func TestReleasesRefusesAChannelItDoesNotRead(t *testing.T) {
 		t.Fatalf("releases of a channel kvsctl does not read: %v, printed %q", err, out)
 	}
 }
+
+// The first line counts the releases in words that agree with the number,
+// the single release of a first manifest included.
+func TestReleasesCountsTheReleases(t *testing.T) {
+	root := newRoot(t)
+	for _, tc := range []struct {
+		releases []manifest.Release
+		want     string
+	}{
+		{[]manifest.Release{testRelease("1.0.0", "2026-09-01", "")}, "1 release, channel stable, updated "},
+		{[]manifest.Release{testRelease("1.1.0", "2026-09-08", ""), testRelease("1.0.0", "2026-09-01", "")}, "2 releases, channel stable, updated "},
+	} {
+		url := signedManifest(t, tc.releases...)
+		useStderr(t)
+		out, err := runKvsctl(t, "releases", "--root", root, "--manifest", url, "--quiet")
+		if err != nil || !strings.HasPrefix(out, tc.want) {
+			t.Errorf("releases of %d: %v, printed %q, want a first line starting with %q", len(tc.releases), err, out, tc.want)
+		}
+	}
+}
