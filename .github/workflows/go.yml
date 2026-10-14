@@ -76,7 +76,7 @@ jobs:
       # database is read at each run, so a commit checked once fails later
       # when a vulnerability it ships becomes known.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       # Static and for linux/amd64, the way the release workflow builds the
       # only binaries it publishes.
       - name: build
