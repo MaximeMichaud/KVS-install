@@ -1,0 +1,38 @@
+name: pre-commit
+
+# The hooks of .pre-commit-config.yaml, on every push to a branch and every
+# pull request. Main requires this check before a pull request merges:
+# Renovate merges the updates of these hooks by itself, and nothing else
+# runs them before a commit does.
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      # The environments of the hooks, built once for each version of the
+      # configuration.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      # The hooks of the commit-msg and pre-push stages check a message or
+      # the commits of a branch, which a run on the files leaves out.
+      - name: the hooks, on every file
+        run: |
+          python -m pip install pre-commit==4.6.2
+          pre-commit run --all-files --show-diff-on-failure

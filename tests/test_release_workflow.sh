@@ -16,7 +16,8 @@
 # never publish at once, the matrix builds php-fpm and cron for the same PHP
 # series, only linux/amd64 binaries are built, the Go toolchain is exactly
 # the one cli/go.mod names, and the lock of the base images is checked every
-# week.
+# week. Every check main requires before a pull request merges starts on
+# every pull request, under the name the protection of main asks for.
 #
 # The jobs, steps and triggers are read as YAML, where GitHub reads them, so
 # a trigger left in a comment, a condition on a job or a step, or a test
@@ -341,3 +342,23 @@ has "$DOCKER" "if: github.event_name == 'schedule' || github.event_name == 'work
 [ "$(grep -c "if: github.event_name == 'push' || github.event_name == 'pull_request'" "$DOCKER")" -eq 2 ] ||
     fail "hadolint and the image builds must keep running on push and pull requests only"
 echo "PASS: images.lock is checked against the registries every week"
+
+# Main requires these checks before a pull request merges, the ones Renovate
+# opens and merges by itself included, and a check that never starts holds
+# its pull request forever: the workflow of each starts on every pull
+# request, with no filter, and its job keeps the name the protection of main
+# asks for. A job renamed here is renamed in that protection too.
+for required in "go.yml:build:build" "tests.yml:suites:shell suites" \
+    "tests.yml:release-scripts:release scripts, runner coreutils" \
+    "push.yml:shellcheck:shellcheck" "markdown-lint.yml:markdownlint:markdownlint" \
+    "pre-commit.yml:pre-commit:pre-commit"; do
+    IFS=: read -r file job name <<<"$required"
+    json=$(workflow_json "$ROOT_DIR/.github/workflows/$file")
+    holds "$json" "$file must start on every pull request, with no filter: main requires its $name check" \
+        '.on | if type == "array" then index("pull_request") != null
+            elif type == "object" then has("pull_request") and .pull_request == null
+            else . == "pull_request" end'
+    holds "$json" "the $job job of $file must keep the name main requires, $name" \
+        '.jobs | has($job) and (.[$job].name // $job) == $name' --arg job "$job" --arg name "$name"
+done
+echo "PASS: every check main requires starts on every pull request, under the name it requires"
