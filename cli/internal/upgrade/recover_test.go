@@ -115,7 +115,7 @@ func TestRecoverAfterACutAndAComposeUpByHand(t *testing.T) {
 				t.Fatalf("journal: %+v", j)
 			}
 			s.f.with(func(f *fakeDocker) {
-				if resp := f.up(filepath.Join(s.root, "docker"), nil); resp.Code != 0 {
+				if resp := f.up(filepath.Join(s.root, "docker"), nil, ""); resp.Code != 0 {
 					t.Fatalf("compose up by hand: %s", resp.Stderr)
 				}
 			})

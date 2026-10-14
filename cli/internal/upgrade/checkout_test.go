@@ -54,7 +54,7 @@ func (s *stack) asCheckout() {
 		} {
 			f.held = append(f.held, img)
 		}
-		if resp := f.up(inst.DockerDir, nil); resp.Code != 0 {
+		if resp := f.up(inst.DockerDir, nil, ""); resp.Code != 0 {
 			s.t.Fatalf("the checkout does not start: %s", resp.Stderr)
 		}
 	})

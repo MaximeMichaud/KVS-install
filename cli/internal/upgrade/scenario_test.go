@@ -1356,3 +1356,98 @@ func TestUpgradeKeepsTheArchiveARollbackReplays(t *testing.T) {
 		t.Errorf("the database holds %q after the rollback, want the archive of the upgrade to 1.1.0", db)
 	}
 }
+
+// A MariaDB created by a release that set it no grace period has Docker's
+// 10 seconds, and compose kills it that soon when it recreates the
+// container, unless --timeout says otherwise: the first upgrade to a
+// release that sets one recreates MariaDB alone first with that grace
+// period, so the server can flush its changed pages. A rollback stops the
+// container of that release within the grace period it has, and an upgrade
+// whose MariaDB has the time already passes nothing; a grace period raised
+// in the .env is given the same way.
+func TestUpgradeGivesTheOldMariaDBItsGracePeriod(t *testing.T) {
+	const grace = "${MARIADB_STOP_GRACE_PERIOD:-10m}"
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0", grace: grace}, rel{version: "1.2.0", grace: grace}, rel{version: "1.3.0", grace: grace})
+	to := func(v string) func(*Options) { return func(o *Options) { o.Version = v } }
+	// step runs fn and reports how long compose gave the mariadb
+	// containers it replaced to stop, and the commands with a --timeout.
+	step := func(what string, fn func() error) (stops, timeouts []string) {
+		t.Helper()
+		s.f.with(func(f *fakeDocker) { f.recreated = nil })
+		before := len(s.f.commands())
+		if err := fn(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		s.f.with(func(f *fakeDocker) {
+			for _, r := range f.recreated {
+				if strings.HasPrefix(r, mariadbService+" ") {
+					stops = append(stops, r)
+				}
+			}
+		})
+		for _, c := range s.f.commands()[before:] {
+			if strings.Contains(c, "--timeout") {
+				timeouts = append(timeouts, c)
+			}
+		}
+		return stops, timeouts
+	}
+
+	stops, timeouts := step("upgrade to 1.1.0", func() error { return s.upgrade(s.runner(to("1.1.0"))) })
+	s.back("1.1.0")
+	if !slices.Equal(stops, []string{"mariadb 600s"}) || !slices.Equal(timeouts, []string{"compose up -d --timeout 600 mariadb"}) {
+		t.Errorf("the MariaDB of 1.0.0 was stopped within %v, by %q; want 600s, alone first", stops, timeouts)
+	}
+	if first, all := s.ran("compose up -d --timeout 600 mariadb"), s.ran("compose up -d"); all < first {
+		t.Errorf("the other services were brought up before MariaDB: %q", s.f.commands())
+	}
+	if !s.rep.said("the mariadb container was created to be killed 10s after it is asked to stop: compose gives it the 10m0s the stack sets") {
+		t.Errorf("the log does not say why MariaDB is stopped with the grace period: %q", s.rep.logs())
+	}
+
+	stops, timeouts = step("rollback to 1.0.0", func() error { s.fresh(); return s.rollback(s.runner()) })
+	s.back("1.0.0")
+	if !slices.Equal(stops, []string{"mariadb 600s"}) || len(timeouts) != 0 {
+		t.Errorf("the rollback stopped the MariaDB of 1.1.0 within %v, by %q; want its own 600s", stops, timeouts)
+	}
+
+	stops, timeouts = step("upgrade to 1.1.0 again", func() error { return s.upgrade(s.runner(to("1.1.0"))) })
+	if !slices.Equal(stops, []string{"mariadb 600s"}) || len(timeouts) != 1 {
+		t.Errorf("the MariaDB the rollback created was stopped within %v, by %q; want 600s", stops, timeouts)
+	}
+
+	stops, timeouts = step("upgrade to 1.2.0", func() error { return s.upgrade(s.runner(to("1.2.0"))) })
+	if len(stops) != 0 || len(timeouts) != 0 {
+		t.Errorf("a MariaDB with its grace period was stopped within %v, by %q; want it left alone", stops, timeouts)
+	}
+
+	s.setEnv("MARIADB_STOP_GRACE_PERIOD", "15m")
+	stops, timeouts = step("upgrade to 1.3.0", func() error { return s.upgrade(s.runner(to("1.3.0"))) })
+	if !slices.Equal(stops, []string{"mariadb 900s"}) || !slices.Equal(timeouts, []string{"compose up -d --timeout 900 mariadb"}) {
+		t.Errorf("a grace period raised to 15m: stopped within %v, by %q", stops, timeouts)
+	}
+}
+
+// A grace period compose cannot be asked for is said in the log, and
+// MariaDB is then stopped as compose always stopped it.
+func TestUpgradeWhenTheGracePeriodCannotBeRead(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0", grace: "10m"})
+	s.f.with(func(f *fakeDocker) {
+		f.hook = func(_ *fakeDocker, req cliRequest) (cliResponse, bool) {
+			if strings.Join(req.Args, " ") == "compose config --format json mariadb" {
+				return cliResponse{Stderr: "unknown flag: --format\n", Code: 1}, true
+			}
+			return cliResponse{}, false
+		}
+	})
+	if err := s.upgrade(s.runner()); err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	s.back("1.1.0")
+	if !s.rep.said("the grace period of MariaDB could not be read, compose stops it within the 10s its container has: docker compose config --format json mariadb: exit status 1: unknown flag: --format") {
+		t.Errorf("the log does not say the grace period was not read: %q", s.rep.logs())
+	}
+	if s.count("compose up -d --timeout") != 0 {
+		t.Errorf("compose was given a timeout it was not asked for: %q", s.f.commands())
+	}
+}

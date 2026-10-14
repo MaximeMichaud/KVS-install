@@ -73,6 +73,9 @@ type rel struct {
 	// files are release files this release ships beside the ones every
 	// release of the tests ships, by path to content.
 	files map[string]string
+	// grace is the stop_grace_period its MariaDB sets, none by default,
+	// as the releases before it was set.
+	grace string
 }
 
 func (r rel) phpSeries() []string {
@@ -106,10 +109,12 @@ type stack struct {
 	releases []manifest.Release
 	// images of each version by service, variants as service@series.
 	images map[string]map[string]manifest.Image
-	// extra are the extra services of each version, and shipped the files
-	// each version ships beside the common ones.
+	// extra are the extra services of each version, shipped the files
+	// each version ships beside the common ones, and grace the grace
+	// period its MariaDB sets.
 	extra   map[string][]string
 	shipped map[string]map[string]string
+	grace   map[string]string
 	site    atomic.Int32
 	port    string
 	rep     *recorder
@@ -127,7 +132,7 @@ func newStack(t *testing.T, series string, installed rel, more ...rel) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &stack{t: t, f: f, docker: docker, root: t.TempDir(), dir: t.TempDir(), pub: pub, priv: priv, images: map[string]map[string]manifest.Image{}, extra: map[string][]string{}, shipped: map[string]map[string]string{}, rep: &recorder{answer: true}}
+	s := &stack{t: t, f: f, docker: docker, root: t.TempDir(), dir: t.TempDir(), pub: pub, priv: priv, images: map[string]map[string]manifest.Image{}, extra: map[string][]string{}, shipped: map[string]map[string]string{}, grace: map[string]string{}, rep: &recorder{answer: true}}
 	s.site.Store(http.StatusOK)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(int(s.site.Load()))
@@ -167,7 +172,7 @@ func (s *stack) addRelease(r rel) {
 		images[svc] = s.f.publish(svc, registry+svc+":"+v, "")
 		out.Images = append(out.Images, images[svc])
 	}
-	s.extra[v], s.shipped[v] = r.extra, r.files
+	s.extra[v], s.shipped[v], s.grace[v] = r.extra, r.files, r.grace
 	if out.Date == "" {
 		out.Date = "2026-10-01"
 	}
@@ -199,7 +204,11 @@ func (s *stack) addRelease(r rel) {
 // on the machine.
 func (s *stack) files(v string, images map[string]manifest.Image) map[string]string {
 	pin := func(service string) string { return images[service].Ref + "@" + images[service].Digest }
-	base := "nginx kvs-nginx\nphp-fpm kvs-php needs:mariadb\nmariadb mariadb:${MARIADB_VERSION:-12.3}\nmanticore kvs-manticore manticore needs:mariadb\nkvs-init kvs-init setup needs:mariadb\nmemcached memcached:1.6 memcached\n"
+	mariadb := "mariadb mariadb:${MARIADB_VERSION:-12.3}"
+	if grace := s.grace[v]; grace != "" {
+		mariadb += " grace:" + grace
+	}
+	base := "nginx kvs-nginx\nphp-fpm kvs-php needs:mariadb\n" + mariadb + "\nmanticore kvs-manticore manticore needs:mariadb\nkvs-init kvs-init setup needs:mariadb\nmemcached memcached:1.6 memcached\n"
 	override := "nginx " + pin("nginx") + "\n" +
 		"php-fpm ${KVS_PHP_FPM_IMAGE:?run-kvsctl-upgrade}\n" +
 		"mariadb ${KVS_MARIADB_IMAGE:?run-kvsctl-upgrade}\n" +
@@ -316,7 +325,7 @@ func (s *stack) install(v, series string) {
 		s.f.hold(images[service])
 	}
 	s.f.with(func(f *fakeDocker) {
-		if resp := f.up(inst.DockerDir, nil); resp.Code != 0 {
+		if resp := f.up(inst.DockerDir, nil, ""); resp.Code != 0 {
 			s.t.Fatalf("the stack does not start: %s", resp.Stderr)
 		}
 	})

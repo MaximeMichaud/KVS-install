@@ -447,7 +447,14 @@ line a script reads.
    containers of the services the release drops are removed, then
    `docker compose up -d` runs; when the MariaDB image changes, MariaDB comes
    up alone first and the other services once it is healthy, within the
-   database wait (`--db-timeout`), which the log names.
+   database wait (`--db-timeout`), which the log names. Compose stops a
+   container it recreates within the grace period that container was
+   created with, and a MariaDB created before the stack gave it one
+   (`MARIADB_STOP_GRACE_PERIOD`, ten minutes) has Docker's 10 seconds, after
+   which the kill can cut short the flush of its changed pages. When the
+   project gives MariaDB a longer grace period than its container has, it
+   comes up alone first too, with
+   `docker compose up -d --timeout <seconds> mariadb`, and the log says so.
 7. **Verify.** Only the containers of the services compose runs here are
    judged, and Docker's health state decides: running and healthy, or
    running without a health check, passes. A container still starting gets

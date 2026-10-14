@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -297,7 +298,9 @@ func (r *Runner) lay(dir string, files []string, state *instance.State, want map
 // them keeps running the code of the version left. When the mariadb image
 // changes, MariaDB comes up alone first and the other services once it is
 // healthy: a long upgrade of its system tables would otherwise trip the
-// health dependencies of the services that need it.
+// health dependencies of the services that need it. So it does when its
+// container must be given more time to stop than it was created with
+// (stopGrace).
 func (r *Runner) restart(ctx context.Context, j *instance.Journal, mariadbFirst bool, budget time.Duration) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
@@ -334,12 +337,18 @@ func (r *Runner) restart(ctx context.Context, j *instance.Journal, mariadbFirst 
 }
 
 // composeUp runs docker compose up -d, MariaDB alone first when
-// mariadbFirst is set, and waits for it within budget before the rest.
+// mariadbFirst is set or its container needs more time to stop than it
+// has (stopGrace), and waits for it within budget before the rest.
 // started reports whether compose ran at all.
 func (r *Runner) composeUp(ctx context.Context, mariadbFirst bool, budget time.Duration) (started bool, err error) {
-	if mariadbFirst {
+	grace := r.stopGrace(ctx)
+	if mariadbFirst || grace > 0 {
 		r.log(fmt.Sprintf("starting MariaDB alone first, the other services follow once it is healthy; MariaDB has %s to be ready (--db-timeout)", shortDuration(budget)))
-		started, err = dockerx.ComposeStarted(ctx, r.Inst.DockerDir, r.log, "up", "-d", mariadbService)
+		up := []string{"up", "-d"}
+		if grace > 0 {
+			up = append(up, "--timeout", strconv.FormatInt(int64((grace+time.Second-1)/time.Second), 10))
+		}
+		started, err = dockerx.ComposeStarted(ctx, r.Inst.DockerDir, r.log, append(up, mariadbService)...)
 		if err == nil {
 			err = r.waitDatabase(ctx, budget)
 		}
@@ -349,6 +358,31 @@ func (r *Runner) composeUp(ctx context.Context, mariadbFirst bool, budget time.D
 	}
 	all, err := dockerx.ComposeStarted(ctx, r.Inst.DockerDir, r.log, "up", "-d")
 	return started || all, err
+}
+
+// stopGrace is how long compose must give the running MariaDB to stop
+// when it recreates it, zero when its container has that long already.
+// Compose stops a container it recreates with the grace period that
+// container was created with, unless --timeout says otherwise, and a
+// MariaDB created before the stack gave it one has Docker's 10 seconds:
+// the kill that follows can cut short the flush of its changed pages and
+// leave a crash recovery to the next start. What cannot be read changes
+// nothing, and compose stops it as it always did.
+func (r *Runner) stopGrace(ctx context.Context) time.Duration {
+	c, err := r.Docker.Container(ctx, r.mariadbContainer())
+	if err != nil || c.State != "running" || c.StopTimeout < 0 {
+		return 0
+	}
+	grace, err := dockerx.StopGracePeriod(ctx, r.Inst.DockerDir, mariadbService)
+	if err != nil {
+		r.log("the grace period of MariaDB could not be read, compose stops it within the " + shortDuration(c.StopTimeout).String() + " its container has: " + errLine(err))
+		return 0
+	}
+	if grace <= c.StopTimeout {
+		return 0
+	}
+	r.log(fmt.Sprintf("the mariadb container was created to be killed %s after it is asked to stop: compose gives it the %s the stack sets", shortDuration(c.StopTimeout), shortDuration(grace)))
+	return grace
 }
 
 // mariadbMark is the mariadb container as it is now, the life a later look

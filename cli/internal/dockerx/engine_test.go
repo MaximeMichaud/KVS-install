@@ -3,6 +3,7 @@ package dockerx
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,30 @@ func TestContainersCarryTheIDAndTheHealthTiming(t *testing.T) {
 	}
 	if _, err := c.Container(context.Background(), "kvs-gone"); err == nil {
 		t.Error("a container the engine does not know is an error")
+	}
+}
+
+// The grace period a container was created with is how long docker stop,
+// and compose when it recreates the container, waits before the kill:
+// Docker's 10 seconds without one, and as long as it takes below zero.
+func TestContainerStopTimeout(t *testing.T) {
+	f, c := newFakeEngine(t)
+	f.set(func(f *fakeEngine) {
+		f.containers = nil
+		for i, timeout := range []*int{nil, new(600), new(0), new(-1)} {
+			ctr := fakeContainer(fmt.Sprintf("id-%d", i), fmt.Sprintf("kvs-%d", i), "mariadb", nil)
+			ctr.Config.StopTimeout = timeout
+			f.containers = append(f.containers, ctr)
+		}
+	})
+	for i, want := range []time.Duration{10 * time.Second, 10 * time.Minute, 0, -time.Second} {
+		got, err := c.Container(context.Background(), fmt.Sprintf("kvs-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.StopTimeout != want {
+			t.Errorf("kvs-%d: stop timeout %s, want %s", i, got.StopTimeout, want)
+		}
 	}
 }
 

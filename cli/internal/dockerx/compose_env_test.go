@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/dotenv"
 )
@@ -164,5 +165,42 @@ func TestServicesOfReadsTheFileItIsGiven(t *testing.T) {
 	}
 	if _, err := ServicesOf(context.Background(), compose, map[string]string{"COMPOSE_PROFILES": ""}); err == nil || !strings.Contains(err.Error(), "set it") {
 		t.Errorf("a variable the file requires, set to nothing: %v, want what compose said", err)
+	}
+}
+
+// The real docker compose gives StopGracePeriod what it sets on the
+// containers it creates: the default the file gives, or the setting of the
+// .env, and nothing for a service that sets none. Gated like
+// TestComposeResolvesWhatKvsctlReads.
+func TestStopGracePeriodOfTheRealCompose(t *testing.T) {
+	if os.Getenv("KVSCTL_COMPOSE_PARITY") != "1" {
+		t.Skip("set KVSCTL_COMPOSE_PARITY=1 to compare with docker compose")
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker is not installed")
+	}
+	dir := t.TempDir()
+	compose := "name: kvsctltest-grace\nservices:\n  mariadb:\n    image: mariadb:11.8\n    stop_grace_period: ${MARIADB_STOP_GRACE_PERIOD:-10m}\n  nginx:\n    image: nginx\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		env  string
+		want time.Duration
+	}{
+		{"", 10 * time.Minute},
+		{"MARIADB_STOP_GRACE_PERIOD=\n", 10 * time.Minute},
+		{"MARIADB_STOP_GRACE_PERIOD=90s\n", 90 * time.Second},
+		{"MARIADB_STOP_GRACE_PERIOD=1h30m\n", 90 * time.Minute},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(c.env), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := StopGracePeriod(context.Background(), dir, "mariadb"); err != nil || got != c.want {
+			t.Errorf(".env %q: %s, %v; want %s", c.env, got, err, c.want)
+		}
+	}
+	if got, err := StopGracePeriod(context.Background(), dir, "nginx"); err != nil || got != 0 {
+		t.Errorf("a service without a grace period: %s, %v", got, err)
 	}
 }

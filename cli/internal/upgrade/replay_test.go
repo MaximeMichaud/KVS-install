@@ -162,7 +162,7 @@ func (s *stack) withSearch() {
 	})
 	s.setEnv("COMPOSE_PROFILES", "manticore,memcached")
 	s.f.with(func(f *fakeDocker) {
-		if resp := f.up(filepath.Join(s.root, "docker"), nil); resp.Code != 0 {
+		if resp := f.up(filepath.Join(s.root, "docker"), nil, ""); resp.Code != 0 {
 			s.t.Fatalf("compose up: %s", resp.Stderr)
 		}
 	})

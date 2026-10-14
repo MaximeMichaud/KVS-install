@@ -57,6 +57,12 @@ images)
 project)
 	printf '{"name":"kvs-example","services":{"nginx":{"build":{"context":"."}}}}\n'
 	;;
+grace)
+	printf '{"name":"kvs","services":{"mariadb":{"image":"mariadb:11.8","stop_grace_period":"10m0s"}}}\n'
+	;;
+nograce)
+	printf '{"name":"kvs","services":{"mariadb":{"image":"mariadb:11.8"}}}\n'
+	;;
 empty)
 	;;
 stdin)
@@ -310,6 +316,36 @@ func TestComposeConfigCheck(t *testing.T) {
 	t.Setenv("FAKE_DOCKER_MODE", "fail")
 	err := ComposeConfigCheck(context.Background(), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "undefined volume x") {
+		t.Errorf("err = %v, want what compose said", err)
+	}
+}
+
+// StopGracePeriod reads the grace period compose gives the containers of
+// a service from the project it resolves, zero for a service that sets
+// none; a project compose cannot read, or without the service, is an
+// error.
+func TestStopGracePeriod(t *testing.T) {
+	log := installFakeDocker(t, "grace")
+	dir := t.TempDir()
+	grace, err := StopGracePeriod(context.Background(), dir, "mariadb")
+	if err != nil || grace != 10*time.Minute {
+		t.Fatalf("grace %s, %v; want 10m", grace, err)
+	}
+	text := readLog(t, log)
+	if args := logged(text, "args"); args != "compose config --format json mariadb" {
+		t.Errorf("args %q", args)
+	}
+	assertOwnGroup(t, text)
+	t.Setenv("FAKE_DOCKER_MODE", "nograce")
+	if grace, err := StopGracePeriod(context.Background(), dir, "mariadb"); err != nil || grace != 0 {
+		t.Errorf("a service without a grace period: %s, %v", grace, err)
+	}
+	t.Setenv("FAKE_DOCKER_MODE", "project")
+	if _, err := StopGracePeriod(context.Background(), dir, "mariadb"); err == nil || !strings.Contains(err.Error(), "lists no service mariadb") {
+		t.Errorf("a project without the service: %v", err)
+	}
+	t.Setenv("FAKE_DOCKER_MODE", "fail")
+	if _, err := StopGracePeriod(context.Background(), dir, "mariadb"); err == nil || !strings.Contains(err.Error(), "undefined volume x") {
 		t.Errorf("err = %v, want what compose said", err)
 	}
 }

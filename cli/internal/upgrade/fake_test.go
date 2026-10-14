@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -132,6 +133,9 @@ type fakeContainer struct {
 	// services it depends on did not turn healthy.
 	created bool
 	behave  behavior
+	// grace is the stop_grace_period the container was created with, ""
+	// for none, which leaves Docker's 10 seconds.
+	grace string
 }
 
 // fakeData is what a folder of the MariaDB data volume holds: data files
@@ -180,6 +184,9 @@ type fakeDocker struct {
 	requested map[string]bool
 	rebuilds  []string
 	removed   []string
+	// recreated are the running containers compose up replaced, each with
+	// the time it gave the container to stop: "mariadb 600s".
+	recreated []string
 	// dumpedWith and replayedWith are the services whose containers ran
 	// while each dump was taken and each replay went in, and movedWith
 	// while the data files moved aside or back: the ones that could write
@@ -591,6 +598,10 @@ func (f *fakeDocker) inspect(c *fakeContainer, now time.Time) map[string]any {
 		st["Health"] = map[string]any{"Status": health}
 	}
 	config := map[string]any{"Image": c.ref, "Labels": f.labels(c)}
+	if c.grace != "" {
+		grace, _ := time.ParseDuration(c.grace)
+		config["StopTimeout"] = int(grace / time.Second)
+	}
 	if !c.behave.noCheck && !c.behave.exits {
 		config["Healthcheck"] = map[string]any{"Test": []string{"CMD", "true"}, "Interval": int64(10 * time.Millisecond), "Timeout": int64(10 * time.Millisecond), "Retries": 1, "StartPeriod": int64(c.behave.startPeriod)}
 	}
@@ -633,37 +644,43 @@ func (f *fakeDocker) compose(req cliRequest, args []string) cliResponse {
 	case "version":
 		return cliResponse{Stdout: "2.29.7\n"}
 	case "config":
-		load := func() ([]string, error) {
-			_, active, err := f.loadProject(dir)
-			return active, err
+		load := func() (map[string]fakeService, []string, error) {
+			return f.loadProject(dir)
 		}
 		if stdin {
-			load = func() ([]string, error) {
+			load = func() (map[string]fakeService, []string, error) {
 				env := map[string]string{}
 				for _, entry := range req.Env {
 					key, value, _ := strings.Cut(entry, "=")
 					env[key] = value
 				}
-				_, active, err := parseProject([][]byte{req.Stdin}, env)
-				return active, err
+				return parseProject([][]byte{req.Stdin}, env)
 			}
 		}
-		active, err := load()
+		services, active, err := load()
 		if err != nil {
 			return cliResponse{Stderr: err.Error() + "\n", Code: 15}
 		}
-		if slices.Contains(args, "--services") {
+		switch {
+		case slices.Contains(args, "--services"):
 			return cliResponse{Stdout: strings.Join(active, "\n") + "\n"}
+		case slices.Contains(args, "json"):
+			return projectJSON(services, args[1:])
 		}
 		return cliResponse{}
 	case "up":
 		var only []string
-		for _, a := range args[1:] {
-			if !strings.HasPrefix(a, "-") {
+		timeout := ""
+		for i := 1; i < len(args); i++ {
+			switch a := args[i]; {
+			case (a == "--timeout" || a == "-t") && i+1 < len(args):
+				i++
+				timeout = args[i] + "s"
+			case !strings.HasPrefix(a, "-"):
 				only = append(only, a)
 			}
 		}
-		return f.up(dir, only)
+		return f.up(dir, only, timeout)
 	case "stop":
 		for _, name := range args[1:] {
 			if c := f.containers[f.prefix+"-"+name]; c != nil {
@@ -772,11 +789,13 @@ func (f *fakeDocker) moveBack(script string) cliResponse {
 
 // up is docker compose up -d: every active service, or the ones named and
 // the ones they need, gets a container of the image its files name,
-// recreated when that image changed and started when it was stopped. A
+// recreated when that image or its grace period changed, and started when
+// it was stopped. A running container compose replaces is stopped within
+// timeout, --timeout, or else the grace period it was created with. A
 // service that needs another one healthy is started once it is, and when
 // it is not, compose stops there with the container it created never
 // started, the way depends_on with condition service_healthy does.
-func (f *fakeDocker) up(dir string, only []string) cliResponse {
+func (f *fakeDocker) up(dir string, only []string, timeout string) cliResponse {
 	services, active, err := f.loadProject(dir)
 	if err != nil {
 		return cliResponse{Stderr: err.Error() + "\n", Code: 15}
@@ -813,14 +832,22 @@ func (f *fakeDocker) up(dir string, only []string) cliResponse {
 		}
 		cname := f.prefix + "-" + name
 		c := f.containers[cname]
-		same := c != nil && c.image == img && c.ref == ref.image
+		same := c != nil && c.image == img && c.ref == ref.image && c.grace == ref.grace
+		if !same && c != nil && !c.stopped && !c.created {
+			within := timeout
+			if within == "" {
+				within = cmp.Or(c.grace, "10s")
+			}
+			stop, _ := time.ParseDuration(within)
+			f.recreated = append(f.recreated, fmt.Sprintf("%s %ds", name, int(stop/time.Second)))
+		}
 		if failed := f.waitHealthy(ref.needs); failed != "" {
 			if !same {
 				if c != nil {
 					lines = append(lines, "Container "+cname+" Recreate")
 				}
 				f.seq++
-				f.containers[cname] = &fakeContainer{id: fmt.Sprintf("%064x", f.seq), name: cname, service: name, ref: ref.image, image: img, created: true}
+				f.containers[cname] = &fakeContainer{id: fmt.Sprintf("%064x", f.seq), name: cname, service: name, ref: ref.image, image: img, created: true, grace: ref.grace}
 				lines = append(lines, "Container "+cname+" Created")
 			}
 			return cliResponse{Stdout: strings.Join(lines, "\n") + "\n", Stderr: "dependency failed to start: " + failed + "\n", Code: 1}
@@ -836,7 +863,7 @@ func (f *fakeDocker) up(dir string, only []string) cliResponse {
 				lines = append(lines, "Container "+cname+" Recreate")
 			}
 			f.seq++
-			c = &fakeContainer{id: fmt.Sprintf("%064x", f.seq), name: cname, service: name, ref: ref.image, image: img}
+			c = &fakeContainer{id: fmt.Sprintf("%064x", f.seq), name: cname, service: name, ref: ref.image, image: img, grace: ref.grace}
 			f.containers[cname] = c
 			f.start(c)
 			lines = append(lines, "Container "+cname+" Started")
@@ -964,6 +991,8 @@ type fakeService struct {
 	image, profile string
 	// needs are the services this one waits for, healthy.
 	needs []string
+	// grace is the stop_grace_period of the service, "" for none.
+	grace string
 }
 
 // overrideNames are the overrides compose loads beside docker-compose.yml
@@ -971,11 +1000,11 @@ type fakeService struct {
 var overrideNames = []string{"compose.override.yml", "compose.override.yaml", "docker-compose.override.yml", "docker-compose.override.yaml"}
 
 // loadProject reads the compose project the way docker compose does, from a
-// format of its own: one "service image [profile] [needs:service]" line
-// per service, the files COMPOSE_FILE names (later ones override the
-// image), or docker-compose.yml and the override compose finds without it,
-// ${VAR}, ${VAR:-default} and ${VAR:?message} taken from the .env, and the
-// profiles of COMPOSE_PROFILES.
+// format of its own: one "service image [profile] [needs:service]
+// [grace:duration]" line per service, the files COMPOSE_FILE names (later
+// ones override the image), or docker-compose.yml and the override compose
+// finds without it, ${VAR}, ${VAR:-default} and ${VAR:?message} taken from
+// the .env, and the profiles of COMPOSE_PROFILES.
 func (f *fakeDocker) loadProject(dir string) (map[string]fakeService, []string, error) {
 	env, err := instance.ReadEnv(filepath.Join(dir, ".env"))
 	if err != nil {
@@ -1024,6 +1053,8 @@ func parseProject(contents [][]byte, env map[string]string) (map[string]fakeServ
 			for _, field := range fields[min(len(fields), 2):] {
 				if need, ok := strings.CutPrefix(field, "needs:"); ok {
 					svc.needs = append(svc.needs, need)
+				} else if grace, ok := strings.CutPrefix(field, "grace:"); ok {
+					svc.grace = grace
 				} else {
 					svc.profile = field
 				}
@@ -1039,13 +1070,63 @@ func parseProject(contents [][]byte, env map[string]string) (map[string]fakeServ
 		if err != nil {
 			return nil, nil, err
 		}
-		svc.image = image
+		grace, err := interpolate(svc.grace, env)
+		if err != nil {
+			return nil, nil, err
+		}
+		if grace != "" {
+			d, err := time.ParseDuration(grace)
+			if err != nil {
+				return nil, nil, fmt.Errorf("'services[%s].stop_grace_period' %w", name, err)
+			}
+			grace = d.String()
+		}
+		svc.image, svc.grace = image, grace
 		services[name] = svc
 		if svc.profile == "" || slices.Contains(profiles, svc.profile) {
 			active = append(active, name)
 		}
 	}
 	return services, active, nil
+}
+
+// projectJSON is docker compose config --format json: the services named,
+// or all of them, with the grace period each sets.
+func projectJSON(services map[string]fakeService, args []string) cliResponse {
+	type service struct {
+		Image           string `json:"image"`
+		StopGracePeriod string `json:"stop_grace_period,omitempty"`
+	}
+	out := map[string]service{}
+	for name, svc := range services {
+		out[name] = service{Image: svc.image, StopGracePeriod: svc.grace}
+	}
+	var named []string
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--format":
+			i++
+		case !strings.HasPrefix(a, "-"):
+			named = append(named, a)
+		}
+	}
+	if len(named) > 0 {
+		for name := range out {
+			if !slices.Contains(named, name) {
+				delete(out, name)
+			}
+		}
+		for _, name := range named {
+			if _, ok := out[name]; !ok {
+				return cliResponse{Stderr: "no such service: " + name + "\n", Code: 1}
+			}
+		}
+	}
+	data, err := json.Marshal(map[string]any{"name": "kvs", "services": out})
+	if err != nil {
+		return cliResponse{Stderr: err.Error() + "\n", Code: 1}
+	}
+	return cliResponse{Stdout: string(data) + "\n"}
 }
 
 var varRe = regexp.MustCompile(`\$\{([A-Z0-9_]+)(?:(:-|:\?)([^}]*))?\}`)

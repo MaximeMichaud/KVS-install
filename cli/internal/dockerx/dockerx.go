@@ -296,7 +296,17 @@ type ContainerState struct {
 	HealthInterval    time.Duration
 	HealthTimeout     time.Duration
 	HealthRetries     int
+	// StopTimeout is how long docker stop waits before it kills the
+	// container, and compose too when it stops or recreates it without
+	// --timeout: the grace period the container was created with, or
+	// Docker's 10 seconds when it has none. Negative waits for as long as
+	// the container takes.
+	StopTimeout time.Duration
 }
+
+// defaultStopTimeout is how long Docker waits for a container created
+// without a grace period of its own to stop before it kills it.
+const defaultStopTimeout = 10 * time.Second
 
 // Docker's health check defaults, for the fields a check leaves at zero.
 const (
@@ -370,10 +380,14 @@ func (p projectContainer) state() ContainerState {
 			s.Health = string(st.Health.Status)
 		}
 	}
+	s.StopTimeout = defaultStopTimeout
 	if inspect.Config != nil {
 		if hc := inspect.Config.Healthcheck; hc != nil && !(len(hc.Test) > 0 && hc.Test[0] == "NONE") {
 			s.HealthStartPeriod, s.HealthInterval = hc.StartPeriod, hc.Interval
 			s.HealthTimeout, s.HealthRetries = hc.Timeout, hc.Retries
+		}
+		if timeout := inspect.Config.StopTimeout; timeout != nil {
+			s.StopTimeout = time.Duration(*timeout) * time.Second
 		}
 	}
 	return s
@@ -655,6 +669,37 @@ func serviceList(out, where string) ([]string, error) {
 func ComposeConfigCheck(ctx context.Context, dir string) error {
 	_, err := composeConfig(ctx, dir, "config", "--quiet")
 	return err
+}
+
+// StopGracePeriod is the stop_grace_period of service in the project in
+// dir, as compose reads it from the files and the .env there: how long it
+// gives the containers it creates for that service to stop. Zero when the
+// service sets none, which leaves them Docker's 10 seconds.
+func StopGracePeriod(ctx context.Context, dir, service string) (time.Duration, error) {
+	out, err := composeConfig(ctx, dir, "config", "--format", "json", service)
+	if err != nil {
+		return 0, err
+	}
+	var project struct {
+		Services map[string]struct {
+			StopGracePeriod string `json:"stop_grace_period"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal([]byte(out), &project); err != nil {
+		return 0, fmt.Errorf("docker compose config --format json: %w", err)
+	}
+	svc, ok := project.Services[service]
+	switch {
+	case !ok:
+		return 0, fmt.Errorf("docker compose config --format json lists no service %s", service)
+	case svc.StopGracePeriod == "":
+		return 0, nil
+	}
+	grace, err := time.ParseDuration(svc.StopGracePeriod)
+	if err != nil {
+		return 0, fmt.Errorf("the stop_grace_period of %s: %w", service, err)
+	}
+	return grace, nil
 }
 
 // composeConfig runs "docker compose" with args, a config command, and
