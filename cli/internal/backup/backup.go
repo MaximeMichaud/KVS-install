@@ -169,7 +169,8 @@ var (
 	// checks of the free space.
 	spaceCheckEvery int64 = 64 << 20
 	// minFreeFloor and freeFloorPercent set the free space a backup never
-	// takes its filesystem below: the larger of the two.
+	// takes its filesystem below: the larger of the two, as FloorRule
+	// says.
 	minFreeFloor     int64 = 1 << 30
 	freeFloorPercent int64 = 2
 	// measureSpace reads the filesystem of the backup directory.
@@ -596,7 +597,7 @@ func (g *spaceGuard) checkLocked() error {
 	if err != nil {
 		return nil
 	}
-	floor := max(minFreeFloor, space.Size*freeFloorPercent/100)
+	floor := FreeFloor(space.Size)
 	if space.Avail >= floor {
 		return nil
 	}
@@ -605,6 +606,16 @@ func (g *spaceGuard) checkLocked() error {
 		g.cancel(g.err)
 	}
 	return g.err
+}
+
+// FloorRule says in words what FreeFloor takes.
+const FloorRule = "2 % of the filesystem, 1 GiB at least"
+
+// FreeFloor is the free space a backup never takes a filesystem of size
+// bytes below. The plan of an upgrade counts it too, so that check does not
+// call ready a machine its backup would refuse.
+func FreeFloor(size int64) int64 {
+	return max(minFreeFloor, size*freeFloorPercent/100)
 }
 
 func (g *spaceGuard) failure() error {

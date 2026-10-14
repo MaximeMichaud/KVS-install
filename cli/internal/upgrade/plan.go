@@ -910,10 +910,13 @@ var measure = diskspace.Measure
 // backup, and for a one-way upgrade the second copy of the database a
 // rollback builds while the files of the new server stay in their volume.
 // Directories on one filesystem share its free space, so their needs add
-// up there. A size, a data directory or a filesystem that cannot be read
-// is listed in DiskUnknown with the reason, never held against the
-// machine: check prints it, and upgrade before it asks, for the operator
-// to judge.
+// up there. The backup also stops before its filesystem falls below a
+// floor (backup.FreeFloor), and it writes before the rest of the run: that
+// filesystem needs the backup and its floor free, or what its directories
+// add up to, whichever is more. A size, a data directory or a filesystem
+// that cannot be read is listed in DiskUnknown with the reason, never held
+// against the machine: check prints it, and upgrade before it asks, for
+// the operator to judge.
 func (r *Runner) planDisk(ctx context.Context, plan *Plan) {
 	type need struct {
 		path  string
@@ -924,6 +927,9 @@ func (r *Runner) planDisk(ctx context.Context, plan *Plan) {
 		at string
 		// images marks the need of the pulled layers.
 		images bool
+		// backup marks the need of the backup, which keeps the floor of
+		// its filesystem free.
+		backup bool
 	}
 	pulled := fmt.Sprintf("the images to pull (%s, counted twice for their unpacked layers)", humanBytes(plan.Bytes))
 	var needs []need
@@ -942,10 +948,14 @@ func (r *Runner) planDisk(ctx context.Context, plan *Plan) {
 	}
 	needs = append(needs, need{path: r.Inst.StateDir(), bytes: plan.Target.Bundle.Size*3 + 200*mib, what: fmt.Sprintf("the bundle (%s) downloaded, unpacked and laid, and 200 MiB", humanBytes(plan.Target.Bundle.Size))})
 	if !r.Opts.SkipBackup {
+		// A backup of unknown size still needs its floor free before its
+		// first byte.
 		plan.DumpEstimate, plan.DumpSource = r.estimateDump(ctx, plan)
+		what := "the backup, of unknown size"
 		if plan.DumpEstimate > 0 {
-			needs = append(needs, need{path: r.Inst.BackupDir(), bytes: plan.DumpEstimate, what: fmt.Sprintf("the backup (about %s, %s)", humanBytes(plan.DumpEstimate), plan.DumpSource)})
+			what = fmt.Sprintf("the backup (about %s, %s)", humanBytes(plan.DumpEstimate), plan.DumpSource)
 		}
+		needs = append(needs, need{path: r.Inst.BackupDir(), bytes: plan.DumpEstimate, what: what, backup: true})
 	}
 	if plan.OneWay {
 		switch datadir, at, size, why := r.secondCopy(ctx, plan); {
@@ -958,6 +968,11 @@ func (r *Runner) planDisk(ctx context.Context, plan *Plan) {
 	var groups []*DiskNeed
 	byDevice := map[uint64]*DiskNeed{}
 	var images *DiskNeed
+	// start is what the filesystem of the backup needs free when the
+	// backup starts, its dump and the floor it keeps: the backup is the
+	// first thing the run writes, and what comes after it may take that
+	// floor.
+	start := map[*DiskNeed]int64{}
 	for _, n := range needs {
 		at := n.path
 		if n.at != "" {
@@ -976,14 +991,21 @@ func (r *Runner) planDisk(ctx context.Context, plan *Plan) {
 			}
 			groups = append(groups, g)
 		}
+		what := n.what
+		if n.backup {
+			floor := backup.FreeFloor(space.Size)
+			what += fmt.Sprintf(", which stops below %s free (%s)", humanBytes(floor), backup.FloorRule)
+			start[g] = n.bytes + floor
+		}
 		g.Paths = append(g.Paths, n.path)
 		g.Needed += n.bytes
-		g.Parts = append(g.Parts, n.what)
+		g.Parts = append(g.Parts, what)
 		if n.images {
 			images = g
 		}
 	}
 	for _, g := range groups {
+		g.Needed = max(g.Needed, start[g])
 		plan.Disk = append(plan.Disk, *g)
 		if g.Free < g.Needed {
 			plan.Blockers = append(plan.Blockers, fmt.Sprintf("%s free on the filesystem of %s is not enough: %s need %s; free some space there ('kvsctl clean' removes what earlier upgrades left, old backups are in %s) and run 'kvsctl check' again", humanBytes(g.Free), strings.Join(g.Paths, " and "), strings.Join(g.Parts, ", "), humanBytes(g.Needed), r.Inst.BackupDir()))

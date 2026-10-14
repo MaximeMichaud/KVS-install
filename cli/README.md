@@ -523,10 +523,15 @@ without touching anything, when:
   times the bundle and 200 MiB; in `backups/`, the expected size of the
   backup (half again the last one, or half of what the tables take); for a
   one-way upgrade, a fifth more than the database on the filesystem of the
-  MariaDB data volume. Directories on the same filesystem add up. A need
-  `kvsctl` cannot measure (a size, the data directory or a filesystem it
-  cannot read) blocks nothing: `kvsctl check` prints it as `not measured`,
-  with why, and `kvsctl upgrade` says it before its question;
+  MariaDB data volume. Directories on the same filesystem add up. The
+  backup also stops before its filesystem falls below the larger of 1 GiB
+  and 2 % of its size (see [Backups](#backups)), and it is the first thing
+  the upgrade writes: that filesystem needs the backup and that floor free,
+  or what its directories add up to, whichever is more, even when the size
+  of the backup is unknown. A need `kvsctl` cannot measure (a size, the
+  data directory or a filesystem it cannot read) blocks nothing:
+  `kvsctl check` prints it as `not measured`, with why, and
+  `kvsctl upgrade` says it before its question;
 - the stack is an adopted checkout newer than the release;
 - the state lists no release file of the installed version;
 - Docker does not answer, or cannot list the containers of the stack, which

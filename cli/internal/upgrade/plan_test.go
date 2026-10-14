@@ -587,6 +587,13 @@ func (s *stack) rebundle(v string, extra map[string]string) {
 // upgrade also counts a second copy of the database in its volume.
 func TestPlanDiskAddsUpPerFilesystem(t *testing.T) {
 	s := newStack(t, "11.8", rel{version: "1.0.0"}, rel{version: "1.1.0"})
+	// The filesystems of the machine read as 10 GiB, which keeps the floor
+	// of the backup at 1 GiB, under what the run adds up there.
+	measuring(t, func(path string) (diskspace.Space, error) {
+		space, err := diskspace.Measure(path)
+		space.Size = 10 << 30
+		return space, err
+	})
 	_, plan := s.plan(s.runner())
 	if len(plan.Disk) != 1 || len(plan.Disk[0].Paths) != 3 {
 		t.Fatalf("disk: %+v", plan.Disk)
@@ -606,6 +613,80 @@ func TestPlanDiskAddsUpPerFilesystem(t *testing.T) {
 	if got, want := oneWay.Disk[0].Needed, oneWay.Bytes*2+gib+oneWay.Target.Bundle.Size*3+200*mib+oneWay.DumpEstimate+1048576*6/5; got != want {
 		t.Errorf("one way needed %d, want %d", got, want)
 	}
+}
+
+// The backup is the first thing an upgrade writes, and it stops before its
+// filesystem falls below 2 % of its size, 1 GiB at least: the plan wants
+// the backup and that floor free there, so check never calls ready a
+// machine the backup would refuse once the operator said yes. What the run
+// writes after the backup comes out of that floor; a backup of unknown
+// size still needs it, and --skip-backup takes it away.
+func TestPlanDiskKeepsTheFloorOfTheBackup(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0"})
+	backups := s.runner().Inst.BackupDir()
+	var free, size int64 = 1 << 40, 1000 << 30
+	own := false
+	measuring(t, func(path string) (diskspace.Space, error) {
+		if own && path == backups {
+			return diskspace.Space{Avail: free, Size: size, Device: 2}, nil
+		}
+		return diskspace.Space{Avail: free, Size: size, Device: 1}, nil
+	})
+	const floor = 20 << 30 // 2 % of 1000 GiB
+	rule := ", which stops below " + humanBytes(floor) + " free (2 % of the filesystem, 1 GiB at least)"
+	_, plan := s.plan(s.runner())
+	rest := plan.Bytes*2 + gib + plan.Target.Bundle.Size*3 + 200*mib
+	if plan.DumpEstimate <= 0 || rest+plan.DumpEstimate >= plan.DumpEstimate+floor {
+		t.Fatalf("estimate %d, rest %d: the floor must be what counts", plan.DumpEstimate, rest)
+	}
+	backupPart := "the backup (about " + humanBytes(plan.DumpEstimate) + ", " + plan.DumpSource + ")" + rule
+	if len(plan.Blockers) != 0 || len(plan.Disk) != 1 || plan.Disk[0].Needed != plan.DumpEstimate+floor || !slices.Contains(plan.Disk[0].Parts, backupPart) {
+		t.Fatalf("a large filesystem: blockers %q, disk %+v", plan.Blockers, plan.Disk)
+	}
+
+	free = plan.DumpEstimate + floor - 1
+	_, plan = s.plan(s.runner())
+	blocked(t, plan, humanBytes(free)+" free on the filesystem of ")
+	blocked(t, plan, backupPart+" need "+humanBytes(plan.DumpEstimate+floor)+"; free some space there")
+	free++
+	if _, plan := s.plan(s.runner()); len(plan.Blockers) != 0 {
+		t.Errorf("the backup and its floor free: blockers %q", plan.Blockers)
+	}
+
+	// On 10 GiB the floor is 1 GiB, and what the run adds up is more.
+	free, size = 1<<40, 10<<30
+	_, plan = s.plan(s.runner())
+	if len(plan.Disk) != 1 || plan.Disk[0].Needed != rest+plan.DumpEstimate || !strings.HasSuffix(plan.Disk[0].Parts[2], ", which stops below "+humanBytes(gib)+" free (2 % of the filesystem, 1 GiB at least)") {
+		t.Errorf("a small filesystem: disk %+v", plan.Disk)
+	}
+
+	// On a filesystem of their own, the backups need their floor alone.
+	own, size = true, 1000<<30
+	_, plan = s.plan(s.runner())
+	if len(plan.Disk) != 2 || plan.Disk[0].Needed != rest || !slices.Equal(plan.Disk[1].Paths, []string{backups}) || plan.Disk[1].Needed != plan.DumpEstimate+floor {
+		t.Errorf("a filesystem for the backups: disk %+v", plan.Disk)
+	}
+	own = false
+
+	_, plan = s.plan(s.runner(func(o *Options) { o.SkipBackup = true }))
+	if len(plan.Disk) != 1 || plan.Disk[0].Needed != rest || len(plan.Disk[0].Parts) != 2 {
+		t.Errorf("--skip-backup: disk %+v", plan.Disk)
+	}
+
+	s.f.with(func(f *fakeDocker) {
+		f.hook = func(_ *fakeDocker, req cliRequest) (cliResponse, bool) {
+			if req.Args[0] == "exec" && strings.Contains(req.Args[len(req.Args)-1], "information_schema") {
+				return cliResponse{Stderr: "ERROR 1045 (28000): Access denied\n", Code: 1}, true
+			}
+			return cliResponse{}, false
+		}
+	})
+	free = floor - 1
+	_, plan = s.plan(s.runner())
+	if plan.DumpEstimate != 0 || len(plan.Disk) != 1 || plan.Disk[0].Needed != floor {
+		t.Fatalf("a backup of unknown size: estimate %d, disk %+v", plan.DumpEstimate, plan.Disk)
+	}
+	blocked(t, plan, "the backup, of unknown size"+rule+" need "+humanBytes(floor)+";")
 }
 
 // release is the entry of version in the list the stack publishes, for a
