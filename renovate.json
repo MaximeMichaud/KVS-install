@@ -1,0 +1,78 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["gomod", "github-actions", "pre-commit", "custom.regex"],
+  "pre-commit": {
+    "enabled": true
+  },
+  "timezone": "America/Toronto",
+  "schedule": ["before 6am on Monday"],
+  "labels": ["dependencies"],
+  "semanticCommits": "enabled",
+  "dependencyDashboard": true,
+  "minimumReleaseAge": "3 days",
+  "automerge": true,
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "platformAutomerge": true,
+  "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
+  "vulnerabilityAlerts": {
+    "addLabels": ["security"]
+  },
+  "customManagers": [
+    {
+      "description": "The kvsctl workflow runs govulncheck at a pinned version",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/go\\.yml$/"],
+      "matchStrings": [
+        "go run golang\\.org/x/vuln/cmd/govulncheck@(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "golang.org/x/vuln",
+      "datasourceTemplate": "go"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Dependency updates keep the chore(deps) prefix the history and the release notes already use",
+      "matchPackageNames": ["*"],
+      "semanticCommitType": "chore"
+    },
+    {
+      "description": "One pull request for the Go modules kvsctl is built from, govulncheck included",
+      "matchDatasources": ["go"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "Go modules"
+    },
+    {
+      "description": "The go line of cli/go.mod is the toolchain CI and the release build kvsctl with. Its patch releases carry the standard library fixes govulncheck asks for, so they are taken as soon as they are out",
+      "matchDatasources": ["golang-version"],
+      "rangeStrategy": "bump",
+      "separateMinorPatch": true,
+      "schedule": ["at any time"]
+    },
+    {
+      "description": "A minor Go release changes defaults for the whole program through GODEBUG, so its pull request waits for a person",
+      "matchDatasources": ["golang-version"],
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
+    },
+    {
+      "description": "One pull request for the actions the workflows use",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "CI does not run the pre-commit hooks, so a new hook version waits for a person to run pre-commit run --all-files",
+      "matchManagers": ["pre-commit"],
+      "groupName": "pre-commit hooks",
+      "automerge": false
+    },
+    {
+      "description": "A major release can change behaviour or, for a Go module, its import path: it waits on the dependency dashboard until a person asks for its pull request, and that pull request waits for a person too",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    }
+  ]
+}
