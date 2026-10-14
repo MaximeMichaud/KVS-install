@@ -132,10 +132,15 @@ holds "$go" "govulncheck must check kvsctl, in a version of its own" \
 # tests run the MariaDB of the lock, the .env tests read the example, which
 # they compare with docker compose, and the entrypoints, and a test runs the
 # publish check on the compose file, the lock and release.env through
-# release-images.sh. A change of one of them runs the kvsctl tests too.
-holds "$go" "the kvsctl tests must run on a push and a pull request that change kvsctl or a file of the repository they read" \
-    '($read - .on.push.paths) == [] and ($read - .on.pull_request.paths) == []' \
+# release-images.sh. A push that changes one of them runs the kvsctl tests
+# too. A pull request runs them whatever it changes: main requires their
+# check before a pull request merges, and a check that never starts would
+# hold it forever.
+holds "$go" "the kvsctl tests must run on a push that changes kvsctl or a file of the repository they read" \
+    '($read - .on.push.paths) == []' \
     --argjson read '["cli/**", "docker/images.lock", "docker/docker-compose.yml", "docker/.env.example", "docker/php/docker-entrypoint.sh", "docker/cron/docker-entrypoint.sh", ".github/release.env", ".github/scripts/release-images.sh"]'
+holds "$go" "the kvsctl tests must run on every pull request, with no filter" \
+    '.on | has("pull_request") and .pull_request == null'
 # The test that reads the example runs only with KVSCTL_COMPOSE_PARITY=1,
 # and skips where there is no docker compose, which a step before the tests
 # has to find instead.

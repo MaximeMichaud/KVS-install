@@ -1,6 +1,8 @@
 name: kvsctl
 
-# On a change of kvsctl or of a file of the repository its tests read, and
+# On a push that changes kvsctl or a file of the repository its tests read,
+# on every pull request, since main requires this check before a pull
+# request merges and a check that never starts would hold it forever, and
 # called by the release workflow, which builds and pushes nothing before
 # these checks pass on the tagged commit. The dump and replay tests run a
 # MariaDB that docker/images.lock pins, of the series
@@ -23,16 +25,6 @@ on:
       - ".github/release.env"
       - ".github/scripts/release-images.sh"
   pull_request:
-    paths:
-      - "cli/**"
-      - ".github/workflows/go.yml"
-      - "docker/images.lock"
-      - "docker/docker-compose.yml"
-      - "docker/.env.example"
-      - "docker/php/docker-entrypoint.sh"
-      - "docker/cron/docker-entrypoint.sh"
-      - ".github/release.env"
-      - ".github/scripts/release-images.sh"
   workflow_call:
 
 permissions:
