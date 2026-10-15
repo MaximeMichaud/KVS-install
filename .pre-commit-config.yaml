@@ -40,7 +40,7 @@ repos:
 
   # Markdown linting
   - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: v0.47.0
+    rev: v0.49.1
     hooks:
       - id: markdownlint
         name: "Markdownlint - Markdown style checker"
@@ -65,7 +65,7 @@ repos:
 
   # Security checks
   - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.4.0
+    rev: v1.5.0
     hooks:
       - id: detect-secrets
         name: "Detect potential secrets"
@@ -74,7 +74,7 @@ repos:
 
   # Commitizen - Conventional commits
   - repo: https://github.com/commitizen-tools/commitizen
-    rev: v4.9.1
+    rev: v4.19.2
     hooks:
       - id: commitizen
         name: "Check commit message format"
