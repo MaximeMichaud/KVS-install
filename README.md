@@ -386,7 +386,7 @@ In a 2023 test, a standard installation left 6.3GB free out of 10GB. Watch demo 
 
 ## Features
 
-- **Docker Support (Recommended)**: Full Docker Compose setup with NGINX, PHP-FPM, MariaDB, Dragonfly cache, and automatic SSL via ACME. Includes bind mount option for direct file access with kvs-cli.
+- **Docker Support (Recommended)**: Full Docker Compose setup with NGINX, PHP-FPM, MariaDB, Dragonfly cache, and automatic SSL via ACME. The site files stay on the host in `/var/www/<domain>`, for direct access with kvs-cli.
 - **Automated KVS Setup**: Installs all necessary dependencies, sets up the database, configures cron jobs, and prepares the webserver. Tailored to meet the [KVS requirements](https://www.kernel-video-sharing.com/en/requirements/).
 - **Optimized Web Server Configuration**: Configures NGINX with the latest performance and security enhancements including HTTP/2 with ALPN, 0-RTT support for TLS 1.3, and x25519 support. Configurations are aligned with [Qualys SSL Labs](https://www.ssllabs.com/ssltest/) and Mozilla Foundation security standards, ensuring broad compatibility without compromising on security.
 - **SSL Configuration via ACME.sh**: Automatically handles SSL certificate issuance and renewal using ACME.sh with ECDSA support for enhanced security.

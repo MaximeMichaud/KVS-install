@@ -1,17 +1,19 @@
-# Copy this file to docker-compose.override.yml to use bind mounts
-# This allows direct file access from the host for manual edits
+# Local changes to the stack belong in docker-compose.override.yml: an
+# upgrade replaces the release files under docker/ and conf/ and keeps this
+# one. Anything that is not a Compose setting goes to .env.
 #
-# Before using:
-# 1. sudo mkdir -p /var/www/${DOMAIN}
-# 2. sudo chown 1000:1000 /var/www/${DOMAIN}
-# 3. Copy this file: cp docker-compose.override.yml.example docker-compose.override.yml
-# 4. Run: docker compose --profile setup up kvs-init
-# 5. Then: docker compose up -d
+# The site files need no override: docker-compose.yml mounts
+# /var/www/${DOMAIN} in nginx, php-fpm, cron and kvs-init, and kvs-init
+# gives its entries their owner, 1000:1000, at every setup. The entries
+# below repeat those mounts as an example; replace them with your changes.
 #
-# This file is also where local changes belong: an upgrade replaces the
-# release files under docker/ and conf/, while setup.sh and kvsctl keep
-# docker-compose.override.yml in COMPOSE_FILE whenever it exists. Anything
-# that is not a Compose setting goes to .env.
+# 1. Copy this file: cp docker-compose.override.yml.example docker-compose.override.yml
+# 2. Write your changes in it.
+# 3. If .env sets COMPOSE_FILE, add docker-compose.override.yml to it, right
+#    after docker-compose.yml. setup.sh and the next kvsctl upgrade or
+#    rollback do it too; until then, kvsctl status reports that compose
+#    ignores the file.
+# 4. Run: docker compose up -d
 
 services:
   nginx:

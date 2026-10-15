@@ -4904,15 +4904,6 @@ else
     echo -e "  ${GREEN}✓${NC} DH parameters already exist"
 fi
 
-# Create bind mount directory if override file exists
-if [ -f docker-compose.override.yml ]; then
-    echo ""
-    echo -e "${CYAN}Bind mount enabled - creating /var/www/${DOMAIN}...${NC}"
-    mkdir -p "/var/www/${DOMAIN}"
-    chown -R 1000:1000 "/var/www/${DOMAIN}"
-    echo -e "${GREEN}Directory ready: /var/www/${DOMAIN}${NC}"
-fi
-
 # Create SSL directory structure (certificates will be generated later)
 mkdir -p "nginx/ssl/${DOMAIN}"
 
@@ -5603,11 +5594,9 @@ echo -e "${CYAN}Database:${NC}    $DOMAIN"
 echo -e "${CYAN}DB User:${NC}     $DOMAIN"
 echo -e "${CYAN}Database credentials:${NC} saved in the mode-0600 .env file"
 echo ""
-if [ -f docker-compose.override.yml ]; then
-    echo -e "${CYAN}KVS Files:${NC}   /var/www/$DOMAIN"
-    echo -e "${CYAN}kvs-cli:${NC}     kvs-cli --path=/var/www/$DOMAIN"
-    echo ""
-fi
+echo -e "${CYAN}KVS Files:${NC}   /var/www/$DOMAIN"
+echo -e "${CYAN}kvs-cli:${NC}     kvs-cli --path=/var/www/$DOMAIN"
+echo ""
 echo "To view logs: docker compose logs -f"
 echo "To stop: docker compose down"
 echo "To restart: docker compose up -d"
