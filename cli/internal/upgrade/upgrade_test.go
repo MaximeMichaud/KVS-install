@@ -131,6 +131,28 @@ func TestSetComposeFilesSeedsAnOverrideByAnyName(t *testing.T) {
 	}
 }
 
+// A backup keeps every override of the operator, under each name compose
+// gives one, in the order compose looks for them, and nothing that only
+// bears such a name.
+func TestOverridePaths(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"docker-compose.override.yaml", "docker-compose.override.yml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("services: {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "compose.override.yml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(dir, "docker-compose.override.yml"), filepath.Join(dir, "docker-compose.override.yaml")}
+	if got := OverridePaths(dir); !slices.Equal(got, want) {
+		t.Errorf("OverridePaths = %q, want %q", got, want)
+	}
+	if got := OverridePaths(t.TempDir()); len(got) != 0 {
+		t.Errorf("without an override OverridePaths = %q", got)
+	}
+}
+
 func TestSetComposeFilesWithoutAnOverrideOnDisk(t *testing.T) {
 	inst := testInstance(t, "DOMAIN=example.com\n")
 	r := &Runner{Inst: inst, Reporter: &recorder{}}

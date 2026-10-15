@@ -183,7 +183,7 @@ func (r *Runner) Restore(ctx context.Context, state *instance.State, archive str
 		r.done(StepBackup, "skipped")
 	} else {
 		r.start(StepBackup, "Backing up the current database first")
-		result, err := backup.Create(ctx, r.Inst.BackupDir(), version, r.mariadbContainer(), r.Inst.EnvPath, r.statePath(), r.log, backup.WithKVSVersion(r.Inst.KVSVersion()))
+		result, err := backup.Create(ctx, r.Inst.BackupDir(), version, r.mariadbContainer(), r.Inst.EnvPath, r.statePath(), r.log, backup.WithKVSVersion(r.Inst.KVSVersion()), backup.WithFiles(OverridePaths(r.Inst.DockerDir)...))
 		if err != nil {
 			r.failStep(StepBackup, err)
 			r.giveUp(ctx, j)

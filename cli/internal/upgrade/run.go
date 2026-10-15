@@ -185,7 +185,7 @@ func (r *Runner) backupBefore(ctx context.Context, state *instance.State, plan *
 		return "", nil
 	}
 	r.start(StepBackup, "database and configuration")
-	result, err := backup.Create(ctx, r.Inst.BackupDir(), plan.Current, r.mariadbContainer(), r.Inst.EnvPath, r.statePath(), r.log, backup.WithKVSVersion(r.Inst.KVSVersion()))
+	result, err := backup.Create(ctx, r.Inst.BackupDir(), plan.Current, r.mariadbContainer(), r.Inst.EnvPath, r.statePath(), r.log, backup.WithKVSVersion(r.Inst.KVSVersion()), backup.WithFiles(OverridePaths(r.Inst.DockerDir)...))
 	if err != nil {
 		r.failStep(StepBackup, err)
 		return "", r.untouched(plan, fmt.Errorf("backup: %w", err))
@@ -1057,6 +1057,20 @@ func DefaultOverride(dir string) string {
 		}
 	}
 	return ""
+}
+
+// OverridePaths are the operator's overrides in dir, under every name
+// compose gives one, in the order it looks for them: what a backup keeps
+// beside the .env, since no release file holds the local changes.
+func OverridePaths(dir string) []string {
+	var paths []string
+	for _, name := range overrideFiles {
+		path := filepath.Join(dir, name)
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 // IsOverride reports whether an entry of COMPOSE_FILE names an override of

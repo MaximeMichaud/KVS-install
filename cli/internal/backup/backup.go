@@ -119,8 +119,10 @@ const dumpAttempts = 3
 const probeAttempts = 3
 
 // Format is the archive layout this build writes and reads: a plain tar
-// holding the compressed dump, the .env, the state and backup.json, which
-// carries this number. Members are found by name, whatever their order.
+// holding the compressed dump, the .env, the state, the files a caller
+// adds with WithFiles and backup.json, which carries this number. Members
+// are found by name, whatever their order, and a member a build does not
+// read is no reason to refuse an archive.
 const Format = 2
 
 // Members of an archive.
@@ -208,6 +210,17 @@ func WithKVSVersion(version string) Option {
 	return func(in *archiveInput) { in.kvsVersion = version }
 }
 
+// WithFiles adds files of the installation to the archive, each under its
+// own name, after the .env and the state: the operator's compose override,
+// which neither the release nor the .env holds. A file that does not exist
+// is left out, and so is one that cannot be read or whose name the archive
+// already holds, which the report says: such a file never costs the backup
+// of the database. A restore leaves them in the archive, where tar extracts
+// one by its name.
+func WithFiles(paths ...string) Option {
+	return func(in *archiveInput) { in.files = append(in.files, paths...) }
+}
+
 // WrittenError is a failure of Create once the archive has its name: the
 // archive is complete at Path, but its name may not survive a power cut,
 // or its size could not be read back. The archive stays, and a caller
@@ -248,9 +261,10 @@ type Info struct {
 
 // Create writes <dir>/backup-<version>-<stamp>.tar: the dump of the
 // database first, compressed as it streams out of mariadb-dump, then the
-// .env, the state file and backup.json. The dump goes straight into the
-// archive, so the disk never holds two copies of it: its tar header is a
-// placeholder until the stream ends, then written over with the real size.
+// .env, the state file, the files of WithFiles and backup.json. The dump
+// goes straight into the archive, so the disk never holds two copies of
+// it: its tar header is a placeholder until the stream ends, then written
+// over with the real size.
 // While the dump streams, the free space of the filesystem is checked every
 // 64 MiB, and the backup stops before it takes the filesystem below
 // max(1 GiB, 2% of its size): the running database may live there too. The
@@ -348,6 +362,7 @@ func nextSequence(dir string) (int64, error) {
 type archiveInput struct {
 	dir, version, container, envPath, statePath string
 	kvsVersion                                  string
+	files                                       []string
 	start                                       time.Time
 	sequence                                    int64
 	report                                      func(string)
@@ -472,6 +487,7 @@ func finishArchive(f *os.File, raw, compressed int64, in archiveInput) error {
 		return err
 	}
 	tw := tar.NewWriter(f)
+	taken := map[string]bool{dumpName: true, metaName: true}
 	for _, extra := range []string{in.envPath, in.statePath} {
 		if extra == "" {
 			continue
@@ -486,6 +502,26 @@ func finishArchive(f *os.File, raw, compressed int64, in archiveInput) error {
 		if err := addBytes(tw, filepath.Base(extra), data, in.start); err != nil {
 			return err
 		}
+		taken[filepath.Base(extra)] = true
+	}
+	for _, extra := range in.files {
+		name := filepath.Base(extra)
+		if taken[name] {
+			in.say(fmt.Sprintf("%s is left out of the backup: the archive holds a member of that name already", extra))
+			continue
+		}
+		data, err := os.ReadFile(extra)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			in.say(fmt.Sprintf("%s is left out of the backup: %v", name, err))
+			continue
+		}
+		if err := addBytes(tw, name, data, in.start); err != nil {
+			return err
+		}
+		taken[name] = true
 	}
 	meta, err := json.MarshalIndent(Meta{
 		Format:          Format,

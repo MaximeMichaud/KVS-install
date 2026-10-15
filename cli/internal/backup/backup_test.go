@@ -1551,3 +1551,71 @@ func TestCreateRecordsTheKVSVersion(t *testing.T) {
 		}
 	}
 }
+
+// The files given with WithFiles follow the .env and the state under their
+// own names, as they are on disk. A file that does not exist is left out
+// without a word; one that cannot be read, or would take the name of
+// another member, is left out with a line in the report, and the database
+// is backed up all the same.
+func TestCreateKeepsTheFilesItIsGiven(t *testing.T) {
+	plentyOfSpace(t)
+	stubServer(t, dumpOf("SELECT 1;\n"))
+	dir := t.TempDir()
+	env := writeEnv(t, dir)
+	override := filepath.Join(dir, "docker-compose.override.yml")
+	content := []byte("services:\n  php-fpm:\n    environment:\n      LOCAL_SETTING: \"1\"\n")
+	if err := os.WriteFile(override, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unreadable := filepath.Join(dir, "compose.override.yaml")
+	if err := os.WriteFile(unreadable, []byte("services: {}\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// root reads a file of any mode: the archive then holds that one too.
+	readable := false
+	if f, err := os.Open(unreadable); err == nil {
+		f.Close()
+		readable = true
+	}
+	missing := filepath.Join(dir, "compose.override.yml")
+	var said []string
+	report := func(line string) { said = append(said, line) }
+	result, err := Create(context.Background(), filepath.Join(dir, "backups"), "0.2.0", "kvs-mariadb", env, "", report,
+		WithFiles(missing, unreadable, override, env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, members, err := Describe(result.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{dumpName, ".env", "docker-compose.override.yml", metaName}
+	if readable {
+		want = []string{dumpName, ".env", "compose.override.yaml", "docker-compose.override.yml", metaName}
+	}
+	if !slices.Equal(members, want) {
+		t.Fatalf("members are %v, wanted %v", members, want)
+	}
+	if meta.DumpBytes != int64(len("SELECT 1;\n")) {
+		t.Errorf("the dump is %d bytes", meta.DumpBytes)
+	}
+	a, err := openArchive(result.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := a.read("docker-compose.override.yml", 1<<20)
+	a.Close()
+	if err != nil || !bytes.Equal(kept, content) {
+		t.Fatalf("docker-compose.override.yml is kept as %q, %v; want %q", kept, err, content)
+	}
+	all := strings.Join(said, "\n")
+	if strings.Contains(all, missing) {
+		t.Errorf("a missing file is reported:\n%s", all)
+	}
+	if !strings.Contains(all, env+" is left out of the backup: the archive holds a member of that name already") {
+		t.Errorf("a second .env is not reported:\n%s", all)
+	}
+	if !readable && !strings.Contains(all, "compose.override.yaml is left out of the backup: ") {
+		t.Errorf("an unreadable file is not reported:\n%s", all)
+	}
+}

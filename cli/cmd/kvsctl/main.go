@@ -1042,7 +1042,7 @@ func runBackup(s *session, keep int) error {
 	if state != nil {
 		version, rollbackArchive = state.Current, state.UpgradeBackup
 	}
-	result, err := createBackup(s.ctx(), s.inst.BackupDir(), version, s.inst.ContainerPrefix()+"-mariadb", s.inst.EnvPath, filepath.Join(s.inst.StateDir(), "state.json"), s.detail, backup.WithKVSVersion(s.inst.KVSVersion()))
+	result, err := createBackup(s.ctx(), s.inst.BackupDir(), version, s.inst.ContainerPrefix()+"-mariadb", s.inst.EnvPath, filepath.Join(s.inst.StateDir(), "state.json"), s.detail, backup.WithKVSVersion(s.inst.KVSVersion()), backup.WithFiles(upgrade.OverridePaths(s.inst.DockerDir)...))
 	switch {
 	case err != nil && s.ctx().Err() != nil && errors.Is(err, context.Canceled):
 		// The error is the one of the dump the interrupt cut short,

@@ -1088,7 +1088,7 @@ func (r *Runner) backupStopped(ctx context.Context, state *instance.State, j *in
 		r.done(StepBackup, "skipped")
 	} else {
 		r.start(StepBackup, "the live database of "+state.Label(state.Current))
-		result, err := backup.Create(ctx, r.Inst.BackupDir(), state.Current, r.mariadbContainer(), r.Inst.EnvPath, r.statePath(), r.log, backup.WithKVSVersion(r.Inst.KVSVersion()))
+		result, err := backup.Create(ctx, r.Inst.BackupDir(), state.Current, r.mariadbContainer(), r.Inst.EnvPath, r.statePath(), r.log, backup.WithKVSVersion(r.Inst.KVSVersion()), backup.WithFiles(OverridePaths(r.Inst.DockerDir)...))
 		if err != nil {
 			r.failStep(StepBackup, err)
 			r.giveUp(ctx, j)

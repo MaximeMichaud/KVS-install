@@ -3,10 +3,12 @@
 package upgrade
 
 import (
+	"archive/tar"
 	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -1505,6 +1507,44 @@ func TestKvsctlRestoreLatestQuietPrintsItsResultAlone(t *testing.T) {
 		t.Errorf("restore --latest --quiet printed:\n%s\nwant it to match\n%s", out, want)
 	}
 	contains(t, "the log of the restore", s.runLog("restore"), "Archive:     "+filepath.Base(archive), "Holds:       ")
+}
+
+// kvsctl backup keeps the operator's compose override beside the .env, as
+// it is on disk: the local changes of the stack, which no release file
+// holds, come back from the archive with a plain tar.
+func TestKvsctlBackupKeepsTheOverride(t *testing.T) {
+	s := e2eStack(t)
+	override := []byte("services:\n  php-fpm:\n    environment:\n      LOCAL_SETTING: \"1\"\n")
+	if err := os.WriteFile(filepath.Join(s.root, "docker", OverrideFile), override, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archive := s.kvsctlBackup()
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var names []string
+	var kept []byte
+	tr := tar.NewReader(f)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, hdr.Name)
+		if hdr.Name == OverrideFile {
+			if kept, err = io.ReadAll(tr); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !slices.Contains(names, ".env") || !bytes.Equal(kept, override) {
+		t.Fatalf("the archive holds %v, and %s as %q, want it beside the .env as on disk", names, OverrideFile, kept)
+	}
 }
 
 // A series change run with the default budgets gives MariaDB alone 30

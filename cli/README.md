@@ -762,12 +762,14 @@ restore before it replays an older dump write one archive,
 UTC. It holds `database.sql.zst`, the dump of the database compressed with
 zstd as it streams out of `mariadb-dump`, so the disk never holds two copies
 of it; `.env` and `state.json`, copies of `docker/.env` and
-`kvsctl/state.json`; and `backup.json`: the stack version, the KVS version
-the site runs (`kvs_version`), the date, a sequence number, the domain, the
-sizes of the dump and the `kvsctl` build. The sequence is one more than the
-highest of the archives in `backups/`, and orders them: `--latest`,
-`--keep` and a rollback that has no archive recorded read that order, which
-a clock set wrong does not change.
+`kvsctl/state.json`; the operator's compose override,
+`docker-compose.override.yml` or the same file under another name compose
+gives one, when `docker/` has one; and `backup.json`: the stack version,
+the KVS version the site runs (`kvs_version`), the date, a sequence number,
+the domain, the sizes of the dump and the `kvsctl` build. The sequence is
+one more than the highest of the archives in `backups/`, and orders them:
+`--latest`, `--keep` and a rollback that has no archive recorded read that
+order, which a clock set wrong does not change.
 
 The dump reads every table at one point: in one transaction when every
 table of the site takes part in transactions, and under a lock of every
@@ -845,6 +847,12 @@ written once the database is replayed exits 5 and leaves the journal:
 `kvsctl recover` finishes the restore, and the message says how to do it by
 hand. The containers read the restored `.env` at the next
 `docker compose up -d`, which the restore names.
+
+A restore leaves the compose override in the archive and the live one as
+it is. To bring it back, on a new server or after the file was lost,
+extract it in the installation directory with
+`tar -xf backups/<archive> -C docker docker-compose.override.yml`, then run
+`docker compose up -d` in `docker/`.
 
 `kvs-install.sh`, run again on an installation `kvsctl` does not manage,
 keeps `backups/` and `kvsctl/` in its new copy.
