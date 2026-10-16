@@ -74,6 +74,14 @@ In multi-site, the Caddy proxy belongs to a Compose project of its own, which th
 
 Troubleshooting: the requests of the site are in `<domain>.access.log` (`docker compose exec nginx tail -F /var/log/nginx/example.com.access.log`, which keeps following the log across a rotation), not in `access.log`, which is the container output shown by `docker compose logs nginx`.
 
+#### Cloudflare visitor IPs
+
+For Docker single-site connections directly from Cloudflare, set `CLOUDFLARE_ENABLED=true` in `docker/.env`, then run `./reconfigure.sh` from `docker/`. Install a release whose Nginx image supports the option first (`kvsctl upgrade`), or rebuild Nginx on a source checkout. `kvsctl update-cli` alone does not update Nginx.
+
+The setting activates the supplied Cloudflare ranges and `CF-Connecting-IP` through a generated fragment inside the container. The main `nginx.conf` stays read-only, and the fragment is not stored in a persistent volume. Upgrades keep your `.env` choice; a rollback restores its matching configuration. The default is `false`; absent or empty also means `false`. Recreate the container after editing `.env`: reload and restart alone keep its previous environment.
+
+Keep a single Real IP configuration: existing manual directives are preserved and can conflict with the automatic activation. This option does not configure HAProxy and is not supported in Caddy multi-site mode. See [Cloudflare behavior and migration](docker/SECURITY.md#sites-behind-cloudflare).
+
 #### IonCube
 
 The ionCube loader ships in every PHP-FPM and cron image, and `IONCUBE` in `docker/.env` decides whether it runs. The containers read it when they start, so a change takes `docker compose up -d`, not a rebuild. `yes`, `true`, `1` and `on`, in any case, enable the loader, and so does an empty value; anything else disables it, and a value other than `no`, `false`, `0`, `off` and `disabled` is reported as a warning in the container log. `setup.sh` sets it from the encoding of the site's files: IonCube encoded files need the loader.

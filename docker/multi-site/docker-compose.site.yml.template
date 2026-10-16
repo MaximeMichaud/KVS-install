@@ -43,6 +43,8 @@ services:
       - nginx-logs:/var/log/nginx
     environment:
       - DOMAIN=${DOMAIN}
+      - MODE=multi
+      - CLOUDFLARE_ENABLED=${CLOUDFLARE_ENABLED:-false}
       - USE_WWW=${USE_WWW:-false}
       - SSL_PROVIDER=none
       - PROJECT_HTTPS_PORT=443

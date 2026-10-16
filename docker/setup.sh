@@ -850,6 +850,17 @@ setup_resume_require_init_image() {
     done <<< "$images"
 }
 
+check_cloudflare_configuration() {
+    case "${CLOUDFLARE_ENABLED:-false}" in
+        true|false) ;;
+        *) echo "ERROR: CLOUDFLARE_ENABLED must be true or false" >&2; return 1 ;;
+    esac
+    if [ "${CLOUDFLARE_ENABLED:-false}" = true ] && [ "${MODE:-single}" != single ]; then
+        echo "ERROR: CLOUDFLARE_ENABLED=true supports single-site mode only; Caddy multi-site is not supported" >&2
+        return 1
+    fi
+}
+
 setup_resume_import() {
     local key site_info snapshot state project marker resume_library wait_budget="${MARIADB_WAIT_SECONDS:-0}" compose_version
     # The initializers run with "docker compose run --pull missing", which
@@ -878,6 +889,7 @@ setup_resume_import() {
     set -a
     source .env
     set +a
+    check_cloudflare_configuration || return 1
     MARIADB_WAIT_SECONDS=$wait_budget
     if ! validate_domain "${DOMAIN:-}" || [[ ! "${TABLES_PREFIX:-}" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
         echo "ERROR: saved DOMAIN or TABLES_PREFIX is invalid; recovery will not guess the database." >&2
@@ -2932,8 +2944,10 @@ fi
 chmod 600 .env
 
 # Load environment
+unset CLOUDFLARE_ENABLED
 source .env
 check_mariadb_stop_grace_period || exit 1
+check_cloudflare_configuration || exit 1
 
 # Domain validation
 
@@ -3997,6 +4011,10 @@ select_mode() {
 
     case $MODE_CHOICE in
         2)
+            if [ "${CLOUDFLARE_ENABLED:-false}" = true ]; then
+                echo "ERROR: CLOUDFLARE_ENABLED=true supports single-site mode only; Caddy multi-site is not supported" >&2
+                return 1
+            fi
             require_multi_compose_version || return $?
 
             echo -e "${YELLOW}Multi-site mode uses Caddy reverse proxy${NC}"

@@ -3,6 +3,7 @@ services:
   nginx:
     ports: !reset []
     environment:
+      - MODE=multi
       - SSL_PROVIDER=none
       - PROJECT_HTTPS_PORT=443
     volumes:

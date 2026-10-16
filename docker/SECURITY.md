@@ -55,6 +55,39 @@ as Host. Editing only a generated `kvs.conf` is not persistent across recreation
 
 ## Sites behind Cloudflare
 
+For Docker single-site installations reached directly from Cloudflare, set
+`CLOUDFLARE_ENABLED=true` in `docker/.env`, then run `./reconfigure.sh` from
+`docker/`. This requires an image and `nginx.conf` that support the option:
+upgrade the stack with `kvsctl upgrade`, or rebuild Nginx on a source checkout,
+before enabling it. `kvsctl update-cli` only updates the CLI binary.
+
+The entrypoint generates `/run/kvs-nginx/cloudflare-realip.conf`, included by
+the read-only main configuration. It trusts only the shipped Cloudflare IPv4
+and IPv6 ranges and reads `CF-Connecting-IP`. No runtime download, DNS change,
+TLS change or firewall change is performed. The default, an absent or empty
+setting, and `false` generate no Cloudflare configuration; other values are
+rejected. Change `.env` and recreate Nginx to apply a new value: reload and
+restart alone retain the environment the container was created with.
+
+The generated fragment is not in a persistent volume. Upgrades keep an
+explicit `.env` choice, rollbacks restore their main configuration, and a
+recreated container cannot inherit a fragment from the newer image. Restoring
+an archived `.env` restores its Cloudflare choice. An upgrade on the same
+version is not a general reconfiguration command; use `reconfigure.sh` to
+apply a changed setting.
+
+Manual Real IP directives in `nginx.conf` or `conf.d` are not migrated or
+removed automatically. Before enabling the option, move only the equivalent
+manual Cloudflare activation to `.env` and preserve any other custom settings.
+Conflicting directives stop startup with the Nginx diagnostic. A locally
+edited release file also blocks `kvsctl upgrade` unless its replacement is
+explicitly allowed; `.env` does not automatically migrate those edits.
+
+This option does not configure an intermediate HAProxy or Caddy. Nginx must
+see a Cloudflare address as its peer for the supplied trust list to apply.
+`CLOUDFLARE_ENABLED=true` is refused in Caddy multi-site mode. The standalone
+installation keeps its existing manual configuration.
+
 Rejecting unknown names prevents a basic IP scan from revealing the site's
 domain. It does **not** require requests to come through Cloudflare. A client
 that already knows the domain can send the correct Host and TLS SNI directly to

@@ -20,6 +20,8 @@ services:
       - "${HTTPS_PORT:-443}:443"
     environment:
       - DOMAIN=${DOMAIN}
+      - MODE=${MODE:-single}
+      - CLOUDFLARE_ENABLED=${CLOUDFLARE_ENABLED:-false}
       - USE_WWW=${USE_WWW:-false}
       - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
       - PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT:-443}

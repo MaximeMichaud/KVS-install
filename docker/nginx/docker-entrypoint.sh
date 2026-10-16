@@ -5,6 +5,20 @@ DOMAIN="${DOMAIN:-example.com}"
 USE_WWW="${USE_WWW:-false}"
 SSL_PROVIDER="${SSL_PROVIDER:-selfsigned}"
 PROJECT_HTTPS_PORT="${PROJECT_HTTPS_PORT:-443}"
+MODE="${MODE:-single}"
+CLOUDFLARE_ENABLED="${CLOUDFLARE_ENABLED:-false}"
+
+case "$CLOUDFLARE_ENABLED" in
+    true|false) ;;
+    *)
+        echo "ERROR: CLOUDFLARE_ENABLED must be true or false" >&2
+        exit 1
+        ;;
+esac
+if [ "$CLOUDFLARE_ENABLED" = true ] && [ "$MODE" != single ]; then
+    echo "ERROR: CLOUDFLARE_ENABLED=true supports single-site mode only; Caddy multi-site is not supported" >&2
+    exit 1
+fi
 
 case "$PROJECT_HTTPS_PORT" in
     ''|*[!0-9]*)
@@ -239,6 +253,33 @@ if [ -f /etc/nginx/templates/kvs.conf.tpl ]; then
         < /etc/nginx/templates/kvs.conf.tpl \
         > /etc/nginx/conf.d/kvs.conf
     echo "Generated kvs.conf for domain: ${DOMAIN} (USE_WWW=${USE_WWW})"
+fi
+
+# Keep generated Real IP settings out of the host's persistent conf.d: a
+# rollback must not inherit settings produced by the newer image.
+cloudflare_config=/run/kvs-nginx/cloudflare-realip.conf
+if [ "$CLOUDFLARE_ENABLED" = true ]; then
+    if [ ! -s /etc/nginx/globals/cloudflare-ip-list.conf ]; then
+        echo "ERROR: CLOUDFLARE_ENABLED=true requires a non-empty Cloudflare IP list" >&2
+        exit 1
+    fi
+    mkdir -p /run/kvs-nginx
+    cloudflare_temp=$(mktemp /run/kvs-nginx/.cloudflare-realip.XXXXXX)
+    trap 'rm -f "$cloudflare_temp"' EXIT
+    cat > "$cloudflare_temp" <<'EOF'
+# Managed by kvs-install. Configure CLOUDFLARE_ENABLED in docker/.env.
+include /etc/nginx/globals/cloudflare-ip-list.conf;
+real_ip_header CF-Connecting-IP;
+EOF
+    chmod 0644 "$cloudflare_temp"
+    mv -f "$cloudflare_temp" "$cloudflare_config"
+    trap - EXIT
+
+    # The official entrypoint validates this through its late hook, after
+    # rendering any additional operator-provided *.template files.
+else
+    # A restart of the same container retains its writable layer.
+    rm -f "$cloudflare_config"
 fi
 
 if [ "$SSL_PROVIDER" != "none" ]; then

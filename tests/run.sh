@@ -8,4 +8,7 @@ for test_script in "$TEST_DIR"/test_*.sh; do
     "$test_script"
 done
 
+echo 'Running integration_cloudflare_realip.sh'
+"$TEST_DIR/integration_cloudflare_realip.sh"
+
 echo "All hardening test suites passed"

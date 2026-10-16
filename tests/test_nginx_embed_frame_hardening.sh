@@ -69,6 +69,7 @@ run_rendered_template_case() {
         "${case_dir}/etc/nginx/templates/kvs.conf.tpl"
     sed \
         -e "s|/etc/nginx|${case_dir}/etc/nginx|g" \
+        -e "s|/run/kvs-nginx|${case_dir}/run/kvs-nginx|g" \
         -e 's|exec /docker-entrypoint.sh "$@"|exec "$@"|' \
         -e '/^[[:space:]]*monitor_certificate_changes &$/c\    : # Not needed here.' \
         -e '\|^/usr/local/bin/rotate-site-logs &$|c\: # Not needed here.' \

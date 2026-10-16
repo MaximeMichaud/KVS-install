@@ -40,6 +40,7 @@ render() {
     mkdir -p "$root/etc/nginx/templates" "$root/etc/nginx/conf.d" "$root/etc/nginx/ssl/$domain"
     cp "$template" "$root/etc/nginx/templates/kvs.conf.tpl"
     sed -e "s|/etc/nginx|$root/etc/nginx|g" \
+        -e "s|/run/kvs-nginx|$root/run/kvs-nginx|g" \
         -e 's|exec /docker-entrypoint.sh "$@"|exec "$@"|' \
         -e '/^[[:space:]]*monitor_certificate_changes &$/c\    : # No background worker in the rendering fixture.' \
         -e '\|^/usr/local/bin/rotate-site-logs &$|c\: # No background worker in the rendering fixture.' \

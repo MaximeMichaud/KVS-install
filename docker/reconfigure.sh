@@ -46,6 +46,10 @@ DESCRIPTION:
     HTTPS port changed, recreates Nginx with the updated environment,
     and verifies the persisted state afterwards.
 
+    CLOUDFLARE_ENABLED=true restores visitor IPs for direct Cloudflare
+    connections in single-site mode. Install a release whose Nginx image
+    supports this setting first, or rebuild Nginx on a source checkout.
+
     Switching MODE between single and multi is not handled here,
     because it requires the orchestration performed by setup.sh.
 
@@ -149,6 +153,7 @@ if [ ! -f ".env" ]; then
 fi
 
 # Load environment
+unset CLOUDFLARE_ENABLED
 # shellcheck source=/dev/null
 source .env
 DOMAIN="${DOMAIN:-}"
@@ -379,6 +384,14 @@ if [ -n "$RUNTIME_ACTION" ]; then
             ;;
     esac
     exit $?
+fi
+case "${CLOUDFLARE_ENABLED:-false}" in
+    true|false) ;;
+    *) echo "ERROR: CLOUDFLARE_ENABLED must be true or false" >&2; exit 1 ;;
+esac
+if [ "${CLOUDFLARE_ENABLED:-false}" = true ] && [ "$MODE" != single ]; then
+    echo "ERROR: CLOUDFLARE_ENABLED=true supports single-site mode only; Caddy multi-site is not supported" >&2
+    exit 1
 fi
 if [[ ! "$SITE_PREFIX" =~ ^[a-z0-9][a-z0-9_-]*$ ]] ||
     [ "${#SITE_PREFIX}" -gt 235 ]; then

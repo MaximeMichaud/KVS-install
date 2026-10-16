@@ -770,6 +770,29 @@ run_case() {
     set -e
 }
 
+# Invalid or unsupported Cloudflare settings stop before any Docker call.
+for name in cloudflare-invalid cloudflare-multi; do
+    create_fixture "$name"
+    if [ "$name" = cloudflare-invalid ]; then
+        set_env_value "$TEST_ROOT/$name" CLOUDFLARE_ENABLED invalid
+    else
+        set_env_value "$TEST_ROOT/$name" CLOUDFLARE_ENABLED true
+        set_env_value "$TEST_ROOT/$name" MODE multi
+    fi
+    run_case "$name"
+    assert_failure "$name"
+    assert_contains "$LAST_DIR/output.log" 'ERROR: CLOUDFLARE_ENABLED' "the setting was not explained"
+    assert_eq '' "$(cat "$LAST_DIR/docker.calls")" "invalid Cloudflare settings reached Docker"
+done
+
+# Reconfiguration must preserve a saved choice and ignore an older shell.
+create_fixture cloudflare-enabled
+set_env_value "$TEST_ROOT/cloudflare-enabled" CLOUDFLARE_ENABLED true
+run_case cloudflare-enabled CLOUDFLARE_ENABLED=invalid
+assert_success "saved Cloudflare setting"
+assert_contains "$LAST_DIR/.env" 'CLOUDFLARE_ENABLED=true' "Cloudflare choice was lost"
+assert_contains "$LAST_DIR/docker.calls" 'compose up -d --force-recreate nginx acme' "Nginx was not recreated"
+
 # Public direct TLS, exact SANs, profiles, stopped Nginx/ACME, runtime services,
 # plugin safety, persisted port, and the final verified success marker.
 create_fixture public-success
