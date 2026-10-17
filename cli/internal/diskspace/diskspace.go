@@ -22,6 +22,9 @@ type Space struct {
 	// paths on the same device share one free space, so what an upgrade
 	// writes to each of them adds up there.
 	Device uint64
+	// Filesystems without a fixed inode limit report zero Files.
+	Files, FreeFiles uint64
+	ReadOnly         bool
 }
 
 // Measure reads the filesystem under path. A path that does not exist yet,
@@ -39,7 +42,8 @@ func Measure(path string) (Space, error) {
 		var st unix.Statfs_t
 		err := unix.Statfs(dir, &st)
 		if err == nil {
-			space := Space{Avail: int64(st.Bavail) * st.Bsize, Size: int64(st.Blocks) * st.Bsize}
+			space := Space{Avail: int64(st.Bavail) * st.Bsize, Size: int64(st.Blocks) * st.Bsize,
+				Files: st.Files, FreeFiles: st.Ffree, ReadOnly: st.Flags&unix.ST_RDONLY != 0}
 			var info unix.Stat_t
 			if unix.Stat(dir, &info) == nil {
 				space.Device = info.Dev

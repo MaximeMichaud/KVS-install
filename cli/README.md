@@ -172,6 +172,8 @@ the checkout are kept in `kvsctl/checkout/<version>/` for that rollback.
     services it could not start again and its result line; the description
     of an archive named on the command line or by `--latest`, and the
     progress of the backup and of the replay, go to the log alone;
+  - `doctor` prints only warnings, failures and incomplete checks; its
+    `--json` report is unchanged;
   - `status`, `check`, `releases`, `history`, `logs` and `version` print
     what they print without it;
   - the notice that `KVSCTL_RELEASE_KEY` replaces the release keys is
@@ -195,7 +197,7 @@ given; `kvsctl recover`, which reads no manifest, repeats `--root` alone. A
 release candidate is never announced, nor a release older than the git
 checkout of an adopted stack, and when this `kvsctl` can no longer read the
 manifest, it says so, with `run 'kvsctl update-cli'`. `upgrade`, `recover`,
-`update-cli` and `version` say nothing of it, `status` and `check` say it
+`update-cli`, `doctor` and `version` say nothing of it, `status` and `check` say it
 themselves, and `--quiet` skips it. The manifest is read for it at most
 once a day and waited for 5 seconds at most, and a read that failed is not
 tried again by the same `kvsctl` build for an hour, both kept in
@@ -210,6 +212,9 @@ has no place on a production server.
 
 ### Commands that only read
 
+- `kvsctl doctor`: diagnose the installed stack using local configuration
+  and running services, without reading a release manifest or checking for
+  updates. See [Diagnosing an installation](#diagnosing-an-installation).
 - `kvsctl status`: the installed stack, line by line. It runs while another
   `kvsctl` holds the lock and changes nothing; a Ctrl-C while it reads the
   manifest ends it with exit 1.
@@ -387,6 +392,80 @@ and `docker/reconfigure.sh` change nothing while a run holds the lock.
 Every command prints this table at the end of its `--help`. A command that
 fails says why on stderr, `kvsctl: <message>`, as its last line: that is the
 line a script reads.
+
+## Diagnosing an installation
+
+Run doctor on the Docker host, with the same root privileges used for
+maintenance. A user who can read Docker but cannot access database volumes
+or write to the installation will get storage failures explaining that
+limitation. Adoption by `kvsctl` is optional.
+
+```sh
+kvsctl doctor
+kvsctl doctor --root /srv/kvs --verbose
+kvsctl doctor --only database,storage
+kvsctl doctor --json --strict
+kvsctl doctor --list-checks
+```
+
+Doctor reads `docker/.env` with the same quoting, interpolation and shell
+environment isolation as other `kvsctl` commands. Compose resolves the
+actual project name, overrides, enabled profiles and published ports.
+The checks cover:
+
+- Configuration syntax, domain, ports, PHP series, TLS mode and cache profiles.
+- Docker Engine, Compose, expected containers, health checks and completed
+  initialization jobs. Disabled optional services are skipped.
+- PHP-FPM and cron PHP versions, extensions, ionCube and media executables.
+- A `SELECT 1` query from PHP using `setup_db.php`, restricted to the local
+  MariaDB service, a read-only cache protocol query and optional Manticore
+  status. Database credentials are never printed or passed in arguments.
+- The cron daemon and KVS schedule, without running a scheduled job.
+- Disk space, inodes, directory access and actual database/site mounts.
+- Local backup metadata and age, recorded release file checksums and image
+  pins. Backup inspection does not decompress or restore the database.
+- HTTPS responses from `/` and `/admin/`, connected directly to the local
+  nginx binding with the site's Host and SNI. Redirects are not followed.
+  TLS is checked separately for hostname, validity and trust; self-signed
+  mode uses the certificate configured inside nginx.
+- The installation record, a current lock or an interrupted operation.
+
+Doctor does not change configuration, acquire the maintenance lock, create
+a backup, restart containers or download images. Its HTTP requests may
+produce normal application access logs. It does not load the application
+bootstrap for its database probe. An unadopted installation or missing local
+backups produces a warning; neither establishes that the site is broken.
+A legacy root cron schedule is also reported as a warning.
+
+Each check reports `OK`, `WARN`, `FAIL` or `SKIP`, with a next step when
+useful. One failure does not stop independent checks. A check that cannot
+run because a prerequisite failed is explicitly incomplete; a disabled
+optional service is an ordinary skip. `--only` accepts the IDs or groups
+shown by `--list-checks` and includes their prerequisites. `--timeout 10s`
+sets the time budget per check, including its child commands and requests.
+
+Exit 0 means the selected checks completed without failures; warnings are
+allowed. Exit 1 means a failure, an incomplete diagnostic, or a warning
+with `--strict`. Invalid arguments return 2. `--json` writes one report to
+stdout, with `schema_version: 1`, stable check IDs, status, evidence,
+suggested next steps, durations, a summary, `complete` and `exit_code`.
+Errors remain on stderr. `--quiet` suppresses successful text checks and
+ordinary skips; `--verbose` includes successful checks' evidence.
+
+### Optional network checks
+
+```sh
+kvsctl doctor --network --timeout 15s
+kvsctl doctor --network --only network.dns
+```
+
+The default diagnostic needs no Internet connection or GitHub access.
+`--network` explicitly adds system DNS resolution, HTTPS through that
+resolved address and reachability of the configured image registries.
+The resolver honors local host overrides, so this is not an independent
+public DNS observation. Registry responses 200 and 401 establish reachability
+only; no registry credentials are sent. No option of doctor reads the release
+manifest, queries GitHub releases or writes the update reminder cache.
 
 ## What an upgrade does
 

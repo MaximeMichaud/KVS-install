@@ -116,7 +116,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&flagManifest, "manifest", "", "release manifest URL (default $KVSCTL_MANIFEST_URL or the project releases)")
 	root.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "answer yes to every question; without it, a question is answered no unless stdin and stdout are both a terminal")
 	root.PersistentFlags().BoolVar(&flagPlain, "plain", false, "print lines instead of the interactive screen")
-	root.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "skip the reminder that a newer stable release exists, and name the log of a run only when it fails; upgrade, rollback and recover then print lines instead of the screen, only their steps, their failures, their questions, each question after what it asks about, and what the operator must act on (services that could not be started again, a .env taken from an archive), and nothing at all for an upgrade with nothing to do; backup, clean, adopt and update-cli print nothing unless they fail or ask, a question after what it asks about, and clean --dry-run its list; restore prints its warnings, its question, what became of .env and its result line; the notice that KVSCTL_RELEASE_KEY replaces the release keys is printed all the same; the other commands print what they print without it")
+	root.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "skip the reminder that a newer stable release exists, and name the log of a run only when it fails; upgrade, rollback and recover then print lines instead of the screen, only their steps, their failures, their questions, each question after what it asks about, and what the operator must act on (services that could not be started again, a .env taken from an archive), and nothing at all for an upgrade with nothing to do; backup, clean, adopt and update-cli print nothing unless they fail or ask, a question after what it asks about, and clean --dry-run its list; restore prints its warnings, its question, what became of .env and its result line; doctor prints only warnings, failures and incomplete checks, without changing its JSON report; the notice that KVSCTL_RELEASE_KEY replaces the release keys is printed all the same; the other commands print what they print without it")
 	root.PersistentFlags().BoolVar(&flagAllowStale, "allow-stale-manifest", false, "accept a manifest older than the newest one already seen (a stale mirror, a replayed file)")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	root.SetUsageTemplate(root.UsageTemplate() + exitCodes)
@@ -201,7 +201,7 @@ func remind(cmd *cobra.Command) {
 		return
 	}
 	switch cmd.Name() {
-	case "upgrade", "update-cli", "version", "help", "completion", "recover", "status", "check":
+	case "upgrade", "update-cli", "version", "help", "completion", "recover", "status", "check", "doctor":
 		return
 	}
 	if parent := cmd.Parent(); parent != nil && parent.Name() == "completion" {
