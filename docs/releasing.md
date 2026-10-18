@@ -735,3 +735,16 @@ without activity; the Actions tab enables them again.
   version: those belong to the commit you tag.
 - It deletes nothing, and it creates neither the environment nor its secrets,
   nor does it change the visibility of a package.
+
+### Direct cache routing
+
+`CACHE_ROUTING=direct` in `.github/release.env` adds `cache_routing: direct`
+to the signed release. New installations use the private Docker cache alias;
+`kvsctl upgrade` migrates existing literal loopback settings after checking
+that backend. The host change is journaled for rollback and recovery.
+
+The publisher automatically sets `requires.kvsctl_min` to the first release
+that enables this migration. Later direct releases inherit that minimum
+from the previous signed manifest. An explicit older minimum is refused,
+so a binary that ignores the new field cannot silently omit the migration.
+An empty policy preserves the application configuration.

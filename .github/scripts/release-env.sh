@@ -34,7 +34,7 @@ file=${2:-${repo_root}/.github/release.env}
 # ${!knob} only.
 # shellcheck disable=SC2034
 NOTES='' HIGHLIGHT_1='' HIGHLIGHT_2='' HIGHLIGHT_3='' MIN_FROM='' DATABASE='' ONE_WAY=''
-KVS_MIN='' KVSCTL_MIN='' COMPOSE_MIN='' ANNOUNCE_KEY=''
+KVS_MIN='' KVSCTL_MIN='' COMPOSE_MIN='' ANNOUNCE_KEY='' CACHE_ROUTING=''
 # shellcheck source=/dev/null
 . "$file"
 
@@ -109,6 +109,11 @@ done
 case "$DATABASE" in
     none | migrates) ;;
     *) die "DATABASE in $file is '$DATABASE': none or migrates" ;;
+esac
+
+case "$CACHE_ROUTING" in
+    '' | direct) ;;
+    *) die "CACHE_ROUTING in $file is '$CACHE_ROUTING': empty or direct" ;;
 esac
 
 case "$ONE_WAY" in

@@ -48,6 +48,9 @@ const JournalFormat = 2
 // SIGKILL included, which kvsctl recover finishes or undoes from what it
 // says.
 type Journal struct {
+	// CacheChange is saved before the application setting changes, so recover
+	// can undo it even when the process stops before compose starts.
+	CacheChange *CacheChange `json:"cache_change,omitempty"`
 	// Format is JournalFormat for a run this kvsctl began, 0 for the
 	// journal of an older one. SaveJournal sets it on the first save of a
 	// run.

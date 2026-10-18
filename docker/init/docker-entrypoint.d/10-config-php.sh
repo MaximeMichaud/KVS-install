@@ -172,13 +172,12 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     set_setup_php_value project_url "$PROJECT_URL"
     log_info "Project URL: $PROJECT_URL"
 
-    # Keep KVS configured with localhost. Its audit plugin checks Memcached from
-    # the PHP runtime as 127.0.0.1:11211; PHP and cron containers expose that
-    # loopback via socat to the Docker cache service.
+    # PHP and cron share the cache alias on this site's private network.
+    # Keep the loopback relay for consumers that still use localhost.
     if [ -n "$(setup_php_value memcache_server)" ]; then
-        set_setup_php_value memcache_server 127.0.0.1
+        set_setup_php_value memcache_server cache
+        log_info "Memcache: direct connection to cache:11211"
     fi
-    log_info "Memcache: 127.0.0.1:11211 via container loopback"
 
     # The binaries as the PHP and cron images ship them (docker/php and
     # docker/cron Dockerfiles), with the links they add for KVS.

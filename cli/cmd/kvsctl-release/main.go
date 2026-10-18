@@ -84,7 +84,7 @@ func usage() {
       [--key <release.key>]... [--key-id <id>]... [--announce-key <id=base64[@YYYY-MM-DD]>]... \
       [--commit <40 hex>] [--notes ..] [--notes-file RELEASE_NOTES.md] [--notes-url ..] [--highlight ..]... \
       [--php 8.1] [--php-series 8.1,8.2,8.3,8.4] [--min-from v] [--kvs-min v] [--kvsctl-min v] \
-      [--compose-min 2.19.0] [--database none|migrates] [--one-way] \
+      [--compose-min 2.19.0] [--database none|migrates] [--one-way] [--cache-routing direct] \
       [--cli os-arch=url,...] [--assets <dir>]
       sign the manifest of a release: the stable channel, or the candidate channel for a
       version with a pre-release suffix (26.11.0-rc1)
@@ -844,6 +844,7 @@ func manifestCmd(args []string) error {
 	minFrom := fs.String("min-from", "", "oldest version that may upgrade directly, a release the manifest lists")
 	kvsMin := fs.String("kvs-min", "", "oldest KVS version supported")
 	kvsctlMin := fs.String("kvsctl-min", "", "oldest kvsctl that may install the release, at most the release itself; check and upgrade on an older one ask for update-cli first, and a candidate of that version (26.11.0-rc1 for 26.11.0) asks for its own kvsctl")
+	cacheRouting := fs.String("cache-routing", "", "direct migrates the installer's legacy loopback cache setting through kvsctl; empty leaves it unchanged")
 	composeMin := fs.String("compose-min", "", "oldest Docker Compose that reads the override, 2.19.0 for build: !reset null")
 	database := fs.String("database", "", "none or migrates")
 	oneWay := fs.Bool("one-way", false, "the release cannot be undone by restarting the previous images: the rollback recreates the MariaDB data directory and replays the dump, and --skip-backup becomes an error")
@@ -902,6 +903,10 @@ func manifestCmd(args []string) error {
 		m.Schema = manifest.Schema
 	}
 	m.Channel = channelOf(released)
+	needsKvsctl, err = cacheRoutingMinimum(*cacheRouting, needsKvsctl, released, m.Releases)
+	if err != nil {
+		return err
+	}
 	if *minFrom != "" {
 		if err := checkStop(*minFrom, *version, m.Releases); err != nil {
 			return err
@@ -942,8 +947,9 @@ func manifestCmd(args []string) error {
 			ComposeMin: *composeMin,
 			KvsctlMin:  needsKvsctl,
 		},
-		Database: *database,
-		OneWay:   *oneWay,
+		Database:     *database,
+		OneWay:       *oneWay,
+		CacheRouting: *cacheRouting,
 	}
 	specs, err := parseImages(*imageSpecs)
 	if err != nil {

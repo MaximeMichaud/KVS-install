@@ -104,7 +104,12 @@ func (r *Runner) change(ctx context.Context, state *instance.State, plan *Plan, 
 	want := variantEnv(plan)
 	before, after := r.runSettings(state, plan, want)
 	services, containers := r.composeView(ctx)
+	cacheChange, err := r.cacheChange(ctx, target.CacheRouting, services)
+	if err != nil {
+		return r.untouched(plan, err)
+	}
 	j := &instance.Journal{
+		CacheChange:       cacheChange,
 		Action:            instance.ActionUpgrade,
 		From:              plan.Current,
 		To:                target.Version,
@@ -148,6 +153,9 @@ func (r *Runner) change(ctx context.Context, state *instance.State, plan *Plan, 
 		if errors.As(err, &conflict) {
 			return r.notLaid(plan, err)
 		}
+		return fail(StepApply, err)
+	}
+	if err := r.applyCache(ctx, j.CacheChange, false); err != nil {
 		return fail(StepApply, err)
 	}
 	r.done(StepApply, fmt.Sprintf("%d files", len(files)))
@@ -462,6 +470,9 @@ func (r *Runner) record(state *instance.State, j *instance.Journal, journaled bo
 	// series change, the PHP series and COMPOSE_FILE included.
 	before := withComposeFile(j.ImagesBefore, j.ComposeFileBefore)
 	if reapply && state.Previous != "" && !overCheckout {
+		if state.CacheChange == nil {
+			state.CacheChange = j.CacheChange
+		}
 		// The version before the re-applied one stays the way back, its
 		// files and images kept and left to clean. A setting the record of
 		// the installed version holds and the way back does not is one the
@@ -495,6 +506,7 @@ func (r *Runner) record(state *instance.State, j *instance.Journal, journaled bo
 		state.OneWay = state.OneWay || j.OneWay
 	} else {
 		state.Previous, state.PreviousFiles = j.From, state.Files
+		state.CacheChange = j.CacheChange
 		state.PreviousImages = before
 		// What a later rollback has to do with the database: what the
 		// releases installed declared, or "migrates" when MariaDB rewrote

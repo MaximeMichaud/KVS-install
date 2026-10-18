@@ -82,6 +82,8 @@ const (
 
 // State is what kvsctl remembers between runs.
 type State struct {
+	// CacheChange is the cache host change to undo on a manual rollback.
+	CacheChange *CacheChange `json:"cache_change,omitempty"`
 	// Current is the installed stack version.
 	Current string `json:"current"`
 	// Previous is the version a rollback returns to.
@@ -124,6 +126,13 @@ type State struct {
 	AdoptedCommit     string    `json:"adopted_commit,omitempty"`
 	AdoptedCommitDate time.Time `json:"adopted_commit_date,omitzero"`
 	History           []Entry   `json:"history,omitempty"`
+}
+
+// CacheChange records only the literal host, never the site's PHP source
+// or credentials. Reversing it restores the route of the previous release.
+type CacheChange struct {
+	Before string `json:"before"`
+	After  string `json:"after"`
 }
 
 // Upgraded reports whether kvsctl has upgraded this stack: a successful

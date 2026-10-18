@@ -140,6 +140,10 @@ func (r *Runner) undo(ctx context.Context, state *instance.State, j *instance.Jo
 		stopped(err)
 		return fmt.Errorf("%w; once that is fixed, 'kvsctl recover' runs the rollback again", err)
 	}
+	if err := r.applyCache(ctx, j.CacheChange, true); err != nil {
+		stopped(err)
+		return err
+	}
 	if err := r.dataBack(ctx, state, j); err != nil {
 		stopped(err)
 		return err
@@ -628,6 +632,7 @@ func (r *Runner) Rollback(ctx context.Context, state *instance.State) (err error
 	}
 	j := &instance.Journal{
 		Action:            instance.ActionRollback,
+		CacheChange:       reverseCache(state.CacheChange),
 		From:              state.Current,
 		To:                state.Previous,
 		Phase:             instance.PhaseApply,
@@ -690,6 +695,13 @@ func (r *Runner) Rollback(ctx context.Context, state *instance.State) (err error
 	}
 	if err := r.restoreEnv(state.PreviousImages, state.Images); err != nil {
 		return partWay(StepApply, fmt.Errorf(".env: %w", err))
+	}
+	if change := j.CacheChange; change != nil {
+		// An operator's new cache choice is kept. Only the value this
+		// migration wrote is eligible for the route of the previous release.
+		if _, err := r.cacheCommand(ctx, "undo", change.Before, change.After); err != nil {
+			return partWay(StepApply, err)
+		}
 	}
 	r.done(StepApply, fmt.Sprintf("%d files", len(state.PreviousFiles)))
 
@@ -1148,6 +1160,7 @@ func (r *Runner) recreated(ctx context.Context, j *instance.Journal) bool {
 // with, COMPOSE_FILE included.
 func (r *Runner) recordRollback(state *instance.State, j *instance.Journal, journaled bool) error {
 	left := state.Current
+	state.CacheChange = j.CacheChange
 	state.Current, state.Previous = state.Previous, state.Current
 	state.Files, state.PreviousFiles = state.PreviousFiles, state.Files
 	state.Images = withComposeFile(withoutComposeFile(state.PreviousImages), r.Inst.Env[composeFileKey])

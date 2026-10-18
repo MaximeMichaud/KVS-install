@@ -442,6 +442,7 @@ jobs:
             --kvs-min "$KVS_MIN"
             --compose-min "$COMPOSE_MIN"
             --database "$DATABASE"
+            --cache-routing "${CACHE_ROUTING:-}"
             --cli "linux-amd64=${base}/kvsctl-linux-amd64"
             --assets ../dist/
           )

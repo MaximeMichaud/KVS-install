@@ -173,6 +173,9 @@ type Release struct {
 	// says whether the data itself changed.
 	OneWay bool             `json:"one_way,omitempty"`
 	CLI    map[string]Asset `json:"cli,omitempty"`
+	// CacheRouting opts this release into migrating the installer's legacy
+	// loopback cache setting. Empty leaves application configuration alone.
+	CacheRouting string `json:"cache_routing,omitempty"`
 	// Requires stays last: a release writes again every release before it
 	// through this type, so a field moved here would change the signed
 	// bytes of releases already published.

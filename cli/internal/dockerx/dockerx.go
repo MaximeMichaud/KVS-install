@@ -705,6 +705,12 @@ func StopGracePeriod(ctx context.Context, dir, service string) (time.Duration, e
 // composeConfig runs "docker compose" with args, a config command, and
 // returns what it printed; a failure carries what compose said on stderr.
 func composeConfig(ctx context.Context, dir string, args ...string) (string, error) {
+	return ComposeOutput(ctx, dir, args...)
+}
+
+// ComposeOutput uses the project's Compose environment and keeps stdout
+// separate from diagnostics. Inline PHP source is omitted from errors.
+func ComposeOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := command(ctx, "docker", append([]string{"compose"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = composeEnv(dir)
@@ -712,7 +718,14 @@ func composeConfig(ctx context.Context, dir string, args ...string) (string, err
 	stderr := &tailBuffer{max: 8 << 10}
 	cmd.Stdout, cmd.Stderr = &stdout, stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("docker compose %s: %w%s", strings.Join(args, " "), err, said(stderr))
+		shown := slices.Clone(args)
+		if i := slices.Index(shown, "-r"); i >= 0 && i+1 < len(shown) {
+			shown[i+1] = "<embedded PHP helper>"
+		}
+		if cause := context.Cause(ctx); cause != nil {
+			err = cause
+		}
+		return "", fmt.Errorf("docker compose %s: %w%s", strings.Join(shown, " "), err, said(stderr))
 	}
 	return stdout.String(), nil
 }

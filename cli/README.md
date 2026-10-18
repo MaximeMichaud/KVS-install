@@ -13,9 +13,12 @@ A release of the stack is the Docker side of an installation: the images of
 nginx, PHP-FPM, cron, Manticore, MariaDB and the init service, pinned by
 digest, and the files of this repository at that version (compose files,
 configuration, scripts). It is not KVS: KVS updates itself from its admin
-panel. `kvsctl` never changes the files of the site. It dumps the database
-for its backups, and replaces it only by replaying a backup, in a rollback
-or a restore.
+panel. A release can migrate the installer's legacy cache host in
+`admin/include/setup.php` from loopback to the private Docker alias `cache`.
+That targeted change is journaled and reversible; custom hosts and disabled
+caches are preserved. `kvsctl` does not update the KVS application code.
+It dumps the database for its backups, and replaces it only by replaying a
+backup, in a rollback or a restore.
 
 `kvsctl` is not:
 

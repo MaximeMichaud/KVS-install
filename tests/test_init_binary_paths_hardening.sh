@@ -52,6 +52,7 @@ write_site() {
 \$config['mysqldump_path']="$5";
 
 \$config['memcache_server']="localhost";
+\$config['memcache_port']="11211";
 \$config['tables_prefix']="ktvs_";
 PHP
     cat > "$1/admin/include/setup_db.php" <<'PHP'
@@ -103,7 +104,7 @@ run_config "$site" > "$TEST_DIR/quoted.log" 2>&1 || fail "single-quoted settings
 php -r '
 require $argv[1];
 $expected = ["project_path" => $argv[2], "project_url" => "https://example.com",
-    "memcache_server" => "127.0.0.1", "php_path" => "/usr/local/bin/php",
+    "memcache_server" => "cache", "memcache_port" => "11211", "php_path" => "/usr/local/bin/php",
     "ffmpeg_path" => "/usr/bin/ffmpeg", "image_magick_path" => "/usr/bin/convert",
     "mysqldump_path" => "/usr/bin/mysqldump"];
 foreach ($expected as $key => $value) {
@@ -115,6 +116,29 @@ foreach ($expected as $key => $value) {
 cp "$site/admin/include/setup.php" "$TEST_DIR/quoted.first"
 run_config "$site" > /dev/null 2>&1 || fail "quoted settings must support a second run"
 cmp -s "$site/admin/include/setup.php" "$TEST_DIR/quoted.first" || fail "quoted migration must be idempotent"
+
+# Existing loopback installations and imported cache hosts use the Docker
+# endpoint directly. Disabling the cache or omitting it must stay possible.
+for host in 127.0.0.1 cache old-cache.example ''; do
+    site="$TEST_DIR/cache-${host:-disabled}"
+    write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+    sed -i "s/memcache_server'\]=\"localhost\"/memcache_server']=\"$host\"/" "$site/admin/include/setup.php"
+    run_config "$site" > /dev/null 2>&1 || fail "cache configuration must migrate"
+    expected=cache
+    [ -n "$host" ] || expected=''
+    [ "$(config_value "$site/admin/include/setup.php" memcache_server)" = "$expected" ] ||
+        fail "cache host '$host' must migrate to '$expected'"
+    cp "$site/admin/include/setup.php" "$TEST_DIR/cache.first"
+    run_config "$site" > /dev/null 2>&1 || fail "cache migration must support a second run"
+    cmp -s "$site/admin/include/setup.php" "$TEST_DIR/cache.first" || fail "cache migration must be idempotent"
+done
+site="$TEST_DIR/cache-omitted"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+sed -i '/memcache_server/d' "$site/admin/include/setup.php"
+run_config "$site" > /dev/null 2>&1 || fail "an omitted cache host must stay omitted"
+if grep -q memcache_server "$site/admin/include/setup.php"; then
+    fail "initialization must not enable an omitted cache"
+fi
 
 # A computed value cannot be rewritten safely and must not report success.
 site="$TEST_DIR/computed"

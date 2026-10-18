@@ -79,6 +79,7 @@ echo "PASS: a complete release.env is accepted"
 
 refused "empty notes" 26.11.0 "$(variant no-notes 'NOTES=""')" "NOTES is empty"
 refused "notes over two lines" 26.11.0 "$(variant two-lines 'NOTES="one' 'two"')" "more than one line"
+refused "an unknown cache route" 26.11.0 "$(variant cache-route CACHE_ROUTING=proxy)" "empty or direct"
 refused "an unknown database value" 26.11.0 "$(variant database DATABASE=migrate)" "none or migrates"
 refused "no database value" 26.11.0 "$(variant no-database DATABASE=)" "none or migrates"
 refused "a one-way flag that is no boolean" 26.11.0 "$(variant one-way-word ONE_WAY=yes)" "true or false"

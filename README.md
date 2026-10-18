@@ -82,6 +82,30 @@ The setting activates the supplied Cloudflare ranges and `CF-Connecting-IP` thro
 
 Keep a single Real IP configuration: existing manual directives are preserved and can conflict with the automatic activation. This option does not configure HAProxy and is not supported in Caddy multi-site mode. See [Cloudflare behavior and migration](docker/SECURITY.md#sites-behind-cloudflare).
 
+#### Cache connections
+
+New Docker installations connect PHP and cron directly to `cache:11211` on
+that site's private network. The service alias selects the enabled
+Dragonfly or Memcached backend. The loopback relay remains available for
+components that still require `127.0.0.1:11211`; normal configured cache
+operations bypass it.
+
+For an existing single-site installation managed by `kvsctl`, install a
+signed release that enables the direct cache migration:
+
+```bash
+kvsctl update-cli
+kvsctl check
+kvsctl upgrade
+```
+
+Updating the CLI alone does not migrate the site. During the stack upgrade,
+`kvsctl` verifies direct cache access, migrates only an unambiguous literal
+loopback host using port 11211, and journals the old host. A failed upgrade,
+`kvsctl recover`, or `kvsctl rollback` restores it. Disabled caches, custom
+hosts, ports and computed PHP settings stay unchanged. KVS-install manages
+this migration through `kvsctl`.
+
 #### IonCube
 
 The ionCube loader ships in every PHP-FPM and cron image, and `IONCUBE` in `docker/.env` decides whether it runs. The containers read it when they start, so a change takes `docker compose up -d`, not a rebuild. `yes`, `true`, `1` and `on`, in any case, enable the loader, and so does an empty value; anything else disables it, and a value other than `no`, `false`, `0`, `off` and `disabled` is reported as a warning in the container log. `setup.sh` sets it from the encoding of the site's files: IonCube encoded files need the loader.

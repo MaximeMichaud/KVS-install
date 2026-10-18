@@ -66,6 +66,10 @@ func (r *Runner) Plan(ctx context.Context, state *instance.State) (*Plan, error)
 	if r.planKvsctl(plan, m) {
 		return plan, nil
 	}
+	if policy := plan.Target.CacheRouting; policy != "" && policy != "direct" {
+		plan.Blockers = append(plan.Blockers, fmt.Sprintf("unsupported cache routing %q: update kvsctl first", policy))
+		return plan, nil
+	}
 	// An engine that does not answer, or answers a client it is too old
 	// for, tells nothing of what follows, each refusal less clear than the
 	// last, and what the plan would show without it would be guesses: the
