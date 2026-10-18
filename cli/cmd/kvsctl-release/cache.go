@@ -1,11 +1,50 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/manifest"
 	"github.com/MaximeMichaud/KVS-install/cli/internal/semver"
 )
+
+// checkCacheRouting runs the publisher's validation before images are pushed.
+// The previous manifest has already had its signature checked by the workflow.
+func checkCacheRouting(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("check-cache-routing", flag.ContinueOnError)
+	version := fs.String("version", "", "release version")
+	policy := fs.String("cache-routing", "", "direct or empty")
+	minimum := fs.String("kvsctl-min", "", "oldest kvsctl that may install the release")
+	previous := fs.String("previous", "", "verified stable manifest to extend")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *version == "" || fs.NArg() != 0 {
+		return fmt.Errorf("--version is required; positional arguments are not accepted")
+	}
+	released, err := semver.Parse(*version)
+	if err != nil {
+		return err
+	}
+	needsKvsctl, err := kvsctlMinimum(*minimum, released)
+	if err != nil {
+		return err
+	}
+	m, err := readPreviousManifest(*previous)
+	if err != nil {
+		return err
+	}
+	needsKvsctl, err = cacheRoutingMinimum(*policy, needsKvsctl, released, m.Releases)
+	if err != nil {
+		return err
+	}
+	if needsKvsctl == "" {
+		needsKvsctl = "none"
+	}
+	_, err = fmt.Fprintf(out, "kvsctl min: %s\n", needsKvsctl)
+	return err
+}
 
 // Older binaries ignore cache_routing. Their existing kvsctl_min gate must
 // refuse the first release using it, before an upgrade changes anything.

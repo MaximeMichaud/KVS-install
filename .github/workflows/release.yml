@@ -72,6 +72,20 @@ jobs:
             "${RUNNER_TEMP}/previous.json"
           ./.github/scripts/release-previous.sh "${RUNNER_TEMP}/previous.json"
 
+      # Use the publisher's own migration minimum check before the images
+      # job spends this version's tags on a release it cannot sign.
+      - name: check the cache migration minimum
+        working-directory: cli
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          . ../.github/release.env
+          arguments=(--version "$VERSION" --cache-routing "${CACHE_ROUTING:-}" --kvsctl-min "${KVSCTL_MIN:-}")
+          if [ -f "${RUNNER_TEMP}/previous.json" ]; then
+            arguments+=(--previous "${RUNNER_TEMP}/previous.json")
+          fi
+          go run ./cmd/kvsctl-release check-cache-routing "${arguments[@]}"
+
       # GHCR refuses an image name with an uppercase letter, and this
       # repository has two of them.
       - name: image namespace

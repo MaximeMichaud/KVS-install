@@ -22,9 +22,10 @@ commit. It has six stages.
    release, or whose release GitHub could not say anything about, and
    checks `.github/release.env` and the manifest the release will extend,
    the one of the latest release: its signature, that it is the stable
-   list, and that it lists the stop `MIN_FROM` names. The publish job checks
-   that manifest again before it extends it. Then prepare writes the release
-   notes.
+   list, and that it lists the stop `MIN_FROM` names. It also checks the
+   cache migration's `KVSCTL_MIN` with the publisher's own validation before
+   any image is pushed. The publish job checks that manifest again before it
+   extends it. Then prepare writes the release notes.
 2. **tests** runs, on the tagged commit, the checks a pull request runs:
    the `kvsctl` workflow (gofmt, vet, `go test -race`, `govulncheck`, the
    build) and the `tests` workflow (the base of every Dockerfile, and the
@@ -747,4 +748,7 @@ The publisher automatically sets `requires.kvsctl_min` to the first release
 that enables this migration. Later direct releases inherit that minimum
 from the previous signed manifest. An explicit older minimum is refused,
 so a binary that ignores the new field cannot silently omit the migration.
+The prepare job runs `kvsctl-release check-cache-routing` against the verified
+previous manifest, so an incompatible explicit minimum stops the release
+before any image is built or pushed. The publisher repeats the same check.
 An empty policy preserves the application configuration.

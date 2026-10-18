@@ -190,6 +190,19 @@ holds "$release" "Go must be set up before the prepare job verifies the previous
     '.jobs.prepare.steps | (map(.uses // "" | startswith("actions/setup-go@")) | index(true)) as $go
         | (map(.name == "the previous manifest") | index(true)) as $previous
         | $go != null and $previous != null and $go < $previous'
+holds "$release" "the prepare job must validate the cache migration minimum after reading the previous manifest" \
+    '.jobs.prepare.steps | (map(.name == "the previous manifest") | index(true)) as $previous
+        | (map(.name == "check the cache migration minimum" and .run == $run
+            and .["working-directory"] == "cli" and .env.VERSION == "${{ steps.version.outputs.version }}") | index(true)) as $cache
+        | $previous != null and $cache != null and $previous < $cache' \
+    --arg run '. ../.github/release.env
+arguments=(--version "$VERSION" --cache-routing "${CACHE_ROUTING:-}" --kvsctl-min "${KVSCTL_MIN:-}")
+if [ -f "${RUNNER_TEMP}/previous.json" ]; then
+  arguments+=(--previous "${RUNNER_TEMP}/previous.json")
+fi
+go run ./cmd/kvsctl-release check-cache-routing "${arguments[@]}"
+'
+holds "$release" "the images job must wait for the cache migration preflight" '.jobs.images.needs | index("prepare") != null'
 echo "PASS: the signing keys and the previous manifest are checked before any image is pushed"
 
 has "$RELEASE" './.github/scripts/release-env.sh "$VERSION"' "the prepare job must check release.env"

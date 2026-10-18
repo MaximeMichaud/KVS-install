@@ -49,6 +49,8 @@ func main() {
 		err = bundle(os.Args[2:])
 	case "manifest":
 		err = manifestCmd(os.Args[2:])
+	case "check-cache-routing":
+		err = checkCacheRouting(os.Args[2:], os.Stdout)
 	case "verify":
 		err = verify(os.Args[2:])
 	default:
@@ -78,6 +80,10 @@ func usage() {
   kvsctl-release verify --manifest manifest.json --signature manifest.json.sig --pub <base64|id=base64>... [--all]
       check a manifest against its signature file with the given public keys; one match is
       enough, or, with --all, every signature of the file must match one of the keys
+
+  kvsctl-release check-cache-routing --version <v> [--cache-routing direct] [--kvsctl-min v] [--previous manifest.json]
+      check the cache migration minimum before building or pushing images; --previous is
+      the already verified stable manifest, as for the manifest command
 
   kvsctl-release manifest --key release.key --out <dir> --version <v> --bundle-url <url> --bundle <file.tar.gz> \
       --images <svc=ref|svc@series=ref,...> [--digests <svc[@series]=sha256:...,...>] [--previous manifest.json] \
@@ -882,25 +888,9 @@ func manifestCmd(args []string) error {
 	if err := checkAnnouncedSign(announced, signers); err != nil {
 		return err
 	}
-	m := &manifest.Manifest{Schema: manifest.Schema}
-	if *previous != "" {
-		data, err := os.ReadFile(*previous)
-		if err != nil {
-			return err
-		}
-		// The releases it lists are written back as they are decoded, the
-		// requires.kvsctl_min each one was signed with included.
-		m, err = manifest.Parse(data)
-		if err != nil {
-			return err
-		}
-		// A release extends the stable list, never the list of a candidate,
-		// which would offer the candidate to every installation as the
-		// latest stable release.
-		if m.Channel != channelStable {
-			return fmt.Errorf("--previous %s is a manifest of channel %q: a release extends the stable list, the manifest of the latest stable release (channel %s)", *previous, m.Channel, channelStable)
-		}
-		m.Schema = manifest.Schema
+	m, err := readPreviousManifest(*previous)
+	if err != nil {
+		return err
 	}
 	m.Channel = channelOf(released)
 	needsKvsctl, err = cacheRoutingMinimum(*cacheRouting, needsKvsctl, released, m.Releases)
@@ -1071,6 +1061,27 @@ func manifestCmd(args []string) error {
 	}
 	fmt.Printf("%s: %d releases, latest %s, channel %s, signed by %s\n", filepath.Join(*out, "manifest.json"), len(m.Releases), rel.Version, m.Channel, strings.Join(ids, ", "))
 	return nil
+}
+
+// Both the publisher and its preflight extend the same verified stable list.
+// Keep each decoded release intact, including the minimum it was signed with.
+func readPreviousManifest(path string) (*manifest.Manifest, error) {
+	if path == "" {
+		return &manifest.Manifest{Schema: manifest.Schema}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	m, err := manifest.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if m.Channel != channelStable {
+		return nil, fmt.Errorf("--previous %s is a manifest of channel %q: a release extends the stable list, the manifest of the latest stable release (channel %s)", path, m.Channel, channelStable)
+	}
+	m.Schema = manifest.Schema
+	return m, nil
 }
 
 // The channels a manifest is signed into, as kvsctl reads them.
