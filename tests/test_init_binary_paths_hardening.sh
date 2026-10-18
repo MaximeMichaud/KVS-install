@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d /tmp/kvs-init-binary-paths.XXXXXX)
+TEST_DIR=$(mktemp -d -t kvs-init-binary-paths.XXXXXX)
 
 cleanup() {
     rm -rf "$TEST_DIR"
@@ -117,8 +117,8 @@ cp "$site/admin/include/setup.php" "$TEST_DIR/quoted.first"
 run_config "$site" > /dev/null 2>&1 || fail "quoted settings must support a second run"
 cmp -s "$site/admin/include/setup.php" "$TEST_DIR/quoted.first" || fail "quoted migration must be idempotent"
 
-# Existing loopback installations and imported cache hosts use the Docker
-# endpoint directly. Disabling the cache or omitting it must stay possible.
+# Imported cache hosts use the Docker endpoint directly. Disabling the cache
+# or omitting it must stay possible.
 for host in 127.0.0.1 cache old-cache.example ''; do
     site="$TEST_DIR/cache-${host:-disabled}"
     write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
@@ -139,6 +139,57 @@ run_config "$site" > /dev/null 2>&1 || fail "an omitted cache host must stay omi
 if grep -q memcache_server "$site/admin/include/setup.php"; then
     fail "initialization must not enable an omitted cache"
 fi
+
+# A setup rerun must keep an initialized site's cache route. Its PHP and cron
+# services may relay localhost to a custom backend through Compose overrides;
+# the init service does not inherit those services' environment variables.
+for setting in '127.0.0.1 11211' 'localhost 11212' 'operator-cache 11212' 'cache 11211'; do
+    read -r host port <<< "$setting"
+    site="$TEST_DIR/cache-existing-$host-$port"
+    write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+    run_config "$site" > /dev/null 2>&1 || fail "the site's first initialization must succeed"
+    sed -i \
+        -e "s#project_path'\]=\"$site\"#project_path']=\"$site/\"#" \
+        -e "s/memcache_server'\]=\"cache\"/memcache_server']=\"$host\"/" \
+        -e "s/memcache_port'\]=\"11211\"/memcache_port']=\"$port\"/" \
+        "$site/admin/include/setup.php"
+    grep memcache "$site/admin/include/setup.php" > "$TEST_DIR/cache-existing.before"
+    run_config "$site" > /dev/null 2>&1 || fail "an initialized site must support setup reruns"
+    grep memcache "$site/admin/include/setup.php" > "$TEST_DIR/cache-existing.after"
+    cmp -s "$TEST_DIR/cache-existing.before" "$TEST_DIR/cache-existing.after" ||
+        fail "setup reruns must preserve the existing cache route $host:$port"
+done
+
+# Files imported from another Docker installation can already name the same
+# container path. Without evidence of their topology, keep their route too.
+site="$TEST_DIR/cache-import-same-path"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+sed -i "s#project_path'\]=\"/home/old/www\"#project_path']=\"$site\"#" \
+    "$site/admin/include/setup.php"
+run_config "$site" > /dev/null 2>&1 || fail "an import already using the container path must initialize"
+[ "$(config_value "$site/admin/include/setup.php" memcache_server)" = localhost ] ||
+    fail "an import already using the container path must keep its cache route"
+
+# Stock archives use /PATH. Classification must happen before that placeholder
+# is replaced; otherwise a fresh archive would look like an initialized site.
+site="$TEST_DIR/cache-fresh-placeholder"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+sed -i 's#/home/old/www#/PATH#' "$site/admin/include/setup.php"
+run_config "$site" > /dev/null 2>&1 || fail "a fresh archive must initialize"
+[ "$(config_value "$site/admin/include/setup.php" memcache_server)" = cache ] ||
+    fail "a fresh archive must use the direct cache route"
+
+# An import pass can replace a previously initialized setup.php with the source
+# server's configuration. Its old project path still triggers adoption.
+site="$TEST_DIR/cache-import-again"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+run_config "$site" > /dev/null 2>&1 || fail "the initial import must succeed"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+sed -i 's/memcache_server'"'"'\]="localhost"/memcache_server'"'"']="old-cache.example"/' \
+    "$site/admin/include/setup.php"
+run_config "$site" > /dev/null 2>&1 || fail "a repeated import must adopt the source settings"
+[ "$(config_value "$site/admin/include/setup.php" memcache_server)" = cache ] ||
+    fail "an import replacing setup.php must still adopt the direct cache route"
 
 # A computed value cannot be rewritten safely and must not report success.
 site="$TEST_DIR/computed"

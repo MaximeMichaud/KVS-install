@@ -149,6 +149,13 @@ setup_db_value() {
 if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     log_info "Configuring setup.php..."
 
+    # A working container site already uses KVS_PATH. Its cache may depend on
+    # PHP/cron overrides that this init container cannot inspect. Preserve that
+    # route on reruns; kvsctl handles eligible migrations for existing sites.
+    # Read this before replacing /PATH, which marks a fresh archive.
+    configured_project_path=$(setup_php_value project_path)
+    configured_project_path=${configured_project_path%/}
+
     # Replace /PATH placeholder (fresh archives)
     sed -i "s|/PATH|$KVS_PATH|g" "$KVS_PATH/admin/include/setup.php"
 
@@ -172,9 +179,10 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     set_setup_php_value project_url "$PROJECT_URL"
     log_info "Project URL: $PROJECT_URL"
 
-    # PHP and cron share the cache alias on this site's private network.
-    # Keep the loopback relay for consumers that still use localhost.
-    if [ -n "$(setup_php_value memcache_server)" ]; then
+    # Fresh archives and imports from another path adopt the private cache.
+    # An import already using KVS_PATH is conservatively treated like a rerun.
+    # Keep the loopback relay for existing consumers that use localhost.
+    if [ "$configured_project_path" != "$KVS_PATH" ] && [ -n "$(setup_php_value memcache_server)" ]; then
         set_setup_php_value memcache_server cache
         log_info "Memcache: direct connection to cache:11211"
     fi

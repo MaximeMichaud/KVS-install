@@ -90,6 +90,11 @@ Dragonfly or Memcached backend. The loopback relay remains available for
 components that still require `127.0.0.1:11211`; normal configured cache
 operations bypass it.
 
+Rerunning `setup.sh` preserves the cache host and port when `setup.php` already
+uses the container's project path, including custom loopback relays configured
+only in the PHP and cron services. Imports already using that path are preserved
+as well; fresh archives and imports from another path adopt the direct route.
+
 For an existing single-site installation managed by `kvsctl`, install a
 signed release that enables the direct cache migration:
 
