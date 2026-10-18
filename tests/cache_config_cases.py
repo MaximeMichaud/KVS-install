@@ -88,6 +88,21 @@ $config['unrelated'] = 'keep this value';
         self.invoke(source, "undo", "localhost", "cache")
         self.assertEqual(self.path.read_text(), source)
 
+    def test_undo_restores_direct_cache_without_a_live_backend(self):
+        ready = subprocess.run(["php", "-n", "-r",
+                                "exit(function_exists('token_get_all') && function_exists('ctype_digit') && function_exists('fsync') ? 0 : 1);"],
+                               capture_output=True, check=False)
+        if ready.returncode:
+            self.skipTest("PHP needs tokenizer, ctype and fsync without extensions")
+        source = "<?php\n$config['memcache_server'] = '127.0.0.1';\n"
+        self.path.write_text(source)
+        # No extensions: restoring a journaled value must not instantiate
+        # Memcached while recovery still has the backend stopped.
+        result = subprocess.run(["php", "-n", "-r", self.code, "--", "undo", "127.0.0.1", "cache"],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.path.read_text(), source.replace("'127.0.0.1'", "'cache'"))
+
     def test_symlinked_setup_is_not_automatically_migrated(self):
         target = self.path.parent / "custom.php"
         target.write_text("<?php\n$config['memcache_server'] = '127.0.0.1';\n")

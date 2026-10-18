@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -114,6 +119,75 @@ func TestRecoverRestoresCacheAfterInterruptedUpgrade(t *testing.T) {
 	}
 	if host.Load() != "127.0.0.1" {
 		t.Fatalf("recover left the interrupted cache route: %q", host.Load())
+	}
+}
+
+func TestRecoverRestoresDirectCacheWhileRollbackServicesAreStopped(t *testing.T) {
+	php, err := exec.LookPath("php")
+	if err != nil {
+		t.Skip("PHP is needed to exercise the real cache undo helper")
+	}
+	if err := exec.Command(php, "-n", "-r", `exit(function_exists('token_get_all') && function_exists('ctype_digit') && function_exists('fsync') ? 0 : 1);`).Run(); err != nil {
+		t.Skip("PHP needs tokenizer, ctype and fsync without extensions for the native cache undo check")
+	}
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0", database: migrates})
+	host := cacheRoute(s, "127.0.0.1")
+	setup := filepath.Join(t.TempDir(), "setup.php")
+	helper := strings.Replace(cacheConfigPHP, "$path = '/var/www/kvs/admin/include/setup.php';", "$path = getenv('KVSCTL_TEST_SETUP');", 1)
+	if helper == cacheConfigPHP {
+		t.Fatal("the cache helper fixture did not replace the setup.php path")
+	}
+	runPHP := func(mode, before, after string) ([]byte, error) {
+		// No extensions are loaded: undo must restore a journaled route
+		// without trying to contact the cache that rollback stopped.
+		cmd := exec.Command(php, "-n", "-r", strings.TrimPrefix(helper, "<?php\n"), "--", mode, before, after)
+		cmd.Env = append(os.Environ(), "KVSCTL_TEST_SETUP="+setup, "KVS_MEMCACHE_HOST=cache", "KVS_MEMCACHE_PORT=11211")
+		return cmd.CombinedOutput()
+	}
+	modeled := s.f.hook
+	var undos atomic.Int32
+	s.f.hook = func(f *fakeDocker, req cliRequest) (cliResponse, bool) {
+		args := req.Args
+		if !strings.Contains(strings.Join(args, " "), "KVSCTL_CACHE_ROUTING") || args[len(args)-3] != "undo" {
+			return modeled(f, req)
+		}
+		source := fmt.Sprintf("<?php\n$config['memcache_server'] = '%s';\n$config['memcache_port'] = 11211;\n", host.Load())
+		if err := os.WriteFile(setup, []byte(source), 0600); err != nil {
+			return cliResponse{Code: 1, Stderr: err.Error()}, true
+		}
+		if out, err := runPHP("undo", args[len(args)-2], args[len(args)-1]); err != nil {
+			return cliResponse{Code: 1, Stderr: fmt.Sprintf("%s: %v", out, err)}, true
+		}
+		out, err := runPHP("inspect", "", "")
+		if err != nil {
+			return cliResponse{Code: 1, Stderr: fmt.Sprintf("%s: %v", out, err)}, true
+		}
+		var config cacheConfig
+		if err := json.Unmarshal(out, &config); err != nil {
+			return cliResponse{Code: 1, Stderr: err.Error()}, true
+		}
+		host.Store(config.Host)
+		undos.Add(1)
+		return cliResponse{Stdout: "{}"}, true
+	}
+	if err := runCacheUpgrade(s, s.runner()); err != nil {
+		t.Fatal(err)
+	}
+	s.fresh()
+	s.rep.cut = isStep(KindStepDone, StepApply)
+	cutRun(t, s.rep, func() { _ = s.rollback(s.runner()) })
+	if host.Load() != "127.0.0.1" || !slices.Contains(s.stopped(), "memcached") {
+		t.Fatalf("rollback did not restore loopback with its cache stopped: host=%v, stopped=%v", host.Load(), s.stopped())
+	}
+	s.fresh()
+	if err := s.recover(s.runner()); err != nil {
+		t.Fatal(err)
+	}
+	if host.Load() != "cache" || len(s.stopped()) != 0 || undos.Load() != 2 {
+		t.Fatalf("recover did not restore the route and services: host=%v, stopped=%v, native undos=%d", host.Load(), s.stopped(), undos.Load())
+	}
+	if s.journal() != nil {
+		t.Fatal("successful recovery left its journal behind")
 	}
 }
 

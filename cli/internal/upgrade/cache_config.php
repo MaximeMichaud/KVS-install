@@ -78,7 +78,10 @@ try {
         }
         throw new RuntimeException('The cache setting changed after the migration was prepared');
     }
-    if ($after === 'cache' && $host !== $after) {
+    // A new route must work before it is applied. Undo only restores a
+    // journaled setting: recovery may still have the backend stopped for a
+    // database replay, and verifies services after restarting them.
+    if ($mode === 'apply' && $after === 'cache' && $host !== $after) {
         $cache = new Memcached();
         $cache->setOption(Memcached::OPT_CONNECT_TIMEOUT, 1000);
         $cache->setOption(Memcached::OPT_RECV_TIMEOUT, 1000000);

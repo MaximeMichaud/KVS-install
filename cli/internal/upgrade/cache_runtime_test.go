@@ -45,6 +45,17 @@ func TestCacheCommandRealDocker(t *testing.T) {
 		t.Fatal("the cache setting changed while its backend was stopped")
 	}
 	check("127.0.0.1")
+	// Recovery can undo an interrupted manual rollback while the cache is
+	// stopped for a database replay. Restore the journaled route first;
+	// restart and health verification belong to the rest of recovery.
+	if err := r.applyCache(ctx, reverseCache(change), true); err != nil {
+		t.Fatal(err)
+	}
+	check("cache")
+	if err := r.applyCache(ctx, change, true); err != nil {
+		t.Fatal(err)
+	}
+	check("127.0.0.1")
 	if err := dockerx.Compose(ctx, dir, nil, "start", backend); err != nil {
 		t.Fatal(err)
 	}

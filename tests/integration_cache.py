@@ -139,6 +139,7 @@ http { server { listen 80; location = /cache-probe.php {
             networks = {name: {"internal": True} for name in rendered["networks"]}
             services["nginx"] = dict(image=IMAGES["nginx"], pull_policy="never", restart="no",
                 entrypoint=["nginx", "-g", "daemon off;"], networks=list(networks),
+                depends_on=["php-fpm"],
                 volumes=[mount(WORK / "nginx.conf", "/etc/nginx/nginx.conf")])
             services["init"] = dict(image=IMAGES["php-fpm"], pull_policy="never", restart="no",
                 entrypoint=["bash", "/init/docker-entrypoint.d/10-config-php.sh"],
