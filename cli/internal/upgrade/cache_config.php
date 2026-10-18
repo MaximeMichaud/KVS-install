@@ -16,24 +16,60 @@ try {
     }
     $tokens = [];
     $offset = 0;
+    $inString = false;
     foreach (token_get_all($source, TOKEN_PARSE) as $token) {
         $text = is_array($token) ? $token[1] : $token;
         $id = is_array($token) ? $token[0] : 0;
+        if ($id === T_START_HEREDOC) { $inString = true; }
+        if ($id === 0 && $text === '"') { $inString = !$inString; }
         if (!in_array($id, [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
-            $tokens[] = [$id, $text, $offset];
+            $tokens[] = [$id, $text, $offset, $inString];
         }
+        if ($id === T_END_HEREDOC) { $inString = false; }
         $offset += strlen($text);
     }
     $values = [];
     $supported = true;
     $depth = 0;
     foreach ($tokens as $i => $token) {
-        if ($token[1] === '{') { $depth++; }
-        if ($token[1] === '}') { $depth--; }
-        if ($token[0] !== T_VARIABLE || $token[1] !== '$config' || ($tokens[$i + 1][1] ?? '') !== '[') {
+        // Alternative control flow has no braces for the depth check below.
+        // Leave such files alone rather than guessing which branch runs.
+        if (in_array($token[0], [T_ENDIF, T_ENDFOR, T_ENDFOREACH, T_ENDWHILE, T_ENDSWITCH, T_ENDDECLARE], true)) {
+            $supported = false;
+        }
+        if ($token[0] === 0 && !$token[3] && $token[1] === '{') { $depth++; }
+        if ($token[0] === 0 && !$token[3] && $token[1] === '}') { $depth--; }
+        if ($token[0] !== T_VARIABLE || $token[1] !== '$config') {
             continue;
         }
+        // Standard setup files initialize an absent array before setting its
+        // keys and interpolate paths as "$config[project_path]/...".
+        if (($tokens[$i - 2][0] ?? 0) === T_ISSET && ($tokens[$i - 1][1] ?? '') === '('
+            && ($tokens[$i + 1][1] ?? '') === ')') {
+            continue;
+        }
+        if ($values === [] && ($tokens[$i + 1][1] ?? '') === '=' && ($tokens[$i + 2][1] ?? '') === '['
+            && ($tokens[$i + 3][1] ?? '') === ']' && ($tokens[$i + 4][1] ?? '') === ';') {
+            continue;
+        }
+        if ($values === [] && ($tokens[$i + 1][1] ?? '') === '=' && ($tokens[$i + 2][0] ?? 0) === T_ARRAY
+            && ($tokens[$i + 3][1] ?? '') === '(' && ($tokens[$i + 4][1] ?? '') === ')'
+            && ($tokens[$i + 5][1] ?? '') === ';') {
+            continue;
+        }
+        if ($token[3] && ($tokens[$i + 1][1] ?? '') === '[' && ($tokens[$i + 2][0] ?? 0) === T_STRING
+            && ($tokens[$i + 3][1] ?? '') === ']') {
+            continue;
+        }
+        // Whole-array access can replace or alias the settings. A computed
+        // or escaped key could be the cache port even when no plain port
+        // assignment is present, so it must not imply the default 11211.
         $key = $tokens[$i + 2][1] ?? '';
+        if (($tokens[$i + 1][1] ?? '') !== '[' || ($tokens[$i + 3][1] ?? '') !== ']'
+            || ($tokens[$i + 2][0] ?? 0) !== T_CONSTANT_ENCAPSED_STRING || strpos($key, '\\') !== false) {
+            $supported = false;
+            continue;
+        }
         if (!in_array($key, ["'memcache_server'", '"memcache_server"', "'memcache_port'", '"memcache_port"'], true)) {
             continue;
         }
@@ -48,7 +84,7 @@ try {
         $raw = $literal[1];
         if ($literal[0] === T_CONSTANT_ENCAPSED_STRING && preg_match('/^[\x27\x22]([a-zA-Z0-9.:-]*)[\x27\x22]$/D', $raw, $matches)) {
             $value = $matches[1];
-        } elseif ($name === 'memcache_port' && $literal[0] === T_LNUMBER && ctype_digit($raw)) {
+        } elseif ($name === 'memcache_port' && $literal[0] === T_LNUMBER && preg_match('/^(0|[1-9][0-9]*)$/D', $raw)) {
             $value = $raw;
         } else {
             $plain = false;

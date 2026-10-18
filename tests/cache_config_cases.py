@@ -70,6 +70,49 @@ $config['unrelated'] = 'keep this value';
         self.invoke(source, "undo", "cache", "localhost")
         self.assertEqual(self.path.read_text(), source)
 
+    def test_ambiguous_config_writes_preserve_the_cache_route(self):
+        cases = [
+            "$config['memcache_server']='cache'; $config['memcache_' . 'port']=11212;",
+            "$config['memcache_server']='cache'; $key='memcache_port'; $config[$key]=11212;",
+            "$config['memcache_server']='cache'; $config=array_replace($config, ['memcache_port'=>11212]);",
+            "$config['memcache_server']='cache'; $alias=&$config; $alias['memcache_port']=11212;",
+            r'''$config['memcache_server']='cache'; $config["memcache_\x70ort"]=11212;''',
+            "$config['memcache_server']='cache'; $config['memcache_port']=011211;",
+            "if (PHP_SAPI === 'cli'): $config['unrelated']='keep'; $config['memcache_server']='cache'; endif;",
+            "foreach ([1] as $item): $config['unrelated']='keep'; $config['memcache_server']='cache'; endforeach;",
+            '''if (false) { $unrelated="$unused}"; $config['memcache_server']='cache'; }''',
+        ]
+        for settings in cases:
+            with self.subTest(settings=settings):
+                source = "<?php\n" + settings + "\n"
+                self.assertFalse(self.invoke(source)["supported"])
+                result = self.invoke(source, "undo", "cache", "127.0.0.1")
+                self.assertEqual(result, {"preserved": True})
+                self.assertEqual(self.path.read_text(), source)
+
+    def test_plain_decimal_ports_remain_supported(self):
+        for port in ("11211", "'11211'", '"011211"'):
+            with self.subTest(port=port):
+                source = "<?php\n$config['memcache_server']='cache'; $config['memcache_port']=" + port + ";\n"
+                self.assertEqual(self.invoke(source), {"host": "cache", "port": 11211, "supported": True})
+                self.invoke(source, "undo", "cache", "127.0.0.1")
+                self.assertEqual(self.path.read_text(), source.replace("'cache'", "'127.0.0.1'"))
+
+    def test_initial_empty_config_and_interpolated_paths_are_supported(self):
+        source = '''<?php
+if (!isset($config)) { $config = []; }
+$config['project_path']='/fixture';
+$config['derived_path']="$config[project_path]/data";
+$config['memcache_server']='cache';
+$config['memcache_port']=11211;
+'''
+        for initializer in ("[]", "array()"):
+            with self.subTest(initializer=initializer):
+                variant = source.replace("[]", initializer)
+                self.assertEqual(self.invoke(variant), {"host": "cache", "port": 11211, "supported": True})
+                self.invoke(variant, "undo", "cache", "127.0.0.1")
+                self.assertEqual(self.path.read_text(), variant.replace("'cache'", "'127.0.0.1'"))
+
     def test_undo_preserves_a_new_operator_choice(self):
         source = "<?php\n$config['memcache_server'] = 'custom-cache';\n"
         self.invoke(source, "undo", "cache", "localhost")
