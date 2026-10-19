@@ -111,6 +111,31 @@ loopback host using port 11211, and journals the old host. A failed upgrade,
 hosts, ports and computed PHP settings stay unchanged. KVS-install manages
 this migration through `kvsctl`.
 
+#### Upload request buffering
+
+Docker single-site and multi-site Nginx use `client_body_buffer_size 10m` in
+`docker/nginx/nginx.conf`. This holds the default 9 MiB KVS upload chunk and
+its multipart fields in memory, avoiding an extra Nginx temporary-file write
+for each chunk. The previous implicit Nginx default was 8 or 16 KiB.
+
+This is a per-request buffer, not a video size limit. Larger request bodies
+can still spill to disk; a `client request body is buffered to a temporary
+file` warning alone does not mean the upload failed. The existing
+`client_max_body_size 2048M` still limits each HTTP request, not a video
+assembled from smaller chunks. Custom KVS chunk sizes may need a different
+buffer. Budget roughly 10 MiB per simultaneously buffered upload request;
+PHP can still write its own upload temporary files.
+
+For an existing source checkout, update `docker/nginx/nginx.conf`, then run
+`docker compose up -d --no-deps --force-recreate nginx` from `docker/` (or the
+additional site's directory). No image rebuild is needed: the file is bind
+mounted. Recreation also picks up a file replaced by Git, which a reload can
+miss when the old inode remains mounted. Schedule recreation outside active
+uploads because it closes the existing Nginx connections. Verify with
+`docker compose exec -T nginx nginx -T` and inspect `client_body_buffer_size`.
+For a release-managed stack, use `kvsctl upgrade` once a signed stack release
+contains this configuration; updating the CLI alone does not install it.
+
 #### PHP-FPM capacity
 
 The Docker PHP-FPM image sizes the web pool at each start, using the smaller
