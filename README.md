@@ -111,6 +111,40 @@ loopback host using port 11211, and journals the old host. A failed upgrade,
 hosts, ports and computed PHP settings stay unchanged. KVS-install manages
 this migration through `kvsctl`.
 
+#### PHP-FPM capacity
+
+The Docker PHP-FPM image sizes the web pool at each start, using the smaller
+of total host RAM and the visible cgroup v1/v2 memory limits. It uses capacity,
+not free RAM, so an unchanged machine gets the same pool after a restart.
+`PHP_FPM_MEMORY_PERCENT=25` budgets a quarter of that capacity for PHP workers,
+leaving room for MariaDB, cache, search and the OS. With the default estimate
+`PHP_FPM_PROCESS_MEMORY_MB=64`, a 16 GiB budget source gives 64 workers, with
+16 started, 8 minimum spare and 32 maximum spare. These are estimates, not
+memory reservations: adjust the worker estimate to observed memory use.
+`PHP_MEMORY_LIMIT` is a per-request ceiling, not this worker estimate.
+
+Set `PHP_FPM_MAX_CHILDREN`, `PHP_FPM_START_SERVERS`,
+`PHP_FPM_MIN_SPARE_SERVERS` and `PHP_FPM_MAX_SPARE_SERVERS` in `docker/.env`
+(or the site's `.env` in multi-site mode) to positive integers to override
+the calculation; `auto` or empty selects automatic values. The entrypoint
+rejects inconsistent values before starting PHP. On a host with multiple
+sites, divide the memory percentage between them or give each PHP container
+a memory limit; automatic sizing cannot discover other sites' budgets.
+
+The startup log reports the capacity and all four values. After editing the
+environment, recreate PHP with `docker compose up -d --no-deps php-fpm`;
+`docker compose restart` does not load changed environment variables.
+Verify the configuration actually loaded by FPM with
+`docker compose exec -T php-fpm php-fpm -tt`.
+
+Existing installations need a PHP-FPM image containing this change. For a
+source-built stack, build it with `docker compose build php-fpm` before
+recreating PHP. Release-pinned stacks need a stack release containing the
+change through `kvsctl upgrade`. Existing additional multi-site sites also
+need the updated Compose template to forward settings from their `.env`;
+carry over local changes when updating that file. Older Compose files still
+get automatic sizing from the new image's defaults.
+
 #### IonCube
 
 The ionCube loader ships in every PHP-FPM and cron image, and `IONCUBE` in `docker/.env` decides whether it runs. The containers read it when they start, so a change takes `docker compose up -d`, not a rebuild. `yes`, `true`, `1` and `on`, in any case, enable the loader, and so does an empty value; anything else disables it, and a value other than `no`, `false`, `0`, `off` and `disabled` is reported as a warning in the container log. `setup.sh` sets it from the encoding of the site's files: IonCube encoded files need the loader.

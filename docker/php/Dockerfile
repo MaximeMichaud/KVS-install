@@ -211,13 +211,8 @@ RUN chmod 0755 /usr/local/bin/yt-dlp \
     && ln -s yt-dlp /usr/local/bin/youtube-dl \
     && [ "$(yt-dlp --version)" = "${YT_DLP_VERSION}" ]
 
-# Configure PHP-FPM
-RUN sed -i \
-    -e 's/pm.max_children = 5/pm.max_children = 20/' \
-    -e 's/pm.start_servers = 2/pm.start_servers = 5/' \
-    -e 's/pm.min_spare_servers = 1/pm.min_spare_servers = 3/' \
-    -e 's/pm.max_spare_servers = 3/pm.max_spare_servers = 10/' \
-    /usr/local/etc/php-fpm.d/www.conf
+# Size PHP-FPM on the running host, where container memory limits are known.
+COPY fpm-config.sh /usr/local/lib/kvs/fpm-config.sh
 
 # Symlink PHP to /usr/bin (KVS scripts expect it there), and give www-data
 # the UID and GID 1000 that own the KVS files on the host.

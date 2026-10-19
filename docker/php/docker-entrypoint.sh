@@ -141,6 +141,14 @@ apply_yt_dlp_auto_update() {
     echo "yt-dlp updates disabled (${reason}): yt-dlp stays at the release of the image"
 }
 
+case "${1:-}" in
+    php-fpm|/usr/local/sbin/php-fpm)
+        # shellcheck source=docker/php/fpm-config.sh
+        source /usr/local/lib/kvs/fpm-config.sh
+        configure_php_fpm
+        ;;
+esac
+
 start_memcache_loopback
 apply_ioncube_setting
 apply_opcache_jit_setting

@@ -97,6 +97,12 @@ services:
       - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
       - PHP_POST_MAX_SIZE=${PHP_POST_MAX_SIZE:-2048M}
       - PHP_MAX_EXECUTION_TIME=${PHP_MAX_EXECUTION_TIME:-300}
+      - PHP_FPM_MEMORY_PERCENT=${PHP_FPM_MEMORY_PERCENT:-25}
+      - PHP_FPM_PROCESS_MEMORY_MB=${PHP_FPM_PROCESS_MEMORY_MB:-64}
+      - PHP_FPM_MAX_CHILDREN=${PHP_FPM_MAX_CHILDREN:-auto}
+      - PHP_FPM_START_SERVERS=${PHP_FPM_START_SERVERS:-auto}
+      - PHP_FPM_MIN_SPARE_SERVERS=${PHP_FPM_MIN_SPARE_SERVERS:-auto}
+      - PHP_FPM_MAX_SPARE_SERVERS=${PHP_FPM_MAX_SPARE_SERVERS:-auto}
       # The loader ships in every image and the entrypoint turns it off for
       # NO, so a change needs no rebuild, only docker compose up -d: a
       # container keeps the environment it was created with, and
