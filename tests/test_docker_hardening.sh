@@ -1179,6 +1179,7 @@ test_failed_build_step_shows_its_output_not_the_dockerfile_echo() {
     local functions_file="$TMP_ROOT/report-step-failure.sh"
     local logfile="$TMP_ROOT/failed-build.log"
     local output
+    local log_reference="    Error (last lines, full output in $TMP_ROOT/setup-debug.log):"
     local command='/bin/bash -o pipefail -c set -eux;     curl -fsSL -o /tmp/ioncube.tar.gz https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64_15.5.1.tar.gz;     tar -xzf /tmp/ioncube.tar.gz -C /tmp;     php -m | grep -q ionCube'
 
     awk '
@@ -1224,10 +1225,12 @@ test_failed_build_step_shows_its_output_not_the_dockerfile_echo() {
     grep -Fxq "    failed to solve: exit code: 255" <<< "$output" ||
         fail "the exit code must be shown without the command: $output"
     grep -Fq "did not complete successfully" <<< "$output" && fail "the command must not be repeated: $output"
+    grep -Fxq "$log_reference" <<< "$output" || fail "the full debug log path must be named"
     while IFS= read -r line; do
+        # Keep the full log path usable regardless of the temporary directory depth.
+        [ "$line" != "$log_reference" ] || continue
         [ "${#line}" -le 124 ] || fail "a line of the report is longer than a terminal: $line"
     done <<< "$output"
-    grep -Fq "$TMP_ROOT/setup-debug.log" <<< "$output" || fail "the debug log must be named"
 
     pass "a failed build step shows its own last lines, its name and its exit code"
 }

@@ -597,6 +597,7 @@ test_a_full_temporary_directory_does_not_shrink_the_site_size() {
     # 8 kB at most for any file the exporter writes: its report fits, the
     # 40 kB list of the entries to measure does not.
     (
+        ulimit -c 0
         ulimit -f 8
         STUB_LOG=/dev/null run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site"
     ) || fail "detect must go on when the temporary directory is full: $(cat "$err")"

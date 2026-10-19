@@ -14,6 +14,7 @@ default_language_version:
 default_install_hook_types:
   - pre-commit
   - commit-msg
+  - pre-push
 
 repos:
   # ShellCheck - Static analysis tool for shell scripts
@@ -22,7 +23,9 @@ repos:
     hooks:
       - id: shellcheck
         name: "ShellCheck - Static analysis for shell scripts"
-        # No args = default behavior = show all severity levels (style, info, warning, error)
+        # Follow annotated sources even when pre-commit splits files into batches.
+        # All severity levels remain enabled.
+        args: ["--external-sources"]
         types: [shell]
         files: \.(sh|bash|ksh|zsh)$
 
