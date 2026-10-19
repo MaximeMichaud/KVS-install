@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"reflect"
@@ -589,7 +590,7 @@ func TestStepTitleOfRecord(t *testing.T) {
 	}
 }
 
-func TestTruncateCountsRunes(t *testing.T) {
+func TestTruncateCountsCells(t *testing.T) {
 	cases := []struct {
 		in    string
 		width int
@@ -599,6 +600,7 @@ func TestTruncateCountsRunes(t *testing.T) {
 		{"ééééé", 5, "ééééé"},
 		{"ééééééééé", 4, "ééé…"},
 		{"abcdefghij", 4, "abc…"},
+		{"界界界界", 5, "界界…"},
 	}
 	for _, c := range cases {
 		if got := truncate(c.in, c.width); got != c.want {
@@ -892,6 +894,89 @@ func TestImagesShowTheVersions(t *testing.T) {
 	if len(m.images) != 2 {
 		t.Errorf("rows are keyed by service, got %d rows", len(m.images))
 	}
+	m.apply(upgrade.Event{Kind: upgrade.KindImages, Total: dockerx.Progress{Current: 70 << 20, Total: 70 << 20, Done: true}})
+	if !strings.Contains(m.View(), "█") || strings.Contains(m.View(), "░") {
+		t.Fatalf("the completed image must keep its full progress bar:\n%s", m.View())
+	}
+
+	t.Run("release in an SSH terminal", func(t *testing.T) {
+		_, m := newScreen(nil)
+		for _, step := range upgrade.UpgradeSteps[:3] {
+			m.apply(upgrade.Event{Kind: upgrade.KindStepDone, Step: step})
+		}
+		rows := []struct {
+			name, from, to, note string
+			size                 int64
+		}{
+			{"nginx", "26.10.1", "26.10.2", "", 34_000_000},
+			{"kvs-init", "none", "26.10.2", "not pulled, the service is not active", 0},
+			{"manticore", "26.10.1", "26.10.2", "", 0},
+			{"memcached", "none", "1.6.45-alpine", "not pulled, the service is not active", 0},
+			{"dragonfly", "v1.35.1", "v1.35.1", "unchanged", 0},
+			{"acme", "none", "3.1.6", "not pulled, the service is not active", 0},
+			{"phpmyadmin-init", "none", "3.24.2", "already on this machine", 0},
+			{"mariadb", "12.3.3", "12.3.3", "", 105_000_000},
+			{"cron", "26.10.1-php8.1", "26.10.2-php8.1", "", 0},
+			{"php-fpm", "26.10.1-php8.1", "26.10.2-php8.1", "", 6_000},
+			{"transcript-searchd", "6.3.6", "6.3.6", "unchanged", 0},
+		}
+		for _, row := range rows {
+			m.apply(upgrade.Event{Kind: upgrade.KindImage, Service: row.name, From: row.from, To: row.to, Message: row.note,
+				Progress: dockerx.Progress{Current: row.size / 2, Total: row.size},
+				Total:    dockerx.Progress{Current: 69_503_000, Total: 139_006_000}})
+		}
+		barRE := regexp.MustCompile(`[█░]+`)
+		barWidth, barColumn := 0, 0
+		for _, stage := range []string{"planned", "pulling", "complete"} {
+			if stage == "pulling" {
+				m.apply(upgrade.Event{Kind: upgrade.KindStepStart, Step: upgrade.StepPull})
+				for i := range 6 {
+					m.addLog(fmt.Sprintf("download log %d %s", i, strings.Repeat("界", 100)))
+				}
+			} else if stage == "complete" {
+				m.apply(upgrade.Event{Kind: upgrade.KindImages, Total: dockerx.Progress{Current: 139_006_000, Total: 139_006_000, Done: true}})
+				m.apply(upgrade.Event{Kind: upgrade.KindStepDone, Step: upgrade.StepPull, Message: "images ready"})
+			}
+			var previous string
+			for _, width := range []int{120, 80, 320, 80} {
+				height := 26
+				if width == 80 {
+					height = 24
+				}
+				m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+				view := ansiRe.ReplaceAllString(m.View(), "")
+				for _, line := range strings.Split(view, "\n") {
+					if w := visibleWidth(line); w > 78 {
+						t.Fatalf("%s at %d columns has a %d-cell line, which would reflow at 80:\n%s", stage, width, w, view)
+					}
+					if bar := barRE.FindStringIndex(line); bar != nil {
+						w, col := visibleWidth(line[bar[0]:bar[1]]), visibleWidth(line[:bar[0]])
+						if barWidth == 0 {
+							barWidth, barColumn = w, col
+						}
+						if w < 8 || w > 24 || w != barWidth || col != barColumn {
+							t.Fatalf("bars changed size or alignment: width %d, column %d; wanted %d, %d:\n%s", w, col, barWidth, barColumn, view)
+						}
+					}
+				}
+				if lines := strings.Count(view, "\n") + 1; lines > 24 {
+					t.Fatalf("%s has %d lines: Bubble Tea would hide services at 80x24:\n%s", stage, lines, view)
+				}
+				for _, row := range rows {
+					if !strings.Contains(view, row.name) || !strings.Contains(view, versionsOf(row.from, row.to)) {
+						t.Fatalf("%s lost the name or versions of %s:\n%s", stage, row.name, view)
+					}
+				}
+				if stage != "planned" && len(barRE.FindAllString(view, -1)) != 5 {
+					t.Fatalf("%s must keep all five progress bars:\n%s", stage, view)
+				}
+				if previous != "" && view != previous {
+					t.Fatalf("the table moved when resized to %d columns:\n%s", width, view)
+				}
+				previous = view
+			}
+		}
+	})
 }
 
 func TestPlainImagesShowTheVersions(t *testing.T) {
@@ -905,6 +990,56 @@ func TestPlainImagesShowTheVersions(t *testing.T) {
 	for _, want := range []string{"nginx      local build -> 0.2.0", "73 MB to download", "mariadb    11.8", "unchanged", " 50%", "100%"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("plain output lacks %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestCompactTransfer(t *testing.T) {
+	for _, c := range []struct {
+		current, total int64
+		want           string
+	}{
+		{0, 0, "0/0B"},
+		{3_000, 6_000, "3/6kB"},
+		{52_500_000, 105_000_000, "52/105MB"},
+		{999_000, 105_000_000, "1/105MB"},
+		{1, 105_000_000, "<0.1/105MB"},
+		{999_500, 999_500, "1/1MB"},
+		{2_000_000_000, 1_000_000_000, "2/1GB"},
+		{1, 1<<63 - 1, "<0.1/9.2EB"},
+	} {
+		got := compactTransfer(c.current, c.total)
+		if got != c.want || len("100% "+got) > 15 {
+			t.Errorf("compactTransfer(%d, %d) = %q, want %q within a 15-cell progress state", c.current, c.total, got, c.want)
+		}
+	}
+}
+
+// Unusually long custom service names and tags, or terminals below 80
+// columns, still show complete metadata and bars on continuation lines.
+func TestImageMetadataWrapsWithoutDroppingBars(t *testing.T) {
+	for _, width := range []int{40, 80} {
+		_, m := newScreen(nil)
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+		name := "custom-transcript-search-service"
+		from, to := "2026.10.19-custom-build-before", "2026.10.19-custom-build-after"
+		m.apply(upgrade.Event{Kind: upgrade.KindImage, Service: name, From: from, To: to, Progress: dockerx.Progress{Current: 1000, Total: 2000}})
+		m.apply(upgrade.Event{Kind: upgrade.KindImage, Service: "nginx", From: "26.10.1", To: "26.10.2", Progress: dockerx.Progress{Current: 1000, Total: 2000}})
+		m.apply(upgrade.Event{Kind: upgrade.KindStepStart, Step: upgrade.StepPull})
+		view := ansiRe.ReplaceAllString(m.View(), "")
+		flat := strings.Join(strings.Fields(view), " ")
+		for _, want := range []string{name, from, to, "50%", "1/2kB", "█", "░"} {
+			if !strings.Contains(flat, want) {
+				t.Errorf("at %d columns the image lost %q:\n%s", width, want, view)
+			}
+		}
+		for _, line := range strings.Split(view, "\n") {
+			if width == 80 && strings.Contains(line, "nginx") && !strings.Contains(line, "█") {
+				t.Errorf("a long custom tag forced a normal service onto two lines:\n%s", view)
+			}
+			if visibleWidth(line) > min(width, 78) {
+				t.Errorf("at %d columns the image overflows:\n%s", width, view)
+			}
 		}
 	}
 }

@@ -32,6 +32,11 @@ var (
 	askStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 )
 
+// Keep the live area inside a standard 80-column SSH terminal, with room
+// before its right edge. Long lines reflow before Bubble Tea can redraw
+// them on resize, leaving stale rows even when the new view is narrower.
+const terminalWidth = 78
+
 var stepTitles = map[string]string{
 	upgrade.StepCheck:   "Checking for updates",
 	upgrade.StepConfirm: "Confirmation",
@@ -99,10 +104,11 @@ type Model struct {
 	asking   bool
 	// done is set by the event that ends the run, err is its outcome;
 	// ended is set when the event stream closed, with or without it.
-	done  bool
-	err   error
-	ended bool
-	width int
+	done   bool
+	err    error
+	ended  bool
+	width  int
+	height int
 }
 
 // wakeMsg tells the screen that events wait in the queue, or that the
@@ -154,7 +160,8 @@ func NewTerminal(title, logPath string, steps []string, interrupt func() string,
 		spinner:   sp,
 		steps:     map[string]*stepState{},
 		pending:   steps,
-		width:     80,
+		width:     terminalWidth,
+		height:    24,
 		above:     []string{titleStyle.Render(title)},
 	}
 	if logPath != "" {
@@ -298,7 +305,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// one, reports 0: the width stays the one assumed until a real
 		// size comes, rather than a wrap at minWrap columns.
 		if msg.Width > 0 {
-			m.width = msg.Width
+			m.width = min(msg.Width, terminalWidth)
+		}
+		if msg.Height > 0 {
+			m.height = msg.Height
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -439,7 +449,7 @@ func (m *Model) apply(e upgrade.Event) {
 			}
 		}
 		if img == nil {
-			img = &imageState{key: key, ref: e.Image, service: e.Service, bar: progress.New(progress.WithDefaultGradient(), progress.WithoutPercentage())}
+			img = &imageState{key: key, ref: e.Image, service: e.Service, bar: progress.New(progress.WithDefaultGradient(), progress.WithoutPercentage(), progress.WithColorProfile(lipgloss.ColorProfile()))}
 			m.images = append(m.images, img)
 		}
 		if e.From != "" || e.To != "" {
@@ -508,9 +518,16 @@ func (m *Model) View() string {
 		}
 	}
 	if len(m.logs) > 0 && !over {
-		b.WriteString("\n")
-		for _, l := range m.logs {
-			b.WriteString(dimStyle.Render("   "+truncate(l, m.width-4)) + "\n")
+		// Steps and image bars take priority over the log tail. The full
+		// log is kept on disk; overflowing the viewport hides services.
+		// Keep the same budget on taller terminals too, so shrinking
+		// back to 24 rows cannot push old steps into the scrollback.
+		available := min(len(m.logs), max(0, min(m.height, 24)-strings.Count(b.String(), "\n")-2))
+		if available > 0 {
+			b.WriteString("\n")
+			for _, l := range m.logs[len(m.logs)-available:] {
+				b.WriteString(dimStyle.Render("   "+truncate(l, m.width-4)) + "\n")
+			}
 		}
 	}
 	if m.done {
@@ -596,38 +613,55 @@ func cutWidth(s string, n int) (head, tail string) {
 // download carries its note instead.
 func (m *Model) renderImages(b *strings.Builder) {
 	nameW, verW := 9, 13
+	stateW := 15
 	for _, img := range m.images {
-		nameW = max(nameW, len(imageLabel(img)))
-		verW = max(verW, len(img.versions))
+		nameW = max(nameW, lipgloss.Width(imageLabel(img)))
+		verW = max(verW, lipgloss.Width(img.versions))
+		stateW = max(stateW, 2+len(upgrade.HumanBytes(img.progress.Progress.Total)))
 	}
-	nameW, verW = min(nameW, 14), min(verW, 34)
-	width := m.width - (nameW + verW + 31)
-	if width < 12 {
-		width = 12
+	// A long custom name or tag gets its own continuation line; it
+	// must not force every other service onto two lines as well.
+	nameW, verW = min(nameW, 18), min(verW, 31)
+	prefixW := 3 + nameW + 1 + verW + 1
+	columnsFit := prefixW+8+1+stateW <= m.width
+	if !columnsFit {
+		prefixW = 3
+	}
+	width := max(1, min(24, m.width-prefixW-1-stateW))
+	pad := func(text string, width int) string {
+		return text + strings.Repeat(" ", max(0, width-lipgloss.Width(text)))
 	}
 	pulling := m.steps[upgrade.StepPull] != nil
 	for _, img := range m.images {
 		p := img.progress.Progress
-		prefix := fmt.Sprintf("     %-*s  %-*s", nameW, truncate(imageLabel(img), nameW), verW, truncate(img.versions, verW))
+		prefix := "   " + pad(imageLabel(img), nameW) + " " + pad(img.versions, verW) + " "
+		if !columnsFit || lipgloss.Width(imageLabel(img)) > nameW || lipgloss.Width(img.versions) > verW {
+			m.writeWrapped(b, "   ", imageLabel(img)+" "+img.versions, lipgloss.NewStyle())
+			prefix = strings.Repeat(" ", prefixW)
+		}
 		switch {
 		case img.note != "":
-			fmt.Fprintf(b, "%s  %s\n", prefix, dimStyle.Render(img.note))
+			note := img.note
+			if note == "not pulled, the service is not active" {
+				note = "inactive (not pulled)"
+			}
+			m.writeWrapped(b, prefix, note, dimStyle)
 		case !pulling:
-			fmt.Fprintf(b, "%s  %s\n", prefix, dimStyle.Render(upgrade.HumanBytes(p.Total)+" to download"))
+			m.writeWrapped(b, prefix, upgrade.HumanBytes(p.Total)+" to download", dimStyle)
 		default:
 			var percent float64
 			if p.Total > 0 {
-				percent = float64(p.Current) / float64(p.Total)
+				percent = min(1, max(0, float64(p.Current)/float64(p.Total)))
 			}
 			if p.Done {
 				percent = 1
 			}
 			img.bar.Width = width
-			state := fmt.Sprintf("%3.0f%%  %s / %s", percent*100, upgrade.HumanBytes(p.Current), upgrade.HumanBytes(p.Total))
+			state := fmt.Sprintf("%3.0f%% %s", percent*100, compactTransfer(p.Current, p.Total))
 			if p.Done {
-				state = okStyle.Render("✓") + "     " + upgrade.HumanBytes(p.Total)
+				state = okStyle.Render("✓") + fmt.Sprintf(" %*s", stateW-2, upgrade.HumanBytes(p.Total))
 			}
-			fmt.Fprintf(b, "%s  %s  %s\n", prefix, img.bar.ViewAs(percent), state)
+			fmt.Fprintf(b, "%s%s %s\n", prefix, img.bar.ViewAs(percent), state)
 		}
 	}
 	if t := m.total.Total; t.Total > 0 {
@@ -635,8 +669,38 @@ func (m *Model) renderImages(b *strings.Builder) {
 		if !pulling {
 			total = upgrade.HumanBytes(t.Total) + " to download"
 		}
-		fmt.Fprintf(b, "     %-*s  %-*s  %s\n", nameW, "total", verW, "", dimStyle.Render(total))
+		prefix := "   " + pad("total", nameW) + " " + pad("", verW) + " "
+		if !columnsFit {
+			prefix = "   total "
+		}
+		m.writeWrapped(b, prefix, total, dimStyle)
 	}
+}
+
+// compactTransfer uses a shared SI unit so the progress state has a
+// bounded width, including when current and total cross a unit boundary.
+// A positive amount below the displayed precision stays visibly nonzero.
+func compactTransfer(current, total int64) string {
+	a, z := float64(max(0, current)), float64(max(0, total))
+	units := []string{"B", "kB", "MB", "GB", "TB", "PB", "EB"}
+	u := 0
+	for max(a, z) >= 999.5 && u < len(units)-1 {
+		a, z = a/1000, z/1000
+		u++
+	}
+	number := func(n float64) string {
+		switch {
+		case n == 0:
+			return "0"
+		case n < 0.1:
+			return "<0.1"
+		case n < 10:
+			return strings.TrimSuffix(fmt.Sprintf("%.1f", n), ".0")
+		default:
+			return fmt.Sprintf("%.0f", n)
+		}
+	}
+	return number(a) + "/" + number(z) + units[u]
 }
 
 // imageLabel is the service name of a row, or the image name when the
@@ -671,18 +735,16 @@ func shortRef(ref string) string {
 	return name
 }
 
-// truncate cuts a line to n columns, counting runes: a log line full of
-// accents or box drawing would otherwise lose its last character to a cut
-// in the middle of a code point.
+// truncate cuts a line to n terminal cells without splitting a code point.
 func truncate(s string, n int) string {
 	if n < 4 {
 		return s
 	}
-	runes := []rune(s)
-	if len(runes) <= n {
+	if lipgloss.Width(s) <= n {
 		return s
 	}
-	return string(runes[:n-1]) + "…"
+	head, _ := cutWidth(s, n-1)
+	return head + "…"
 }
 
 func firstLine(s string) string {
