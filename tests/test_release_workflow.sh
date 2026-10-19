@@ -228,6 +228,26 @@ has "$RELEASE" 'cancel-in-progress: false' "a release run must never be cancelle
 has "$RELEASE" '--ignore-tags . --strip header' "the notes must be one section"
 has "$RELEASE" './.github/scripts/release-notes-range.sh "$TAG"' "the notes must start at the previous stable release"
 grep -Eq '^ +version: v[0-9]+\.[0-9]+\.[0-9]+$' "$RELEASE" || fail "the git-cliff version must be pinned"
+
+# Run the actual selection step: reviewed prose wins, an absent file keeps
+# the generated list, and an empty file must never publish a blank release.
+notes_step=$(jq -er '.jobs.prepare.steps[] | select(.name == "reviewed release notes") | .run' <<<"$release")
+notes_dir=$(mktemp -d "${TMPDIR:-/var/tmp}/kvs-release-notes.XXXXXX")
+trap 'rm -rf "$notes_dir"' EXIT
+(
+    cd "$notes_dir"
+    mkdir -p .github/release-notes
+    printf 'Generated commit list\n' > RELEASE_NOTES.md
+    TAG=26.10.2 bash -e -c "$notes_step"
+    grep -Fxq 'Generated commit list' RELEASE_NOTES.md || fail 'absent notes replaced the fallback'
+    printf 'Reviewed operator notes\n' > .github/release-notes/26.10.2.md
+    TAG=26.10.2 bash -e -c "$notes_step"
+    cmp .github/release-notes/26.10.2.md RELEASE_NOTES.md || fail 'reviewed notes were not selected'
+    : > .github/release-notes/26.10.2.md
+    if TAG=26.10.2 bash -e -c "$notes_step"; then fail 'empty reviewed notes were accepted'; fi
+)
+echo "PASS: reviewed release notes replace generated notes without allowing an empty release"
+
 if grep -n -e '--notes-file' -e 'mariadb-from' "$RELEASE"; then
     fail "the publish job still passes a flag kvsctl-release no longer uses this way"
 fi

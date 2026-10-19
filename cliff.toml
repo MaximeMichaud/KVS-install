@@ -4,7 +4,7 @@
 #
 #   git cliff <previous stable tag>..<tag> --tag <tag> --ignore-tags . --strip header
 #
-# and puts the result in the body of the GitHub release:
+# and uses the result when no reviewed .github/release-notes/<tag>.md exists:
 # .github/scripts/release-notes-range.sh prints the range, which starts at
 # the previous stable release, and every tag inside it is ignored, so the
 # notes are one section named after <tag>. The manifest kvsctl fetches on
@@ -29,7 +29,7 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
-- {% if commit.scope %}{{ commit.scope }}: {% endif %}{{ commit.message | upper_first }}\
+- {% if commit.scope %}{{ commit.scope }}: {% endif %}{{ commit.message | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/MaximeMichaud/KVS-install/commit/{{ commit.id }}))\
 {% endfor %}
 {% endfor %}\n
 """

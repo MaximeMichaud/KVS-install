@@ -119,6 +119,18 @@ jobs:
         env:
           OUTPUT: RELEASE_NOTES.md
 
+      # Prefer the operator-facing notes reviewed with the tagged commit.
+      # Older tags without a dedicated file keep the linked commit list.
+      - name: reviewed release notes
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          notes=".github/release-notes/${TAG}.md"
+          if [ -f "$notes" ]; then
+            test -s "$notes"
+            cp "$notes" RELEASE_NOTES.md
+          fi
+
       - uses: actions/upload-artifact@v7
         with:
           name: notes

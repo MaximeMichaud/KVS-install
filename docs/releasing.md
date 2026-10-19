@@ -238,7 +238,14 @@ release](#a-bad-release) anyway.
    .github/scripts/release-env.sh 26.11.0
    ```
 
-3. **Tag a commit of main and push the tag.**
+3. **Write and review `.github/release-notes/<tag>.md`.** Group the changes
+   by operator-facing topic, explain the resulting behavior, and link the
+   relevant commits by their short IDs. Put required upgrade commands first.
+   These reviewed notes become the release description; `NOTES` and the
+   highlights remain the shorter text shown by the CLI. See
+   [26.10.2](../.github/release-notes/26.10.2.md) for the format.
+
+4. **Tag a commit of main and push the tag.**
 
    ```sh
    git tag -a 26.11.0 -m 26.11.0
@@ -252,19 +259,25 @@ release](#a-bad-release) anyway.
    had and this one lacks. A tag on a branch that is behind main would
    publish a stack without main's newer files.
 
-4. **Approve the two jobs of the `release` environment**: the signing keys
+5. **Approve the two jobs of the `release` environment**: the signing keys
    job when the run waits for it, right after prepare, and the publish job
    once the images and kvsctl jobs are green.
 
-5. **Check the result.** The release page lists the six files above. On a
+6. **Check the result.** The release page lists the six files above. On a
    lab installation, `kvsctl check` shows the new version, its images and the
    size of the download.
 
 ## Release notes
 
-The prepare job writes the description of the GitHub release with git-cliff
-and `cliff.toml`, from the Conventional Commit subjects: everything since the
-previous stable release, grouped by type, breaking changes first. A
+The prepare job uses `.github/release-notes/<tag>.md` from the tagged commit
+as the GitHub release description when present. Write those notes in English,
+with concrete changes grouped by topic, required upgrade steps, and linked
+commit IDs. Author mentions are optional. Never reuse the previous release's
+notes. An empty notes file fails the prepare job.
+
+When no reviewed file exists, git-cliff and `cliff.toml` generate a fallback
+from Conventional Commit subjects, with a link for every commit: everything
+since the previous stable release, grouped by type, breaking changes first. A
 candidate and the release it leads to cover the same span, so the notes of
 `26.11.0-rc2` and of `26.11.0` both start at the last `26.10` release, and a
 tag pushed later never changes the notes of an earlier run started again.
