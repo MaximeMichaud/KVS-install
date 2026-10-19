@@ -28,6 +28,9 @@ fi
 if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh" ]; then
     source "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh"
 fi
+if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/import-cli.sh" ]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/import-cli.sh"
+fi
 
 # The compose file, .env and the staging directories are named relative to
 # the directory of this script. A run started elsewhere (bash
@@ -92,8 +95,39 @@ MARIADB_BUFFER_POOL_SIZE_REQUEST="${MARIADB_BUFFER_POOL_SIZE:-}"
 # shellcheck disable=SC2034  # Read by lib/database.sh after .env is loaded.
 MARIADB_REDO_LOG_SIZE_REQUEST="${MARIADB_REDO_LOG_SIZE:-}"
 
+validate_domain() {
+    local domain="$1"
+    local label
+    local -a labels
+
+    # The domain is also used directly as the MariaDB database identifier.
+    if [ -z "$domain" ] || [ "${#domain}" -gt 64 ]; then
+        return 1
+    fi
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
+        return 1
+    fi
+
+    IFS='.' read -r -a labels <<< "$domain"
+    for label in "${labels[@]}"; do
+        [ "${#label}" -le 63 ] || return 1
+    done
+    return 0
+}
+
+# The supported LTS series, newest first; planning uses the same choices
+# as installation (tests/test_mariadb_versions.sh).
+readonly MARIADB_LTS_VERSIONS=("12.3" "11.8" "11.4")
+readonly MARIADB_DEFAULT_VERSION="${MARIADB_LTS_VERSIONS[0]}"
+
+DRY_RUN=false
+
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
         --resume-import)
             RESUME_IMPORT=true
             shift
@@ -117,6 +151,9 @@ OPTIONS:
                 - Auto-cleanup volumes
                 - Skip Manticore (faster startup)
                 - Bypass pre-flight warnings (disk space, internet)
+
+    --dry-run   Preview an explicitly selected import without changing the
+                installation, installing tools or contacting an SSH source.
 
     --resume-import
                 Finish an already staged import using its existing MariaDB
@@ -259,6 +296,17 @@ EOF
             ;;
     esac
 done
+
+if [ "$DRY_RUN" = true ]; then
+    if [ "$RESUME_IMPORT" = true ]; then
+        echo 'ERROR: --dry-run previews a new import and cannot be combined with --resume-import' >&2
+        exit 1
+    fi
+    # shellcheck source=lib/import-plan.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/import-plan.sh"
+    import_plan "$DEV_MODE"
+    exit $?
+fi
 
 if [ "$RESUME_IMPORT" = true ] && [ "$DEV_MODE" = true ]; then
     echo "ERROR: --resume-import cannot be combined with --dev" >&2
@@ -623,26 +671,6 @@ require_single_kvs_archive() {
     echo -e "${RED}ERROR: kvs-archive/ holds ${#archives[@]} KVS archives; keep the one to install and remove the others:${NC}" >&2
     printf '  %s\n' "${archives[@]}" >&2
     return 1
-}
-
-validate_domain() {
-    local domain="$1"
-    local label
-    local -a labels
-
-    # The domain is also used directly as the MariaDB database identifier.
-    if [ -z "$domain" ] || [ "${#domain}" -gt 64 ]; then
-        return 1
-    fi
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
-        return 1
-    fi
-
-    IFS='.' read -r -a labels <<< "$domain"
-    for label in "${labels[@]}"; do
-        [ "${#label}" -le 63 ] || return 1
-    done
-    return 0
 }
 
 # MARIADB_STOP_GRACE_PERIOD, when set, as Compose reads stop_grace_period:
@@ -1124,6 +1152,10 @@ IMPORT_ARCHIVE_DUMP=""
 IMPORT_ARCHIVE_MANIFEST=""
 IMPORT_ARCHIVE_MB=""
 IMPORT_ARCHIVE_IGNORED=""
+IMPORT_CLI_PACKAGE=false
+IMPORT_CLI_APPLICATION_ARCHIVE=""
+IMPORT_CLI_PACKAGE_IDENTITY=""
+IMPORT_CLI_APPLICATION_IDENTITY=""
 IMPORT_REMOTE_RSYNC=""
 IMPORT_REMOTE_RSYNC_VERSION=""
 IMPORT_REMOTE_COMPRESSOR=""
@@ -1531,6 +1563,11 @@ import_inspect_archive() {
         echo -e "${RED}ERROR: could not list $IMPORT_ARCHIVE${NC}"
         exit 1
     fi
+    if import_cli_archive_is_package "$listing"; then
+        rm -f "$listing"
+        import_inspect_cli_package
+        return
+    fi
     analysis=$(import_archive_analyze "$listing") || { rm -f "$listing"; exit 1; }
     rm -f "$listing"
     IMPORT_ARCHIVE_ROOT=$(import_field "$analysis" 1)
@@ -1566,6 +1603,68 @@ import_inspect_archive() {
     if [ "$IMPORT_OLD_PATH" != "/var/www/kvs" ]; then
         echo "  Server paths: $IMPORT_OLD_PATH -> /var/www/kvs"
     fi
+}
+
+# Legacy CLI packages hold data only. The matching application ZIP supplies
+# the PHP files; both inputs are validated before any target files are moved.
+import_inspect_cli_package() {
+    local info destination="${1:-/var/www/$DOMAIN}"
+
+    import_ensure_tool python3 || exit 1
+    import_ensure_tool zstd || exit 1
+    IMPORT_CLI_APPLICATION_ARCHIVE=$(import_cli_application_archive "$(pwd)/kvs-archive") || exit 1
+    IMPORT_CLI_PACKAGE_IDENTITY=$(import_dump_identity "$IMPORT_ARCHIVE") || exit 1
+    IMPORT_CLI_APPLICATION_IDENTITY=$(import_dump_identity "$IMPORT_CLI_APPLICATION_ARCHIVE") || exit 1
+    info=$(import_cli_inspect "$IMPORT_ARCHIVE" "$IMPORT_CLI_APPLICATION_ARCHIVE") || exit 1
+    IMPORT_SITE_VERSION=$(import_field "$info" 1)
+    IMPORT_OLD_PATH=$(import_field "$info" 2)
+    IMPORT_TABLES_PREFIX=$(import_field "$info" 3)
+    IMPORT_ARCHIVE_MB=$(import_field "$info" 5)
+    IMPORT_SITE_IONCUBE=$(import_field "$info" 6)
+    IMPORT_CLI_PACKAGE=true
+    IMPORT_ARCHIVE_ROOT=www
+    IMPORT_ARCHIVE_DUMP=database.sql.zst
+    IMPORT_ARCHIVE_MANIFEST=''
+    echo "  Legacy KVS CLI data package: KVS $IMPORT_SITE_VERSION, prefix $IMPORT_TABLES_PREFIX, content $(import_field "$info" 4)"
+    echo "  Application files: $IMPORT_CLI_APPLICATION_ARCHIVE (custom application files and settings are not in the data package)"
+    if ! import_free_space_mb_ok "$IMPORT_ARCHIVE_MB" "$destination"; then
+        echo "ERROR: not enough free space to prepare the legacy package in $destination" >&2
+        exit 1
+    fi
+    import_destination_ready "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
+}
+
+# The private stage is removed on rejection or interruption. SQL is checked
+# before the destination marker, site files or database staging are changed.
+import_cli_inputs_unchanged() {
+    if [ "$(import_dump_identity "$IMPORT_ARCHIVE")" != "$IMPORT_CLI_PACKAGE_IDENTITY" ] ||
+        [ "$(import_dump_identity "$IMPORT_CLI_APPLICATION_ARCHIVE")" != "$IMPORT_CLI_APPLICATION_IDENTITY" ]; then
+        echo 'ERROR: a legacy package input changed after inspection; run setup again' >&2
+        return 1
+    fi
+}
+
+import_extract_cli_package() {
+    (
+        set -e
+        local destination="$1" stage
+        import_cli_inputs_unchanged || exit 1
+        import_destination_ready "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
+        stage=$(import_stage_dir_for "$destination")
+        stage=$(mktemp -d "${stage}.cli.XXXXXX") || exit 1
+        trap 'rm -rf -- "$stage"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        import_cli_prepare "$IMPORT_ARCHIVE" "$IMPORT_CLI_APPLICATION_ARCHIVE" "$stage" || exit 1
+        import_cli_inputs_unchanged || exit 1
+        IMPORT_SITE_DIR="$stage/www" IMPORT_DB_DUMP="$stage/database.sql.zst" import_validate_local_materials
+        import_destination_ready "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
+        import_cli_inputs_unchanged || exit 1
+        import_mark_destination "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
+        mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
+        import_archive_settle "$stage" www database.sql.zst '' "$IMPORT_STAGING" "$destination" >/dev/null || exit 1
+        chmod 600 "$IMPORT_STAGING/database.sql.zst" || exit 1
+    )
 }
 
 # import_remote_size_text <report>: the site size for the summary. The
@@ -2199,6 +2298,14 @@ import_ensure_nginx_rewrites() {
 import_fetch_archive() {
     local destination="/var/www/$DOMAIN" stage settled
 
+    if [ "$IMPORT_CLI_PACKAGE" = true ]; then
+        import_extract_cli_package "$destination" || exit 1
+        IMPORT_DB_DUMP="$IMPORT_STAGING/database.sql.zst"
+        IMPORT_RAW_DUMP=$IMPORT_DB_DUMP
+        IMPORT_SITE_DIR=$destination
+        echo "  Site files in $destination, dump in $IMPORT_DB_DUMP"
+        return
+    fi
     echo ""
     echo -e "${CYAN}Extracting $IMPORT_ARCHIVE into $destination...${NC}"
     import_destination_ready "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
@@ -2382,12 +2489,6 @@ esac
 # Colors
 
 readonly MAX_SITE_PREFIX_LENGTH=235
-
-# The MariaDB LTS series the setup offers, newest first; the first one is
-# the default of a fresh install. docker-compose.yml, .env.example and the
-# multi-site files carry the same default (tests/test_mariadb_versions.sh).
-readonly MARIADB_LTS_VERSIONS=("12.3" "11.8" "11.4")
-readonly MARIADB_DEFAULT_VERSION="${MARIADB_LTS_VERSIONS[0]}"
 
 #################################################################
 # Pre-flight Checks

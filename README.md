@@ -233,6 +233,28 @@ An existing KVS site moves into the Docker stack from two inputs: its files and 
 - **A directory and a dump on the new server**, copied there by any means.
 - **The old server over SSH**: the setup pipes `kvs-export.sh` to it, shows what it found (KVS version, domain, paths, database name, host and user with the password masked, table count, sizes), then streams the dump and mirrors the files with rsync (a tar stream when the old server has no rsync). The transfer is counted first, a dry run of rsync, and shown against that count: bytes and files done out of the whole, the rates of the last twenty seconds and the time left that follows the slower of the two, since the tail of a site is many small files where the bytes hardly move (rsync's own percentage and estimate are relative to the files its scan has found so far, and grow with it). The detection and dump share one SSH connection, so an interactive password is typed once, on ssh's own prompt; a run nobody attends hands it over with `IMPORT_REMOTE_PASSWORD` instead (to `sshpass`, installed when missing, through its environment). No software is installed or server configuration changed on the old server; native database exports use private temporary files that are removed on exit. Its credentials are never stored on the new server.
 
+Migration inspection and package compatibility are owned by KVS-install. KVS CLI keeps application diagnostics (`system:check`, `system:status`, `system:stats`); its former `migrate:*` commands are retired.
+
+Inspect the source without creating an export:
+
+```bash
+bash kvs-export.sh detect /srv/site --database-format=sql --json > inspection.json
+```
+
+The versioned JSON report includes catalogue totals and status counts, database and storage diagnostics, and an archive size estimate. Missing optional tables are reported as `null` with a warning; SQL and filesystem failures return a nonzero exit status. `ready` requires successful database checks and a complete storage measurement. It describes inspection readiness, not a guaranteed migration. `--no-size` and timed-out measurements keep unavailable sizes and estimates explicit. The estimate adds the uncompressed site files to a heuristic database dump size (30% of the database size); it is not a disk-space guarantee. The JSON report omits database passwords but still contains private site paths and identifiers.
+
+`--compression N` selects zstd level 1 through 19 for database exports (default 3), including `--dump-only`. An explicit level requires zstd and cannot be combined with `--gzip`. Without an explicit level, gzip remains the fallback when zstd is unavailable. The outer site archive remains an uncompressed `.tar`.
+
+Preview the selected import from the `docker` directory:
+
+```bash
+DOMAIN=example.test SSL_CHOICE=3 IMPORT_ARCHIVE=/srv/backups/site.tar ./setup.sh --dry-run
+```
+
+The preview validates local source metadata and, for a directory source, the SQL dump. It creates temporary inspection files only, does not require root, installs nothing and leaves source files, setup configuration and services unchanged. An SSH preview opens no connection and explicitly leaves source credentials and data unverified. Existing-site replacement checks and full import validation still run during actual setup. `IMPORT_FILES_ONLY` and `IMPORT_REUSE_DUMP` are reflected in the plan. `--resume-import` cannot be combined with `--dry-run`.
+
+Legacy KVS CLI `.tar.zst` packages containing `metadata.json`, `database.sql.zst` and optional `content/` are also accepted through `IMPORT_ARCHIVE`. Put exactly one matching `KVS_*.zip` in `docker/kvs-archive/` first: the actual application version must match the package metadata. These packages contain data only; custom PHP files, templates and application configuration are not recovered from them. The importer reconstructs the application from the supplied ZIP, preserves the package table prefix and uses the normal Docker initialization path. Python 3 and zstd are required; actual setup installs missing readers, while a preview reports missing readers without installing them. Links, unsafe archive paths, inconsistent metadata, corrupted payloads and source paths containing quotes, backslashes or control characters are rejected. Package metadata and SQL stay outside the webroot. Prefer the native full-site exporter for new migrations.
+
 Procedure:
 
 1. No KVS archive is needed: the site brings its version (`admin/include/version.php`, which picks the PHP release), its encoding (`admin/include/functions_base.php`, IonCube or plain PHP, which sets [`IONCUBE`](#ioncube)) and its nginx rewrite rules (see below). An archive in `docker/kvs-archive/` is only a fallback for the rewrites and must then be of the site's version.

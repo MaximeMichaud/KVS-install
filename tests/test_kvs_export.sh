@@ -8,7 +8,7 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 EXPORT_SCRIPT="$REPO_ROOT/kvs-export.sh"
-TMP_ROOT=$(mktemp -d /tmp/kvs-export-test.XXXXXX)
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kvs-export-test.XXXXXX")
 TESTS_RUN=0
 
 STUB_BIN="$TMP_ROOT/bin-stub"
@@ -211,14 +211,63 @@ for arg in "$@"; do
             printf 'kvs-native-export-probe\n' > "$path"
             exit 0
             ;;
+        *'kvs-export:catalogue:'*)
+            table=${arg#*kvs-export:catalogue:}
+            table=${table%% *}
+            case " ${STUB_CATALOGUE_MISSING:-} " in *" $table "*) echo "ERROR 1146 (42S02): table fixture.$table does not exist" >&2; exit 1 ;; esac
+            case " ${STUB_CATALOGUE_DENIED:-} " in *" $table "*) echo "ERROR 1142 (42000): SELECT command denied on $table" >&2; exit 1 ;; esac
+            if [ "${STUB_CATALOGUE_RAW_TABLE:-}" = "$table" ]; then
+                printf '%b' "${STUB_CATALOGUE_RAW:-}"
+                exit 0
+            fi
+            case $table in
+                videos) rows=${STUB_VIDEO_STATUSES-'0 1 1 2 3 4'} ;;
+                albums) rows='0 1 1 2 4' ;;
+                users) rows='0 1 2 2 3 4' ;;
+                categories) echo 3; exit 0 ;;
+                tags) echo 4; exit 0 ;;
+                models) echo 5; exit 0 ;;
+                dvds) echo 2; exit 0 ;;
+                comments) echo 7; exit 0 ;;
+                *) exit 89 ;;
+            esac
+            total=0
+            for row in $rows; do total=$((total + 1)); done
+            printf '%s' "$total"
+            rest=$arg
+            while [[ $rest =~ SUM\(status_id[[:space:]]*(\>=|=)[[:space:]]*([0-9]+)\) ]]; do
+                predicate=${BASH_REMATCH[0]}
+                operator=${BASH_REMATCH[1]}
+                boundary=${BASH_REMATCH[2]}
+                count=0
+                for row in $rows; do
+                    if { [ "$operator" = = ] && [ "$row" -eq "$boundary" ]; } ||
+                        { [ "$operator" = '>=' ] && [ "$row" -ge "$boundary" ]; }; then
+                        count=$((count + 1))
+                    fi
+                done
+                printf '\t%s' "$count"
+                rest=${rest#*"$predicate"}
+            done
+            printf '\n'
+            exit 0
+            ;;
         *admin_servers*)
+            if [ -n "${STUB_SERVERS_ERROR:-}" ]; then
+                printf '%s\n' "$STUB_SERVERS_ERROR" >&2
+                exit 1
+            fi
             # The storage server rows, tab separated, as the batch mode prints them.
             printf '%b' "${STUB_SERVERS:-}"
             exit 0
             ;;
     esac
 done
-printf '11.8.2-MariaDB\t127\t45\t%s\t%s\n' "${STUB_NON_TRANSACTIONAL:-0}" "${STUB_UTF8MB4:-1}"
+if [ -n "${STUB_PROBE_RESULT+x}" ]; then
+    printf '%b' "$STUB_PROBE_RESULT"
+else
+    printf '11.8.2-MariaDB\t127\t45\t%s\t%s\n' "${STUB_NON_TRANSACTIONAL:-0}" "${STUB_UTF8MB4:-1}"
+fi
 EOF
     cat > "$STUB_BIN/mariadb-dump" <<'EOF'
 #!/bin/bash
@@ -295,7 +344,14 @@ if [ -n "${STUB_DU_SLEEP:-}" ]; then
     trap 'kill $! 2> /dev/null; exit 143' TERM
     wait $!
 fi
-printf '%s\t%s\n' "${STUB_DU_KB:-1024}" "${*: -1}"
+[ "${STUB_DU_FAIL:-no}" != yes ] || exit 1
+delimiter=$'\n'
+for argument in "$@"; do [ "$argument" != --null ] || delimiter=$'\0'; done
+if [ -z "$delimiter" ]; then
+    printf '%s\t%s\0' "${STUB_DU_KB:-1024}" "${*: -1}"
+else
+    printf '%s\t%s\n' "${STUB_DU_KB:-1024}" "${*: -1}"
+fi
 printf 'du done: %s\n' "${*: -1}" >> "${STUB_LOG:-/dev/null}"
 EOF
     # findmnt answers nfs for the path named in STUB_NFS_PATH, ext4 otherwise.
@@ -1598,9 +1654,215 @@ test_the_usage_is_available_and_bad_options_are_refused() {
     pass "the usage is available and bad options are refused"
 }
 
+# JSON is parsed by a development-only oracle. The exporter itself runs
+# with MIN_BIN, which deliberately contains neither Python nor PHP.
+assert_json() {
+    local file="$1" expression="$2"
+    local python
+
+    shift 2
+    python=$(command -v python3) || fail "python3 is required by the JSON assertion tests"
+    "$python" - "$file" "$expression" "$@" <<'PY' || fail "structured JSON assertion failed"
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as stream:
+    report = json.load(stream)
+expected = sys.argv[3:]
+assert eval(sys.argv[2]), report
+PY
+}
+
+test_readme_json_detect_command_runs_without_exporting() {
+    local site="$TMP_ROOT/readme-site" work="$TMP_ROOT/readme-inspection"
+    local out="$TMP_ROOT/readme.out" err="$TMP_ROOT/readme.err" command quoted_site
+
+    make_site "$site"
+    mkdir -p "$work/bin"
+    ln -s "$EXPORT_SCRIPT" "$work/kvs-export.sh"
+    ln -s "$BASH" "$work/bin/bash"
+    command=$(sed -n '/^bash kvs-export\.sh detect .* > inspection\.json$/p' "$REPO_ROOT/README.md")
+    [ -n "$command" ] && [[ "$command" != *$'\n'* ]] || fail "README must contain one JSON detect example"
+    printf -v quoted_site '%q' "$site"
+    command=${command//\/srv\/site/$quoted_site}
+    : > "$STUB_LOG"
+    (
+        cd "$work"
+        PATH="$work/bin:$STUB_BIN:$MIN_BIN" "$BASH" -c "$command"
+    ) > "$out" 2> "$err" || fail "README detect example failed: $(cat "$err")"
+    assert_json "$work/inspection.json" 'report["ready"] is True and report["exit_code"] == 0 and report["errors"] == []'
+    assert_json "$work/inspection.json" 'report["site"]["directory"] == expected[0] and report["catalogue"]["videos"]["total"] == 6' "$site"
+    [ ! -s "$out" ] || fail "README redirection must write the report to inspection.json"
+    [ -z "$(find "$work" -maxdepth 1 -type f ! -name inspection.json -print -quit)" ] ||
+        fail "README inspection must not create an export"
+    pass "the README JSON detect command runs against a fixture without creating an export"
+}
+
+test_database_probe_rejects_malformed_numbers() {
+    local site="$TMP_ROOT/probe-numbers" out="$TMP_ROOT/probe-numbers.out" err="$TMP_ROOT/probe-numbers.err"
+
+    make_site "$site"
+    STUB_PROBE_RESULT=$'11.8.2-MariaDB\tinvalid\t45\t0\t1\n' \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "legacy detect remains diagnostic"
+    assert_key "$out" db_ok no
+    detect_value "$out" db_error > /dev/null || fail "invalid SQL numbers need a diagnostic"
+    pass "the database probe rejects malformed numbers instead of accepting fabricated zero"
+}
+
+test_json_detect_reports_typed_catalogue_and_estimates() {
+    local site="$TMP_ROOT/json-site" out="$TMP_ROOT/json.out" err="$TMP_ROOT/json.err"
+
+    make_site "$site"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || fail "JSON inspection failed: $(cat "$err")"
+    assert_json "$out" 'report["kvs_export"] == 1 and report["ready"] is True and report["exit_code"] == 0 and report["status"] == "complete"'
+    assert_json "$out" 'report["site"]["directory"] == expected[0]' "$site"
+    assert_json "$out" 'report["catalogue"]["videos"] == {"status":"ok","total":6,"active":2,"disabled":1,"error":1,"error_message":None}'
+    assert_json "$out" 'report["catalogue"]["albums"] == {"status":"ok","total":5,"active":2,"disabled":1,"error_message":None}'
+    assert_json "$out" 'report["catalogue"]["users"] == {"status":"ok","total":6,"active":4,"error_message":None}'
+    assert_json "$out" '[report["catalogue"][key]["total"] for key in ("categories","tags","models","dvds","comments")] == [3,4,5,2,7]'
+    assert_json "$out" 'report["database"]["tables"] == 127 and type(report["database"]["tables"]) is int and report["database"]["ok"] is True'
+    assert_json "$out" 'report["compression"] == {"algorithm":"gzip","level":6} and report["storage"]["size_mb"] == 4'
+    assert_json "$out" 'report["estimate"]["state"] == "heuristic" and report["estimate"]["database_dump_mb"] == 14 and report["estimate"]["archive_mb"] == 18'
+    assert_json "$out" 'expected[0] not in json.dumps(report) and "password_hint" not in json.dumps(report) and "db_password" not in json.dumps(report)' "$REAL_PASSWORD"
+    STUB_VIDEO_STATUSES='' run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || fail "an empty table is not an error"
+    assert_json "$out" 'report["catalogue"]["videos"]["status"] == "ok" and all(report["catalogue"]["videos"][key] == 0 for key in ("total","active","disabled","error"))'
+    : > "$STUB_LOG"
+    PATH="$STUB_BIN:$MIN_BIN" "$BASH" -s -- detect --json "$site" < "$EXPORT_SCRIPT" > "$out" 2> "$err" ||
+        fail "JSON detect must also run with the script on stdin"
+    assert_json "$out" 'report["ready"] is True and report["catalogue"]["videos"]["total"] == 6'
+    pass "JSON detect reports typed SQL-derived counts, status breakdowns and honest tar estimates"
+}
+
+test_json_detect_distinguishes_missing_tables_and_sql_failures() {
+    local site="$TMP_ROOT/json-sql" out="$TMP_ROOT/json-sql.out" err="$TMP_ROOT/json-sql.err" status
+
+    make_site "$site"
+    STUB_CATALOGUE_MISSING=comments run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" ||
+        fail "a missing optional legacy table is a warning"
+    assert_json "$out" 'report["catalogue"]["comments"]["status"] == "missing" and report["catalogue"]["comments"]["total"] is None and report["warnings"] and report["status"] == "partial" and report["ready"] is True'
+    status=0
+    STUB_CATALOGUE_MISSING=videos run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+    [ "$status" -eq 3 ] || fail "a missing required catalogue table must return3"
+    assert_json "$out" 'report["ready"] is False and report["exit_code"] == 3 and report["catalogue"]["videos"]["total"] is None and report["errors"]'
+    status=0
+    STUB_CATALOGUE_DENIED=tags run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+    [ "$status" -eq 3 ] || fail "a SQL permission error must return3"
+    assert_json "$out" 'report["ready"] is False and report["catalogue"]["tags"]["status"] == "error" and report["catalogue"]["tags"]["total"] is None and "1142" in report["catalogue"]["tags"]["error_message"]'
+    status=0
+    STUB_DB_FAIL=yes run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+    [ "$status" -eq 3 ] || fail "JSON detect must fail when its database cannot be inspected"
+    assert_json "$out" 'report["database"]["ok"] is False and report["database"]["tables"] is None and report["catalogue"]["videos"]["status"] == "unavailable" and report["catalogue"]["videos"]["total"] is None and report["ready"] is False'
+    status=0
+    STUB_CATALOGUE_RAW_TABLE=videos STUB_CATALOGUE_RAW=$'6\t0x2\t1\t1\n' \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+    [ "$status" -eq 3 ] || fail "malformed SQL counters must fail rather than become zero"
+    assert_json "$out" 'report["catalogue"]["videos"]["total"] is None and report["catalogue"]["videos"]["active"] is None and report["catalogue"]["videos"]["status"] == "error"'
+    for raw in $'6\t2\t1\t1\t' $'6\t2\t1\t1\n7\t0\t0\t0' $'6\t7\t1\t1' $'6\t02\t1\t1' $'6\t9223372036854775808\t1\t1'; do
+        status=0
+        STUB_CATALOGUE_RAW_TABLE=videos STUB_CATALOGUE_RAW="$raw" \
+            run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+        [ "$status" -eq 3 ] || fail "an extra field, extra row or invalid status count must be refused"
+        assert_json "$out" 'report["catalogue"]["videos"]["total"] is None and report["ready"] is False'
+    done
+    status=0
+    STUB_SERVERS_ERROR='ERROR 1142 (42000): SELECT command denied on storage servers' \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+    [ "$status" -eq 3 ] || fail "denied storage SQL must not leave a ready JSON report"
+    assert_json "$out" 'report["ready"] is False and any(item["component"] == "storage_servers" for item in report["errors"])'
+    STUB_SERVERS_ERROR='ERROR 1146 (42S02): legacy storage table does not exist' \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || fail "a missing optional legacy storage table remains compatible"
+    assert_json "$out" 'report["ready"] is True and report["warnings"]'
+    STUB_SERVERS_ERROR='ERROR 1142 (42000): SELECT command denied on storage servers' \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "legacy SSH detect remains diagnostic"
+    assert_key "$out" db_ok yes
+    if grep -q 'kvs-export:catalogue:' "$STUB_LOG"; then fail "legacy detect must not perform detailed catalogue queries"; fi
+    status=0
+    STUB_SERVERS_ERROR="ERROR 1142 (42000): fixture client echoed $REAL_PASSWORD" \
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+    [ "$status" -eq 3 ] || fail "a client error containing a secret must still fail"
+    assert_json "$out" 'expected[0] not in json.dumps(report) and any("[redacted]" in item["message"] for item in report["errors"])' "$REAL_PASSWORD"
+    if grep -Fq "$REAL_PASSWORD" "$err"; then fail "JSON diagnostics must not echo the database password"; fi
+    chmod 000 "$site/admin/include/version.php"
+    if [ ! -r "$site/admin/include/version.php" ]; then
+        status=0
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+        [ "$status" -eq 1 ] || fail "an unreadable required configuration must not report ready"
+        assert_json "$out" 'report["ready"] is False and report["database"]["tables"] is None and report["errors"]'
+        [ ! -s "$STUB_LOG" ] || fail "unreadable configuration must fail before database inspection"
+        assert_json "$out" 'report["compression"] == {"algorithm":None,"level":None}'
+    else
+        echo '# Permission subcase skipped: this user can read mode000 files.'
+    fi
+    chmod 600 "$site/admin/include/version.php"
+    pass "JSON distinguishes empty and missing tables from denied, unreachable or malformed SQL"
+}
+
+test_json_storage_is_explicit_and_paths_round_trip() {
+    local site="$TMP_ROOT/json-storage" out="$TMP_ROOT/json-storage.out" err="$TMP_ROOT/json-storage.err"
+    local unusual=$'lib"quoted\\path\nnext' bin="$TMP_ROOT/json-find-failure" status
+
+    make_site "$site"
+    mkdir "$site/$unusual"
+    printf data > "$site/$unusual/synthetic.bin"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || fail "LF paths must not break JSON inspection"
+    assert_json "$out" 'any(item["path"] == expected[0] and item["size_mb"] == 1 for item in report["storage"]["entries"]) and report["storage"]["state"] == "exact"' "$unusual"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --no-size detect --json "$site" || fail "an intentional skipped size remains diagnostic"
+    assert_json "$out" 'report["storage"]["state"] == "skipped" and report["storage"]["size_mb"] is None and report["estimate"]["state"] == "unavailable" and report["estimate"]["archive_mb"] is None and report["ready"] is False and report["warnings"]'
+    STUB_DU_SLEEP=20 run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --size-timeout 1 detect --json "$site" || fail "an intentional timeout must be explicit"
+    assert_json "$out" 'report["storage"]["state"] == "incomplete" and report["estimate"]["state"] == "incomplete" and report["estimate"]["archive_mb"] is None and report["ready"] is False and report["warnings"]'
+    status=0
+    STUB_DU_FAIL=yes run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "failed size processes must not report an exact successful result"
+    assert_json "$out" 'report["ready"] is False and report["storage"]["state"] == "failed" and report["storage"]["size_mb"] is None and report["errors"]'
+    mkdir "$bin"
+    printf '#!/bin/bash\necho "find: fixture: Permission denied" >&2\nexit 1\n' > "$bin/find"
+    chmod +x "$bin/find"
+    status=0
+    run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" detect --json "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a failed storage enumeration must not report success"
+    assert_json "$out" 'report["ready"] is False and report["storage"]["size_mb"] is None and report["errors"]'
+    pass "JSON preserves LF paths and distinguishes skipped, timed out and failed storage inspection"
+}
+
+test_compression_levels_reach_zstd_and_preserve_payload() {
+    local site="$TMP_ROOT/compression-levels" out="$TMP_ROOT/compression-levels.out" err="$TMP_ROOT/compression-levels.err"
+    local level status argument
+
+    make_site "$site"
+    for level in 1 3 19; do
+        run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" --compression "$level" dump "$site" || fail "valid zstd level $level failed"
+        grep -Fq -- "[-$level] [-q] [-c]" "$STUB_LOG" || fail "selected compression level must reach the real compressor invocation"
+        grep -Fq -- '-- Dump completed' "$out" || fail "the successful stream must preserve the SQL payload"
+    done
+    run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" --compression=19 detect --json "$site" || fail "compression=VALUE must work"
+    assert_json "$out" 'report["compression"] == {"algorithm":"zstd","level":19}'
+    for argument in 0 20 -1 1.5 1e1 bad ''; do
+        status=0
+        run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" --compression="$argument" dump "$site" || status=$?
+        [ "$status" -eq 1 ] && [ ! -s "$out" ] || fail "invalid compression must fail before producing output"
+    done
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --compression 3 dump "$site" || status=$?
+    [ "$status" -eq 1 ] && [ ! -s "$out" ] || fail "explicit zstd level must not silently use gzip"
+    for argument in first last; do
+        status=0
+        if [ "$argument" = first ]; then
+            run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" --gzip --compression 3 dump "$site" || status=$?
+        else
+            run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" --compression 3 --gzip dump "$site" || status=$?
+        fi
+        [ "$status" -eq 1 ] && [ ! -s "$out" ] || fail "gzip and an explicit zstd level must conflict in either order"
+        [ ! -s "$STUB_LOG" ] || fail "conflicting options must fail before database access or compressor invocation"
+    done
+    status=0
+    run_export "$EXTRA_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" --json dump "$site" || status=$?
+    [ "$status" -eq 1 ] && [ ! -s "$out" ] || fail "JSON must not be mixed with the binary dump payload"
+    pass "zstd levels are validated and used without changing payload or legacy gzip fallback"
+}
+
 make_stubs
 make_min_bin
 make_extra_bin
+
+test_readme_json_detect_command_runs_without_exporting
 
 test_detect_reports_the_installation_as_key_value_lines
 test_detect_reports_the_encoding_and_the_web_server_configuration
@@ -1630,5 +1892,11 @@ test_the_script_works_when_bash_reads_it_from_stdin
 test_an_unattended_run_asks_nothing
 test_a_full_filesystem_stops_the_archive
 test_the_usage_is_available_and_bad_options_are_refused
+
+test_database_probe_rejects_malformed_numbers
+test_json_detect_reports_typed_catalogue_and_estimates
+test_json_detect_distinguishes_missing_tables_and_sql_failures
+test_json_storage_is_explicit_and_paths_round_trip
+test_compression_levels_reach_zstd_and_preserve_payload
 
 echo "All $TESTS_RUN export tests passed."

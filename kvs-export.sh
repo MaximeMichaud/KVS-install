@@ -54,6 +54,22 @@ OPT_DATABASE_FORMAT="auto"
 OPT_ASSUME_YES="no"
 OPT_SIZE_TIMEOUT="${KVS_EXPORT_SIZE_TIMEOUT:-0}"
 OPT_MEASURE_SIZE="yes"
+OPT_JSON="no"
+OPT_COMPRESSION=3
+OPT_COMPRESSION_SET="no"
+JSON_EXIT=0
+JSON_LAST_ERROR=""
+JSON_WARNINGS=()
+JSON_ERROR_COMPONENTS=()
+JSON_ERROR_CODES=()
+JSON_ERROR_MESSAGES=()
+CATALOGUE_NAMES=(videos albums users categories tags models dvds comments)
+CATALOGUE_STATUS=()
+CATALOGUE_TOTAL=()
+CATALOGUE_ACTIVE=()
+CATALOGUE_DISABLED=()
+CATALOGUE_ERRORS=()
+CATALOGUE_MESSAGES=()
 OPT_EXCLUDES=()
 OPT_INCLUDES=()
 
@@ -142,12 +158,16 @@ Runs on the server that holds the KVS site to move away.
 Commands
   archive   Write an archive with the site files, the database dump and a
             manifest (default)
-  detect    Print what was found as key=value lines on stdout
+  detect    Print what was found as key=value lines on stdout (or --json)
   dump      Write the compressed database dump on stdout
 
 Options
   -o, --output PATH   Archive path, or - for stdout. Default:
                       ./<domain>-kvs-export-<YYYYMMDD-HHMM>.tar
+      --json          Structured detect report, with catalogue counts and estimates
+      --compression LEVEL
+                      zstd database dump level 1-19 (default 3); requires zstd
+                      when explicit. The outer site archive remains tar.
       --dump-only     Write only the database dump
       --gzip          Compress the dump with gzip (default: zstd when
                       installed, else pigz, else gzip)
@@ -181,7 +201,7 @@ Environment
 
 Exit codes
   0 success, 1 error, 2 no site found or several found,
-  3 the database could not be reached
+  3 database access or detailed JSON SQL inspection failed
 EOF
 }
 
@@ -194,11 +214,23 @@ kvs_say() {
 }
 
 kvs_error() {
-    printf 'ERROR: %s\n' "$*" >&2
+    local message="$*"
+
+    if [ "$OPT_JSON" = yes ]; then
+        message=$(kvs_redact_error "$message")
+        JSON_LAST_ERROR=$message
+    fi
+    printf 'ERROR: %s\n' "$message" >&2
 }
 
 kvs_warn() {
-    printf 'WARNING: %s\n' "$*" >&2
+    local message="$*"
+
+    if [ "$OPT_JSON" = yes ]; then
+        message=$(kvs_redact_error "$message")
+        JSON_WARNINGS+=("$message")
+    fi
+    printf 'WARNING: %s\n' "$message" >&2
 }
 
 # shellcheck disable=SC2329  # Runs from the EXIT trap set at the bottom.
@@ -592,6 +624,7 @@ kvs_probe_database() {
     local status
     local line
     local utf8mb4_count
+    local without_tabs
 
     DB_OK="no"
     DB_ERROR=""
@@ -641,9 +674,15 @@ kvs_probe_database() {
         DB_ERROR="the probe query returned nothing"
         return 0
     fi
-    kvs_is_number "$DB_TABLES" || DB_TABLES="0"
-    kvs_is_number "$DB_SIZE_MB" || DB_SIZE_MB="0"
-    kvs_is_number "$DB_NON_TRANSACTIONAL" || DB_NON_TRANSACTIONAL="0"
+    without_tabs=${out//$'\t'/}
+    if [ "$((${#out} - ${#without_tabs}))" -ne 4 ] ||
+        ! kvs_is_uint "$DB_TABLES" || ! kvs_is_uint "$DB_SIZE_MB" ||
+        ! kvs_is_uint "$DB_NON_TRANSACTIONAL" || [[ "$out" == *$'\n'* ]] ||
+        { [ "${utf8mb4_count:-}" != 0 ] && [ "${utf8mb4_count:-}" != 1 ]; }; then
+        DB_ERROR="invalid numeric database probe response"
+        DB_TABLES=0 DB_SIZE_MB=0 DB_NON_TRANSACTIONAL=0
+        return 0
+    fi
     # utf8mb4 exists from MySQL 5.5.3 and MariaDB 5.5; the stock MySQL 5.1
     # of CentOS 6 has none, and its mysqldump refuses the name.
     if [ "${utf8mb4_count:-}" = "0" ]; then
@@ -717,10 +756,34 @@ kvs_measure_jobs() {
 kvs_list_measure_units() {
     local file="$1"
     local depth="$2"
+    local err=""
     local -a statuses
 
-    # find also fails on a directory it cannot read, which only leaves that
-    # directory out; cat fails when the list could not be written whole.
+    if [ "$OPT_JSON" = yes ]; then
+        TEMP_ERR_FILE=$(mktemp 2> /dev/null) || TEMP_ERR_FILE=""
+        if [ -z "$TEMP_ERR_FILE" ]; then
+            kvs_add_json_error storage enumeration_failed 'cannot create a temporary diagnostic file' 1
+            return 1
+        fi
+        (
+            status=0
+            find -L "$SITE_DIR" -mindepth 1 -maxdepth "$((depth - 1))" ! -type d -print0 2> "$TEMP_ERR_FILE" || status=$?
+            find -L "$SITE_DIR" -mindepth "$depth" -maxdepth "$depth" -print0 2>> "$TEMP_ERR_FILE" || status=$?
+            exit "$status"
+        ) < /dev/null | cat > "$file" 2> /dev/null
+        statuses=(${PIPESTATUS[@]+"${PIPESTATUS[@]}"})
+        err=$(< "$TEMP_ERR_FILE")
+        rm -f -- "$TEMP_ERR_FILE"
+        TEMP_ERR_FILE=""
+        if [ "${statuses[0]}" -ne 0 ] || [ "${statuses[1]}" -ne 0 ]; then
+            [ -n "$err" ] || err='the complete list of site entries could not be written'
+            kvs_add_json_error storage enumeration_failed "$err" 1
+            return 1
+        fi
+        return 0
+    fi
+    # The legacy SSH report tolerates directories that cannot be read.
+    # cat fails when the list could not be written whole.
     {
         find -L "$SITE_DIR" -mindepth 1 -maxdepth "$((depth - 1))" ! -type d -print0 2> /dev/null
         find -L "$SITE_DIR" -mindepth "$depth" -maxdepth "$depth" -print0 2> /dev/null
@@ -737,10 +800,13 @@ kvs_start_measure() {
 
     # The probes run du on an empty list: the options are checked, nothing
     # is measured.
+    local -a record_options=()
+
+    [ "$OPT_JSON" != yes ] || record_options=(--null)
     if xargs -r -0 -n 1 -P "$jobs" du < /dev/null > /dev/null 2>&1; then
-        exec 3< <(exec xargs -0 -n 1 -P "$jobs" du -sLk -- < "$file" 2> /dev/null)
+        exec 3< <(exec xargs -0 -n 1 -P "$jobs" du -sLk ${record_options[@]+"${record_options[@]}"} -- < "$file" 2> /dev/null)
     elif xargs -r -0 -n 1 du < /dev/null > /dev/null 2>&1; then
-        exec 3< <(exec xargs -0 -n 1 du -sLk -- < "$file" 2> /dev/null)
+        exec 3< <(exec xargs -0 -n 1 du -sLk ${record_options[@]+"${record_options[@]}"} -- < "$file" 2> /dev/null)
     else
         return 1
     fi
@@ -804,7 +870,10 @@ kvs_measure_site() {
     local last
     local elapsed=0
     local timed_out="no"
+    local measure_status=0
+    local delimiter=$'\n'
 
+    [ "$OPT_JSON" != yes ] || delimiter=''
     SITE_SIZE_MB="0"
     SITE_SIZE_STATUS="skipped"
     SITE_SIZE_SECONDS="0"
@@ -821,7 +890,18 @@ kvs_measure_site() {
     fi
     jobs=$(kvs_measure_jobs)
     UNITS_FILE=$(mktemp 2> /dev/null) || UNITS_FILE=""
+    if [ "$OPT_JSON" = yes ] && [ -z "$UNITS_FILE" ]; then
+        SITE_SIZE_STATUS=failed
+        kvs_add_json_error storage enumeration_failed 'cannot create the temporary site entry list' 1
+        return 1
+    fi
     if [ -n "$UNITS_FILE" ] && ! kvs_list_measure_units "$UNITS_FILE" "$depth"; then
+        if [ "$OPT_JSON" = yes ]; then
+            SITE_SIZE_STATUS=failed
+            rm -f -- "$UNITS_FILE"
+            UNITS_FILE=""
+            return 1
+        fi
         # A list cut short would leave part of the site out of an exact
         # size: the site is measured in one pass instead.
         kvs_warn "the list of the entries to measure could not be written in ${TMPDIR:-/tmp} (full?); measuring the site in one pass"
@@ -847,14 +927,18 @@ kvs_measure_site() {
         # Nothing listed or no usable xargs: one du over the site, with
         # the timer only.
         total=1
-        exec 3< <(exec du -sLk -- "$SITE_DIR" 2> /dev/null)
+        if [ "$OPT_JSON" = yes ]; then
+            exec 3< <(exec du -sLk --null -- "$SITE_DIR" 2> /dev/null)
+        else
+            exec 3< <(exec du -sLk -- "$SITE_DIR" 2> /dev/null)
+        fi
         MEASURE_PID=$!
     fi
     start=$SECONDS
     last=$start
     while :; do
         line=""
-        if IFS= read -r -t 1 line <&3; then
+        if IFS= read -r -d "$delimiter" -t 1 line <&3; then
             kvs_add_measure_line "$line"
         else
             status=$?
@@ -875,6 +959,9 @@ kvs_measure_site() {
         fi
     done
     exec 3<&-
+    if [ "$OPT_JSON" = yes ] && [ -n "$MEASURE_PID" ]; then
+        wait "$MEASURE_PID" || measure_status=$?
+    fi
     MEASURE_PID=""
     rm -f -- "$UNITS_FILE"
     UNITS_FILE=""
@@ -886,6 +973,11 @@ kvs_measure_site() {
         SITE_SIZE_STATUS="incomplete"
         kvs_warn "site size measurement cut short after $(kvs_elapsed "$SITE_SIZE_SECONDS"): at least $(kvs_human_mb "$SITE_SIZE_MB") in $MEASURE_COUNT of $total entries, at most $(kvs_human_mb "$SITE_FS_USED_MB") (the filesystem usage); --size-timeout 0 measures it all"
         return 0
+    fi
+    if [ "$OPT_JSON" = yes ] && { [ "$measure_status" -ne 0 ] || [ "$MEASURE_COUNT" -lt "$total" ]; }; then
+        SITE_SIZE_STATUS=failed
+        kvs_add_json_error storage measurement_failed "site measurement failed (exit $measure_status, $MEASURE_COUNT of $total entries measured)" 1
+        return 1
     fi
     if [ "$MEASURE_COUNT" -eq 0 ]; then
         SITE_SIZE_STATUS="failed"
@@ -1024,28 +1116,30 @@ kvs_entry_kind() {
 kvs_list_entry_candidates() {
     local path
     local rel
+    local -A seen=()
 
     {
-        find -L "$SITE_DIR" -mindepth 1 -maxdepth 1 -type d -print 2> /dev/null | LC_ALL=C sort
+        find -L "$SITE_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2> /dev/null | LC_ALL=C sort -z
         if [ -d "$SITE_DIR/contents" ]; then
-            find -L "$SITE_DIR/contents" -mindepth 1 -maxdepth 1 -type d -print 2> /dev/null | LC_ALL=C sort
+            find -L "$SITE_DIR/contents" -mindepth 1 -maxdepth 1 -type d -print0 2> /dev/null | LC_ALL=C sort -z
         fi
         for rel in $KVS_REPORTED_DIRS $KVS_TRANSIENT_DIRS; do
             if [ -d "$SITE_DIR/$rel" ]; then
-                printf '%s/%s\n' "$SITE_DIR" "$rel"
+                printf '%s/%s\0' "$SITE_DIR" "$rel"
             fi
         done
         for rel in $KVS_DEBUG_LOGS; do
             if [ -f "$SITE_DIR/$rel" ]; then
-                printf '%s/%s\n' "$SITE_DIR" "$rel"
+                printf '%s/%s\0' "$SITE_DIR" "$rel"
             fi
         done
-    } < /dev/null | while IFS= read -r path; do
+    } < /dev/null | while IFS= read -r -d '' path; do
         rel=${path#"$SITE_DIR/"}
-        if [ -n "$rel" ] && [ "$rel" != "$path" ]; then
-            printf '%s\n' "$rel"
+        if [ -n "$rel" ] && [ "$rel" != "$path" ] && [ -z "${seen[$rel]+set}" ]; then
+            printf '%s\0' "$rel"
+            seen[$rel]=yes
         fi
-    done | awk '!seen[$0]++'
+    done
 }
 
 # kvs_entry_index <relative path>: its position in the entry arrays.
@@ -1095,7 +1189,7 @@ kvs_collect_entries() {
     ENTRY_KIND=()
     ENTRY_STATE=()
     EXCLUDE_PATTERNS=()
-    while IFS= read -r rel; do
+    while IFS= read -r -d '' rel; do
         [ -n "$rel" ] || continue
         kind=$(kvs_entry_kind "$rel")
         state="copied"
@@ -1109,8 +1203,14 @@ kvs_collect_entries() {
             state="copied"
         fi
         mb=""
-        if [ "$MEASURE_PER_ENTRY" = "yes" ]; then
+        if [ "$MEASURE_PER_ENTRY" = "yes" ] &&
+            { [ "$OPT_JSON" != yes ] || [ -n "${MEASURE_ENTRY_KB[$rel]+set}" ]; }; then
             mb=$((${MEASURE_ENTRY_KB[$rel]:-0} / 1024))
+        fi
+        if [ "$OPT_JSON" = yes ] && [ "$state" = copied ] && [ -d "$SITE_DIR/$rel" ] &&
+            { [ ! -r "$SITE_DIR/$rel" ] || [ ! -x "$SITE_DIR/$rel" ]; }; then
+            SITE_SIZE_STATUS=failed
+            kvs_add_json_error storage unreadable_entry "site entry cannot be read: $rel" 1
         fi
         if [ "$kind" = "debuglog" ] && [ -z "${MEASURE_ENTRY_KB[$rel]+set}" ]; then
             # Beyond the walk (skipped or cut short): one file, sized on
@@ -1176,16 +1276,40 @@ kvs_probe_servers() {
     local remote
     local urls
     local placement
+    local err_file=/dev/null err status
 
     SERVER_LINES=()
     [ "$DB_OK" = "yes" ] || return 0
     query="SELECT title, path, is_remote, SUBSTRING_INDEX(urls, '\\n', 1) FROM ${TABLES_PREFIX}admin_servers ORDER BY server_id"
+    if [ "$OPT_JSON" = yes ]; then
+        TEMP_ERR_FILE=$(mktemp 2> /dev/null) || TEMP_ERR_FILE=""
+        if [ -z "$TEMP_ERR_FILE" ]; then
+            kvs_add_json_error storage_servers inspection_failed 'cannot create a temporary diagnostic file' 1
+            return 0
+        fi
+        err_file=$TEMP_ERR_FILE
+    fi
     out=$(
         # shellcheck disable=SC2030,SC2031  # Same deliberate subshell as the probe.
         export MYSQL_PWD="$DB_PASSWORD"
         kvs_ignore_user_option_files
-        "$DB_CLIENT" --connect-timeout=10 ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} -N -B -e "$query" "$DB_NAME" 2> /dev/null < /dev/null
-    ) || return 0
+        "$DB_CLIENT" --connect-timeout=10 ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} -N -B -e "$query" "$DB_NAME" 2> "$err_file" < /dev/null
+    )
+    status=$?
+    if [ "$OPT_JSON" = yes ]; then
+        err=$(< "$err_file")
+        rm -f -- "$err_file"
+        TEMP_ERR_FILE=""
+        if [ "$status" -ne 0 ]; then
+            [ -n "$err" ] || err="$DB_CLIENT exited with status $status"
+            if [[ "$err" =~ (^|[^0-9])(1146|1054)([^0-9]|$) ]]; then
+                kvs_warn "optional legacy storage-server metadata is unavailable: $err"
+            else
+                kvs_add_json_error storage_servers storage_query_failed "$err" 3
+            fi
+        fi
+    fi
+    [ "$status" -eq 0 ] || return 0
     while IFS=$'\t' read -r title path remote urls; do
         [ -n "$title$path" ] || continue
         placement="outside"
@@ -1355,6 +1479,14 @@ kvs_check_free_space() {
 #################################################################
 
 kvs_choose_compressor() {
+    if [ "$OPT_COMPRESSION_SET" = yes ]; then
+        COMPRESSOR=zstd
+        if ! command -v zstd > /dev/null 2>&1; then
+            kvs_error "--compression requires zstd; no output was produced"
+            return 1
+        fi
+        return 0
+    fi
     if [ "$OPT_FORCE_GZIP" = "yes" ]; then
         COMPRESSOR="gzip"
     elif command -v zstd > /dev/null 2>&1; then
@@ -1391,9 +1523,9 @@ kvs_compressor_args() {
     case $COMPRESSOR in
         zstd)
             if kvs_zstd_accepts_threads; then
-                COMPRESS_CMD=(zstd -T0 -3 -q -c)
+                COMPRESS_CMD=(zstd -T0 "-$OPT_COMPRESSION" -q -c)
             else
-                COMPRESS_CMD=(zstd -3 -q -c)
+                COMPRESS_CMD=(zstd "-$OPT_COMPRESSION" -q -c)
             fi
             ;;
         pigz) COMPRESS_CMD=(pigz -6 -c) ;;
@@ -1888,6 +2020,314 @@ kvs_require_dump_tool() {
 # Output
 #################################################################
 
+# JSON is optional and uses Bash builtins, so this standalone exporter can
+# still run on old servers without Python, PHP or jq.
+kvs_json_string() {
+    local value="${1-}" character escaped i=1
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    while [ "$i" -lt 32 ]; do
+        printf -v character '%b' "\\$(printf '%03o' "$i")"
+        printf -v escaped '\\u%04x' "$i"
+        value=${value//"$character"/"$escaped"}
+        i=$((i + 1))
+    done
+    printf '"%s"' "$value"
+}
+
+# SQL counts and sizes must be canonical non-negative integers that fit
+# Bash's signed arithmetic. A malformed response is unavailable, not zero.
+kvs_is_uint() {
+    local value="${1-}"
+
+    case $value in '' | *[!0-9]*) return 1 ;; esac
+    case $value in 0) return 0 ;; 0*) return 1 ;; esac
+    [ "${#value}" -lt 19 ] && return 0
+    # Compare equal-length decimal strings before any arithmetic can overflow.
+    # shellcheck disable=SC2071
+    [ "${#value}" -eq 19 ] && [[ "$value" < 9223372036854775808 ]]
+}
+
+kvs_json_number() {
+    if kvs_is_uint "${1-}"; then printf '%s' "$1"; else printf null; fi
+}
+
+kvs_redact_error() {
+    local value="${1-}"
+
+    if [ -n "$DB_PASSWORD" ]; then value=${value//"$DB_PASSWORD"/'[redacted]'}; fi
+    printf '%s' "$value"
+}
+
+kvs_add_json_error() {
+    JSON_ERROR_COMPONENTS+=("$1")
+    JSON_ERROR_CODES+=("$2")
+    JSON_ERROR_MESSAGES+=("$(kvs_redact_error "$3")")
+    [ "$JSON_EXIT" -ne 0 ] || JSON_EXIT=$4
+}
+
+kvs_reset_catalogue() {
+    local i=0
+
+    while [ "$i" -lt "${#CATALOGUE_NAMES[@]}" ]; do
+        CATALOGUE_STATUS[i]=unavailable
+        CATALOGUE_TOTAL[i]=''
+        CATALOGUE_ACTIVE[i]=''
+        CATALOGUE_DISABLED[i]=''
+        CATALOGUE_ERRORS[i]=''
+        CATALOGUE_MESSAGES[i]=''
+        i=$((i + 1))
+    done
+}
+
+kvs_probe_catalogue() {
+    local i=0 name identifier query out err status expected field remaining invalid
+    local total active disabled errors extra without_tabs
+
+    [ "$DB_OK" = yes ] || return 0
+    while [ "$i" -lt "${#CATALOGUE_NAMES[@]}" ]; do
+        name=${CATALOGUE_NAMES[$i]}
+        identifier="${TABLES_PREFIX}${name}"
+        identifier=${identifier//\`/\`\`}
+        query="SELECT /* kvs-export:catalogue:$name */ COUNT(*)"
+        # These are KVS's native status values: videos/albums 1 active,
+        # 0 disabled, videos 2 error; users 2 and above are active.
+        case $name in
+            videos) query+=", COALESCE(SUM(status_id = 1), 0), COALESCE(SUM(status_id = 0), 0), COALESCE(SUM(status_id = 2), 0)"; expected=4 ;;
+            albums) query+=", COALESCE(SUM(status_id = 1), 0), COALESCE(SUM(status_id = 0), 0)"; expected=3 ;;
+            users) query+=", COALESCE(SUM(status_id >= 2), 0)"; expected=2 ;;
+            *) expected=1 ;;
+        esac
+        query+=" FROM \`$identifier\`"
+        TEMP_ERR_FILE=$(mktemp 2> /dev/null) || TEMP_ERR_FILE=""
+        out="" err="" status=1
+        if [ -n "$TEMP_ERR_FILE" ]; then
+            out=$(
+                # shellcheck disable=SC2030,SC2031  # Deliberately scoped to this client.
+                export MYSQL_PWD="$DB_PASSWORD"
+                kvs_ignore_user_option_files
+                "$DB_CLIENT" --connect-timeout=10 ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} -N -B -e "$query" "$DB_NAME" 2> "$TEMP_ERR_FILE" < /dev/null
+            )
+            status=$?
+            err=$(< "$TEMP_ERR_FILE")
+            rm -f -- "$TEMP_ERR_FILE"
+            TEMP_ERR_FILE=""
+        else
+            err="cannot create a temporary diagnostic file"
+        fi
+        if [ "$status" -ne 0 ]; then
+            err=$(kvs_redact_error "$(kvs_one_line "$err")")
+            [ -n "$err" ] || err="$DB_CLIENT exited with status $status"
+            CATALOGUE_STATUS[i]=error
+            CATALOGUE_MESSAGES[i]=$err
+            if [[ "$err" =~ (^|[^0-9])1146([^0-9]|$) ]]; then
+                CATALOGUE_STATUS[i]=missing
+                if [ "$i" -ge 3 ]; then
+                    kvs_warn "optional catalogue table $name is missing: $err"
+                    i=$((i + 1))
+                    continue
+                fi
+            fi
+            kvs_add_json_error "catalogue.$name" catalogue_query_failed "$err" 3
+            i=$((i + 1))
+            continue
+        fi
+        total='' active='' disabled='' errors='' extra=''
+        case $expected in
+            4) IFS=$'\t' read -r total active disabled errors extra <<< "$out" ;;
+            3) IFS=$'\t' read -r total active disabled extra <<< "$out" ;;
+            2) IFS=$'\t' read -r total active extra <<< "$out" ;;
+            *) total=$out ;;
+        esac
+        invalid=no
+        without_tabs=${out//$'\t'/}
+        [ "$((${#out} - ${#without_tabs}))" -eq "$((expected - 1))" ] &&
+            [[ "$out" != *$'\n'* ]] && [ -z "$extra" ] && kvs_is_uint "$total" || invalid=yes
+        remaining=$total
+        if [ "$invalid" = no ]; then
+            for field in "$active" "$disabled" "$errors"; do
+                [ -n "$field" ] || continue
+                if ! kvs_is_uint "$field" || [ "$field" -gt "$remaining" ]; then
+                    invalid=yes
+                    break
+                fi
+                remaining=$((remaining - field))
+            done
+            if { [ "$expected" -ge 2 ] && [ -z "$active" ]; } ||
+                { [ "$expected" -ge 3 ] && [ -z "$disabled" ]; } ||
+                { [ "$expected" -ge 4 ] && [ -z "$errors" ]; }; then invalid=yes; fi
+        fi
+        if [ "$invalid" = yes ]; then
+            CATALOGUE_STATUS[i]=error
+            CATALOGUE_MESSAGES[i]="invalid numeric catalogue response"
+            kvs_add_json_error "catalogue.$name" invalid_numeric_data "invalid numeric catalogue response" 3
+        else
+            CATALOGUE_STATUS[i]=ok
+            CATALOGUE_TOTAL[i]=$total
+            CATALOGUE_ACTIVE[i]=$active
+            CATALOGUE_DISABLED[i]=$disabled
+            CATALOGUE_ERRORS[i]=$errors
+        fi
+        i=$((i + 1))
+    done
+}
+
+kvs_print_detect_json() {
+    local state=complete ready=true i key value db_available=false
+    local dump_estimate='' archive_estimate='' estimate_state=unavailable
+
+    if [ "$DB_OK" = yes ]; then
+        db_available=true
+        dump_estimate=$(((DB_SIZE_MB / 10) * 3 + ((DB_SIZE_MB % 10) * 3 + 9) / 10))
+    fi
+    if [ "$SITE_SIZE_STATUS" = exact ] && [ "$db_available" = true ] &&
+        [ "$SITE_SIZE_MB" -le "$((9223372036854775807 - dump_estimate))" ]; then
+        estimate_state=heuristic
+        archive_estimate=$((SITE_SIZE_MB + dump_estimate))
+    elif [ "$SITE_SIZE_STATUS" = incomplete ]; then
+        estimate_state=incomplete
+    fi
+    if [ "${#JSON_WARNINGS[@]}" -gt 0 ] || [ "$SITE_SIZE_STATUS" != exact ]; then state=partial; fi
+    if [ "$SITE_SIZE_STATUS" != exact ]; then ready=false; fi
+    if [ "$JSON_EXIT" -ne 0 ]; then state=error; ready=false; fi
+    printf '{"kvs_export":1,"status":"%s","ready":%s,"exit_code":%s,' "$state" "$ready" "$JSON_EXIT"
+    printf '"site":{'
+    i=0
+    for key in directory version project_url domain project_path table_prefix table_prefix_multi hostname ioncube; do
+        case $key in
+            directory) value=$SITE_DIR ;; version) value=$KVS_VERSION ;; project_url) value=$PROJECT_URL ;;
+            domain) value=$DOMAIN ;; project_path) value=$PROJECT_PATH ;; table_prefix) value=$TABLES_PREFIX ;;
+            table_prefix_multi) value=$TABLES_PREFIX_MULTI ;; hostname) value=$HOST_NAME ;; *) value=$SITE_IONCUBE ;;
+        esac
+        [ "$i" -eq 0 ] || printf ','
+        kvs_json_string "$key"; printf ':'; kvs_json_string "$value"
+        i=$((i + 1))
+    done
+    printf '},"database":{"ok":%s' "$db_available"
+    for key in host name user client dump_tool format format_reason server_version; do
+        case $key in
+            host) value=$DB_HOST_RAW ;; name) value=$DB_NAME ;; user) value=$DB_USER ;; client) value=$DB_CLIENT ;;
+            dump_tool) value=$DB_DUMP_TOOL ;; format) value=$DB_DUMP_FORMAT ;; format_reason) value=$DB_DIRECTORY_REASON ;;
+            *) value=$DB_SERVER_VERSION ;;
+        esac
+        printf ','; kvs_json_string "$key"; printf ':'; kvs_json_string "$value"
+    done
+    for key in tables size_mb non_transactional; do
+        case $key in tables) value=$DB_TABLES ;; size_mb) value=$DB_SIZE_MB ;; *) value=$DB_NON_TRANSACTIONAL ;; esac
+        printf ',"%s":' "$key"
+        if [ "$db_available" = true ]; then kvs_json_number "$value"; else printf null; fi
+    done
+    printf ',"utf8mb4":'
+    if [ "$db_available" != true ]; then printf null; elif [ "$DB_UTF8MB4" = yes ]; then printf true; else printf false; fi
+    printf ',"error_message":'
+    if [ -n "$DB_ERROR" ]; then kvs_json_string "$(kvs_redact_error "$DB_ERROR")"; else printf null; fi
+    printf '},"catalogue":{'
+    i=0
+    while [ "$i" -lt "${#CATALOGUE_NAMES[@]}" ]; do
+        [ "$i" -eq 0 ] || printf ','
+        key=${CATALOGUE_NAMES[$i]}; kvs_json_string "$key"
+        printf ':{"status":'; kvs_json_string "${CATALOGUE_STATUS[$i]}"
+        printf ',"total":'; kvs_json_number "${CATALOGUE_TOTAL[$i]}"
+        case $key in
+            videos | albums | users) printf ',"active":'; kvs_json_number "${CATALOGUE_ACTIVE[$i]}" ;;
+        esac
+        case $key in
+            videos | albums) printf ',"disabled":'; kvs_json_number "${CATALOGUE_DISABLED[$i]}" ;;
+        esac
+        if [ "$key" = videos ]; then printf ',"error":'; kvs_json_number "${CATALOGUE_ERRORS[$i]}"; fi
+        printf ',"error_message":'
+        if [ -n "${CATALOGUE_MESSAGES[$i]}" ]; then kvs_json_string "${CATALOGUE_MESSAGES[$i]}"; else printf null; fi
+        printf '}'
+        i=$((i + 1))
+    done
+    printf '},"storage":{"state":'; kvs_json_string "$SITE_SIZE_STATUS"
+    for key in size_mb total_mb filesystem_used_mb; do
+        case $key in size_mb) value=$SITE_SIZE_MB ;; total_mb) value=$SITE_TOTAL_MB ;; *) value=$SITE_FS_USED_MB ;; esac
+        printf ',"%s":' "$key"
+        if [ "$key" != filesystem_used_mb ] && { [ "$SITE_SIZE_STATUS" = skipped ] || [ "$SITE_SIZE_STATUS" = failed ]; }; then
+            printf null
+        else kvs_json_number "$value"; fi
+    done
+    printf ',"measured_entries":'; kvs_json_number "$SITE_SIZE_ENTRIES"
+    printf ',"total_entries":'; kvs_json_number "$SITE_SIZE_ENTRIES_TOTAL"
+    printf ',"seconds":'; kvs_json_number "$SITE_SIZE_SECONDS"
+    printf ',"entries":['
+    i=0
+    while [ "$i" -lt "${#ENTRY_PATHS[@]}" ]; do
+        [ "$i" -eq 0 ] || printf ','
+        printf '{"path":'; kvs_json_string "${ENTRY_PATHS[$i]}"
+        printf ',"size_mb":'; kvs_json_number "${ENTRY_MB[$i]}"
+        printf ',"kind":'; kvs_json_string "${ENTRY_KIND[$i]}"
+        printf ',"state":'; kvs_json_string "${ENTRY_STATE[$i]}"
+        printf '}'
+        i=$((i + 1))
+    done
+    printf '],"excluded_patterns":['
+    i=0
+    while [ "$i" -lt "${#EXCLUDE_PATTERNS[@]}" ]; do
+        [ "$i" -eq 0 ] || printf ','; kvs_json_string "${EXCLUDE_PATTERNS[$i]}"; i=$((i + 1))
+    done
+    printf ']},"compression":{"algorithm":'
+    if [ -n "$COMPRESSOR" ]; then kvs_json_string "$COMPRESSOR"; else printf null; fi
+    printf ',"level":'
+    case $COMPRESSOR in
+        zstd) printf '%s' "$OPT_COMPRESSION" ;;
+        gzip | pigz) printf 6 ;;
+        *) printf null ;;
+    esac
+    printf '},"estimate":{"state":"%s","database_dump_mb":' "$estimate_state"
+    kvs_json_number "$dump_estimate"
+    printf ',"archive_mb":'; kvs_json_number "$archive_estimate"
+    printf ',"method":"site-transfer-plus-database-times-0.30"},"warnings":['
+    i=0
+    while [ "$i" -lt "${#JSON_WARNINGS[@]}" ]; do
+        [ "$i" -eq 0 ] || printf ','; kvs_json_string "${JSON_WARNINGS[$i]}"; i=$((i + 1))
+    done
+    printf '],"errors":['
+    i=0
+    while [ "$i" -lt "${#JSON_ERROR_MESSAGES[@]}" ]; do
+        [ "$i" -eq 0 ] || printf ','
+        printf '{"component":'; kvs_json_string "${JSON_ERROR_COMPONENTS[$i]}"
+        printf ',"code":'; kvs_json_string "${JSON_ERROR_CODES[$i]}"
+        printf ',"message":'; kvs_json_string "${JSON_ERROR_MESSAGES[$i]}"; printf '}'
+        i=$((i + 1))
+    done
+    printf '],"site_candidates":['
+    i=0
+    while [ "$i" -lt "${#SITE_CANDIDATES[@]}" ]; do
+        [ "$i" -eq 0 ] || printf ','; kvs_json_string "${SITE_CANDIDATES[$i]}"; i=$((i + 1))
+    done
+    printf ']}\n'
+}
+
+kvs_command_detect_json() {
+    local status
+
+    kvs_reset_catalogue
+    kvs_resolve_site_dir
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        kvs_add_json_error installation site_not_resolved "$JSON_LAST_ERROR" "$status"
+    elif ! kvs_collect yes; then
+        kvs_add_json_error configuration inspection_failed "$JSON_LAST_ERROR" 1
+    else
+        if [ "$DB_OK" != yes ]; then
+            kvs_add_json_error database database_probe_failed "$DB_ERROR" 3
+        fi
+        kvs_probe_catalogue
+        if ! kvs_select_database_format; then
+            kvs_add_json_error database format_unavailable "$JSON_LAST_ERROR" 1
+        fi
+        if [ "$SITE_SIZE_STATUS" = skipped ]; then kvs_warn 'site size was explicitly skipped; archive estimate is unavailable'; fi
+        if [ "$SITE_SIZE_STATUS" = failed ] && [ "$JSON_EXIT" -eq 0 ]; then
+            kvs_add_json_error storage measurement_failed 'site storage could not be measured' 1
+        fi
+    fi
+    kvs_print_detect_json
+    return "$JSON_EXIT"
+}
+
 kvs_print_detect() {
     printf 'kvs_export=1\n'
     printf 'site_dir=%s\n' "$SITE_DIR"
@@ -2166,7 +2606,16 @@ kvs_collect() {
     local setup_db="$SITE_DIR/admin/include/setup_db.php"
     local version_file="$SITE_DIR/admin/include/version.php"
     local raw
+    local required_file
 
+    if [ "$OPT_JSON" = yes ]; then
+        for required_file in "$setup" "$version_file"; do
+            if [ -f "$required_file" ] && [ ! -r "$required_file" ]; then
+                kvs_error "$required_file is not readable by $(id -un)"
+                return 1
+            fi
+        done
+    fi
     PROJECT_PATH=$(kvs_config_value "$setup" project_path)
     PROJECT_URL=$(kvs_config_value "$setup" project_url)
     TABLES_PREFIX=$(kvs_config_value "$setup" tables_prefix)
@@ -2198,7 +2647,7 @@ kvs_collect() {
     DB_PASSWORD=$(kvs_php_unescape "$raw")
     DB_PASSWORD_HINT=$(kvs_mask_password "$DB_PASSWORD")
     HOST_NAME=$(kvs_hostname)
-    kvs_detect_tools
+    kvs_detect_tools || return 1
     kvs_build_connection_args
     kvs_probe_database
     kvs_probe_servers
@@ -2213,6 +2662,11 @@ kvs_collect() {
 
 kvs_command_detect() {
     local status
+
+    if [ "$OPT_JSON" = yes ]; then
+        kvs_command_detect_json
+        return $?
+    fi
 
     kvs_resolve_site_dir
     status=$?
@@ -2431,6 +2885,12 @@ kvs_parse_arguments() {
                 OPT_OUTPUT=${1#--output=}
                 shift
                 ;;
+            --json) OPT_JSON=yes; shift ;;
+            --compression)
+                if [ $# -lt 2 ]; then kvs_error "--compression needs a level 1-19"; return 1; fi
+                OPT_COMPRESSION=$2; OPT_COMPRESSION_SET=yes; shift 2
+                ;;
+            --compression=*) OPT_COMPRESSION=${1#*=}; OPT_COMPRESSION_SET=yes; shift ;;
             --dump-only)
                 OPT_DUMP_ONLY="yes"
                 shift
@@ -2526,6 +2986,14 @@ kvs_parse_arguments() {
         kvs_error "--size-timeout needs a number of seconds, got '$OPT_SIZE_TIMEOUT'"
         return 1
     fi
+    case $OPT_COMPRESSION in
+        [1-9] | 1[0-9]) ;;
+        *) kvs_error "--compression must be an integer from 1 to 19"; return 1 ;;
+    esac
+    if [ "$OPT_COMPRESSION_SET" = yes ] && [ "$OPT_FORCE_GZIP" = yes ]; then
+        kvs_error "--compression selects zstd and cannot be combined with --gzip"
+        return 1
+    fi
     case $OPT_DATABASE_FORMAT in
         auto | sql | directory) ;;
         *) kvs_error "--database-format must be auto, sql or directory"; return 1 ;;
@@ -2549,6 +3017,10 @@ kvs_parse_arguments() {
             OPT_SITE_DIR=$first
             ;;
     esac
+    if [ "$OPT_JSON" = yes ] && [ "$OPT_COMMAND" != detect ]; then
+        kvs_error "--json is only supported with detect"
+        return 1
+    fi
     return 0
 }
 

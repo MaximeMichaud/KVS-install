@@ -11,7 +11,7 @@ set -euo pipefail
 export IMPORT_TRANSFER_JOBS=1
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TMP_ROOT=$(mktemp -d /tmp/kvs-import-sources-test.XXXXXX)
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kvs-import-sources-test.XXXXXX")
 TESTS_RUN=0
 
 cleanup() {
@@ -441,10 +441,34 @@ test_stage_directory_follows_the_destination_filesystem() {
 
 test_destination_marker_allows_a_repeat_of_the_same_source_only() {
     local destination="$TMP_ROOT/marker-dest"
+    local status
 
     import_destination_ready "$destination" "archive:/root/site.zip" || fail "an absent destination is ready"
     mkdir -p "$destination"
     import_destination_ready "$destination" "archive:/root/site.zip" || fail "an empty destination is ready"
+    if [ "$EUID" -ne 0 ]; then
+        echo preserved > "$destination/sentinel"
+        chmod 000 "$destination"
+        status=0
+        import_destination_ready "$destination" "archive:/root/site.zip" > "$TMP_ROOT/denied-output" 2>&1 || status=$?
+        chmod 755 "$destination"
+        [ "$status" -ne 0 ] || fail "an unreadable directory must not be treated as empty"
+        [ "$(cat "$destination/sentinel")" = preserved ] || fail "destination inspection changed an existing file"
+        [ ! -e "$(import_marker_file "$destination")" ] || fail "a refused destination must not receive a marker"
+        rm "$destination/sentinel"
+        chmod 000 "$destination"
+        status=0
+        import_destination_ready "$destination/new-site" "archive:/root/site.zip" > "$TMP_ROOT/ancestor-output" 2>&1 || status=$?
+        chmod 755 "$destination"
+        [ "$status" -ne 0 ] || fail "an inaccessible parent must not make a destination appear absent"
+    fi
+    status=0
+    (
+        # shellcheck disable=SC2329  # Called by the imported destination guard.
+        find() { printf 'synthetic filesystem enumeration failure\n' >&2; return 74; }
+        import_destination_ready "$destination" "archive:/root/site.zip"
+    ) > "$TMP_ROOT/enumeration-output" 2>&1 || status=$?
+    [ "$status" -ne 0 ] || fail "an enumeration error must not be treated as an empty destination"
     import_mark_destination "$destination" "archive:/root/site.zip"
     echo x > "$destination/file"
     import_destination_ready "$destination" "archive:/root/site.zip" || fail "the same source may repeat"

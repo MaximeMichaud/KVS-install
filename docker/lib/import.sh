@@ -443,19 +443,33 @@ import_take_over_site() {
 import_destination_ready() {
     local destination="$1"
     local source="$2"
-    local marker
+    local marker probe parent entries
 
     marker=$(import_marker_file "$destination")
-    if [ -e "$destination" ] && [ ! -d "$destination" ]; then
-        echo "ERROR: $destination exists and is not a directory" >&2
+    # A failed stat below an unsearchable ancestor looks like absence.
+    # Find the nearest existing component and verify traversal first.
+    probe=$destination
+    while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do
+        parent=$(dirname -- "$probe")
+        [ "$parent" != "$probe" ] || return 1
+        probe=$parent
+    done
+    if [ ! -d "$probe" ] || [ ! -x "$probe" ]; then
+        echo "ERROR: cannot access destination directory or parent: $probe" >&2
         return 1
     fi
-    if [ -d "$destination" ] && find "$destination" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
-        if [ -f "$marker" ] && [ "$(cat "$marker")" = "$source" ]; then
-            return 0
+    if [ -d "$destination" ]; then
+        if [ ! -r "$destination" ] || ! entries=$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit); then
+            echo "ERROR: cannot inspect destination directory: $destination" >&2
+            return 1
         fi
-        echo "ERROR: $destination is not empty; import into an empty site directory, or point IMPORT_SITE_DIR at it when the files are already there" >&2
-        return 1
+        if [ -n "$entries" ]; then
+            if [ -f "$marker" ] && [ "$(cat "$marker")" = "$source" ]; then
+                return 0
+            fi
+            echo "ERROR: $destination is not empty; import into an empty site directory, or point IMPORT_SITE_DIR at it when the files are already there" >&2
+            return 1
+        fi
     fi
 }
 
@@ -626,6 +640,7 @@ import_tool_package() {
         unzip) echo unzip ;;
         7zz|7z|7za) echo 7zip ;;
         zstd) echo zstd ;;
+        python3) echo python3 ;;
         xz) echo xz-utils ;;
         bzip2) echo bzip2 ;;
         gzip) echo gzip ;;
