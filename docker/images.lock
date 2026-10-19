@@ -16,7 +16,7 @@
 # packages the PHP-FPM and cron images install, and receive no security
 # update. setup.sh refuses a KVS archive that needs it.
 #
-# Resolved on 2026-10-10.
+# Resolved on 2026-10-19.
 
 # Build bases
 php-fpm	8.1	php:8.1-fpm@sha256:a3118db1911fdd3b3ac66605122ddc859286688ced86fc860fec6d19cc2d6c55
@@ -27,15 +27,15 @@ php-cli	8.1	php:8.1-cli@sha256:76e563191d1ade120313a8736df24154d21da5155c0756f14
 php-cli	8.2	php:8.2-cli@sha256:118ef4fb1db5e866fb604f2f260da81f819a0a1eac87a4083f9194f48e00beee
 php-cli	8.3	php:8.3-cli@sha256:aafe21201943a8a6e497ddfb471e2ce68ada76adede38c7d61fede8918b24319
 php-cli	8.4	php:8.4-cli@sha256:1d2cf2b7d715b5b3aa959f0150ccbcc7b71e0181b637e443abf40a7fb56bf79a
-nginx	-	nginx:mainline@sha256:f9ea18bfa4fad859e1ed38259d711da7ccad2c3516e875cec3351a57c859f571
+nginx	-	nginx:mainline@sha256:bc4cad49969aaf95eb4eecec5572846f86e59f1e8332aba36ed64b91aff8b724
 debian	-	debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 manticore	-	manticoresearch/manticore:29.9.0@sha256:461b419739a2bbbffb4be0b32db26c41d7b435bf7fd1fce95b414ca5ccbb3775
 
 # Images the compose file runs unchanged
-mariadb	11.4	mariadb:11.4.13@sha256:1292844148b311e4ed4300022a996d39083f415a963e970cf47cad1b3b18e3a6
-mariadb	11.8	mariadb:11.8.9@sha256:6422478cb8e159f080fb1d8ccf65101e26fe51385787fde7d16c3b165a331f15
-mariadb	12.3	mariadb:12.3.3@sha256:2bdff1534a7e569fecaf4b10b66ad0d410806e382d9db29ba305448addda97c4
+mariadb	11.4	mariadb:11.4.13@sha256:250e1609e93c0e6aecf64bfbab2d84d5e89d2481540fe77447ff6c855c3b1873
+mariadb	11.8	mariadb:11.8.9@sha256:f16d7a344413e519dff518f27bdb221388f84b0d274c97c4fb5f2cb0dc1b34fa
+mariadb	12.3	mariadb:12.3.3@sha256:99c125f103f5d081ebbc9ffe064e63daf7f688ac33a5f7f29af2d7260a96debf
 memcached	-	memcached:1.6.45-alpine@sha256:9e4de012dc607573052061c0bcb38abc775e1dd59b24e7ac38d1892842094aaf
 dragonfly	-	docker.dragonflydb.io/dragonflydb/dragonfly:v1.35.1@sha256:af7f7f1143269c7ffe4128451dff8f8fc09e157d885abcc9bafeec832d2928e6
-acme	-	neilpang/acme.sh:3.1.6@sha256:af6dbefd9d4fe891963528b6f59f82167de0d18251bcd5aaac67adf02863de7a
+acme	-	neilpang/acme.sh:3.1.6@sha256:9e0652c6bf072cbf40112a1085d1240228044699d0958a89eacc99b4ff4f02fb
 alpine	-	alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
