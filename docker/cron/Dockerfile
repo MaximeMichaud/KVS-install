@@ -62,6 +62,62 @@ ARG PECL_IMAGICK_SHA256=3a3587c0a524c17d0dad9673a160b90cd776e836838474e173b549ed
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# PHP 8.1 is EOL and its pinned official Docker base is unpatched. Apply the
+# PHP security team's minimal backport for CVE-2026-109618 and
+# CVE-2026-109619, preserving the upstream configure options. Repack the
+# patched sources before building: later extension builds, notably opcache,
+# must use those same sources rather than the original vulnerable tarball.
+# https://www.php.net/archive/2026.php#2026-10-21-5
+ARG PHP81_SECURITY_COMMIT=1d7dec178a094e6e75b229ce22754045f8c6070a
+ARG PHP81_SECURITY_SHA256=c85ad0fddcbff7f2318617eeaa54d271135463b5bf70a01228447e3ed78de96e
+# The source build uses a temporary working directory within this layer.
+# hadolint ignore=DL3008,DL3003,SC2086
+RUN set -eux; \
+    series="$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')"; \
+    test "$series" = "$PHP_VERSION"; \
+    case "$series" in \
+        8.1) minimum=8.1.34 ;; \
+        8.2) minimum=8.2.35 ;; \
+        8.3) minimum=8.3.36 ;; \
+        8.4) minimum=8.4.27 ;; \
+        *) echo "No PHP security baseline for ${series}" >&2; exit 1 ;; \
+    esac; \
+    php -r 'exit(version_compare(PHP_VERSION, $argv[1], ">=") ? 0 : 1);' "$minimum"; \
+    if [ "$series" = 8.1 ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            libargon2-dev libcurl4-openssl-dev libonig-dev libreadline-dev \
+            libsodium-dev libsqlite3-dev libssl-dev libxml2-dev zlib1g-dev patch; \
+        security_dir=/usr/local/share/php-security; \
+        mkdir -p "$security_dir"; \
+        curl -fsSL -o "$security_dir/php81.patch" \
+            "https://github.com/php/php-src/commit/${PHP81_SECURITY_COMMIT}.patch"; \
+        echo "${PHP81_SECURITY_SHA256}  $security_dir/php81.patch" | sha256sum -c -; \
+        options="$(php-config --configure-options)"; \
+        docker-php-source extract; \
+        patch --directory=/usr/src/php --strip=1 --batch --fuzz=0 --forward < "$security_dir/php81.patch"; \
+        tar -cJf /usr/src/php.tar.xz -C /usr/src php; \
+        cd /usr/src/php; \
+        export CFLAGS="$PHP_CFLAGS" CPPFLAGS="$PHP_CPPFLAGS" LDFLAGS="$PHP_LDFLAGS"; \
+        ./configure $options; \
+        make -j"$(nproc)"; \
+        make install; \
+        strip --strip-all /usr/local/bin/php; \
+        if [ -x /usr/local/sbin/php-fpm ]; then strip --strip-all /usr/local/sbin/php-fpm; fi; \
+        cd /; \
+        docker-php-source delete; \
+        rm -rf /var/lib/apt/lists/*; \
+        status=0; \
+        php -n -d memory_limit=8M -r \
+            'register_shutdown_function(static function () { echo "unsafe-shutdown"; }); str_repeat("x", 16 * 1024 * 1024);' \
+            > "$security_dir/oom-check" 2>&1 || status=$?; \
+        test "$status" = 1; \
+        grep -q 'Allowed memory size' "$security_dir/oom-check"; \
+        if grep -q 'unsafe-shutdown' "$security_dir/oom-check"; then exit 1; fi; \
+        rm "$security_dir/oom-check"; \
+        printf '%s\n' "$PHP81_SECURITY_COMMIT" > "$security_dir/php81.commit"; \
+    fi
+
 # DL3008 stays muted on purpose. Pinning a Debian package version pins it to
 # one snapshot of the suite, and Debian removes the old binaries as soon as a
 # security update lands, so a pinned apt line stops building a few days later.

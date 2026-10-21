@@ -4,7 +4,7 @@
 # The base is pinned by digest: a tag moves, a digest does not, so this build
 # and the release CI resolve the same bytes. Refresh it with
 # docker/bin/resolve-bases.sh, which rewrites docker/images.lock.
-ARG DEBIAN_BASE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+ARG DEBIAN_BASE=debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 FROM ${DEBIAN_BASE}
 
 # DL3008 stays muted on purpose. Pinning a Debian package version pins it to

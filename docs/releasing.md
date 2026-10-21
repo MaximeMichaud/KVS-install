@@ -267,6 +267,31 @@ release](#a-bad-release) anyway.
    lab installation, `kvsctl check` shows the new version, its images and the
    size of the download.
 
+## PHP security baselines
+
+The PHP-FPM and cron Dockerfiles reject bases older than PHP 8.2.35,
+8.3.36 and 8.4.27, which fix CVE-2026-109618 and CVE-2026-109619.
+PHP 8.1's pinned official Docker bases still contain unpatched 8.1.34. Both
+Dockerfiles apply the PHP security team's checksum-pinned source backport,
+rebuild the original SAPIs with their original configure options, and keep
+the patched source archive for subsequent extension builds. Do not remove
+that step when refreshing the image lock. This does not restore upstream
+support for PHP 8.1.
+
+After building each PHP or cron image, exercise the actual binaries:
+
+```sh
+python3 tests/integration_php_security.py IMAGE VERSION --fpm
+python3 tests/integration_php_security.py CRON_IMAGE VERSION
+```
+
+Use `8.1.34` for the backported series. The FPM check makes consecutive
+requests with and without ionCube; on PHP 8.1 it also verifies that an
+exhausted worker exits without executing a shutdown callback and is
+replaced. The applied source commit is recorded inside PHP 8.1 images at
+`/usr/local/share/php-security/php81.commit`. A plain `php -v` cannot
+distinguish these images from the unpatched upstream 8.1.34 images.
+
 ## Release notes
 
 The prepare job uses `.github/release-notes/<tag>.md` from the tagged commit

@@ -16,19 +16,19 @@
 # packages the PHP-FPM and cron images install, and receive no security
 # update. setup.sh refuses a KVS archive that needs it.
 #
-# Resolved on 2026-10-19.
+# Resolved on 2026-10-21.
 
 # Build bases
 php-fpm	8.1	php:8.1-fpm@sha256:a3118db1911fdd3b3ac66605122ddc859286688ced86fc860fec6d19cc2d6c55
-php-fpm	8.2	php:8.2-fpm@sha256:faf32167826a68cb7c595793e2e508164a24cac187be60ed8de9c81b17236048
-php-fpm	8.3	php:8.3-fpm@sha256:ed67b5fcd7600614dd651621a04214fbe16d373262cb31eb50bc224c18cf0e88
-php-fpm	8.4	php:8.4-fpm@sha256:1071b5609d16d60674f78eea8cf9bd7e9e79169ecb566d015c931c5ee789bb13
+php-fpm	8.2	php:8.2-fpm@sha256:e6f6fcfd926bb316154375c2c7e03561c3574a6308d3bfdd7f780ceea2390519
+php-fpm	8.3	php:8.3-fpm@sha256:805e45ea709a0c84e31caf9a257cc612173b6ef8cfe6c4d45b910aa7adf1e943
+php-fpm	8.4	php:8.4-fpm@sha256:25d77151ca78fcd553fe9c87c7b3edcfe01166e7813b535ff1626a3faab5e6fe
 php-cli	8.1	php:8.1-cli@sha256:76e563191d1ade120313a8736df24154d21da5155c0756f147c0b01bd19d9087
-php-cli	8.2	php:8.2-cli@sha256:118ef4fb1db5e866fb604f2f260da81f819a0a1eac87a4083f9194f48e00beee
-php-cli	8.3	php:8.3-cli@sha256:aafe21201943a8a6e497ddfb471e2ce68ada76adede38c7d61fede8918b24319
-php-cli	8.4	php:8.4-cli@sha256:1d2cf2b7d715b5b3aa959f0150ccbcc7b71e0181b637e443abf40a7fb56bf79a
-nginx	-	nginx:mainline@sha256:bc4cad49969aaf95eb4eecec5572846f86e59f1e8332aba36ed64b91aff8b724
-debian	-	debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+php-cli	8.2	php:8.2-cli@sha256:f4c1690d7101a15b6195223c3c839f4371bded494bd055b76ae39a361860b7d9
+php-cli	8.3	php:8.3-cli@sha256:0987694f6faf38f44bd6e0ff3ffc6e0f997a3a4a235cc4b6b8da78d2f823b75c
+php-cli	8.4	php:8.4-cli@sha256:51b580e9ad2a2db21a849187506d75ad26d58d583345bcf71e933450b142e80b
+nginx	-	nginx:mainline@sha256:8632b3314d74c61f0e27f59055bab13f7793b988c94c090154d867bc29e0f39b
+debian	-	debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 manticore	-	manticoresearch/manticore:29.9.0@sha256:461b419739a2bbbffb4be0b32db26c41d7b435bf7fd1fce95b414ca5ccbb3775
 
 # Images the compose file runs unchanged
