@@ -28,12 +28,18 @@ printf 'origin-site-sentinel\n' > "$TEST_DIR/site/index.html"
 printf 'acme-sentinel\n' > "$TEST_DIR/acme/.well-known/acme-challenge/proof"
 mkdir -p "$TEST_DIR/site/.private" "$TEST_DIR/phpmyadmin/.private"
 for root in "$TEST_DIR/site" "$TEST_DIR/phpmyadmin"; do
+    mkdir -p "$root/.well-known-backup"
+    printf 'private-file-sentinel\n' > "$root/.well-known-backup/proof.css"
+    printf 'private-file-sentinel\n' > "$root/.well-known-backup/proof.txt"
+    printf 'private-file-sentinel\n' > "$root/.well-known.json"
     for asset in proof.css proof.js proof.svg proof.woff2 proof.txt; do
         printf 'private-file-sentinel\n' > "$root/.private/$asset"
     done
     printf 'public-asset-sentinel\n' > "$root/proof.css"
     printf 'public-asset-sentinel\n' > "$root/proof.svg"
 done
+mkdir -p "$TEST_DIR/site/.well-known"
+printf 'well-known-sentinel\n' > "$TEST_DIR/site/.well-known/proof.txt"
 : > "$TEST_DIR/includes/kvs-rewrites.conf"
 openssl genpkey -genparam -algorithm DH -pkeyopt group:ffdhe2048 \
     -out "$TEST_DIR/dhparam.pem" 2>/dev/null
@@ -125,13 +131,14 @@ assert_tls_rejected() {
 
 hidden_file_failures=0
 assert_hidden_files_denied() {
-    local base=$1 prefix asset
+    local base=$1 prefix asset path
     shift
     for prefix in '' /phpmyadmin; do
-        for asset in proof.css proof.js proof.svg proof.woff2 proof.txt; do
-            request "$@" "$base$prefix/.private/$asset"
+        for path in .private/proof.css .private/proof.js .private/proof.svg .private/proof.woff2 .private/proof.txt \
+            .well-known-backup/proof.css .well-known-backup/proof.txt .well-known.json; do
+            request "$@" "$base$prefix/$path"
             if [ "$http_status" != 403 ] || grep -q private-file-sentinel "$TEST_DIR/body"; then
-                printf 'FAIL: hidden file %s returned HTTP %s\n' "$base$prefix/.private/$asset" "$http_status" >&2
+                printf 'FAIL: hidden file %s returned HTTP %s\n' "$base$prefix/$path" "$http_status" >&2
                 hidden_file_failures=$((hidden_file_failures + 1))
             fi
         done
@@ -268,6 +275,9 @@ request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$ht
 [ "$http_status" = 200 ] || fail 'standalone site failed'
 grep -qx origin-site-sentinel "$TEST_DIR/body" || fail 'incorrect standalone site body'
 assert_hidden_files_denied "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
+request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$https_port/.well-known/proof.txt"
+[ "$http_status" = 200 ] || fail 'standalone well-known directory failed'
+grep -qx well-known-sentinel "$TEST_DIR/body" || fail 'incorrect well-known body'
 request --resolve "www.example.test:$https_port:127.0.0.1" "https://www.example.test:$https_port/path"
 [ "$http_status" = 301 ] || fail 'standalone canonical redirect failed'
 grep -Fq 'Location: https://example.test/path' "$TEST_DIR/headers" || fail 'incorrect standalone redirect'
