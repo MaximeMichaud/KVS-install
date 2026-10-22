@@ -7,12 +7,12 @@ source /init/lib/common.sh
 
 # The literal value of a $config key in setup.php, from the first
 # line that sets it, with any spacing around the brackets and the equal
-# sign.
+# sign. Ports may also be unquoted integers.
 setup_php_value() {
     local key="$1"
 
     # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
-    sed -n -E "s/^[[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"][[:space:]]*;.*/\\1/p" \
+    sed -n -E "s/^[[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*(['\"]([^'\"]*)['\"]|([0-9]+))[[:space:]]*;.*/\\2\\3/p" \
         "$KVS_PATH/admin/include/setup.php" | head -n 1
 }
 
@@ -65,7 +65,7 @@ set_setup_php_value() {
     encoded=${encoded//\$/\\\$}
     encoded=$(escape_sed_replacement "$encoded")
     # shellcheck disable=SC2016  # The dollar sign is part of the PHP text.
-    sed -E -i "s#^([[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*)(\"[^\"]*\"|'[^']*')([[:space:]]*;)#\\1\"${encoded}\"\\3#" \
+    sed -E -i "s#^([[:space:]]*\\\$config[[:space:]]*\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*)(\"[^\"]*\"|'[^']*'|[0-9]+)([[:space:]]*;)#\\1\"${encoded}\"\\3#" \
         "$KVS_PATH/admin/include/setup.php"
     if [ "$(setup_php_value "$key")" != "$value" ]; then
         log_error "Could not configure $key in setup.php"
@@ -184,6 +184,9 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     # Keep the loopback relay for existing consumers that use localhost.
     if [ "$configured_project_path" != "$KVS_PATH" ] && [ -n "$(setup_php_value memcache_server)" ]; then
         set_setup_php_value memcache_server cache
+        if [ -n "$(setup_php_value memcache_port)" ]; then
+            set_setup_php_value memcache_port 11211
+        fi
         log_info "Memcache: direct connection to cache:11211"
     fi
 

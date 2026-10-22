@@ -140,6 +140,24 @@ if grep -q memcache_server "$site/admin/include/setup.php"; then
     fail "initialization must not enable an omitted cache"
 fi
 
+# The managed cache listens on 11211, whatever port the old server used.
+# Missing ports still use the application's default.
+cache_port_case=0
+for port in '"11212"' "'11212'" 11212 omitted; do
+    cache_port_case=$((cache_port_case + 1))
+    site="$TEST_DIR/cache-port-$cache_port_case"
+    write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+    if [ "$port" = omitted ]; then
+        sed -i '/memcache_port/d' "$site/admin/include/setup.php"
+    else
+        sed -i "s/memcache_port'\]=\"11211\"/memcache_port']=$port/" "$site/admin/include/setup.php"
+    fi
+    run_config "$site" > "$TEST_DIR/cache-port.log" 2>&1 || fail "an imported cache port must migrate"
+    # shellcheck disable=SC2016  # Execute only the synthetic fixture.
+    php -r 'require $argv[1]; exit(($config["memcache_server"] ?? "") === "cache" && (int) ($config["memcache_port"] ?? 11211) === 11211 ? 0 : 1);' \
+        "$site/admin/include/setup.php" || fail "imported cache port $port must use 11211"
+done
+
 # A setup rerun must keep an initialized site's cache route. Its PHP and cron
 # services may relay localhost to a custom backend through Compose overrides;
 # the init service does not inherit those services' environment variables.
