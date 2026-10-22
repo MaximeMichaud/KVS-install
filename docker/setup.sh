@@ -2203,15 +2203,22 @@ import_fetch_archive() {
     echo -e "${CYAN}Extracting $IMPORT_ARCHIVE into $destination...${NC}"
     import_destination_ready "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
     import_mark_destination "$destination" "archive:$IMPORT_ARCHIVE" || exit 1
-    stage=$(import_stage_dir_for "$destination")
-    rm -rf -- "$stage"
-    mkdir -p "$stage" && chmod 700 "$stage" || exit 1
-    if ! import_archive_extract "$IMPORT_ARCHIVE" "$IMPORT_ARCHIVE_COMMAND" "$stage"; then
-        echo -e "${RED}ERROR: the extraction failed${NC}"
-        exit 1
-    fi
-    mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
-    settled=$(import_archive_settle "$stage" "$IMPORT_ARCHIVE_ROOT" "$IMPORT_ARCHIVE_DUMP" "$IMPORT_ARCHIVE_MANIFEST" "$IMPORT_STAGING" "$destination") || exit 1
+    stage=$(import_stage_dir_for "$destination") || exit 1
+    settled=$(
+        # A mount-point stage has a unique name; clean it on failure as well
+        # as success so a retry does not leave another extracted site behind.
+        trap 'rm -rf -- "$stage"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        rm -rf -- "$stage"
+        mkdir -p "$stage" && chmod 700 "$stage" || exit 1
+        if ! import_archive_extract "$IMPORT_ARCHIVE" "$IMPORT_ARCHIVE_COMMAND" "$stage" >&2; then
+            echo -e "${RED}ERROR: the extraction failed${NC}" >&2
+            exit 1
+        fi
+        mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
+        import_archive_settle "$stage" "$IMPORT_ARCHIVE_ROOT" "$IMPORT_ARCHIVE_DUMP" "$IMPORT_ARCHIVE_MANIFEST" "$IMPORT_STAGING" "$destination"
+    ) || exit 1
     IMPORT_DB_DUMP=$(import_field "$settled" 1)
     if [ -s "$(import_field "$settled" 2)" ]; then
         import_save_nginx_config "$(import_field "$settled" 2)"

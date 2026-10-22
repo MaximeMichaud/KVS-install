@@ -494,7 +494,7 @@ test_settle_preserves_complete_entry_names() {
 }
 
 test_stage_directory_follows_the_destination_filesystem() {
-    local destination="$TMP_ROOT/stage-dest"
+    local destination="$TMP_ROOT/stage-dest" stage other
 
     [ "$(import_stage_dir_for "$destination")" = "$TMP_ROOT/.kvs-import-stage-dest" ] || fail "an absent destination stages next to itself"
     mkdir -p "$destination"
@@ -504,9 +504,47 @@ test_stage_directory_follows_the_destination_filesystem() {
     (
         # shellcheck disable=SC2329  # Stub consumed by the function under test.
         stat() { if [ "$4" = "$destination" ]; then echo 99; else echo 1; fi; }
-        [ "$(import_stage_dir_for "$destination")" = "$destination/.kvs-import-stage" ]
+        stage=$(import_stage_dir_for "$destination") || exit 1
+        [[ "$stage" == "$destination/.kvs-import-stage."* ]] || exit 1
+        [ -d "$stage" ] && [ "$(command stat -c %a "$stage")" = 700 ] || exit 1
+        other=$(import_stage_dir_for "$destination") || exit 1
+        [ "$other" != "$stage" ] && [ -d "$other" ]
     ) || fail "a destination that is a mount point stages inside itself"
     pass "stage directory follows the destination filesystem"
+}
+
+test_nested_stage_preserves_site_entries() {
+    local layout archive stage destination="$TMP_ROOT/nested-stage-dest"
+
+    layout=$(make_layout nested-stage www/ database.sql)
+    mkdir "$layout/www/.kvs-import-stage"
+    printf 'archive content\n' > "$layout/www/.kvs-import-stage/asset.css"
+    archive="$TMP_ROOT/nested-stage.tar"
+    archive_of "$layout" "$archive"
+    mkdir -p "$destination/.kvs-import-stage"
+    printf 'existing content\n' > "$destination/.kvs-import-stage/existing.css"
+    stage=$(
+        # shellcheck disable=SC2329  # Exercise the mount-point choice in isolation.
+        stat() { if [ "$4" = "$destination" ]; then echo 99; else echo 1; fi; }
+        import_stage_dir_for "$destination"
+    ) || fail 'a nested stage must be allocated'
+    [ "$(cat "$destination/.kvs-import-stage/existing.css")" = 'existing content' ] || fail 'stage allocation must preserve existing entries'
+    import_archive_extract "$archive" tar "$stage" || fail 'the collision fixture must extract'
+    import_archive_settle "$stage" www/ database.sql '' "$TMP_ROOT/nested-stage-db" "$destination" >/dev/null || fail 'a site entry named like the old stage must settle'
+    cmp "$layout/www/.kvs-import-stage/asset.css" "$destination/.kvs-import-stage/asset.css" || fail 'the hidden directory must keep its content'
+    [ ! -e "$stage" ] || fail 'the private stage must be removed'
+
+    # Even a name matching the newly allocated stage must never delete it.
+    stage="$destination/.kvs-import-stage-collision"
+    mkdir -p "$stage/www/${stage##*/}"
+    printf 'keep staged content\n' > "$stage/www/${stage##*/}/asset.css"
+    printf 'synthetic dump\n' > "$stage/database.sql"
+    if import_archive_settle "$stage" www/ database.sql '' "$TMP_ROOT/stage-collision-db" "$destination" > "$TMP_ROOT/stage-collision.out" 2> "$TMP_ROOT/stage-collision.err"; then
+        fail 'an exact extraction-stage collision must be refused'
+    fi
+    [ -f "$stage/www/${stage##*/}/asset.css" ] || fail 'a colliding entry must not delete the stage'
+    grep -q 'extraction directory' "$TMP_ROOT/stage-collision.err" || fail 'the collision diagnostic must explain the conflict'
+    pass 'a nested extraction stage preserves site entries and refuses an exact collision'
 }
 
 test_destination_marker_allows_a_repeat_of_the_same_source_only() {
@@ -2279,6 +2317,7 @@ test_peek_reads_the_config_before_extraction
 test_extraction_settles_the_site_and_takes_the_dump_out
 test_settle_rejects_linked_import_materials
 test_settle_preserves_complete_entry_names
+test_nested_stage_preserves_site_entries
 test_stage_directory_follows_the_destination_filesystem
 test_destination_marker_allows_a_repeat_of_the_same_source_only
 test_take_over_moves_the_files_of_an_earlier_import

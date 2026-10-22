@@ -911,8 +911,8 @@ import_archive_analyze() {
 # import_stage_dir_for <destination>
 # Where an archive is unpacked before the site moves into the destination:
 # a private directory next to the destination, on the same filesystem so
-# the move is a rename, inside the destination when that one is a mount
-# point of its own.
+# the move is a rename. For a mount point, allocate a unique private stage
+# inside it, so an existing site entry is never used as the stage.
 import_stage_dir_for() {
     local destination="$1"
     local resolved parent stage
@@ -921,7 +921,7 @@ import_stage_dir_for() {
     parent=$(dirname -- "$resolved")
     stage="$parent/.kvs-import-$(basename -- "$resolved")"
     if [ -d "$resolved" ] && [ "$(stat -c %d -- "$resolved")" != "$(stat -c %d -- "$parent")" ]; then
-        stage="$resolved/.kvs-import-stage"
+        stage=$(mktemp -d "$resolved/.kvs-import-stage.XXXXXXXX") || return 1
     fi
     printf '%s\n' "$stage"
 }
@@ -1005,6 +1005,10 @@ import_archive_settle() {
     find "$site" -name .DS_Store -type f -delete 2>/dev/null || true
     while IFS= read -r -d '' entry; do
         name=${entry##*/}
+        if [ "$destination/$name" -ef "$stage" ]; then
+            echo "ERROR: archive entry conflicts with its extraction directory: $name" >&2
+            return 1
+        fi
         rm -rf -- "${destination:?}/$name" || return 1
         mv -- "$entry" "$destination/" || return 1
     done < <(find "$site" -mindepth 1 -maxdepth 1 -print0)
