@@ -7,7 +7,7 @@ CADDY_TEST_IMAGE=${CADDY_TEST_IMAGE:-caddy:2-alpine}
 endpoint=${DOCKER_HOST:-$(docker context inspect "${DOCKER_CONTEXT:-$(docker context show)}" --format '{{.Endpoints.docker.Host}}')}
 case "$endpoint" in unix://*) ;; *) echo 'ERROR: local Docker socket required' >&2; exit 1 ;; esac
 docker image inspect "$NGINX_TEST_IMAGE" "$CADDY_TEST_IMAGE" >/dev/null
-TEST_DIR=$(mktemp -d /tmp/kvs-origin-http.XXXXXX)
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kvs-origin-http.XXXXXX")
 network="kvs-origin-$$-$RANDOM"
 containers=()
 cleanup() {
@@ -26,6 +26,14 @@ docker network create "$network" >/dev/null
 mkdir -p "$TEST_DIR/site" "$TEST_DIR/acme/.well-known/acme-challenge" "$TEST_DIR/includes"
 printf 'origin-site-sentinel\n' > "$TEST_DIR/site/index.html"
 printf 'acme-sentinel\n' > "$TEST_DIR/acme/.well-known/acme-challenge/proof"
+mkdir -p "$TEST_DIR/site/.private" "$TEST_DIR/phpmyadmin/.private"
+for root in "$TEST_DIR/site" "$TEST_DIR/phpmyadmin"; do
+    for asset in proof.css proof.js proof.svg proof.woff2 proof.txt; do
+        printf 'private-file-sentinel\n' > "$root/.private/$asset"
+    done
+    printf 'public-asset-sentinel\n' > "$root/proof.css"
+    printf 'public-asset-sentinel\n' > "$root/proof.svg"
+done
 : > "$TEST_DIR/includes/kvs-rewrites.conf"
 openssl genpkey -genparam -algorithm DH -pkeyopt group:ffdhe2048 \
     -out "$TEST_DIR/dhparam.pem" 2>/dev/null
@@ -70,6 +78,7 @@ start_nginx() {
         -v "$ROOT_DIR/conf/nginx/globals:/etc/nginx/globals:ro" \
         -v "$TEST_DIR/site:/var/www/kvs:ro" \
         -v "$TEST_DIR/site:/var/www/example.test:ro" \
+        -v "$TEST_DIR/phpmyadmin:/usr/share/phpmyadmin:ro" \
         -v "$TEST_DIR/acme:/var/www/_letsencrypt:ro" \
         --entrypoint nginx "$NGINX_TEST_IMAGE" -g 'daemon off;' >/dev/null
     wait_nginx
@@ -114,6 +123,26 @@ assert_tls_rejected() {
     grep -Eiq 'alert|handshake failure' "$TEST_DIR/tls.log" || fail 'TLS failed for an unrelated reason'
 }
 
+hidden_file_failures=0
+assert_hidden_files_denied() {
+    local base=$1 prefix asset
+    shift
+    for prefix in '' /phpmyadmin; do
+        for asset in proof.css proof.js proof.svg proof.woff2 proof.txt; do
+            request "$@" "$base$prefix/.private/$asset"
+            if [ "$http_status" != 403 ] || grep -q private-file-sentinel "$TEST_DIR/body"; then
+                printf 'FAIL: hidden file %s returned HTTP %s\n' "$base$prefix/.private/$asset" "$http_status" >&2
+                hidden_file_failures=$((hidden_file_failures + 1))
+            fi
+        done
+        for asset in proof.css proof.svg; do
+            request "$@" "$base$prefix/$asset"
+            [ "$http_status" = 200 ] || fail "public asset $base$prefix/$asset failed: HTTP $http_status"
+            grep -qx public-asset-sentinel "$TEST_DIR/body" || fail 'incorrect public asset body'
+        done
+    done
+}
+
 for variant in direct www subdomain; do
     domain=example.test
     www=false
@@ -138,6 +167,7 @@ for variant in direct www subdomain; do
         request --resolve "$canonical:$https_port:127.0.0.1" "https://$canonical:$https_port/index.html"
         [ "$http_status" = 200 ] || fail "canonical site failed: HTTP $http_status, curl $curl_status"
         grep -qx 'origin-site-sentinel' "$TEST_DIR/body" || fail 'incorrect canonical site body'
+        assert_hidden_files_denied "https://$canonical:$https_port" --resolve "$canonical:$https_port:127.0.0.1"
         request -H "Host: $domain" "http://127.0.0.1:$http_port/path"
         [ "$http_status" = 301 ] || fail 'domain redirect failed'
         grep -Fq "Location: https://$canonical/path" "$TEST_DIR/headers" || fail 'incorrect canonical redirect'
@@ -162,6 +192,7 @@ start_nginx proxy
 assert_closed "http://127.0.0.1:$http_port/"
 request -H 'Host: example.test' "http://127.0.0.1:$http_port/health"
 [ "$http_status" = 200 ] || fail 'named health check failed'
+assert_hidden_files_denied "http://127.0.0.1:$http_port" -H 'Host: example.test'
 # Run the actual additional-site Compose health check against this upstream.
 env DOMAIN=example.test SITE_PREFIX=origin-test MARIADB_ROOT_PASSWORD=test-root MARIADB_PASSWORD=test-user \
     docker compose --env-file "$ROOT_DIR/docker/.env.example" \
@@ -192,6 +223,7 @@ for ((attempt=0; attempt<50; attempt++)); do
 done
 [ "$http_status" = 200 ] || fail 'Caddy site failed'
 grep -qx origin-site-sentinel "$TEST_DIR/body" || fail 'incorrect Caddy site body'
+assert_hidden_files_denied "https://example.test:$caddy_https" --resolve "example.test:$caddy_https:127.0.0.1"
 # Let active health checks run before proving the route still serves the site.
 sleep 3
 request --resolve "example.test:$caddy_https:127.0.0.1" "https://example.test:$caddy_https/index.html"
@@ -235,7 +267,10 @@ assert_closed --http1.0 --resolve "example.test:$https_port:127.0.0.1" \
 request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$https_port/index.html"
 [ "$http_status" = 200 ] || fail 'standalone site failed'
 grep -qx origin-site-sentinel "$TEST_DIR/body" || fail 'incorrect standalone site body'
+assert_hidden_files_denied "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
 request --resolve "www.example.test:$https_port:127.0.0.1" "https://www.example.test:$https_port/path"
 [ "$http_status" = 301 ] || fail 'standalone canonical redirect failed'
 grep -Fq 'Location: https://example.test/path' "$TEST_DIR/headers" || fail 'incorrect standalone redirect'
 printf 'PASS: standalone bootstrap ACME, host/SNI rejection, configured site and canonical redirect.\n'
+[ "$hidden_file_failures" -eq 0 ] || fail "$hidden_file_failures hidden-file requests bypassed access restrictions"
+printf 'PASS: hidden files are denied and public CSS/SVG assets remain available in every layout.\n'

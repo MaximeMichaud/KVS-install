@@ -65,6 +65,11 @@ server {
     access_log /var/log/nginx/${DOMAIN}.access.log;
     error_log /var/log/nginx/${DOMAIN}.error.log warn;
 
+    # Deny hidden paths before asset regular expressions can serve them.
+    location ~ /\. {
+        deny all;
+    }
+
     # Assets, media
     location ~* \.(?:css(\.map)?|js(\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv)$ {
         expires 180d;
@@ -98,6 +103,11 @@ server {
         alias /usr/share/phpmyadmin/;
         index index.php;
 
+        # Nested handlers take precedence over server-level expressions.
+        location ~ /\. {
+            deny all;
+        }
+
         # Static files
         location ~* ^/phpmyadmin/(.+\.(css|js|ico|gif|png|jpg|jpeg|svg|woff|woff2|ttf|eot))$ {
             alias /usr/share/phpmyadmin/$1;
@@ -115,11 +125,6 @@ server {
             fastcgi_param HTTP_HOST $host;
             fastcgi_param SERVER_PORT ${PROJECT_HTTPS_PORT};
         }
-    }
-
-    # Deny access to sensitive files
-    location ~ /\. {
-        deny all;
     }
 
     # The KVS rewrites file marks these directories internal with plain prefix
