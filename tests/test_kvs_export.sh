@@ -218,7 +218,11 @@ for arg in "$@"; do
             ;;
     esac
 done
-printf '11.8.2-MariaDB\t127\t45\t%s\t%s\n' "${STUB_NON_TRANSACTIONAL:-0}" "${STUB_UTF8MB4:-1}"
+printf '11.8.2-MariaDB\t127\t45\t%s\t%s' "${STUB_NON_TRANSACTIONAL:-0}" "${STUB_UTF8MB4:-1}"
+case "$*" in
+    *"table_type = 'SYSTEM VERSIONED'"*) printf '\t%s' "${STUB_VERSIONED:-0}" ;;
+esac
+printf '\n'
 EOF
     cat > "$STUB_BIN/mariadb-dump" <<'EOF'
 #!/bin/bash
@@ -1265,6 +1269,29 @@ test_non_transactional_tables_switch_the_dump_to_table_locks() {
     pass "non transactional tables switch the dump to table locks"
 }
 
+test_versioned_tables_are_refused_before_any_export_is_written() {
+    local site="$TMP_ROOT/history-site"
+    local out="$TMP_ROOT/history.out"
+    local err="$TMP_ROOT/history.err"
+    local archive="$TMP_ROOT/history.tar"
+
+    make_site "$site"
+    export STUB_VERSIONED=1
+    for format in auto sql directory; do
+        if run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" --database-format "$format"; then
+            fail "a dump must not silently lose versioned history"
+        fi
+        [ ! -s "$out" ] || fail "refusing history must not stream a partial dump"
+        grep -Fq 'system-versioned tables' "$err" || fail "the refusal must identify unsupported history"
+        if run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" archive "$site" --yes --output "$archive" --database-format "$format"; then
+            fail "an archive must not silently lose versioned history"
+        fi
+        [ ! -e "$archive" ] || fail "refusing history must not create an archive"
+    done
+    unset STUB_VERSIONED
+    pass "versioned tables are refused before any export is written"
+}
+
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent() {
     local site="$TMP_ROOT/mysql-site"
     local bin="$TMP_ROOT/bin-mysql"
@@ -1617,6 +1644,7 @@ test_native_format_selection_and_bundle_integrity
 test_column_statistics_is_passed_only_to_a_tool_that_knows_it
 test_gtid_state_is_left_out_by_a_tool_that_records_it
 test_non_transactional_tables_switch_the_dump_to_table_locks
+test_versioned_tables_are_refused_before_any_export_is_written
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent
 test_the_archive_holds_the_site_the_dump_and_the_manifest
 test_the_archive_can_be_written_on_stdout

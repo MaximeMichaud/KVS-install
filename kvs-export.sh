@@ -78,6 +78,7 @@ DB_SERVER_VERSION=""
 DB_TABLES="0"
 DB_SIZE_MB="0"
 DB_NON_TRANSACTIONAL="0"
+DB_SYSTEM_VERSIONED="0"
 DB_UTF8MB4="yes"
 DB_DUMP_FORMAT="sql"
 DB_DIRECTORY_REASON="not checked"
@@ -599,6 +600,7 @@ kvs_probe_database() {
     DB_TABLES="0"
     DB_SIZE_MB="0"
     DB_NON_TRANSACTIONAL="0"
+    DB_SYSTEM_VERSIONED="0"
     DB_UTF8MB4="yes"
     if [ -z "$DB_CLIENT" ]; then
         DB_ERROR="no mariadb or mysql client on this server"
@@ -609,7 +611,7 @@ kvs_probe_database() {
         return 0
     fi
     like=$(kvs_sql_like_escape "$TABLES_PREFIX")
-    query="SELECT VERSION(), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE '${like}%'), (SELECT ROUND(COALESCE(SUM(data_length + index_length), 0) / 1048576) FROM information_schema.tables WHERE table_schema = DATABASE()), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND engine IS NOT NULL AND engine NOT IN ('InnoDB')), (SELECT COUNT(*) FROM information_schema.character_sets WHERE character_set_name = 'utf8mb4')"
+    query="SELECT VERSION(), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE '${like}%'), (SELECT ROUND(COALESCE(SUM(data_length + index_length), 0) / 1048576) FROM information_schema.tables WHERE table_schema = DATABASE()), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND engine IS NOT NULL AND engine NOT IN ('InnoDB')), (SELECT COUNT(*) FROM information_schema.character_sets WHERE character_set_name = 'utf8mb4'), (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'SYSTEM VERSIONED')"
     TEMP_ERR_FILE=$(mktemp 2> /dev/null) || TEMP_ERR_FILE=""
     if [ -z "$TEMP_ERR_FILE" ]; then
         DB_ERROR="cannot create a temporary file"
@@ -636,7 +638,7 @@ kvs_probe_database() {
         return 0
     fi
     line=${out%%$'\n'*}
-    IFS=$'\t' read -r DB_SERVER_VERSION DB_TABLES DB_SIZE_MB DB_NON_TRANSACTIONAL utf8mb4_count <<< "$line"
+    IFS=$'\t' read -r DB_SERVER_VERSION DB_TABLES DB_SIZE_MB DB_NON_TRANSACTIONAL utf8mb4_count DB_SYSTEM_VERSIONED <<< "$line"
     if [ -z "$DB_SERVER_VERSION" ]; then
         DB_ERROR="the probe query returned nothing"
         return 0
@@ -644,6 +646,10 @@ kvs_probe_database() {
     kvs_is_number "$DB_TABLES" || DB_TABLES="0"
     kvs_is_number "$DB_SIZE_MB" || DB_SIZE_MB="0"
     kvs_is_number "$DB_NON_TRANSACTIONAL" || DB_NON_TRANSACTIONAL="0"
+    if ! kvs_is_number "$DB_SYSTEM_VERSIONED"; then
+        DB_ERROR="the probe did not return the system-versioned table count"
+        return 0
+    fi
     # utf8mb4 exists from MySQL 5.5.3 and MariaDB 5.5; the stock MySQL 5.1
     # of CentOS 6 has none, and its mysqldump refuses the name.
     if [ "${utf8mb4_count:-}" = "0" ]; then
@@ -1881,6 +1887,14 @@ kvs_require_dump_tool() {
         kvs_error "no mariadb-dump or mysqldump on this server, the database cannot be exported"
         return 3
     fi
+    # A normal logical dump omits history. --dump-history is unavailable
+    # on older clients, refuses transaction-precise history, and encodes
+    # current rows differently before/after MariaDB 11.5. The migration
+    # importer cannot safely translate those periods to an unknown target.
+    if [ "$DB_SYSTEM_VERSIONED" -gt 0 ]; then
+        kvs_error "the database contains $DB_SYSTEM_VERSIONED system-versioned tables: this exporter cannot preserve their history across MariaDB versions; use a history-aware backup with a compatible restore target or a physical backup"
+        return 3
+    fi
     return 0
 }
 
@@ -1913,6 +1927,7 @@ kvs_print_detect() {
     printf 'db_tables=%s\n' "$DB_TABLES"
     printf 'db_size_mb=%s\n' "$DB_SIZE_MB"
     printf 'db_non_transactional=%s\n' "$DB_NON_TRANSACTIONAL"
+    printf 'db_system_versioned=%s\n' "$DB_SYSTEM_VERSIONED"
     printf 'db_utf8mb4=%s\n' "$DB_UTF8MB4"
     printf 'site_size_mb=%s\n' "$SITE_SIZE_MB"
     printf 'site_size_status=%s\n' "$SITE_SIZE_STATUS"
