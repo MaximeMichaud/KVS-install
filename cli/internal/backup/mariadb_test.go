@@ -531,6 +531,76 @@ INSERT INTO ktvs_m_rating_history SELECT seq, REPEAT('r', 100) FROM seq_1_to_160
 	}
 }
 
+// Cancelling the host Docker client must also stop the dump in the
+// container, even while the server takes no output because a table is
+// locked. The connection holding that lock must remain untouched.
+func TestRealCancelledDumpEndsItsConnection(t *testing.T) {
+	mariadbServer(t)
+	for _, engine := range []string{"MyISAM", "InnoDB"} {
+		t.Run(engine, func(t *testing.T) {
+			emptySite(t)
+			inSite(t, "CREATE TABLE ktvs_videos (id INT PRIMARY KEY) ENGINE="+engine+";\nINSERT INTO ktvs_videos VALUES (1);\n")
+			unlock := openTransaction(t, "LOCK TABLES ktvs_videos WRITE;\n")
+			defer unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			dir, env := t.TempDir(), siteEnv(t)
+			done := make(chan error, 1)
+			go func() {
+				_, err := Create(ctx, dir, "26.10.0", mariadb.name, env, "", nil)
+				done <- err
+			}()
+			var connection, statement string
+			for deadline := time.Now().Add(10 * time.Second); ; {
+				row := strings.TrimSpace(asRoot(t, "SELECT ID, INFO FROM information_schema.PROCESSLIST WHERE DB = '"+siteDatabase+"' AND INFO LIKE '%ktvs_videos%' AND STATE LIKE 'Waiting%';\n"))
+				connection, statement, _ = strings.Cut(row, "\t")
+				if connection != "" {
+					break
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("the dump ended before waiting for the table: %v", err)
+				default:
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the dump never waited for the table lock")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			t.Logf("dump connection %s is waiting for the table lock: %s", connection, statement)
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatalf("the cancelled dump returned %v", err)
+			}
+			for deadline := time.Now().Add(3 * time.Second); ; {
+				left := strings.TrimSpace(asRoot(t, "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = "+connection+";\n"))
+				if left == "0" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("dump connection %s still waits on the server after the backup was cancelled", connection)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if held := strings.TrimSpace(asRoot(t, "SELECT IS_USED_LOCK('kvsctltest-open-transaction') IS NOT NULL;\n")); held != "1" {
+				t.Fatal("cancelling the dump ended the unrelated connection holding the table lock")
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 0 {
+				t.Errorf("cancelled backup left %v in its directory: %v", entries, err)
+			}
+			unlock()
+			result, err := Create(context.Background(), dir, "26.10.0", mariadb.name, env, "", nil)
+			if err != nil {
+				t.Fatalf("a new backup after cancellation failed: %v", err)
+			}
+			if !strings.Contains(rowsOf(t, dumpText(t, result.Path), "ktvs_videos"), "(1)") {
+				t.Fatal("the new backup lost the row of the site")
+			}
+		})
+	}
+}
+
 // The server itself tells the tables a dump has to lock: those of an engine
 // without transactions, a system-versioned one included, and never a MEMORY
 // table, a sequence or a view.

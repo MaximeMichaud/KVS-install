@@ -63,10 +63,17 @@ type cliResponse struct {
 
 // fakeDockerCLI is the docker CLI of the tests.
 func fakeDockerCLI() int {
-	stdin, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "fake docker:", err)
-		return 125
+	var stdin []byte
+	// A dump keeps stdin open to detect its caller disconnecting. It
+	// produces output without reading input; a replay still consumes SQL.
+	dump := len(os.Args) == 7 && os.Args[1] == "exec" && strings.Contains(os.Args[6], "mariadb-dump")
+	if !dump {
+		var err error
+		stdin, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fake docker:", err)
+			return 125
+		}
 	}
 	dir, _ := os.Getwd()
 	body, _ := json.Marshal(cliRequest{Args: os.Args[1:], Dir: dir, Stdin: stdin, Env: os.Environ()})

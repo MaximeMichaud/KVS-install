@@ -36,7 +36,7 @@ import (
 
 // dumpScript dumps the database of the site in one transaction: a snapshot
 // of every table at one point, which never holds the writes of the site.
-const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump --single-transaction --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE"`
+const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
 
 // lockedDumpScript dumps a database that holds tables no transaction
 // covers, MyISAM or Aria ones, which a site imported from an older server
@@ -48,7 +48,24 @@ const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump --singl
 // the other databases of the server and wait for every running query
 // before it is granted, with the reads queued behind it; stopping the
 // writers would take the whole site down for the length of the dump.
-const lockedDumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump --lock-tables --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE"`
+const lockedDumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
+
+// The open input pipe ties the dump to its caller: disconnecting Docker
+// closes it, even while the dump waits for a server-side table lock.
+const dumpGuard = `
+dump=$!
+exec 3<&0
+(
+  while IFS= read -r line <&3; do : "$line"; done
+  kill -TERM "$dump" 2>/dev/null
+) &
+guard=$!
+wait "$dump"
+status=$?
+kill "$guard" 2>/dev/null
+wait "$guard" 2>/dev/null
+exit "$status"
+`
 
 // enginesScript counts the tables of the site on an engine that keeps no
 // transactions, system-versioned ones included, and names those engines:
@@ -560,7 +577,18 @@ func dumpInto(ctx context.Context, f *os.File, in archiveInput, script string) (
 	}
 	counter := &countWriter{w: zw}
 	guard.raw = &counter.n
-	err = execFn(ctx, in.container, nil, counter, "sh", "-c", script)
+	// os/exec inherits a file directly. An io.Pipe would keep its stdin
+	// copier waiting after a successful dump, preventing Wait from ending.
+	input, hold, err := os.Pipe()
+	if err != nil {
+		_ = zw.Close()
+		return 0, 0, err
+	}
+	defer input.Close()
+	defer hold.Close()
+	stop := context.AfterFunc(ctx, func() { _ = hold.Close() })
+	defer stop()
+	err = execFn(ctx, in.container, input, counter, "sh", "-c", script)
 	if cerr := zw.Close(); err == nil {
 		err = cerr
 	}

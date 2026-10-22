@@ -26,13 +26,28 @@ import (
 // of a replay that was stopped ended on the server.
 const (
 	wantEngines = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names -e "SELECT COUNT(*), COALESCE(GROUP_CONCAT(DISTINCT t.engine ORDER BY t.engine SEPARATOR ', '), '') FROM information_schema.tables t LEFT JOIN information_schema.engines e ON e.engine = t.engine WHERE t.table_schema = DATABASE() AND t.table_type IN ('BASE TABLE', 'SYSTEM VERSIONED') AND t.engine <> 'MEMORY' AND COALESCE(e.transactions, 'NO') <> 'YES'" "$MARIADB_DATABASE"`
-	wantDump    = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump --single-transaction --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE"`
-	wantLocked  = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump --lock-tables --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE"`
+	wantDump    = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + wantDumpGuard
+	wantLocked  = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + wantDumpGuard
 	wantReplay  = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb "$MARIADB_DATABASE"`
 	wantProbe   = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names -e "SELECT COMMAND, TIME_MS, STATE FROM information_schema.PROCESSLIST WHERE ID = IS_USED_LOCK('$1')"`
 	wantEnd     = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names --delimiter=// -e "BEGIN NOT ATOMIC DECLARE id BIGINT UNSIGNED DEFAULT IS_USED_LOCK('$1'); DECLARE CONTINUE HANDLER FOR 1094 BEGIN END; IF id IS NOT NULL THEN EXECUTE IMMEDIATE CONCAT('KILL ', id); END IF; END"`
 	wantSize    = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names -e 'SELECT CAST(COALESCE(SUM(data_length + index_length), 0) AS UNSIGNED) FROM information_schema.tables WHERE table_schema = DATABASE()' "$MARIADB_DATABASE"`
 )
+
+const wantDumpGuard = `
+dump=$!
+exec 3<&0
+(
+  while IFS= read -r line <&3; do : "$line"; done
+  kill -TERM "$dump" 2>/dev/null
+) &
+guard=$!
+wait "$dump"
+status=$?
+kill "$guard" 2>/dev/null
+wait "$guard" 2>/dev/null
+exit "$status"
+`
 
 // wantPreamble is what a replay sends before the dump, with the name of its
 // lock for the %s.
