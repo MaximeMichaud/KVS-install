@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sys/unix"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/diskspace"
 )
@@ -1217,6 +1218,60 @@ func TestRefusesWhatItDoesNotKnow(t *testing.T) {
 	}
 }
 
+// An archive reader must not wait for a FIFO writer, even when the path
+// was supplied explicitly rather than discovered by List.
+func withoutBackupStall(t *testing.T, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a backup stalled on a special file")
+	}
+}
+
+func TestArchiveRejectsSpecialFiles(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "archive.tar")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.tar")
+	if err := os.Symlink(fifo, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"fifo": fifo, "linked fifo": link, "directory": dir, "device": "/dev/null"} {
+		t.Run(name, func(t *testing.T) {
+			withoutBackupStall(t, func() {
+				if _, _, err := Describe(path); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+					t.Errorf("Describe(%q) = %v; want a non-regular file refusal", path, err)
+				}
+			})
+		})
+	}
+}
+
+// An explicit archive path may still be a link to a regular archive.
+func TestDescribeLinkedArchive(t *testing.T) {
+	dir := t.TempDir()
+	path := createSQL(t, dir, "SELECT 1;\n")
+	link := filepath.Join(dir, "chosen.tar")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	meta, _, err := Describe(link)
+	if err != nil || meta.Domain != "example.test" {
+		t.Fatalf("Describe linked archive = %+v, %v", meta, err)
+	}
+	if env, err := ArchivedEnv(link); err != nil || !strings.Contains(string(env), "DOMAIN=example.test") {
+		t.Fatalf("ArchivedEnv linked archive = %q, %v", env, err)
+	}
+}
+
 func TestRestoreEnv(t *testing.T) {
 	dir := t.TempDir()
 	env := writeEnv(t, dir)
@@ -1277,6 +1332,42 @@ func TestDatabaseSize(t *testing.T) {
 	})
 	if _, err := DatabaseSize(context.Background(), "kvs-mariadb"); err == nil {
 		t.Error("a failed query was accepted")
+	}
+}
+
+func TestListSkipsNonRegularEntries(t *testing.T) {
+	dir := t.TempDir()
+	real := createSQL(t, dir, "SELECT 1;\n")
+	fifo := filepath.Join(dir, "backup-fifo-20261022-120000.tar")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(dir, "backup-linked-20261022-120000.tar")
+	linkedFIFO := filepath.Join(dir, "backup-linked-fifo-20261022-120000.tar")
+	broken := filepath.Join(dir, "backup-broken-20261022-120000.tar")
+	for link, target := range map[string]string{linked: real, linkedFIFO: fifo, broken: filepath.Join(dir, "missing.tar")} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directory := filepath.Join(dir, "backup-directory-20261022-120000.tar")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	withoutBackupStall(t, func() {
+		list, err := List(dir)
+		if err != nil || len(list) != 1 || list[0].Path != real {
+			t.Fatalf("List = %+v, %v; want only the regular archive", list, err)
+		}
+		removed, err := Prune(dir, 0)
+		if err != nil || !slices.Equal(removed, []string{real}) {
+			t.Fatalf("Prune = %v, %v; want only the regular archive removed", removed, err)
+		}
+	})
+	for _, path := range []string{fifo, linked, linkedFIFO, broken, directory} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("Prune changed non-regular entry %s: %v", path, err)
+		}
 	}
 }
 

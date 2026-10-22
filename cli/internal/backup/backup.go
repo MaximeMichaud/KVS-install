@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sys/unix"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/diskspace"
 	"github.com/MaximeMichaud/KVS-install/cli/internal/dockerx"
@@ -706,9 +707,27 @@ type archive struct {
 type member struct{ offset, size int64 }
 
 func openArchive(path string) (*archive, error) {
-	f, err := os.Open(path)
+	before, err := os.Stat(path)
 	if err != nil {
 		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	// A caller may name a link to an archive. Follow it, but never wait
+	// for a FIFO writer if the file is replaced between stat and open.
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		f.Close()
+		return nil, fmt.Errorf("%s changed while opening the backup archive", path)
 	}
 	a := &archive{f: f, path: path, members: map[string]member{}}
 	if err := a.index(); err != nil {
@@ -1129,7 +1148,7 @@ var nameRe = regexp.MustCompile(`^backup-(.+)-(\d{8}-\d{6})\.tar$`)
 
 // List reads the backups of a directory, the last written first (see
 // newer). Anything else the directory holds is skipped, including the
-// .part files of a backup that was interrupted.
+// .part files of a backup that was interrupted and non-regular entries.
 func List(dir string) ([]Info, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1152,7 +1171,7 @@ func List(dir string) ([]Info, error) {
 			continue
 		}
 		stat, err := e.Info()
-		if err != nil {
+		if err != nil || !stat.Mode().IsRegular() {
 			continue
 		}
 		item := Info{
