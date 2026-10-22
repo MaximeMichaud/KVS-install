@@ -423,6 +423,40 @@ test_extraction_settles_the_site_and_takes_the_dump_out() {
     pass "extraction settles the site from a private stage and keeps the dump out of the webroot"
 }
 
+test_settle_rejects_linked_import_materials() {
+    local layout archive stage destination kind result root dump manifest
+
+    for kind in dump manifest; do
+        layout=$(make_layout "linked-$kind" www/ database.sql)
+        if [ "$kind" = dump ]; then
+            mv "$layout/database.sql" "$TMP_ROOT/outside-$kind"
+            ln -s "$TMP_ROOT/outside-$kind" "$layout/database.sql"
+        else
+            printf 'format=1\n' > "$TMP_ROOT/outside-$kind"
+            ln -s "$TMP_ROOT/outside-$kind" "$layout/kvs-export.manifest"
+        fi
+        chmod 644 "$TMP_ROOT/outside-$kind"
+        archive="$TMP_ROOT/linked-$kind.zip"
+        archive_of "$layout" "$archive"
+        import_archive_list "$archive" unzip > "$TMP_ROOT/linked-$kind.list"
+        result=$(import_archive_analyze "$TMP_ROOT/linked-$kind.list") || fail 'the ZIP listing does not distinguish links from regular files'
+        root=$(import_field "$result" 1)
+        dump=$(import_field "$result" 2)
+        manifest=$(import_field "$result" 3)
+        stage="$TMP_ROOT/linked-$kind-stage"
+        destination="$TMP_ROOT/linked-$kind-dest"
+        import_archive_extract "$archive" unzip "$stage" || fail 'the ZIP must extract before checking its member types'
+        if import_archive_settle "$stage" "$root" "$dump" "$manifest" "$TMP_ROOT/linked-$kind-db" "$destination" > "$TMP_ROOT/linked-$kind.out" 2> "$TMP_ROOT/linked-$kind.err"; then
+            fail "a linked $kind must not be staged as an import material"
+        fi
+        grep -q 'not a regular file' "$TMP_ROOT/linked-$kind.err" || fail 'the refusal must explain the invalid member type'
+        [ -e "$stage/$dump" ] || fail 'material validation must happen before moving the dump'
+        [ ! -e "$destination" ] || fail 'invalid materials must be refused before moving site files'
+        [ "$(stat -c %a "$TMP_ROOT/outside-$kind")" = 644 ] || fail 'the external file permissions must remain unchanged'
+    done
+    pass 'settling refuses linked dumps and manifests before moving any import materials'
+}
+
 test_settle_preserves_complete_entry_names() {
     local layout archive stage destination name
     local -a files=($'thumbnail\npreview.css' $'trailing.css\n' $'-asset\tname.css')
@@ -2243,6 +2277,7 @@ test_analysis_finds_the_site_root_and_the_dump
 test_analysis_refuses_what_would_pollute_the_webroot
 test_peek_reads_the_config_before_extraction
 test_extraction_settles_the_site_and_takes_the_dump_out
+test_settle_rejects_linked_import_materials
 test_settle_preserves_complete_entry_names
 test_stage_directory_follows_the_destination_filesystem
 test_destination_marker_allows_a_repeat_of_the_same_source_only

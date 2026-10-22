@@ -981,8 +981,17 @@ import_archive_settle() {
     local manifest="$4"
     local staging="$5"
     local destination="$6"
-    local dump_path="" manifest_path="" site entry name
+    local dump_path="" manifest_path="" site entry name member
 
+    # ZIP listings cannot distinguish symlinks from regular files. Check the
+    # extracted materials before moving or chmodding anything outside the site.
+    for member in "$dump" "$manifest"; do
+        [ -n "$member" ] || continue
+        if [ ! -f "$stage/$member" ] || [ -L "$stage/$member" ]; then
+            echo "ERROR: archive member is not a regular file: $member" >&2
+            return 1
+        fi
+    done
     mkdir -p "$staging" "$destination" || return 1
     if [ -n "$dump" ]; then
         dump_path="$staging/$(basename -- "$dump")"
