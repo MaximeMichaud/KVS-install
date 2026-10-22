@@ -389,6 +389,8 @@ SELECT 'event', event_name, event_definition FROM information_schema.events WHER
 SELECT 'trigger', trigger_name, event_object_table, action_statement FROM information_schema.triggers WHERE trigger_schema = DATABASE() ORDER BY trigger_name;
 SELECT 'video', video_id, title FROM ktvs_videos ORDER BY video_id;
 SELECT 'comment', comment_id, video_id, body FROM ktvs_comments ORDER BY comment_id;
+SELECT 'history', id, title, row_start, row_end FROM ktvs_versions FOR SYSTEM_TIME ALL ORDER BY id, row_start;
+SELECT 'current', id, title FROM ktvs_versions ORDER BY id;
 SELECT 'next id', NEXTVAL(ktvs_ids);
 SHOW GRANTS FOR 'site'@'%';
 `)
@@ -413,6 +415,13 @@ CREATE FUNCTION ktvs_double(n INT) RETURNS INT DETERMINISTIC RETURN n * 2;
 CREATE EVENT ktvs_cleanup ON SCHEDULE EVERY 1 DAY DO DELETE FROM ktvs_comments WHERE comment_id < 0;
 INSERT INTO ktvs_videos VALUES (1, ' first 😀 '), (2, 'second ✓');
 INSERT INTO ktvs_comments VALUES (1, 1, 'nice'), (2, 2, 'great');
+CREATE TABLE ktvs_versions (id INT PRIMARY KEY, title VARCHAR(100)) ENGINE=InnoDB WITH SYSTEM VERSIONING;
+SET timestamp = 1700000000;
+INSERT INTO ktvs_versions VALUES (1, 'old title'), (2, 'deleted title');
+SET timestamp = 1700000010;
+UPDATE ktvs_versions SET title = 'current title' WHERE id = 1;
+SET timestamp = 1700000020;
+DELETE FROM ktvs_versions WHERE id = 2;
 `)
 	asRoot(t, "CREATE DATABASE IF NOT EXISTS other_site;\nCREATE TABLE IF NOT EXISTS other_site.kept (id INT);\nCREATE USER IF NOT EXISTS 'site'@'%' IDENTIFIED BY 'site';\nGRANT SELECT, INSERT, UPDATE ON `"+siteDatabase+"`.* TO 'site'@'%';\n")
 	// NEXTVAL in the snapshot moves the sequence on: the snapshot runs once
@@ -425,6 +434,10 @@ INSERT INTO ktvs_comments VALUES (1, 1, 'nice'), (2, 2, 'great');
 	}
 	if len(reports) != 2 || reports[0] != "dumping the database" {
 		t.Errorf("a database of InnoDB tables said %q", reports)
+	}
+	meta, _, err := Describe(result.Path)
+	if err != nil || meta.Format != historyFormat || (meta.HistoryEndYear != 2038 && meta.HistoryEndYear != 2106) {
+		t.Fatalf("history archive metadata = %+v, %v", meta, err)
 	}
 	sql := dumpText(t, result.Path)
 	for _, want := range []string{"CREATE TABLE `ktvs_videos`", "CREATE TABLE `ktvs_comments`", "CREATE SEQUENCE `ktvs_ids`", "VIEW `ktvs_titles`", "TRIGGER ktvs_videos_title", "PROCEDURE `ktvs_count`", "FUNCTION `ktvs_double`", "EVENT `ktvs_cleanup`", "first 😀", "second ✓"} {
@@ -440,6 +453,9 @@ INSERT INTO ktvs_comments VALUES (1, 1, 'nice'), (2, 2, 'great');
 	before := siteSnapshot(t)
 	if !strings.Contains(before, "first 😀") {
 		t.Fatalf("the trigger did not run or the text was mangled:\n%s", before)
+	}
+	if !strings.Contains(before, "old title") || !strings.Contains(before, "deleted title") {
+		t.Fatal("the versioned table has no historical rows, so the test proves nothing")
 	}
 
 	// What the site does after the backup: tables, rows and objects come
@@ -487,13 +503,16 @@ INSERT INTO ktvs_comments VALUES (1, 1, 'nice'), (2, 2, 'great');
 func TestRealDumpOfTablesWithoutTransactions(t *testing.T) {
 	mariadbServer(t)
 	emptySite(t)
-	inSite(t, `CREATE TABLE ktvs_a_comments (comment_id INT PRIMARY KEY, body VARCHAR(64)) ENGINE=MyISAM;
+	inSite(t, `CREATE TABLE ktvs_a_comments (comment_id INT PRIMARY KEY, body VARCHAR(64)) ENGINE=MyISAM WITH SYSTEM VERSIONING;
 CREATE TABLE ktvs_m_rating_history (id INT PRIMARY KEY, a CHAR(100)) ENGINE=MyISAM;
 CREATE TABLE ktvs_z_events (event_id INT PRIMARY KEY, comment_id INT) ENGINE=MyISAM;
-INSERT INTO ktvs_a_comments SELECT seq, 'old' FROM seq_1_to_100;
+INSERT INTO ktvs_a_comments SELECT seq, IF(seq = 1, 'historical comment', 'old') FROM seq_1_to_100;
+UPDATE ktvs_a_comments SET body = 'current comment' WHERE comment_id = 1;
 INSERT INTO ktvs_z_events SELECT seq, seq FROM seq_1_to_100;
 INSERT INTO ktvs_m_rating_history SELECT seq, REPEAT('r', 100) FROM seq_1_to_160000;
 `)
+	versionsSQL := "SELECT body, row_start, row_end FROM ktvs_a_comments FOR SYSTEM_TIME ALL WHERE comment_id = 1 ORDER BY row_start;\n"
+	beforeVersions := inSite(t, versionsSQL)
 	written := make(chan error, 1)
 	pauseFirstDump(t, 2<<20, func() {
 		// The middle table is being read. MyISAM takes these inserts
@@ -528,6 +547,71 @@ INSERT INTO ktvs_m_rating_history SELECT seq, REPEAT('r', 100) FROM seq_1_to_160
 	want := "the database holds 3 tables without transactions (MyISAM): the dump locks every table to read them all at one point, so the writes of the site wait until it ends"
 	if !slices.Contains(reports, want) {
 		t.Errorf("the backup said %q, want %q", reports, want)
+	}
+	if err := RestoreDatabase(context.Background(), result.Path, mariadb.name, nil); err != nil {
+		t.Fatal(err)
+	}
+	if after := inSite(t, versionsSQL); after != beforeVersions {
+		t.Errorf("versioned MyISAM rows after replay:\n%s\nwant the original rows and periods:\n%s", after, beforeVersions)
+	}
+}
+
+// MariaDB cannot logically export transaction-precise historical rows.
+// Refuse the backup instead of publishing an archive with only current rows.
+func TestRealBackupRefusesTransactionPreciseHistory(t *testing.T) {
+	mariadbServer(t)
+	emptySite(t)
+	inSite(t, `CREATE TABLE fixture_history (
+  id INT PRIMARY KEY, title VARCHAR(40),
+  started BIGINT UNSIGNED GENERATED ALWAYS AS ROW START,
+  ended BIGINT UNSIGNED GENERATED ALWAYS AS ROW END,
+  PERIOD FOR SYSTEM_TIME (started, ended)
+) ENGINE=InnoDB WITH SYSTEM VERSIONING;
+INSERT INTO fixture_history (id, title) VALUES (1, 'old');
+UPDATE fixture_history SET title = 'current';
+`)
+	const query = "SELECT * FROM fixture_history FOR SYSTEM_TIME ALL ORDER BY started;\n"
+	before := inSite(t, query)
+	dir := t.TempDir()
+	_, err := Create(context.Background(), dir, "26.10.0", mariadb.name, siteEnv(t), "", nil)
+	if err == nil || !strings.Contains(err.Error(), "transaction-precise history") {
+		t.Fatalf("backup of unsupported transaction history returned %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed backup left %v: %v", entries, err)
+	}
+	if after := inSite(t, query); after != before {
+		t.Fatalf("refused backup changed the source:\n%s\nwant:\n%s", after, before)
+	}
+}
+
+// A different current-row sentinel would hide current rows (2038 to 2106)
+// or reject the INSERT (2106 to 2038). Neither may empty the target first.
+func TestRealReplayRefusesIncompatibleHistoryBeforeChangingTheSite(t *testing.T) {
+	mariadbServer(t)
+	emptySite(t)
+	inSite(t, "CREATE TABLE fixture_kept (id INT PRIMARY KEY); INSERT INTO fixture_kept VALUES (42);\n")
+	const query = "SHOW CREATE TABLE fixture_kept; SELECT * FROM fixture_kept;\n"
+	before := inSite(t, query)
+	year := 2038
+	if strings.TrimSpace(inSite(t, "SELECT COALESCE(YEAR(FROM_UNIXTIME(4294967295)), 2038);\n")) == "2038" {
+		year = 2106
+	}
+	const sql = "CREATE TABLE fixture_from_backup (id INT);\n"
+	zw, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump := zw.EncodeAll([]byte(sql), nil)
+	zw.Close()
+	meta, _ := json.Marshal(Meta{Format: historyFormat, HistoryEndYear: year, DumpBytes: int64(len(sql))})
+	path := writeTar(t, t.TempDir(), "backup-26.10.0-20261022-000000.tar", [][2]string{{metaName, string(meta)}, {dumpName, string(dump)}})
+	if err := RestoreDatabase(context.Background(), path, mariadb.name, nil); err == nil || !strings.Contains(err.Error(), "incompatible") || !strings.Contains(err.Error(), "database was not touched") {
+		t.Fatalf("incompatible replay returned %v", err)
+	}
+	if after := inSite(t, query); after != before {
+		t.Fatalf("incompatible replay changed the target:\n%s\nwant:\n%s", after, before)
 	}
 }
 
@@ -621,13 +705,14 @@ CREATE TABLE ktvs_online (id INT) ENGINE=MEMORY;
 CREATE SEQUENCE ktvs_ids ENGINE=Aria;
 CREATE VIEW ktvs_titles AS SELECT id FROM ktvs_videos;
 `)
-	if got := engines(); got != "0\t\n" {
+	year := strings.TrimSpace(inSite(t, "SELECT COALESCE(YEAR(FROM_UNIXTIME(4294967295)), 2038);\n"))
+	if got := engines(); got != "0\t\t"+year+"\n" {
 		t.Errorf("tables with transactions, MEMORY, a sequence and a view: the server answered %q, want none to lock", got)
 	}
 	inSite(t, `CREATE TABLE ktvs_stats (id INT) ENGINE=Aria;
 CREATE TABLE ktvs_rating_history (id INT) ENGINE=MyISAM WITH SYSTEM VERSIONING;
 `)
-	if got := engines(); got != "2\tAria, MyISAM\n" {
+	if got := engines(); got != "2\tAria, MyISAM\t"+year+"\n" {
 		t.Errorf("with an Aria table and a system-versioned MyISAM one, the server answered %q", got)
 	}
 }

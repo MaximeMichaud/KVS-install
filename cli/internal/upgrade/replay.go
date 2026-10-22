@@ -149,6 +149,9 @@ func (r *Runner) Restore(ctx context.Context, state *instance.State, archive str
 	if err := r.mariadbUsable(ctx, state); err != nil {
 		return err
 	}
+	if err := backup.CheckHistoryCompatibility(ctx, archive, r.mariadbContainer()); err != nil {
+		return err
+	}
 	failing, err := r.failingBefore(ctx)
 	if err != nil {
 		return err

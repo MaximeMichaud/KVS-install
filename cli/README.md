@@ -853,6 +853,17 @@ one more than the highest of the archives in `backups/`, and orders them:
 `--latest`, `--keep` and a rollback that has no archive recorded read that
 order, which a clock set wrong does not change.
 
+Timestamp-based system-versioned tables retain their historical rows and
+validity periods. Their archives use format 3, which older CLI builds
+refuse, and record the current-row timestamp range. MariaDB 11.4 uses a
+2038 end timestamp; 11.8 and 12.3 use 2106. A restore across those ranges
+is refused before stopping the site or changing its database: restore on
+a compatible series and plan the history migration separately. Archives
+without versioned tables keep format 2 and remain readable as before.
+Transaction-precise history cannot be exported by `mariadb-dump`; its
+error stops the backup and no incomplete archive is kept. As with any
+logical dump, do not change table definitions while taking a backup.
+
 The dump reads every table at one point: in one transaction when every
 table of the site takes part in transactions, and under a lock of every
 table of its database when some are MyISAM or Aria, as an installation

@@ -719,6 +719,40 @@ func TestRestoreKeepsTheLiveEnvWhenTheArchivedOneCannotBeRead(t *testing.T) {
 	}
 }
 
+func TestRestoreRefusesIncompatibleHistoryWithoutStoppingTheSite(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"})
+	archive := s.backupNow("1.0.0")
+	setMeta(t, archive, func(meta map[string]any) {
+		meta["format"] = 3
+		meta["history_end_year"] = 2038
+	})
+	s.writeData("data-2")
+	s.f.with(func(f *fakeDocker) {
+		f.hook = func(_ *fakeDocker, req cliRequest) (cliResponse, bool) {
+			args := strings.Join(req.Args, " ")
+			if strings.Contains(args, "FROM_UNIXTIME") && !strings.Contains(args, "information_schema") {
+				return cliResponse{Stdout: "2106\n"}, true
+			}
+			return cliResponse{}, false
+		}
+	})
+	before := len(s.f.commands())
+	if err := s.restore(s.runner(), archive); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("incompatible restore returned %v", err)
+	}
+	if db, replays, _, _ := s.world(); db != "data-2" || len(replays) != 0 {
+		t.Errorf("incompatible restore changed database %q, replays %v", db, replays)
+	}
+	for _, cmd := range s.f.commands()[before:] {
+		if strings.HasPrefix(cmd, "compose stop") {
+			t.Errorf("incompatible restore stopped services: %s", cmd)
+		}
+	}
+	if stopped, j := s.stopped(), s.journal(); len(stopped) != 0 || j != nil {
+		t.Errorf("incompatible restore left stopped services %v and journal %+v", stopped, j)
+	}
+}
+
 // A restore refuses a MariaDB that runs and fails its health check before
 // it stops anything, as a rollback does: the services it starts again once
 // the dump is in wait for MariaDB to be healthy. A stack kvsctl recorded no

@@ -36,7 +36,7 @@ import (
 
 // dumpScript dumps the database of the site in one transaction: a snapshot
 // of every table at one point, which never holds the writes of the site.
-const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
+const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
 
 // lockedDumpScript dumps a database that holds tables no transaction
 // covers, MyISAM or Aria ones, which a site imported from an older server
@@ -48,7 +48,7 @@ const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-tra
 // the other databases of the server and wait for every running query
 // before it is granted, with the reads queued behind it; stopping the
 // writers would take the whole site down for the length of the dump.
-const lockedDumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
+const lockedDumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
 
 // The open input pipe ties the dump to its caller: disconnecting Docker
 // closes it, even while the dump waits for a server-side table lock.
@@ -73,8 +73,12 @@ exit "$status"
 // every restart of the server, so reading them at another moment loses
 // nothing a restart would keep, and a single one would otherwise lock the
 // whole site for every dump. Nor do sequences: one read later than the
-// tables only gives a value past those they hold.
-const enginesScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names -e "SELECT COUNT(*), COALESCE(GROUP_CONCAT(DISTINCT t.engine ORDER BY t.engine SEPARATOR ', '), '') FROM information_schema.tables t LEFT JOIN information_schema.engines e ON e.engine = t.engine WHERE t.table_schema = DATABASE() AND t.table_type IN ('BASE TABLE', 'SYSTEM VERSIONED') AND t.engine <> 'MEMORY' AND COALESCE(e.transactions, 'NO') <> 'YES'" "$MARIADB_DATABASE"`
+// tables only gives a value past those they hold. The last field is the
+// current-row end year when the database has versioned tables: 2038 before
+// MariaDB 11.5, 2106 since. It is empty for an ordinary database.
+const enginesScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names -e "SELECT COUNT(*), COALESCE(GROUP_CONCAT(DISTINCT t.engine ORDER BY t.engine SEPARATOR ', '), ''), (SELECT IF(COUNT(*) = 0, '', COALESCE(YEAR(FROM_UNIXTIME(4294967295)), 2038)) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'SYSTEM VERSIONED') FROM information_schema.tables t LEFT JOIN information_schema.engines e ON e.engine = t.engine WHERE t.table_schema = DATABASE() AND t.table_type IN ('BASE TABLE', 'SYSTEM VERSIONED') AND t.engine <> 'MEMORY' AND COALESCE(e.transactions, 'NO') <> 'YES'" "$MARIADB_DATABASE"`
+
+const historyEndScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names -e 'SELECT COALESCE(YEAR(FROM_UNIXTIME(4294967295)), 2038)'`
 
 // restoreScript replays what it reads into the database of the site:
 // replayPreamble, then the dump.
@@ -143,6 +147,10 @@ const probeAttempts = 3
 // read is no reason to refuse an archive.
 const Format = 2
 
+// A history-bearing archive needs a reader that checks timestamp
+// compatibility before replay. Older readers must refuse it entirely.
+const historyFormat = 3
+
 // Members of an archive.
 const (
 	metaName = "backup.json"
@@ -205,8 +213,12 @@ type Meta struct {
 	// taken, as the files of the site give it; empty when it could not be
 	// read. A replay takes the database back to the schema of that version,
 	// whatever the files of the site run now.
-	KVSVersion string    `json:"kvs_version,omitempty"`
-	Date       time.Time `json:"date"`
+	KVSVersion string `json:"kvs_version,omitempty"`
+	// HistoryEndYear identifies the current-row sentinel in timestamp
+	// history. Replaying it on the other timestamp range would hide current
+	// rows or reject them. Zero means no historical periods were recorded.
+	HistoryEndYear int       `json:"history_end_year,omitempty"`
+	Date           time.Time `json:"date"`
 	// Sequence numbers the archives of a backup directory in the order
 	// they were written, from 1. It orders them where the date cannot: a
 	// clock set back or ahead moves the date, never the sequence. Zero in
@@ -380,6 +392,7 @@ func nextSequence(dir string) (int64, error) {
 type archiveInput struct {
 	dir, version, container, envPath, statePath string
 	kvsVersion                                  string
+	historyEndYear                              int
 	files                                       []string
 	start                                       time.Time
 	sequence                                    int64
@@ -402,7 +415,7 @@ func writeArchive(ctx context.Context, f *os.File, in archiveInput) error {
 	if _, err := f.Write(placeholder); err != nil {
 		return err
 	}
-	script, err := chooseDump(ctx, in)
+	script, err := chooseDump(ctx, &in)
 	if err != nil {
 		return err
 	}
@@ -442,13 +455,21 @@ func writeArchive(ctx context.Context, f *os.File, in archiveInput) error {
 // point: one transaction when every table takes part in transactions, a
 // lock of the tables when some do not, which the operator is told since
 // the writes of the site then wait.
-func chooseDump(ctx context.Context, in archiveInput) (string, error) {
+func chooseDump(ctx context.Context, in *archiveInput) (string, error) {
 	var out bytes.Buffer
 	if err := execFn(ctx, in.container, nil, &out, "sh", "-c", enginesScript); err != nil {
 		return "", fmt.Errorf("the engines of the tables in %s could not be read: %w", in.container, err)
 	}
 	line := strings.TrimRight(out.String(), "\r\n")
 	count, engines, _ := strings.Cut(line, "\t")
+	engines, history, _ := strings.Cut(engines, "\t")
+	if history != "" {
+		year, err := strconv.Atoi(history)
+		if err != nil || (year != 2038 && year != 2106) {
+			return "", fmt.Errorf("the system-versioning timestamp range of %s could not be read: the database answered %q", in.container, excerpt(line))
+		}
+		in.historyEndYear = year
+	}
 	n, err := strconv.Atoi(strings.TrimSpace(count))
 	if err != nil || n < 0 {
 		return "", fmt.Errorf("the engines of the tables in %s could not be read: the database answered %q", in.container, excerpt(line))
@@ -541,8 +562,13 @@ func finishArchive(f *os.File, raw, compressed int64, in archiveInput) error {
 		}
 		taken[name] = true
 	}
+	format := Format
+	if in.historyEndYear != 0 {
+		format = historyFormat
+	}
 	meta, err := json.MarshalIndent(Meta{
-		Format:          Format,
+		Format:          format,
+		HistoryEndYear:  in.historyEndYear,
 		Version:         in.version,
 		KVSVersion:      in.kvsVersion,
 		Date:            in.start.UTC(),
@@ -791,8 +817,11 @@ func (a *archive) index() error {
 	if err := json.Unmarshal(data, &a.meta); err != nil {
 		return fmt.Errorf("%s: %s is not valid JSON: %w", a.path, metaName, err)
 	}
-	if a.meta.Format != Format {
-		return fmt.Errorf("%s is a backup of format %d, and this kvsctl reads format %d", a.path, a.meta.Format, Format)
+	if a.meta.Format != Format && a.meta.Format != historyFormat {
+		return fmt.Errorf("%s is a backup of format %d, and this kvsctl reads formats %d and %d", a.path, a.meta.Format, Format, historyFormat)
+	}
+	if (a.meta.Format == historyFormat && a.meta.HistoryEndYear != 2038 && a.meta.HistoryEndYear != 2106) || (a.meta.Format == Format && a.meta.HistoryEndYear != 0) {
+		return fmt.Errorf("%s has invalid system-versioning timestamp metadata", a.path)
 	}
 	return nil
 }
@@ -820,6 +849,34 @@ func (a *archive) read(name string, limit int64) ([]byte, error) {
 
 func (a *archive) Close() error { return a.f.Close() }
 
+// CheckHistoryCompatibility rejects a timestamp-history archive that the
+// target cannot replay. Callers use it before stopping the site; the replay
+// checks again against the archive and server it actually uses.
+func CheckHistoryCompatibility(ctx context.Context, path, container string) error {
+	a, err := openArchive(path)
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+	return a.checkHistory(ctx, container)
+}
+
+func (a *archive) checkHistory(ctx context.Context, container string) error {
+	if a.meta.HistoryEndYear == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	var out bytes.Buffer
+	if err := execFn(ctx, container, nil, &out, "sh", "-c", historyEndScript); err != nil {
+		return fmt.Errorf("the target system-versioning timestamp range could not be read; the database was not touched: %w", err)
+	}
+	if strings.TrimSpace(out.String()) != strconv.Itoa(a.meta.HistoryEndYear) {
+		return fmt.Errorf("this backup contains system-versioned history ending in %d, incompatible with the target timestamp range %q; restore it on a compatible MariaDB series (11.4 for 2038, 11.8 or 12.3 for 2106) before migrating its history; the database was not touched", a.meta.HistoryEndYear, strings.TrimSpace(out.String()))
+	}
+	return nil
+}
+
 // RestoreDatabase makes the database of the container what the archive
 // holds: it empties the database, then replays the dump of the archive,
 // decompressed on the way in, one pipe from the file to mariadb (see
@@ -842,6 +899,9 @@ func RestoreDatabase(ctx context.Context, path, mariadbContainer string, progres
 		return err
 	}
 	defer a.Close()
+	if err := a.checkHistory(ctx, mariadbContainer); err != nil {
+		return err
+	}
 	dump, err := a.section(dumpName)
 	if err != nil {
 		return err

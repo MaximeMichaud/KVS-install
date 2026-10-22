@@ -1191,13 +1191,38 @@ func writeTar(t *testing.T, dir, name string, members [][2]string) string {
 
 // Only an archive this build knows is read: one without backup.json is
 // not a kvsctl backup, and another format is refused, not guessed at.
+func TestHistoryCompatibilityProbeIsBounded(t *testing.T) {
+	previous := probeTimeout
+	probeTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = previous })
+	meta, _ := json.Marshal(Meta{Format: historyFormat, HistoryEndYear: 2038})
+	path := writeTar(t, t.TempDir(), "history.tar", [][2]string{{metaName, string(meta)}})
+	stubExec(t, func(ctx context.Context, _ string, _ io.Reader, _ io.Writer, _ ...string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := CheckHistoryCompatibility(ctx, path, "kvs-mariadb")
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "database was not touched") {
+		t.Fatalf("unanswered history probe returned %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("history probe waited %s for its caller instead of bounding its own query", elapsed)
+	}
+}
+
 func TestRefusesWhatItDoesNotKnow(t *testing.T) {
 	dir := t.TempDir()
-	newer, _ := json.Marshal(Meta{Format: Format + 1})
+	newer, _ := json.Marshal(Meta{Format: historyFormat + 1})
 	cases := map[string][][2]string{
-		"no metadata":  {{".env", "DOMAIN=example.test\n"}},
-		"newer format": {{metaName, string(newer)}, {dumpName, "x"}},
-		"bad metadata": {{metaName, "{not json"}},
+		"no metadata":                       {{".env", "DOMAIN=example.test\n"}},
+		"newer format":                      {{metaName, string(newer)}, {dumpName, "x"}},
+		"bad metadata":                      {{metaName, "{not json"}},
+		"history without timestamp range":   {{metaName, `{"format":3}`}},
+		"unknown timestamp range":           {{metaName, `{"format":3,"history_end_year":9999}`}},
+		"history readable by an old reader": {{metaName, `{"format":2,"history_end_year":2038}`}},
 	}
 	for what, members := range cases {
 		path := writeTar(t, dir, "backup-0.1.0-20260924-033804.tar", members)
