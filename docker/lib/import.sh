@@ -989,12 +989,11 @@ import_archive_settle() {
     fi
     site="$stage/$root"
     find "$site" -name .DS_Store -type f -delete 2>/dev/null || true
-    while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        name=$(basename -- "$entry")
+    while IFS= read -r -d '' entry; do
+        name=${entry##*/}
         rm -rf -- "${destination:?}/$name" || return 1
         mv -- "$entry" "$destination/" || return 1
-    done < <(find "$site" -mindepth 1 -maxdepth 1 -print)
+    done < <(find "$site" -mindepth 1 -maxdepth 1 -print0)
     rm -rf -- "$stage"
     printf '%s\t%s\n' "$dump_path" "$manifest_path"
 }

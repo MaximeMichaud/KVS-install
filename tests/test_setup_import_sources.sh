@@ -11,7 +11,7 @@ set -euo pipefail
 export IMPORT_TRANSFER_JOBS=1
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TMP_ROOT=$(mktemp -d /tmp/kvs-import-sources-test.XXXXXX)
+TMP_ROOT=$(mktemp -d -t kvs-import-sources-test.XXXXXX)
 TESTS_RUN=0
 
 cleanup() {
@@ -421,6 +421,42 @@ test_extraction_settles_the_site_and_takes_the_dump_out() {
     [ ! -e "$destination/__MACOSX" ] || fail "__MACOSX must not reach the destination"
     [ ! -e "$destination/.DS_Store" ] || fail ".DS_Store files must go"
     pass "extraction settles the site from a private stage and keeps the dump out of the webroot"
+}
+
+test_settle_preserves_complete_entry_names() {
+    local layout archive stage destination name
+    local -a files=($'thumbnail\npreview.css' $'trailing.css\n' $'-asset\tname.css')
+    local directory=$'directory\nclips'
+
+    layout=$(make_layout entry-names www/ database.sql)
+    for name in "${files[@]}"; do
+        printf 'synthetic asset: %s\n' "$name" > "$layout/www/$name"
+    done
+    mkdir "$layout/www/$directory"
+    printf 'nested content\n' > "$layout/www/$directory/asset.css"
+    archive="$TMP_ROOT/entry-names.tar"
+    archive_of "$layout" "$archive"
+    import_archive_list "$archive" tar > "$TMP_ROOT/entry-names.list"
+    import_archive_analyze "$TMP_ROOT/entry-names.list" >/dev/null || fail "an archive with unusual asset names must pass analysis"
+
+    stage="$TMP_ROOT/entry-names-stage"
+    destination="$TMP_ROOT/entry-names-dest"
+    mkdir "$destination"
+    for name in thumbnail trailing.css directory; do
+        printf 'keep %s\n' "$name" > "$destination/$name"
+    done
+    import_archive_extract "$archive" tar "$stage" || fail "the archive must extract with its original names"
+    import_archive_settle "$stage" www/ database.sql "" "$TMP_ROOT/entry-names-db" "$destination" >/dev/null || fail "settling must preserve line breaks and tabs in entry names"
+    for name in "${files[@]}"; do
+        cmp "$layout/www/$name" "$destination/$name" || fail "every file must keep its complete name and content"
+    done
+    cmp "$layout/www/$directory/asset.css" "$destination/$directory/asset.css" || fail "directory names must stay intact"
+    for name in thumbnail trailing.css directory; do
+        [ "$(cat "$destination/$name")" = "keep $name" ] || fail "an unrelated entry matching only part of a name must remain intact"
+    done
+    [ ! -e "$stage" ] || fail "the completed stage must be removed"
+    [ -f "$TMP_ROOT/entry-names-db/database.sql" ] || fail "the dump must stay outside the site"
+    pass "settling preserves complete entry names and unrelated destination files"
 }
 
 test_stage_directory_follows_the_destination_filesystem() {
@@ -2207,6 +2243,7 @@ test_analysis_finds_the_site_root_and_the_dump
 test_analysis_refuses_what_would_pollute_the_webroot
 test_peek_reads_the_config_before_extraction
 test_extraction_settles_the_site_and_takes_the_dump_out
+test_settle_preserves_complete_entry_names
 test_stage_directory_follows_the_destination_filesystem
 test_destination_marker_allows_a_repeat_of_the_same_source_only
 test_take_over_moves_the_files_of_an_earlier_import
