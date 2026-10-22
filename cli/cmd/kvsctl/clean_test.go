@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/instance"
@@ -117,6 +121,81 @@ func TestOnlyLocal(t *testing.T) {
 	got := onlyLocal([]string{"a:1", "b:1"}, []string{"b:1", "c:1"})
 	if strings.Join(got, " ") != "b:1" {
 		t.Fatalf("kept %v", got)
+	}
+}
+
+// An image Docker cannot remove remains discoverable on the next clean,
+// including when an old state records its pins only in release overrides.
+func TestCleanRetriesImagesItCouldNotRemove(t *testing.T) {
+	for _, recorded := range []bool{true, false} {
+		for _, status := range []int{http.StatusConflict, http.StatusInternalServerError} {
+			t.Run(fmt.Sprintf("recorded=%t/status=%d", recorded, status), func(t *testing.T) {
+				const old = "example/maintenance-probe:1.0.0"
+				root := newRoot(t, "docker/.env", "DOMAIN=example.test\nCOMPOSE_PROJECT_NAME=site\nSITE_PREFIX=site\n")
+				useRoot(t, root)
+				useStderr(t)
+				useManifest(t, "file://"+filepath.Join(root, "no-remote-manifest.json"))
+				state := &instance.State{Current: "1.2.0", Previous: "1.1.0"}
+				if recorded {
+					state.ReleaseImages = map[string][]string{"1.0.0": {old}, "1.0.1": {old}}
+				}
+				inst := saveState(t, root, state)
+				for _, version := range []string{"1.0.0", "1.0.1"} {
+					writeOverride(t, inst.StateDir(), version, map[string]string{"nginx": old})
+				}
+				writeOverride(t, inst.StateDir(), "1.0.2", nil)
+				var blocked atomic.Bool
+				var deletes atomic.Int32
+				blocked.Store(true)
+				fakeEngine(t, "site", func() []engineContainer { return nil }, engineImage{
+					tags: []string{old},
+					remove: func(w http.ResponseWriter, r *http.Request) {
+						deletes.Add(1)
+						if r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true" {
+							t.Error("clean must not force image removal")
+						}
+						if blocked.Load() {
+							message := "temporary image removal failure"
+							if status == http.StatusConflict {
+								message = "conflict: image is being used by stopped container maintenance-probe"
+							}
+							w.WriteHeader(status)
+							_ = json.NewEncoder(w).Encode(map[string]string{"message": message})
+							return
+						}
+						_ = json.NewEncoder(w).Encode([]map[string]string{{"Untagged": old}})
+					},
+				})
+				first, err := runKvsctl(t, "clean", "--root", root, "--yes", "--quiet=false", "--dry-run=false")
+				if (err != nil) != (status == http.StatusInternalServerError) || deletes.Load() != 1 {
+					t.Fatalf("first clean: %v, deletes=%d, output=%q", err, deletes.Load(), first)
+				}
+				for _, version := range []string{"1.0.0", "1.0.1"} {
+					if _, err := os.Stat(filepath.Join(inst.ReleasesDir(), version)); err != nil {
+						t.Errorf("release %s needed to retry the image was removed: %v", version, err)
+					}
+				}
+				if _, err := os.Stat(filepath.Join(inst.ReleasesDir(), "1.0.2")); !os.IsNotExist(err) {
+					t.Errorf("unrelated discarded release was kept: %v", err)
+				}
+				if recorded && len(loadState(t, root).ReleaseImages["1.0.0"]) == 0 {
+					t.Error("clean forgot the stored pin of an image it could not remove")
+				}
+				blocked.Store(false)
+				second, err := runKvsctl(t, "clean", "--root", root, "--yes", "--quiet=false", "--dry-run=false")
+				if err != nil || deletes.Load() != 2 {
+					t.Fatalf("second clean: %v, deletes=%d, output=%q; want another removal attempt", err, deletes.Load(), second)
+				}
+				for _, version := range []string{"1.0.0", "1.0.1"} {
+					if _, err := os.Stat(filepath.Join(inst.ReleasesDir(), version)); !os.IsNotExist(err) {
+						t.Errorf("release %s stayed after its image was removed: %v", version, err)
+					}
+					if len(loadState(t, root).ReleaseImages[version]) != 0 {
+						t.Errorf("release %s kept its removed image pin", version)
+					}
+				}
+			})
+		}
 	}
 }
 

@@ -279,6 +279,7 @@ type engineContainer struct {
 // it was pulled by, "repo@sha256:...".
 type engineImage struct {
 	tags, digests []string
+	remove        http.HandlerFunc
 }
 
 // fakeEngine is a Docker engine on a unix socket DOCKER_HOST names, and a
@@ -342,6 +343,10 @@ func fakeEngine(t *testing.T, project string, containers func() []engineContaine
 		if m := removeImage.FindStringSubmatch(r.URL.Path); m != nil && r.Method == http.MethodDelete {
 			for _, img := range images {
 				if slices.Contains(img.tags, m[1]) || slices.Contains(img.digests, m[1]) {
+					if img.remove != nil {
+						img.remove(w, r)
+						return
+					}
 					reply([]map[string]string{{"Untagged": m[1]}})
 					return
 				}

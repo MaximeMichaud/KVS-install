@@ -134,6 +134,7 @@ func clean(s *session, dryRun bool) error {
 	s.log.Printf("answer: yes")
 	var reclaimed int64
 	var failures []string
+	retained := map[string]bool{}
 	stopped := func() error {
 		return fmt.Errorf("clean interrupted after %s reclaimed; run it again to remove the rest", upgrade.HumanBytes(reclaimed))
 	}
@@ -142,6 +143,11 @@ func clean(s *session, dryRun bool) error {
 			return stopped()
 		}
 		err := docker.RemoveImage(ctx, ref)
+		if err != nil {
+			for _, version := range plan.ImageVersions[ref] {
+				retained[version] = true
+			}
+		}
 		switch {
 		case err == nil:
 			reclaimed += sizes[ref]
@@ -158,6 +164,10 @@ func clean(s *session, dryRun bool) error {
 		if ctx.Err() != nil {
 			return stopped()
 		}
+		if dir != plan.Downloads && retained[filepath.Base(dir)] {
+			s.detailf("  kept %s, an image of this release could not be removed", dir)
+			continue
+		}
 		if err := os.RemoveAll(dir); err != nil {
 			failures = append(failures, err.Error())
 			continue
@@ -173,10 +183,12 @@ func clean(s *session, dryRun bool) error {
 	s.detailf("%s reclaimed", upgrade.HumanBytes(reclaimed))
 	if state != nil && len(plan.Dropped) > 0 && state.ReleaseImages != nil {
 		for _, version := range plan.Dropped {
-			delete(state.ReleaseImages, version)
+			if !retained[version] {
+				delete(state.ReleaseImages, version)
+			}
 		}
 		if err := inst.SaveState(state); err != nil {
-			return fmt.Errorf("the images are gone but the record in %s could not be updated: %w", inst.StateDir(), err)
+			return fmt.Errorf("cleanup finished but the record in %s could not be updated: %w", inst.StateDir(), err)
 		}
 	}
 	return nil
@@ -187,6 +199,9 @@ type cleanPlan struct {
 	// Images are the references of the versions that are neither current
 	// nor previous.
 	Images []string
+	// ImageVersions keeps each removal candidate's discarded versions, so
+	// a failed removal preserves the records needed to retry that image.
+	ImageVersions map[string][]string
 	// Releases are the kept file sets of those same versions.
 	Releases []string
 	// Downloads is the directory of downloaded bundles, empty when there
@@ -206,7 +221,7 @@ func (p *cleanPlan) empty() bool {
 // never adopted keeps every version: without a state there is no way to
 // tell which images a rollback still needs.
 func cleanTargets(stateDir string, state *instance.State) (*cleanPlan, error) {
-	plan := &cleanPlan{}
+	plan := &cleanPlan{ImageVersions: map[string][]string{}}
 	downloads := filepath.Join(stateDir, "downloads")
 	if entries, err := os.ReadDir(downloads); err == nil && len(entries) > 0 {
 		plan.Downloads = downloads
@@ -259,6 +274,7 @@ func cleanTargets(stateDir string, state *instance.State) (*cleanPlan, error) {
 					continue
 				}
 				drop[candidate] = true
+				plan.ImageVersions[candidate] = append(plan.ImageVersions[candidate], version)
 			}
 		}
 		if !keep[version] {
