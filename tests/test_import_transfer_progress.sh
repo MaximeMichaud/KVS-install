@@ -397,6 +397,22 @@ test_the_stats_block_stays_off_the_screen() {
     echo 'PASS: the --stats block stays off the screen'
 }
 
+# Recent rsync versions append B to the byte count even with
+# --no-human-readable. Both the display and worker/retry state need it.
+test_byte_suffix_keeps_progress_and_retry_counts() {
+    local bytes out
+    for bytes in 2000000 2,000,000 2000000B 2,000,000B; do
+        printf ' %s 100%% 2000000B/s 0:00:01 (xfr#2, to-chk=0/3)\r' "$bytes" > "$TEST_DIR/byte-suffix.log"
+        out=$(import_rsync_progress 2000000 2 no "$TEST_DIR/byte-suffix.state" < "$TEST_DIR/byte-suffix.log")
+        grep -q '^  Transferred 2 files, 1.9 MB in ' <<< "$out" || fail "$bytes lost the transfer totals: $out"
+        grep -q '; 3 entries checked$' <<< "$out" || fail "$bytes lost the checked entries: $out"
+        [ "$(cat "$TEST_DIR/byte-suffix.state")" = '2000000 2' ] || fail "$bytes lost the retry state"
+        [ "$(import_rsync_log_progress "$TEST_DIR/byte-suffix.log")" = '2000000 2' ] || fail "$bytes lost the worker totals"
+        [ "$(import_rsync_log_progress "$TEST_DIR/byte-suffix.log" 3000000 3)" = '3000000 3' ] || fail "$bytes reduced earlier worker totals"
+    done
+    echo 'PASS: plain and B-suffixed byte counts preserve display, worker and retry totals'
+}
+
 # A complete count is kept with its date and its source; it stands for a
 # later pass of the same source and exclusions only.
 test_counts_serve_the_same_source_only() {
@@ -941,6 +957,7 @@ test_nothing_known_means_left_unknown
 test_a_grown_site_sets_the_earlier_count_aside
 test_the_disk_line
 test_the_stats_block_stays_off_the_screen
+test_byte_suffix_keeps_progress_and_retry_counts
 test_counts_serve_the_same_source_only
 test_hard_links_count_every_name_as_an_entry
 test_disk_busy_from_two_readings

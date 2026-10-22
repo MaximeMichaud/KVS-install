@@ -2125,9 +2125,9 @@ import_rsync_masters_close() {
 import_rsync_log_progress() {
     tail -c 8192 -- "$1" 2>/dev/null | LC_ALL=C awk -v b="${2:-0}" -v f="${3:-0}" '
         BEGIN { RS = "\r|\n" }
-        /^ *[0-9][0-9,.]* +[0-9]+% / {
+        /^ *[0-9][0-9,.]*B? +[0-9]+% / {
             n = $1
-            gsub(/[,.]/, "", n)
+            gsub(/[,.B]/, "", n)
             if (n + 0 > b + 0) b = n
             if (match($0, /xfr#[0-9]+/) && substr($0, RSTART + 4, RLENGTH - 4) + 0 > f + 0) f = substr($0, RSTART + 4, RLENGTH - 4)
         }
@@ -2800,9 +2800,10 @@ import_rsync_progress() {
             pace_f[1] = 0
             pace_c[1] = 0
         }
-        /^ *[0-9][0-9,.]* +[0-9]+% +[0-9.]+[kMGT]?B\/s +[0-9]+:[0-9][0-9]:[0-9][0-9]/ {
+        # Some rsync versions retain the B suffix with --no-human-readable.
+        /^ *[0-9][0-9,.]*B? +[0-9]+% +[0-9.]+[kMGT]?B\/s +[0-9]+:[0-9][0-9]:[0-9][0-9]/ {
             b = $1
-            gsub(/[,.]/, "", b)
+            gsub(/[,.B]/, "", b)
             bytes = b + 0
             if (match($0, /xfr#[0-9]+/)) files = substr($0, RSTART + 4, RLENGTH - 4) + 0
             if (match($0, /chk=[0-9]+\/[0-9]+/)) {
