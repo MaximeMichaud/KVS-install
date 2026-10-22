@@ -22,7 +22,9 @@ repos:
     hooks:
       - id: shellcheck
         name: "ShellCheck - Static analysis for shell scripts"
-        # No args = default behavior = show all severity levels (style, info, warning, error)
+        # Source directives must work even when pre-commit batches the helper
+        # separately from the script that imports it. Keep every severity.
+        args: ["--external-sources"]
         types: [shell]
         files: \.(sh|bash|ksh|zsh)$
 
