@@ -5,7 +5,7 @@
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TMP_ROOT=$(mktemp -d /tmp/kvs-import-test.XXXXXX)
+TMP_ROOT=$(mktemp -d -t kvs-import-test.XXXXXX)
 TESTS_RUN=0
 
 cleanup() {
@@ -468,6 +468,43 @@ test_cached_dump_inspection_preserves_output() {
     pass 'cached inspection avoids a full scan without changing prepared SQL'
 }
 
+test_dump_preparation_stops_after_a_decompression_failure() {
+    local first="$TMP_ROOT/first-stream.sql" second="$TMP_ROOT/second-stream.sql"
+    local dump="$TMP_ROOT/mixed-streams.sql.xz" control="$TMP_ROOT/small-streams.sql.xz"
+    local inspection identity
+
+    cat > "$first" <<'SQL'
+CREATE TABLE `ktvs_options` (`variable` varchar(255) PRIMARY KEY, `value` text);
+INSERT INTO `ktvs_options` VALUES ('INITIAL_VERSION', '7.0.2');
+SQL
+    cat > "$second" <<'SQL'
+CREATE TABLE `ktvs_example` (`id` int PRIMARY KEY);
+INSERT INTO `ktvs_example` VALUES (1);
+-- Dump completed on 2026-10-22 00:00:00
+SQL
+    xz -0c "$first" > "$dump"
+    cp "$dump" "$control"
+    xz -9c "$second" >> "$dump"
+    xz -0c "$second" >> "$control"
+    inspection=$(import_inspect_dump "$dump" ktvs_) || fail 'the complete source must pass inspection'
+    identity=$(import_dump_identity "$dump")
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$TMP_ROOT/full.sql" memory-token "$inspection" >/dev/null || fail 'both xz streams must prepare without a memory limit'
+    grep -q '^CREATE TABLE `ktvs_example`' "$TMP_ROOT/full.sql" || fail 'the second stream must normally be included'
+
+    (
+        # The first dictionary fits; the second needs 64 MiB. This reproduces
+        # a real read failure after valid SQL, without replacing the source.
+        ulimit -v 32768
+        [ "$(import_dump_identity "$dump")" = "$identity" ] || fail 'cached inspection must remain valid'
+        import_prepare_dump "$control" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$TMP_ROOT/control.sql" memory-token "$inspection" >/dev/null || fail 'the low-memory control must prepare successfully'
+        if import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$TMP_ROOT/partial.sql" memory-token "$inspection" > "$TMP_ROOT/partial.out" 2> "$TMP_ROOT/partial.err"; then
+            fail 'a decompression failure must abort preparation, not append a completion marker'
+        fi
+        [ ! -e "$TMP_ROOT/partial.sql" ] || fail 'a failed preparation must remove its incomplete output'
+    ) || fail 'preparation must propagate read errors when called conditionally'
+    pass 'dump preparation rejects a failed second stream without leaving a partial import'
+}
+
 test_php_config_values_are_read_as_kvs_writes_them
 test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip
@@ -480,5 +517,6 @@ test_site_placement_copies_once_and_refuses_a_used_directory
 test_free_space_check_uses_the_nearest_existing_parent
 test_setup_and_init_are_wired_for_imports
 test_cached_dump_inspection_preserves_output
+test_dump_preparation_stops_after_a_decompression_failure
 
 echo "All $TESTS_RUN import tests passed."

@@ -349,10 +349,12 @@ import_prepare_dump() {
         # shellcheck disable=SC2016  # The backticks are SQL quoting inside the sed program.
         # A MySQL dump writes GTID_PURGED over several lines when the source
         # knew several servers (one UUID set per line, up to the semicolon).
+        # The caller checks this function conditionally, disabling errexit.
+        # Stop on read/filter failures before appending a completion marker.
         import_dump_cat "$dump" | sed -E -e '/^(CREATE DATABASE|USE )/d' \
             -e '/^SET @@(GLOBAL|SESSION)\.GTID_PURGED/{' -e ':gtid' -e '/;[[:space:]]*$/!{' -e 'N' -e 'b gtid' -e '}' -e 'd' -e '}' \
             -e '/^SET @@(GLOBAL|SESSION)\.SQL_LOG_BIN/d' -e '/^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
-            import_innodb_row_format -
+            import_innodb_row_format - || return 1
         echo
         echo "-- kvs-install import"
         # --no-autocommit dumps can leave this session in manual commit mode.
@@ -368,7 +370,10 @@ import_prepare_dump() {
         fi
         printf "INSERT INTO \`%soptions\` (variable, value) VALUES ('KVS_INSTALL_IMPORT', '%s') ON DUPLICATE KEY UPDATE value = VALUES(value);\n" \
             "$prefix" "$(import_sql_escape "$token")"
-    } | import_dump_write "$output" || return 1
+    } | import_dump_write "$output" || {
+        rm -f -- "$output"
+        return 1
+    }
     printf '%s\t%s\t%s\n' "$tables" "$initial" "$statements"
 }
 
