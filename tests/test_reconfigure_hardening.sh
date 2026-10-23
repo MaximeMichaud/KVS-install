@@ -894,6 +894,36 @@ assert_eq direct-tls "$(fixture_env_value "$LAST_DIR" COMPOSE_PROFILES)" \
 assert_not_contains "$LAST_DIR/docker.calls" '--no-deps php-fpm cron memcached' \
     'an inherited cache profile was recreated'
 
+# If profiles cannot be persisted, keep ACME and the application untouched.
+for provider in letsencrypt selfsigned; do
+    name="profiles-write-failure-${provider}"
+    create_fixture "$name"
+    fixture="$TEST_ROOT/$name"
+    set_env_value "$fixture" SSL_PROVIDER "$provider"
+    set_env_value "$fixture" COMPOSE_PROFILES dragonfly,direct-tls
+    before_env=$(sha256sum "$fixture/.env")
+    cat > "$fixture/bin/mktemp" <<'EOF'
+#!/bin/bash
+echo 'mktemp: cannot create .env temporary file' >&2
+exit 73
+EOF
+    chmod +x "$fixture/bin/mktemp"
+    run_case "$name" MOCK_ACME_PRESENT=true
+    assert_failure "$name"
+    assert_eq "$before_env" "$(sha256sum "$fixture/.env")" \
+        "$name changed the persisted configuration"
+    assert_not_contains "$LAST_DIR/docker.calls" 'docker-text stop ' \
+        "$name stopped a container after the profile write failed"
+    assert_not_contains "$LAST_DIR/docker.calls" 'docker-text rm ' \
+        "$name removed a container after the profile write failed"
+    assert_not_contains "$LAST_DIR/docker.calls" 'compose up ' \
+        "$name recreated services after the profile write failed"
+    assert_not_contains "$LAST_DIR/docker.calls" 'docker-text exec ' \
+        "$name reached the application after the profile write failed"
+    assert_not_contains "$LAST_DIR/output.log" '=== Reconfiguration Complete ===' \
+        "$name reported successful reconfiguration"
+done
+
 # The table prefix of the site comes from .env: with another prefix the
 # same statements run against that prefix (the mock only recognizes the
 # prefix it is told), and a prefix that is not an identifier stops the run

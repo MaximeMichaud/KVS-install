@@ -1117,7 +1117,7 @@ sync_direct_tls_profile() {
     if [ "$MODE" = "single" ] && [ "$SSL_PROVIDER" != "selfsigned" ]; then
         add_compose_profile direct-tls
     else
-        remove_compose_profile direct-tls
+        remove_compose_profile direct-tls || return 1
         if ! acme_container_names=$(docker ps -a --format '{{.Names}}' 2>/dev/null); then
             echo -e "${RED}ERROR: Could not inspect ACME containers${NC}"
             return 1
