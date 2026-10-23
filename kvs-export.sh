@@ -206,9 +206,27 @@ kvs_warn() {
     printf 'WARNING: %s\n' "$*" >&2
 }
 
+# Stop descendants before removing files they may still be using. Freeze each
+# parent while walking its children so the shell cannot start another command
+# or exit and orphan its active dump during cleanup.
+# shellcheck disable=SC2329  # Called by the EXIT trap's cleanup function.
+kvs_stop_descendants() {
+    local parent="$1" child
+
+    while IFS= read -r child; do
+        if kill -STOP "$child" 2> /dev/null; then
+            kvs_stop_descendants "$child"
+            kill -KILL "$child" 2> /dev/null || true
+        fi
+    done < <(exec pgrep -P "$parent")
+}
+
 # shellcheck disable=SC2329  # Runs from the EXIT trap set at the bottom.
 kvs_cleanup() {
-    kvs_stop_measure
+    kvs_stop_descendants "$BASHPID"
+    # Waiting for one pipeline member can wait for the other members too.
+    # Stop all descendants first, then reap our direct children together.
+    wait 2> /dev/null || true
     if [ -n "$UNITS_FILE" ]; then
         rm -f -- "$UNITS_FILE"
     fi

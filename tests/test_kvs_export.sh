@@ -354,7 +354,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep awk sort stat id chmod chown cp mv sha256sum getconf mkfifo tee head cut; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill pgrep sleep awk sort stat id chmod chown cp mv sha256sum getconf mkfifo tee head cut; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -1537,6 +1537,103 @@ EOF
     pass 'failed exports preserve the previous output and successful replacements are complete'
 }
 
+test_interrupted_exports_stop_their_database_processes() {
+    local work="$TMP_ROOT/cancellation" site="$TMP_ROOT/cancellation-site"
+
+    mkdir -p "$work/bin"
+    make_site "$site"
+    cat > "$work/bin/mariadb-dump" <<'EOF'
+#!/bin/bash
+case " $* " in
+    *' --help '*) exec "$CANCEL_STUB_DUMP" "$@" ;;
+esac
+"$CANCEL_PYTHON" "$CANCEL_BLOCKER"
+exit $?
+EOF
+    chmod +x "$work/bin/mariadb-dump"
+    python3 - "$EXPORT_SCRIPT" "$site" "$work" "$STUB_BIN" "$MIN_BIN" <<'PY' || fail 'an interrupted export left its database process running'
+import ctypes
+import fcntl
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+script, site, work, stubs, minimal = map(Path, sys.argv[1:])
+# Adopt only this test's orphaned grandchildren so every process is reaped,
+# including when the unfixed exporter leaves its database client alive.
+assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
+blocker = work / 'block.py'
+blocker.write_text('''import fcntl, os, signal, time
+from pathlib import Path
+case = Path(os.environ['CANCEL_CASE'])
+lock = (case / 'database.lock').open('w')
+fcntl.flock(lock, fcntl.LOCK_EX)
+(case / 'ready').write_text(str(os.getpid()))
+while True:
+    signal.pause()
+''')
+
+for mode in ('stream', 'dump-only', 'archive'):
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        for from_stdin in (False, True):
+            case = work / f'{mode}-{sig.name}-{from_stdin}'
+            case.mkdir()
+            (case / 'tmp').mkdir()
+            output = case / 'export'
+            sentinel = b'previous complete export\n'
+            output.write_bytes(sentinel)
+            env = dict(os.environ, PATH=f'{work / "bin"}:{stubs}:{minimal}',
+                       TMPDIR=str(case / 'tmp'), CANCEL_CASE=str(case),
+                       CANCEL_PYTHON=sys.executable, CANCEL_BLOCKER=str(blocker),
+                       CANCEL_STUB_DUMP=str(stubs / 'mariadb-dump'))
+            argv = ['/bin/bash', '-s', '--'] if from_stdin else ['/bin/bash', str(script)]
+            argv += ['--yes', '--gzip', '--no-size', '--database-format=sql']
+            if mode == 'stream':
+                argv += ['dump', str(site)]
+            else:
+                argv += ['--output', str(output), str(site)]
+                if mode == 'dump-only':
+                    argv += ['--dump-only']
+            with script.open('rb') as source, (case / 'stdout').open('wb') as stdout, (case / 'stderr').open('wb') as stderr:
+                process = subprocess.Popen(argv, stdin=source if from_stdin else subprocess.DEVNULL,
+                                           stdout=stdout, stderr=stderr, env=env, start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (case / 'ready').exists() and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    assert (case / 'ready').exists(), (case / 'stderr').read_text()
+                    process.send_signal(sig)
+                    assert process.wait(timeout=5) != 0, f'{case.name}: cancellation reported success'
+                    with (case / 'database.lock').open('r') as lock:
+                        try:
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            raise AssertionError(f'{case.name}: database descendant still holds its lock after exporter returned') from None
+                    assert output.read_bytes() == sentinel, f'{case.name}: previous export changed'
+                    assert not list(case.glob('.kvs-export.*')), f'{case.name}: staging remains'
+                    assert not list((case / 'tmp').iterdir()), f'{case.name}: temporary files remain'
+                finally:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=5)
+                    deadline = time.monotonic() + 5
+                    while True:
+                        try:
+                            pid, _ = os.waitpid(-1, os.WNOHANG)
+                        except ChildProcessError:
+                            break
+                        if not pid:
+                            assert time.monotonic() < deadline, 'test descendants were not reaped'
+                            time.sleep(0.01)
+PY
+    pass "parent cancellation stops database descendants before returning and preserves previous exports"
+}
+
 test_exports_refuse_non_regular_destinations() {
     local site="$TMP_ROOT/output-type-site" work="$TMP_ROOT/output-types"
     local kind destination status
@@ -1839,6 +1936,7 @@ test_the_archive_can_be_written_on_stdout
 test_dump_only_writes_a_dump_next_to_the_archive
 test_the_dump_is_staged_next_to_the_archive_and_outside_the_site
 test_failed_exports_preserve_the_previous_output
+test_interrupted_exports_stop_their_database_processes
 test_exports_refuse_non_regular_destinations
 test_export_replacements_preserve_access_acls
 test_array_expansions_are_guarded_for_old_bash
