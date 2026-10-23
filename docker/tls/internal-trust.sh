@@ -50,10 +50,10 @@ publish() (
 )
 
 remove_trust() {
-    if [ -e "$CA_FILE" ]; then
-        rm -f "$CA_FILE" || return 1
-        update-ca-certificates >/dev/null || return 1
-    fi
+    rm -f "$CA_FILE" || return 1
+    # A previous attempt may have removed the source certificate but failed
+    # to rebuild the bundle. Its absence does not mean trust was revoked.
+    update-ca-certificates >/dev/null || return 1
 }
 
 sync_trust() {
