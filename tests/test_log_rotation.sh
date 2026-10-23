@@ -729,6 +729,172 @@ first_loop_done() {
     [ -e "${1}/logs/example.com.access.log.1.gz" ] && [ ! -e "${1}/logs/example.com.access.log.1" ]
 }
 
+# Interrupt the actual script immediately before or after a real rename.
+# Restarting the master also creates a new empty active log when the old one
+# already became .1; recovery must not depend on that active log's size.
+test_interrupted_rotation() {
+    local initial_keep="$1"
+    local stop_after="$2"
+    local when="$3"
+    local resumed_keep="${4:-$1}"
+    local dir
+    local base
+    local source
+    local generation
+    local retained
+    local status=0
+
+    dir=$(new_case "interrupted-${initial_keep}-${stop_after}-${when}-${resumed_keep}")
+    base="${dir}/logs/example.com.access.log"
+    printf 'generation 0\n' > "$base"
+    for generation in $(seq 1 "$initial_keep"); do
+        printf 'generation %s\n' "$generation" | gzip -c > "${base}.${generation}.gz"
+    done
+    source="$base"
+    [ "$stop_after" -eq 0 ] || source="${base}.${stop_after}.gz"
+    mkdir "${dir}/bin"
+    cat > "${dir}/bin/mv" <<'EOF'
+#!/bin/bash
+set -eu
+interrupt() {
+    : > "$INTERRUPT_MARKER"
+    kill -s TERM "$PPID"
+    exit 0
+}
+if [ "${@: -2:1}" = "$INTERRUPT_SOURCE" ] && [ "$INTERRUPT_WHEN" = before ]; then
+    interrupt
+fi
+"$REAL_MV" "$@"
+if [ "${@: -2:1}" = "$INTERRUPT_SOURCE" ] && [ "$INTERRUPT_WHEN" = after ]; then
+    interrupt
+fi
+EOF
+    chmod +x "${dir}/bin/mv"
+    start_fake_master "$dir"
+    rotate_once "$dir" NGINX_LOG_MAX_SIZE=8 NGINX_LOG_KEEP="$initial_keep" \
+        PATH="${dir}/bin:${PATH}" REAL_MV="$(command -v mv)" \
+        INTERRUPT_SOURCE="$source" INTERRUPT_WHEN="$when" INTERRUPT_MARKER="${dir}/interrupted" \
+        > "${dir}/interrupted.out" 2> "${dir}/interrupted.err" || status=$?
+    [ "$status" -eq 143 ] && [ -e "${dir}/interrupted" ] ||
+        fail "the rotation did not stop ${when} renaming ${source}: status ${status}"
+    stop_fake_master "$dir"
+    rm -f "${dir}/stop"
+    start_fake_master "$dir"
+
+    rotate_and_settle "$dir" NGINX_LOG_MAX_SIZE=8 NGINX_LOG_KEEP="$resumed_keep"
+    age_rotated_logs "$dir"
+    rotate_once "$dir" NGINX_LOG_MAX_SIZE=1M NGINX_LOG_KEEP="$resumed_keep" \
+        > "${dir}/compressed.out" 2> "${dir}/compressed.err"
+    retained=$initial_keep
+    [ "$resumed_keep" -ge "$retained" ] || retained=$resumed_keep
+    for generation in $(seq 1 "$retained"); do
+        [ -f "${base}.${generation}.gz" ] &&
+            [ "$(gzip -dc "${base}.${generation}.gz")" = "generation $((generation - 1))" ] ||
+            fail "resume after ${source} (${when}) lost or shifted generation $((generation - 1))"
+    done
+    [ "$(find "${dir}/logs" -name '*.gz' | wc -l)" -eq "$retained" ] ||
+        fail "resumed rotation did not retain ${retained} generations"
+    [ ! -e "${base}.1" ] || fail "a resumed rotation could not finish compression"
+    [ ! -s "${dir}/check.err" ] && [ ! -s "${dir}/compressed.err" ] ||
+        fail "resume ${initial_keep}/${stop_after}/${when}/${resumed_keep}: $(cat "${dir}/check.err" "${dir}/compressed.err")"
+    stop_fake_master "$dir"
+}
+
+test_rotation_interruptions() {
+    local keep
+    local generation
+    local when
+
+    for keep in 3 4 1; do
+        for generation in $(seq $((keep - 1)) -1 0); do
+            for when in after before; do
+                test_interrupted_rotation "$keep" "$generation" "$when"
+            done
+        done
+    done
+    test_interrupted_rotation 4 2 after 2
+    test_interrupted_rotation 4 2 after 6
+}
+
+# A state record that cannot be read or published must stop destructive
+# operations. Once the obstruction is removed, the same files can rotate.
+test_rotation_state_failures() {
+    local kind
+    local dir
+    local base
+    local state
+    local generation
+
+    for kind in temporary-directory invalid-record trailing-line trailing-partial blank-line linked-record directory-record; do
+        dir=$(new_case "state-${kind}")
+        base="${dir}/logs/example.com.access.log"
+        state="${base}.rotation-state"
+        printf 'generation 0\n' > "$base"
+        for generation in 1 2 3; do
+            printf 'generation %s\n' "$generation" | gzip -c > "${base}.${generation}.gz"
+        done
+        sha256sum "$base" "${base}".*.gz > "${dir}/original.sha256"
+        case "$kind" in
+            temporary-directory)
+                mkdir "${state}.tmp"
+                printf 'untouched\n' > "${state}.tmp/sentinel"
+                ;;
+            invalid-record)
+                printf '3 invalid\n' > "$state"
+                ;;
+            trailing-line)
+                printf '3 3\nunexpected\n' > "$state"
+                ;;
+            trailing-partial)
+                printf '3 3\nunexpected' > "$state"
+                ;;
+            blank-line)
+                printf '3 3\n\n' > "$state"
+                ;;
+            linked-record)
+                printf '3 3\n' > "${dir}/target"
+                ln -s "${dir}/target" "$state"
+                ;;
+            directory-record)
+                mkdir "$state"
+                printf 'untouched\n' > "${state}/sentinel"
+                ;;
+        esac
+        start_fake_master "$dir"
+        rotate_and_settle "$dir" NGINX_LOG_MAX_SIZE=8 NGINX_LOG_KEEP=3
+        sha256sum --quiet -c "${dir}/original.sha256" ||
+            fail "${kind} did not preserve the original generations"
+        [ "$(reopen_count "$dir")" -eq 0 ] && [ ! -e "${base}.1" ] ||
+            fail "${kind} allowed a rotation without usable state"
+        [ -s "${dir}/check.err" ] || fail "${kind} was not reported"
+        case "$kind" in
+            temporary-directory)
+                [ "$(cat "${state}.tmp/sentinel")" = untouched ] || fail "state temporary directory was modified"
+                rm "${state}.tmp/sentinel"
+                rmdir "${state}.tmp"
+                ;;
+            directory-record)
+                [ "$(cat "${state}/sentinel")" = untouched ] || fail "state directory was modified"
+                rm "${state}/sentinel"
+                rmdir "$state"
+                ;;
+            *)
+                if [ "$kind" = linked-record ]; then
+                    [ "$(cat "${dir}/target")" = '3 3' ] || fail "state link target was modified"
+                fi
+                rm "$state"
+                ;;
+        esac
+        rotate_and_settle "$dir" NGINX_LOG_MAX_SIZE=8 NGINX_LOG_KEEP=3
+        [ "$(cat "${base}.1")" = 'generation 0' ] &&
+            [ "$(gzip -dc "${base}.2.gz")" = 'generation 1' ] &&
+            [ "$(gzip -dc "${base}.3.gz")" = 'generation 2' ] ||
+            fail "${kind} could not recover after its obstruction was removed"
+        [ ! -e "$state" ] && [ ! -e "${state}.tmp" ] || fail "completed rotation left state behind"
+        stop_fake_master "$dir"
+    done
+}
+
 second_loop_done() {
     [ -e "${1}/logs/example.com.access.log.2.gz" ] && grep -Fq 'Rotated the Nginx site logs' "${1}/second.out"
 }
@@ -850,6 +1016,8 @@ test_one_signal_per_check
 test_rotation_waits_for_nginx
 test_settings
 test_compression
+test_rotation_interruptions
+test_rotation_state_failures
 test_loop_survives_restart
 test_service_logs
 test_cron_log_rotation

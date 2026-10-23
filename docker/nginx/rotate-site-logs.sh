@@ -16,9 +16,11 @@
 # The image links access.log and error.log to the container output, which
 # Docker caps; no symbolic link is rotated, compressed or followed, and one
 # lying where a generation or a temporary copy goes is replaced like a file.
-# Each step is a rename, a write to a temporary file or the removal of a file
-# whose copy is complete, so a check cut short by a container stop is
-# completed by the next one after the restart.
+# A per-log .rotation-state file records the retention limit and the next
+# step before any generation moves. Its .1 stays uncompressed until the
+# single entrypoint loop finishes the rotation, so a container stop never
+# makes a later check repeat completed shifts or purge a generation that
+# just moved into its last slot.
 
 # The tests point these at a scratch directory and a stand-in master.
 log_dir=${NGINX_LOG_DIR:-/var/log/nginx}
@@ -35,6 +37,10 @@ rename_log_file() {
         rm -f -- "$2" || return 1
     fi
     mv -fT -- "$1" "$2"
+}
+
+rotation_pending() {
+    [ -e "$1.rotation-state" ] || [ -L "$1.rotation-state" ]
 }
 
 # Prints a whole number of at most nine digits without its leading zeros,
@@ -123,6 +129,9 @@ nginx_master_ready() {
 compress_rotated_logs() {
     for rotated_log in "$log_dir"/*.access.log.1 "$log_dir"/*.error.log.1; do
         [ -f "$rotated_log" ] && [ ! -L "$rotated_log" ] || continue
+        # .1 also proves that a pending rotation already renamed its active
+        # log. Keep that evidence until the rotation has finished.
+        rotation_pending "${rotated_log%.1}" && continue
         if [ ! -f "${rotated_log%.1}" ]; then
             reopen=yes
             unopened_log=${rotated_log%.1}
@@ -143,11 +152,9 @@ compress_rotated_logs() {
     done
 }
 
-# Makes room for a new <name>.1: <name>.1.gz becomes <name>.2.gz and so on,
-# oldest first. What would pass NGINX_LOG_KEEP is removed, generations left by
-# a larger NGINX_LOG_KEEP included. A symbolic link is neither moved nor
-# removed, but one lying where a generation moves is replaced like a file.
-shift_generations() {
+# Removes regular generations at or above the supplied bound. Links are
+# neither followed nor removed, including ones left by an older limit.
+prune_generations() {
     for generation_file in "$1".*.gz; do
         [ -f "$generation_file" ] && [ ! -L "$generation_file" ] || continue
         generation=${generation_file#"$1".}
@@ -155,17 +162,78 @@ shift_generations() {
         case "$generation" in
             ''|*[!0-9]*) continue ;;
         esac
-        if [ "$generation" -ge "$keep" ]; then
+        if [ "$generation" -ge "$2" ]; then
             rm -f -- "$generation_file" || return 1
         fi
     done
-    generation=$((keep - 1))
-    while [ "$generation" -ge 1 ]; do
-        if [ -f "$1.${generation}.gz" ] && [ ! -L "$1.${generation}.gz" ]; then
-            rename_log_file "$1.${generation}.gz" "$1.$((generation + 1)).gz" || return 1
+}
+
+# The state is two numbers: the KEEP at the start of this rotation and the
+# next step. KEEP means purge, KEEP-1 through 1 shift that source, and 0
+# renames the active log. Publish each update atomically before proceeding.
+save_rotation_state() {
+    if rm -f -- "${rotation_state}.tmp" &&
+        printf '%s %s\n' "$rotation_keep" "$1" > "${rotation_state}.tmp" &&
+        rename_log_file "${rotation_state}.tmp" "$rotation_state"; then
+        rotation_step=$1
+        return 0
+    fi
+    rm -f -- "${rotation_state}.tmp"
+    warn "could not save ${rotation_state}; the next check tries again"
+    return 1
+}
+
+load_rotation_state() {
+    [ -f "$rotation_state" ] && [ ! -L "$rotation_state" ] &&
+        {
+            read -r saved_keep saved_step saved_extra && [ -z "$saved_extra" ] &&
+                ! IFS= read -r saved_trailing && [ -z "$saved_trailing" ]
+        } < "$rotation_state" &&
+        rotation_keep=$(whole_number "$saved_keep") &&
+        rotation_step=$(whole_number "$saved_step") &&
+        [ "$rotation_keep" -ge 1 ] && [ "$rotation_keep" -le 999 ] &&
+        [ "$rotation_step" -le "$rotation_keep" ]
+}
+
+resume_rotation() {
+    rotation_log=$1
+    rotation_state="${rotation_log}.rotation-state"
+    if ! load_rotation_state; then
+        warn "invalid rotation state ${rotation_state}; leaving its logs unchanged"
+        return 1
+    fi
+    if [ "$rotation_step" -eq "$rotation_keep" ]; then
+        prune_generations "$rotation_log" "$rotation_keep" || return 1
+        save_rotation_state "$((rotation_keep - 1))" || return 1
+    fi
+    while [ "$rotation_step" -ge 1 ]; do
+        # If the process stopped after mv but before saving the next step,
+        # the source is already absent. Higher generations must not move again.
+        if [ -f "${rotation_log}.${rotation_step}.gz" ] && [ ! -L "${rotation_log}.${rotation_step}.gz" ]; then
+            rename_log_file "${rotation_log}.${rotation_step}.gz" \
+                "${rotation_log}.$((rotation_step + 1)).gz" || return 1
         fi
-        generation=$((generation - 1))
+        save_rotation_state "$((rotation_step - 1))" || return 1
     done
+    if [ -L "${rotation_log}.1" ] || { [ -e "${rotation_log}.1" ] && [ ! -f "${rotation_log}.1" ]; }; then
+        warn "${rotation_log}.1 blocks the pending rotation; the next check tries again"
+        return 1
+    fi
+    if [ ! -f "${rotation_log}.1" ]; then
+        if [ ! -f "$rotation_log" ] || [ -L "$rotation_log" ]; then
+            warn "${rotation_log} is not a regular log; the pending rotation waits for it"
+            return 1
+        fi
+        rename_log_file "$rotation_log" "${rotation_log}.1" || return 1
+    fi
+    # A .1 already present means the final rename completed before a stop.
+    # Do not overwrite it with the new active log Nginx may have opened.
+    reopen=yes
+    if [ "$keep" -lt "$rotation_keep" ]; then
+        prune_generations "$rotation_log" "$((keep + 1))" || return 1
+    fi
+    rm -f -- "$rotation_state" || return 1
+    rotated_logs="${rotated_logs} ${rotation_log##*/}"
 }
 
 rotate_site_logs() {
@@ -175,8 +243,16 @@ rotate_site_logs() {
     rotated_logs=''
     unopened_logs=''
     compress_rotated_logs
+    # A restart may have opened an empty active log, or none yet. Resume
+    # from the state files themselves. Compression above skips their .1.
+    for pending_state in "$log_dir"/*.access.log.rotation-state "$log_dir"/*.error.log.rotation-state; do
+        [ -e "$pending_state" ] || [ -L "$pending_state" ] || continue
+        nginx_master_ready || break
+        resume_rotation "${pending_state%.rotation-state}" || continue
+    done
     for site_log in "$log_dir"/*.access.log "$log_dir"/*.error.log; do
         [ -f "$site_log" ] && [ ! -L "$site_log" ] || continue
+        rotation_pending "$site_log" && continue
         size=$(stat -c %s -- "$site_log" 2>/dev/null) || continue
         [ "$size" -ge "$max_bytes" ] || continue
         if [ -L "${site_log}.1" ]; then
@@ -187,10 +263,10 @@ rotate_site_logs() {
         # rotates it.
         [ ! -e "${site_log}.1" ] || continue
         nginx_master_ready || return 0
-        shift_generations "$site_log" || continue
-        rename_log_file "$site_log" "${site_log}.1" || continue
-        reopen=yes
-        rotated_logs="${rotated_logs} ${site_log##*/}"
+        rotation_state="${site_log}.rotation-state"
+        rotation_keep=$keep
+        save_rotation_state "$rotation_keep" || continue
+        resume_rotation "$site_log" || continue
     done
     [ -n "$reopen" ] || return 0
     nginx_master_ready || return 0
