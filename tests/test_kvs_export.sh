@@ -8,7 +8,7 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 EXPORT_SCRIPT="$REPO_ROOT/kvs-export.sh"
-TMP_ROOT=$(mktemp -d /tmp/kvs-export-test.XXXXXX)
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kvs-export-test.XXXXXX")
 TESTS_RUN=0
 
 STUB_BIN="$TMP_ROOT/bin-stub"
@@ -270,6 +270,11 @@ if [ "${STUB_DB_FAIL:-no}" = yes ]; then
     echo "mariadb-dump: Got error: 2002: Can't connect to local server" >&2
     exit 2
 fi
+if [ "${STUB_DUMP_FAIL:-no}" = yes ]; then
+    printf -- '-- partial dump\n'
+    echo 'mariadb-dump: interrupted after partial output' >&2
+    exit 42
+fi
 printf -- '-- MariaDB dump 10.19\n'
 printf 'CREATE TABLE `ktvs_options` (`variable` varchar(255) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`variable`));\n'
 printf "INSERT INTO \`ktvs_options\` VALUES ('INITIAL_VERSION','7.0.2');\n"
@@ -349,7 +354,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep awk sort stat id chmod chown mv sha256sum getconf mkfifo tee head cut; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill sleep awk sort stat id chmod chown cp mv sha256sum getconf mkfifo tee head cut; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -1437,6 +1442,189 @@ test_the_dump_is_staged_next_to_the_archive_and_outside_the_site() {
     pass "the dump is staged next to the archive and outside the site"
 }
 
+test_failed_exports_preserve_the_previous_output() {
+    local site="$TMP_ROOT/atomic-site" work="$TMP_ROOT/atomic-output"
+    local bin="$TMP_ROOT/atomic-bin" output out err kind failure present status
+    local expected_mode
+    local -a options
+
+    make_site "$site"
+    mkdir -p "$work" "$bin"
+    printf 'previous completed export\n' > "$work/previous"
+    cat > "$bin/tar" <<'EOF'
+#!/bin/bash
+"${REAL_EXPORT_TAR:?}" "$@" || exit $?
+if [ "${STUB_TAR_FAIL:-no}" = yes ]; then
+    echo 'tar: error after writing archive data' >&2
+    exit 42
+fi
+EOF
+    cat > "$bin/mv" <<'EOF'
+#!/bin/bash
+if [ "${STUB_PUBLISH_FAIL:-no}" = yes ]; then
+    echo 'mv: failed to publish export' >&2
+    exit 42
+fi
+exec "${REAL_EXPORT_MV:?}" "$@"
+EOF
+    cat > "$bin/gzip" <<'EOF'
+#!/bin/bash
+"${REAL_EXPORT_GZIP:?}" "$@" || exit $?
+if [ "${STUB_COMPRESS_FAIL:-no}" = yes ]; then
+    echo 'gzip: compression failed after writing data' >&2
+    exit 42
+fi
+EOF
+    chmod +x "$bin/tar" "$bin/mv" "$bin/gzip"
+    export REAL_EXPORT_TAR REAL_EXPORT_MV REAL_EXPORT_GZIP
+    REAL_EXPORT_TAR=$(command -v tar)
+    REAL_EXPORT_MV=$(command -v mv)
+    REAL_EXPORT_GZIP=$(command -v gzip)
+    out="$work/stdout"
+    err="$work/stderr"
+    output="$work/export"
+    for kind in dump archive; do
+        options=()
+        [ "$kind" != dump ] || options+=(--dump-only)
+        for failure in dump compress tar publish none; do
+            [ "$kind:$failure" != dump:tar ] || continue
+            for present in yes no; do
+                rm -f -- "$output"
+                if [ "$present" = yes ]; then
+                    cp "$work/previous" "$output"
+                    chmod 0640 "$output"
+                    expected_mode=$(stat -c '%a:%u:%g' "$output")
+                fi
+                export STUB_DUMP_FAIL=no STUB_COMPRESS_FAIL=no STUB_TAR_FAIL=no STUB_PUBLISH_FAIL=no
+                case "$failure" in
+                    dump) STUB_DUMP_FAIL=yes ;;
+                    compress) STUB_COMPRESS_FAIL=yes ;;
+                    tar) STUB_TAR_FAIL=yes ;;
+                    publish) STUB_PUBLISH_FAIL=yes ;;
+                esac
+                status=0
+                run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+                    --yes --gzip --no-size --database-format sql --output "$output" \
+                    "${options[@]}" "$site" || status=$?
+                if [ "$failure" != none ]; then
+                    [ "$status" -ne 0 ] || fail "$kind accepted a $failure failure"
+                    if [ "$present" = yes ]; then
+                        cmp -s "$work/previous" "$output" ||
+                            fail "$kind destroyed the previous export after a $failure failure"
+                    else
+                        [ ! -e "$output" ] || fail "$kind published an incomplete export after a $failure failure"
+                    fi
+                else
+                    [ "$status" -eq 0 ] || fail "$kind replacement failed: $(cat "$err")"
+                    if [ "$kind" = dump ]; then
+                        gzip -dc "$output" | grep -Fq -- '-- Dump completed' || fail 'replacement dump is incomplete'
+                    else
+                        tar -xOf "$output" database.sql.gz | gzip -dc | grep -Fq -- '-- Dump completed' ||
+                            fail 'replacement archive is incomplete'
+                    fi
+                    if [ "$present" = yes ]; then
+                        [ "$(stat -c '%a:%u:%g' "$output")" = "$expected_mode" ] ||
+                            fail "$kind replacement changed output permissions or ownership"
+                    fi
+                fi
+                [ -z "$(find "$work" -maxdepth 1 -name '.kvs-export.*' -print -quit)" ] ||
+                    fail "$kind left temporary output after $failure"
+            done
+        done
+    done
+    unset STUB_DUMP_FAIL STUB_COMPRESS_FAIL STUB_TAR_FAIL STUB_PUBLISH_FAIL
+    unset REAL_EXPORT_TAR REAL_EXPORT_MV REAL_EXPORT_GZIP
+    pass 'failed exports preserve the previous output and successful replacements are complete'
+}
+
+test_exports_refuse_non_regular_destinations() {
+    local site="$TMP_ROOT/output-type-site" work="$TMP_ROOT/output-types"
+    local kind destination status
+    local -a options
+
+    make_site "$site"
+    mkdir -p "$work/directory"
+    printf 'previous completed export\n' > "$work/target"
+    cp "$work/target" "$work/previous"
+    ln -s target "$work/link"
+    ln -s missing "$work/dangling"
+    mkfifo "$work/pipe"
+    for kind in dump archive; do
+        options=()
+        [ "$kind" != dump ] || options+=(--dump-only)
+        for destination in directory link dangling pipe; do
+            status=0
+            # Bound a regression that tries to open the FIFO for writing.
+            PATH="$STUB_BIN:$MIN_BIN" "$(command -v timeout)" 10 "$BASH" "$EXPORT_SCRIPT" \
+                --yes --gzip --no-size --database-format sql --output "$work/$destination" \
+                "${options[@]}" "$site" > "$work/stdout" 2> "$work/stderr" < /dev/null || status=$?
+            [ "$status" -eq 1 ] || fail "$kind did not promptly refuse a $destination output"
+            grep -Fq 'is not a regular output file' "$work/stderr" ||
+                fail "$kind did not explain the invalid output type"
+            cmp -s "$work/previous" "$work/target" || fail "$kind wrote through the output symlink"
+            [ -d "$work/directory" ] && [ -L "$work/link" ] && [ -L "$work/dangling" ] &&
+                [ -p "$work/pipe" ] && [ ! -e "$work/missing" ] || fail "$kind replaced a non-regular output"
+            [ -z "$(find "$work/directory" -mindepth 1 -print -quit)" ] || fail "$kind wrote into the output directory"
+            [ -z "$(find "$work" -maxdepth 1 -name '.kvs-export.*' -print -quit)" ] ||
+                fail "$kind left temporary output after refusing a $destination"
+        done
+    done
+    pass 'named exports refuse directories, symlinks and FIFOs without replacing them'
+}
+
+test_export_replacements_preserve_access_acls() {
+    local site="$TMP_ROOT/output-acl-site" work="$TMP_ROOT/output-acl"
+    local kind
+    local -a options
+
+    make_site "$site"
+    mkdir -p "$work"
+    for kind in dump archive; do
+        options=()
+        [ "$kind" != dump ] || options+=(--dump-only)
+        printf 'previous completed export\n' > "$work/export"
+        # Set a real Linux ACL without requiring the optional setfacl tool.
+        # A named user may read, but the owning group has no access. Mode
+        # bits alone cannot represent this distinction.
+        python3 - "$work/export" "$work/acl" <<'PY'
+import os
+import pathlib
+import struct
+import sys
+
+entries = [(1, 6, 0xFFFFFFFF), (2, 4, 65534), (4, 0, 0xFFFFFFFF),
+           (16, 4, 0xFFFFFFFF), (32, 0, 0xFFFFFFFF)]
+acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in entries)
+os.setxattr(sys.argv[1], "system.posix_acl_access", acl)
+pathlib.Path(sys.argv[2]).write_bytes(os.getxattr(sys.argv[1], "system.posix_acl_access"))
+PY
+        run_export "$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+            --yes --gzip --no-size --database-format sql --output "$work/export" \
+            "${options[@]}" "$site" || fail "$kind replacement with an ACL failed"
+        python3 - "$work/export" "$work/acl" <<'PY' || fail "$kind replacement changed its access ACL"
+import os
+import pathlib
+import sys
+
+assert os.getxattr(sys.argv[1], "system.posix_acl_access") == pathlib.Path(sys.argv[2]).read_bytes()
+PY
+        if [ "$(id -u)" -ne 0 ]; then
+            printf 'previous completed export\n' > "$work/previous"
+            cp "$work/previous" "$work/write-only"
+            chmod 200 "$work/write-only"
+            if run_export "$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+                --yes --gzip --no-size --database-format sql --output "$work/write-only" \
+                "${options[@]}" "$site"; then
+                fail "$kind replaced an output whose permissions could not be copied"
+            fi
+            [ "$(stat -c %a "$work/write-only")" = 200 ] || fail "$kind changed the unreadable output mode"
+            chmod 600 "$work/write-only"
+            cmp -s "$work/previous" "$work/write-only" || fail "$kind lost the unreadable output"
+        fi
+    done
+    pass 'export replacements preserve access ACLs as well as mode bits'
+}
+
 test_array_expansions_are_guarded_for_old_bash() {
     local bare
 
@@ -1650,6 +1838,9 @@ test_the_archive_holds_the_site_the_dump_and_the_manifest
 test_the_archive_can_be_written_on_stdout
 test_dump_only_writes_a_dump_next_to_the_archive
 test_the_dump_is_staged_next_to_the_archive_and_outside_the_site
+test_failed_exports_preserve_the_previous_output
+test_exports_refuse_non_regular_destinations
+test_export_replacements_preserve_access_acls
 test_array_expansions_are_guarded_for_old_bash
 test_the_site_is_searched_under_the_configured_roots
 test_a_site_without_its_config_files_is_refused

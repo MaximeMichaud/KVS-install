@@ -149,6 +149,9 @@ Commands
 Options
   -o, --output PATH   Archive path, or - for stdout. Default:
                       ./<domain>-kvs-export-<YYYYMMDD-HHMM>.tar
+                      An existing regular file is replaced only when the
+                      export succeeds and must be readable to preserve its
+                      ownership and permissions. Other file types are refused.
       --dump-only     Write only the database dump
       --gzip          Compress the dump with gzip (default: zstd when
                       installed, else pigz, else gzip)
@@ -175,8 +178,9 @@ Environment
   KVS_EXPORT_SIZE_TIMEOUT   Same as --size-timeout
   KVS_EXPORT_SIZE_JOBS      How many du measure the site at once (default:
                             the CPU count, at most 4)
-  TMPDIR                    Where the dump is staged while the archive is
-                            written. Native export uses secure_file_priv
+  TMPDIR                    Where stdout archives stage their dump. Named
+                            outputs are staged beside the destination.
+                            Native export uses secure_file_priv
                             when set, otherwise the database data directory,
                             and needs space for the uncompressed data.
 
@@ -2276,6 +2280,30 @@ kvs_archive_excludes() {
     done
 }
 
+# Publish only a complete export. A private sibling stage keeps a previous
+# export intact through dump, compression and tar failures, on the same disk.
+kvs_publish_export() {
+    local staged="$1" output="$2"
+
+    if [ -L "$output" ] || { [ -e "$output" ] && [ ! -f "$output" ]; }; then
+        kvs_error "$output is not a regular output file"
+        return 1
+    fi
+    if [ -f "$output" ]; then
+        # mode includes the access ACL; chmod --reference alone loses it.
+        # Copy attributes only, leaving the completed export data intact.
+        if ! cp --attributes-only --preserve=mode,ownership -- "$output" "$staged"; then
+            kvs_error "could not preserve the permissions of $output"
+            return 1
+        fi
+    fi
+    # -T refuses a directory created at the destination during the export.
+    if ! mv -fT -- "$staged" "$output"; then
+        kvs_error "could not publish $output; the previous output was not replaced"
+        return 1
+    fi
+}
+
 kvs_command_archive() {
     local stamp
     local output
@@ -2305,6 +2333,10 @@ kvs_command_archive() {
             kvs_error "$output is inside the site, where its web server would serve the export; write it elsewhere with --output"
             return 1
         fi
+        if [ -L "$output" ] || { [ -e "$output" ] && [ ! -f "$output" ]; }; then
+            kvs_error "$output is not a regular output file"
+            return 1
+        fi
         kvs_say "Output: $output"
     fi
     if ! kvs_confirm "Continue? [Y/n]"; then
@@ -2331,6 +2363,14 @@ kvs_command_archive() {
     fi
     kvs_compressor_args
 
+    if [ "$output" != "-" ]; then
+        # Use the destination filesystem, not a potentially small TMPDIR.
+        STAGING_DIR=$(mktemp -d "$(kvs_dirname "$output")/.kvs-export.XXXXXX" 2> /dev/null) || STAGING_DIR=""
+        if [ -z "$STAGING_DIR" ]; then
+            kvs_error "cannot create a staging directory next to $output"
+            return 1
+        fi
+    fi
     if [ "$OPT_DUMP_ONLY" = "yes" ]; then
         if [ "$output" = "-" ]; then
             if ! kvs_stream_dump; then
@@ -2340,11 +2380,11 @@ kvs_command_archive() {
             return 0
         fi
         kvs_say "Dumping ${DB_NAME} into $output"
-        if ! kvs_stream_dump > "$output"; then
+        if ! kvs_stream_dump > "$STAGING_DIR/export"; then
             kvs_error "the dump failed"
-            rm -f -- "$output"
             return 1
         fi
+        kvs_publish_export "$STAGING_DIR/export" "$output" || return 1
         bytes=$(kvs_file_size "$output") || bytes=0
         mb=$((bytes / 1048576))
         kvs_say "Dump written: $output ($(kvs_human_mb "$mb"))"
@@ -2358,14 +2398,6 @@ kvs_command_archive() {
             return 1
         fi
         kvs_check_free_space "$DB_SIZE_MB" "$STAGING_DIR" || return 1
-    else
-        # Next to the archive, on the filesystem checked above: TMPDIR is
-        # often a small tmpfs that cannot hold the dump of a large site.
-        STAGING_DIR=$(mktemp -d "$(kvs_dirname "$output")/.kvs-export.XXXXXX" 2> /dev/null) || STAGING_DIR=""
-        if [ -z "$STAGING_DIR" ]; then
-            kvs_error "cannot create a staging directory next to $output"
-            return 1
-        fi
     fi
     dump_name="database.$(kvs_dump_extension)"
     dump_path="$STAGING_DIR/$dump_name"
@@ -2388,11 +2420,11 @@ kvs_command_archive() {
         fi
         return 0
     fi
-    if ! tar -chf "$output" ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
+    if ! tar -chf "$STAGING_DIR/export" ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
         kvs_error "tar failed"
-        rm -f -- "$output"
         return 1
     fi
+    kvs_publish_export "$STAGING_DIR/export" "$output" || return 1
     kvs_report_archive "$output"
     return 0
 }
