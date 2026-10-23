@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-nginx:alpine}
 docker image inspect "$NGINX_TEST_IMAGE" >/dev/null
-TEST_DIR=$(mktemp -d /tmp/kvs-nginx-log-rotation.XXXXXX)
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kvs-nginx-log-rotation.XXXXXX")
 container="kvs-nginx-log-rotation-$RANDOM-$$"
 cleanup() {
     local status=$?

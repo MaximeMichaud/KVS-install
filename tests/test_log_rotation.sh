@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ROTATE="${ROOT_DIR}/docker/nginx/rotate-site-logs.sh"
 ENTRYPOINT="${ROOT_DIR}/docker/nginx/docker-entrypoint.sh"
-TEST_DIR=$(mktemp -d /tmp/kvs-log-rotation.XXXXXX)
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kvs-log-rotation.XXXXXX")
 BACKGROUND_PIDS=()
 FAKE_MASTER_PID=''
 LOG_SETTINGS=(DOCKER_LOG_MAX_SIZE DOCKER_LOG_MAX_FILE NGINX_LOG_MAX_SIZE NGINX_LOG_KEEP NGINX_LOG_CHECK_INTERVAL)
@@ -466,6 +466,63 @@ test_symbolic_links_untouched() {
     stop_fake_master "$dir"
 }
 
+# A directory at a rename destination must never receive the archive as a
+# child. A link to a directory is replaced; a directory itself blocks the
+# operation and leaves the source available for a later check.
+test_archive_destinations() {
+    local phase="$1"
+    local kind="$2"
+    local dir
+    local base
+    local source
+    local destination
+    local target
+    local original
+
+    dir=$(new_case "destination-${phase}-${kind}")
+    base="${dir}/logs/example.com.access.log"
+    if [ "$phase" = compression ]; then
+        source="${base}.1"
+        destination="${base}.1.gz"
+        printf 'retained archive\n' > "$source"
+        touch -d '-2 minutes' "$source"
+    else
+        source="${base}.1.gz"
+        destination="${base}.2.gz"
+        printf 'retained archive\n' | gzip -c > "$source"
+        write_bytes "$base" 100
+    fi
+    original=$(sha256sum < "$source")
+    if [ "$kind" = link ]; then
+        target="${dir}/target"
+        mkdir "$target"
+        ln -s "$target" "$destination"
+    else
+        target="$destination"
+        mkdir "$target"
+    fi
+    printf 'untouched\n' > "${target}/sentinel"
+    start_fake_master "$dir"
+    rotate_and_settle "$dir" NGINX_LOG_MAX_SIZE=16 NGINX_LOG_KEEP=3
+
+    [ "$(cat "${target}/sentinel")" = untouched ] &&
+        [ "$(find "$target" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] ||
+        fail "${phase} placed an archive inside a ${kind} destination"
+    if [ "$kind" = link ]; then
+        [ ! -L "$destination" ] && [ -f "$destination" ] &&
+            [ "$(gzip -dc "$destination")" = 'retained archive' ] ||
+            fail "${phase} did not replace a directory link with the archive"
+        [ ! -e "$source" ] || fail "${phase} left the renamed source behind"
+    else
+        [ -f "$source" ] && [ "$(sha256sum < "$source")" = "$original" ] ||
+            fail "${phase} discarded its source when a directory blocked the destination"
+        [ -s "${dir}/check.err" ] || fail "${phase} did not report the blocked destination"
+        [ "$(reopen_count "$dir")" -eq 0 ] || fail "a blocked ${phase} signalled Nginx"
+    fi
+    [ ! -e "${base}.1.gz.tmp" ] || fail "${phase} left a temporary archive behind"
+    stop_fake_master "$dir"
+}
+
 # NGINX_LOG_KEEP bounds the generations, including those a larger value
 # left behind; the oldest go first.
 test_generations_are_bounded() {
@@ -784,6 +841,10 @@ test_settings_documented
 test_rotation_wiring
 test_rotation_keeps_every_line
 test_symbolic_links_untouched
+test_archive_destinations compression link
+test_archive_destinations shift link
+test_archive_destinations compression directory
+test_archive_destinations shift directory
 test_generations_are_bounded
 test_one_signal_per_check
 test_rotation_waits_for_nginx

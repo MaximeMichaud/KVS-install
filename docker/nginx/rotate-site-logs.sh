@@ -28,6 +28,15 @@ warn() {
     printf 'WARNING: %s\n' "$*" >&2
 }
 
+# BusyBox mv -T refuses even a link to a directory. Remove that link first;
+# -T still prevents a real directory from receiving the source as a child.
+rename_log_file() {
+    if [ -L "$2" ]; then
+        rm -f -- "$2" || return 1
+    fi
+    mv -fT -- "$1" "$2"
+}
+
 # Prints a whole number of at most nine digits without its leading zeros,
 # which shell arithmetic would read as octal.
 whole_number() {
@@ -125,7 +134,7 @@ compress_rotated_logs() {
         rm -f -- "${rotated_log}.gz.tmp"
         if nice -n 19 gzip -c -- "$rotated_log" > "${rotated_log}.gz.tmp" &&
             touch -r "$rotated_log" -- "${rotated_log}.gz.tmp" &&
-            mv -f -- "${rotated_log}.gz.tmp" "${rotated_log}.gz"; then
+            rename_log_file "${rotated_log}.gz.tmp" "${rotated_log}.gz"; then
             rm -f -- "$rotated_log"
         else
             rm -f -- "${rotated_log}.gz.tmp"
@@ -153,7 +162,7 @@ shift_generations() {
     generation=$((keep - 1))
     while [ "$generation" -ge 1 ]; do
         if [ -f "$1.${generation}.gz" ] && [ ! -L "$1.${generation}.gz" ]; then
-            mv -f -- "$1.${generation}.gz" "$1.$((generation + 1)).gz" || return 1
+            rename_log_file "$1.${generation}.gz" "$1.$((generation + 1)).gz" || return 1
         fi
         generation=$((generation - 1))
     done
@@ -179,7 +188,7 @@ rotate_site_logs() {
         [ ! -e "${site_log}.1" ] || continue
         nginx_master_ready || return 0
         shift_generations "$site_log" || continue
-        mv -f -- "$site_log" "${site_log}.1" || continue
+        rename_log_file "$site_log" "${site_log}.1" || continue
         reopen=yes
         rotated_logs="${rotated_logs} ${site_log##*/}"
     done
