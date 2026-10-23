@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_ROOT=$(mktemp -d /tmp/kvs-reconfigure-hardening.XXXXXX)
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kvs-reconfigure-hardening.XXXXXX")
 ASSERTIONS=0
 LAST_DIR=''
 LAST_STATUS=0
@@ -845,6 +845,54 @@ assert_not_contains "$LAST_DIR/state/mariadb.argv" \
     "an UPDATE statement appeared in MariaDB process arguments"
 assert_not_contains "$LAST_DIR/docker.calls" 'test-password' \
     "the database password was written to the mock call log"
+
+# Profile edits must use the effective .env value, preserving the cache when
+# adding or removing direct TLS regardless of quoting, comments or export.
+for provider in letsencrypt selfsigned; do
+    for form in plain double single commented exported reference; do
+        name="profiles-${provider}-${form}"
+        create_fixture "$name"
+        fixture="$TEST_ROOT/$name"
+        set_env_value "$fixture" SSL_PROVIDER "$provider"
+        profiles=dragonfly
+        expected=dragonfly,direct-tls
+        if [ "$provider" = selfsigned ]; then
+            profiles=dragonfly,direct-tls
+            expected=dragonfly
+        fi
+        sed -i '/^COMPOSE_PROFILES=/d' "$fixture/.env"
+        case "$form" in
+            plain) printf 'COMPOSE_PROFILES=%s\n' "$profiles" >> "$fixture/.env" ;;
+            double) printf 'COMPOSE_PROFILES="%s"\n' "$profiles" >> "$fixture/.env" ;;
+            single) printf "COMPOSE_PROFILES='%s'\n" "$profiles" >> "$fixture/.env" ;;
+            commented) printf 'COMPOSE_PROFILES=%s # active services\n' "$profiles" >> "$fixture/.env" ;;
+            exported) printf 'export COMPOSE_PROFILES=%s\n' "$profiles" >> "$fixture/.env" ;;
+            reference)
+                # shellcheck disable=SC2016  # Expand the reference when .env is sourced.
+                printf 'SAVED_PROFILES=%s\nCOMPOSE_PROFILES=${SAVED_PROFILES}\n' \
+                    "$profiles" >> "$fixture/.env"
+                ;;
+        esac
+        run_case "$name" COMPOSE_PROFILES=memcached
+        assert_success "$name"
+        assert_contains "$LAST_DIR/docker.calls" \
+            'docker-text compose up -d --force-recreate --no-deps php-fpm cron dragonfly' \
+            "$name lost the configured cache during recreation"
+        assert_eq "$expected" \
+            "$(bash -c 'source "$1"; printf "%s" "$COMPOSE_PROFILES"' _ "$LAST_DIR/.env")" \
+            "$name did not persist the effective profile list"
+    done
+done
+
+# An unrelated exported profile must not enable a service absent from .env.
+create_fixture profiles-absent
+sed -i '/^COMPOSE_PROFILES=/d' "$TEST_ROOT/profiles-absent/.env"
+run_case profiles-absent COMPOSE_PROFILES=memcached
+assert_success 'absent Compose profiles'
+assert_eq direct-tls "$(fixture_env_value "$LAST_DIR" COMPOSE_PROFILES)" \
+    'profiles absent from .env inherited a shell profile'
+assert_not_contains "$LAST_DIR/docker.calls" '--no-deps php-fpm cron memcached' \
+    'an inherited cache profile was recreated'
 
 # The table prefix of the site comes from .env: with another prefix the
 # same statements run against that prefix (the mock only recognizes the

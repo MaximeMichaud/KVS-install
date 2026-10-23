@@ -153,7 +153,7 @@ if [ ! -f ".env" ]; then
 fi
 
 # Load environment
-unset CLOUDFLARE_ENABLED
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES
 # shellcheck source=/dev/null
 source .env
 DOMAIN="${DOMAIN:-}"
@@ -206,14 +206,11 @@ set_env_value() {
 
 add_compose_profile() {
     local profile="$1"
-    local profiles
+    local profiles="${COMPOSE_PROFILES:-}"
     local filtered=""
     local item
     local -a profile_items
 
-    if ! profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' .env | tail -n 1); then
-        return 1
-    fi
     IFS=',' read -r -a profile_items <<< "$profiles"
     for item in "${profile_items[@]}"; do
         [ -n "$item" ] || continue
@@ -241,14 +238,11 @@ add_compose_profile() {
 
 remove_compose_profile() {
     local profile="$1"
-    local profiles
+    local profiles="${COMPOSE_PROFILES:-}"
     local filtered=""
     local item
     local -a profile_items
 
-    if ! profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' .env | tail -n 1); then
-        return 1
-    fi
     IFS=',' read -r -a profile_items <<< "$profiles"
     for item in "${profile_items[@]}"; do
         [ -n "$item" ] || continue
