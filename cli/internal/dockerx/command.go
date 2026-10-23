@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -26,21 +29,122 @@ var killDelay = 30 * time.Second
 // the whole group gets SIGTERM, which lets compose stop cleanly, and the
 // child is killed killDelay later if it is still there. The child inherits
 // the files Inherit names, the lock of the instance among them.
-func command(ctx context.Context, name string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, name, args...)
+func command(ctx context.Context, name string, args ...string) *groupCommand {
+	cmd := &groupCommand{Cmd: exec.CommandContext(ctx, name, args...), grace: killDelay}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.ExtraFiles = inheritedFiles()
 	cmd.Cancel = func() error {
+		began := time.Now()
 		// The negative pid names the group: the docker CLI and the
 		// compose plugin it runs as a child of its own.
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
+		if err == nil {
+			cmd.canceledAt = began
+			cmd.canceled.Store(true)
+		}
 		return err
 	}
 	cmd.WaitDelay = killDelay
 	return cmd
+}
+
+// WaitDelay kills only the immediate process. A compose child may survive
+// it, or close its output pipes and let Wait return before the delay even
+// starts. Give remaining group members the rest of their grace period,
+// then stop them before the caller begins a rollback or releases its lock.
+// No delayed signal is left behind after the command has been collected.
+type groupCommand struct {
+	*exec.Cmd
+	canceled   atomic.Bool
+	canceledAt time.Time
+	grace      time.Duration
+}
+
+func (c *groupCommand) finish(err error) error {
+	if !c.canceled.Swap(false) || c.Process == nil {
+		return err
+	}
+	group := c.Process.Pid
+	stopped, waitErr := waitGroup(group, c.canceledAt.Add(c.grace))
+	if stopped && waitErr == nil {
+		return err
+	}
+	if stopErr := syscall.Kill(-group, syscall.SIGKILL); stopErr != nil && !errors.Is(stopErr, syscall.ESRCH) {
+		return errors.Join(err, waitErr, fmt.Errorf("stop canceled command descendants: %w", stopErr))
+	}
+	// SIGKILL is asynchronous. A zombie has already closed its descriptors;
+	// waiting for its adoptive parent to reap it would hold us needlessly.
+	stopped, stopErr := waitGroup(group, time.Now().Add(time.Second))
+	if stopErr != nil {
+		return errors.Join(err, waitErr, stopErr)
+	}
+	if !stopped {
+		return errors.Join(err, waitErr, errors.New("canceled command descendants did not stop after SIGKILL"))
+	}
+	return errors.Join(err, waitErr)
+}
+
+func (c *groupCommand) Wait() error { return c.finish(c.Cmd.Wait()) }
+func (c *groupCommand) Run() error  { return c.finish(c.Cmd.Run()) }
+
+func (c *groupCommand) Output() ([]byte, error) {
+	out, err := c.Cmd.Output()
+	return out, c.finish(err)
+}
+
+func waitGroup(group int, deadline time.Time) (bool, error) {
+	for {
+		running, err := groupRunning(group)
+		if err != nil || !running {
+			return !running, err
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return false, nil
+		}
+		time.Sleep(min(10*time.Millisecond, left))
+	}
+}
+
+// A signal of zero also finds zombies, which cannot keep working or hold
+// a flock. Inspect Linux's process table to distinguish them from live
+// descendants, including orphans that no longer name our child as parent.
+func groupRunning(group int) (bool, error) {
+	if err := syscall.Kill(-group, 0); errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	} else if err != nil {
+		return true, err
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return true, fmt.Errorf("inspect canceled command descendants: %w", err)
+	}
+	wanted := strconv.Itoa(group)
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		data, err := os.ReadFile("/proc/" + entry.Name() + "/stat")
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrPermission) {
+			continue // A process exited, or procfs hides another user's process.
+		}
+		if err != nil {
+			return true, fmt.Errorf("inspect canceled command descendants: %w", err)
+		}
+		// The parenthesized command name can itself contain spaces or ')'.
+		end := bytes.LastIndexByte(data, ')')
+		if end < 0 {
+			continue
+		}
+		fields := strings.Fields(string(data[end+1:]))
+		if len(fields) >= 3 && fields[2] == wanted && fields[0] != "Z" && fields[0] != "X" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // maxLine and keptLines bound what lineWriter holds: a line that never

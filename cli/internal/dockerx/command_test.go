@@ -101,6 +101,28 @@ stubborn)
 	echo ready >> "$log"
 	while :; do sleep 0.05; done
 	;;
+stubborn-child|stubborn-child-closed|stubborn-family|cooperative-child-closed)
+	(
+		case "$FAKE_DOCKER_MODE" in *-closed) exec >/dev/null 2>&1 ;; esac
+		if [ "$FAKE_DOCKER_MODE" = cooperative-child-closed ]; then
+			trap 'sleep 0.03; echo child-cleaned >> "$log"; exit 0' TERM
+			echo child-ready >> "$log"
+			while :; do sleep 0.01; done
+		fi
+		trap '' TERM
+		echo child-ready >> "$log"
+		exec sleep 60
+	) &
+	echo child-pid=$! >> "$log"
+	if [ "$FAKE_DOCKER_MODE" = stubborn-family ]; then
+		trap '' TERM
+	else
+		trap 'exit 143' TERM
+	fi
+	until grep -q child-ready "$log"; do sleep 0.01; done
+	echo ready >> "$log"
+	while :; do sleep 0.05; done
+	;;
 esac
 `
 

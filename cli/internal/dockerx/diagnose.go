@@ -103,7 +103,7 @@ func DiagnosticComposeVersion(ctx context.Context) (string, error) {
 }
 
 func diagnosticCommand(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := command(ctx, "docker", args...)
+	cmd := command(ctx, "docker", args...).Cmd
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = time.Second
 	return cmd
