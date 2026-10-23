@@ -4,7 +4,7 @@
 # shellcheck disable=SC2034,SC2329,SC2030,SC2031
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d /tmp/kvs-transfer-reporting.XXXXXX)
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kvs-transfer-reporting.XXXXXX")
 trap 'rm -rf "$TEST_DIR"' EXIT
 # shellcheck source=/dev/null
 source "$ROOT_DIR/docker/lib/import.sh"
@@ -137,6 +137,16 @@ if [ -n "${FIXTURE_LOG_READY:-}" ]; then
     while [ ! -f "$FIXTURE_LOG_READY" ]; do sleep 0.01; done
     printf 'KVS_IMPORT_SSH_READY\n' >&2
 fi
+if [ -n "${FIXTURE_FINISHED_SAMPLER:-}" ]; then
+    for ((attempt = 0; attempt < 500; attempt++)); do
+        if [ -s "$FIXTURE_FINISHED_SAMPLER" ]; then
+            read -r sampler < "$FIXTURE_FINISHED_SAMPLER"
+            kill -0 "$sampler" 2>/dev/null || break
+        fi
+        sleep 0.01
+    done
+    [ "$attempt" -lt 500 ] || exit 99
+fi
 printf ' 1024 100%% 1.00kB/s 0:00:01 (xfr#1)\n'
 if [ "${FIXTURE_RSYNC_STATUS:-0}" -ne 0 ]; then
     echo 'rsync: fixture connection unexpectedly closed' >&2
@@ -165,6 +175,34 @@ chmod +x "$TEST_DIR/bin/rsync"
     grep -Fxq 'rsync=0 progress=7' "$TEST_DIR/logs/final.status" || fail 'missing renderer exit code'
 ) || exit 1
 echo 'PASS: rsync and progress failures retain distinct exit codes and diagnostics'
+
+# A statistics sampler that already ended is no longer a process to kill.
+# Its shutdown status must not replace the result of the file transfer.
+(
+    PATH="$TEST_DIR/bin:$PATH"
+    IMPORT_TRANSFER_JOBS=1 IMPORT_REMOTE_SUDO=no IMPORT_TRANSFER_RETRIES=0 IMPORT_DISKSTATS_INTERVAL=1
+    IMPORT_SSH_TARGET=root@source.test IMPORT_TRANSFER_LOG_DIR="$TEST_DIR/logs"
+    import_ssh_rsh() { printf unused; }
+    export FIXTURE_FINISHED_SAMPLER="$TEST_DIR/finished-sampler"
+    export TMPDIR="$TEST_DIR/sampler-cleanup-tmp"
+    mkdir "$TMPDIR"
+    import_disk_sampler() {
+        printf '%s\n' "$BASHPID" > "$FIXTURE_FINISHED_SAMPLER"
+        return "$FIXTURE_SAMPLER_STATUS"
+    }
+    for sampler_status in 0 42; do
+        for rsync_status in 0 12; do
+            rm -f "$FIXTURE_FINISHED_SAMPLER"
+            status=0
+            FIXTURE_SAMPLER_STATUS=$sampler_status FIXTURE_RSYNC_STATUS=$rsync_status \
+                import_remote_files /srv/example "$TEST_DIR/destination" yes > "$TEST_DIR/sampler-output" 2>&1 || status=$?
+            [ "$status" -eq "$rsync_status" ] ||
+                fail "sampler status $sampler_status changed rsync status $rsync_status to $status"
+            [ -z "$(find "$TMPDIR" -mindepth 1 -print -quit)" ] || fail 'sampler cleanup left transfer staging behind'
+        done
+    done
+) || exit 1
+echo 'PASS: an ended statistics sampler preserves transfer status and staging cleanup'
 
 # The final rsync, the whole transfer with one worker, ended the import on
 # a lost connection. It now starts again after a pause and counts against

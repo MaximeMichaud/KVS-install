@@ -2453,7 +2453,9 @@ import_disk_sampler() {
     local -a batch=()
 
     [ "${IMPORT_SSH_COMMAND[0]}" = sshpass ] || batch=(-o BatchMode=yes)
-    trap '[ -z "$probe" ] || kill "$probe" 2>/dev/null; [ -z "$nap" ] || kill "$nap" 2>/dev/null; rm -f -- "$file.reading" "$file.previous" "$file.tmp"; exit 0' TERM
+    # TERM can arrive after wait reaped a child but before its PID is cleared.
+    # An already-finished probe or pause must not interrupt shutdown under -e.
+    trap '[ -z "$probe" ] || kill "$probe" 2>/dev/null || true; [ -z "$nap" ] || kill "$nap" 2>/dev/null || true; rm -f -- "$file.reading" "$file.previous" "$file.tmp"; exit 0' TERM
     while [ -z "$owner" ] || kill -0 "$owner" 2>/dev/null; do
         timeout 15 "${IMPORT_SSH_COMMAND[@]}" "${batch[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" "$IMPORT_DISKSTATS_COMMAND" \
             < /dev/null > "$file.reading" 2>/dev/null &
@@ -2948,7 +2950,9 @@ import_remote_files() (
         work=$(mktemp -d "${TMPDIR:-/var/tmp}/kvs-import-transfer.XXXXXX" 2>/dev/null || mktemp -d) || return 1
         # Interrupted or not, the SSH masters of the workers end and the
         # chunk lists leave the old server.
-        trap '[ -z "$sampler" ] || { kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null; }; import_rsync_masters_close "$masters"; import_remote_plan_remove "$remote_plan"; rm -rf -- "$work"' EXIT
+        # Optional statistics may already have stopped or failed. Their exit
+        # status must not replace rsync's result or skip transfer cleanup.
+        trap '[ -z "$sampler" ] || { kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true; }; import_rsync_masters_close "$masters"; import_remote_plan_remove "$remote_plan"; rm -rf -- "$work"' EXIT
         error_dir=${IMPORT_TRANSFER_LOG_DIR:-$work}
         # The caller owns the private persistent directory when diagnostics
         # must survive a failure; file lists and progress logs stay temporary.

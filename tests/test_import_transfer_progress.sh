@@ -819,6 +819,43 @@ test_the_sampler_reads_the_disks_and_stops() {
     echo 'PASS: the sampler reads the disks without a prompt and stops at once, or with its owner'
 }
 
+# Stopping after wait reaped a child must still remove the readings and
+# return success, even before the sampler clears that child's PID.
+test_sampler_shutdown_tolerates_finished_children() {
+    local bin="$TEST_DIR/sampler-race-bin" ended status file
+    export FIXTURE_READINGS="$TEST_DIR/sampler-race-readings" FIXTURE_SSH_LOG="$TEST_DIR/sampler-race-ssh.log"
+    make_reading_ssh "$bin"
+    cat > "$TEST_DIR/sampler-race.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+# shellcheck source=/dev/null
+source "$1"
+remaining=$3
+IMPORT_SSH_TARGET=root@old.test IMPORT_SSH_COMMAND=(ssh) IMPORT_SSH_OPTS=(-p 22)
+# Deliver TERM immediately after a real child has been reaped, before the
+# caller resumes. The first wait is the SSH probe, the second its pause.
+wait() {
+    local status=0
+    builtin wait "$@" || status=$?
+    remaining=$((remaining - 1))
+    if [ "$remaining" -eq 0 ]; then
+        kill -TERM "$BASHPID"
+    fi
+    return "$status"
+}
+import_disk_sampler "$2" 0
+SH
+    for ended in 1 2; do
+        file="$TEST_DIR/sampler-race-$ended.disks"
+        status=0
+        PATH="$bin:$PATH" timeout 10 bash "$TEST_DIR/sampler-race.sh" "$ROOT_DIR/docker/lib/import.sh" "$file" "$ended" || status=$?
+        [ "$status" -eq 0 ] || fail "sampler shutdown after child $ended finished returned $status"
+        [ ! -e "$file.reading" ] && [ ! -e "$file.previous" ] && [ ! -e "$file.tmp" ] ||
+            fail 'sampler shutdown left temporary readings behind'
+    done
+    echo 'PASS: sampler shutdown tolerates an SSH probe or pause that already finished'
+}
+
 # A transfer killed outright cannot stop its sampler with its trap: the
 # sampler sees that the shell of the transfer is gone and reads no more.
 test_a_killed_transfer_stops_reading_the_disks() {
@@ -961,6 +998,7 @@ test_byte_suffix_keeps_progress_and_retry_counts
 test_counts_serve_the_same_source_only
 test_hard_links_count_every_name_as_an_entry
 test_disk_busy_from_two_readings
+test_sampler_shutdown_tolerates_finished_children
 test_the_setup_validates_the_interval
 for pid in "${pids[@]}"; do
     wait "$pid" || exit 1
