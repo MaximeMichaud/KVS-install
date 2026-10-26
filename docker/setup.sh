@@ -817,6 +817,239 @@ set_env_value() {
     fi
 }
 
+# Save the earlier resource identities before replacing the domain or prefix.
+# Reset/ready distinguish an interrupted prefix reset from a completed custom
+# selection. A later invocation can validate its mode before retiring those IDs.
+retirement_root() {
+    local physical sum
+    physical=$(pwd -P) || return 1
+    sum=$(printf '%s' "$physical" | sha256sum) || return 1
+    printf '%s\n' "${sum%% *}"
+}
+
+retirement_ids_ok() {
+    local value="$1" id
+    local -A seen=()
+    local -a ids
+    [ "$value" != - ] || return 0
+    [[ "$value" =~ ^[0-9a-f]{64}(,[0-9a-f]{64})*$ ]] || return 1
+    IFS=, read -r -a ids <<< "$value"
+    for id in "${ids[@]}"; do
+        [ -z "${seen[$id]:-}" ] || return 1
+        seen[$id]=yes
+    done
+}
+
+retirement_engine() {
+    local engine
+    if ! engine=$(database_docker_query info --format '{{.ID}}') || [[ ! "$engine" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]]; then
+        echo 'ERROR: could not read a valid Docker engine identity. The pending retirement and resources were kept.' >&2
+        return 1
+    fi
+    printf '%s\n' "$engine"
+}
+
+retirement_load() {
+    local record="${KVS_IMPORT_PENDING_RETIREMENT:-}" version separators expected_root expected_engine
+    RETIRE_PHASE='' RETIRE_ROOT='' RETIRE_ENGINE='' RETIRE_OLD_DOMAIN='' RETIRE_TARGET='' RETIRE_PROJECT='' RETIRE_IDS='' RETIRE_NETWORKS=''
+    [ -n "$record" ] || return 0
+    separators=${record//[!|]/}
+    if [ "${#separators}" -ne 8 ]; then
+        echo 'ERROR: unsupported pending retirement record or missing engine identity. The record and resources were kept.' >&2
+        return 1
+    fi
+    IFS='|' read -r version RETIRE_PHASE RETIRE_ROOT RETIRE_ENGINE RETIRE_OLD_DOMAIN RETIRE_TARGET RETIRE_PROJECT RETIRE_IDS RETIRE_NETWORKS <<< "$record"
+    expected_root=$(retirement_root) || return 1
+    if [ "$version" != v2 ] || [[ ! "$RETIRE_PHASE" =~ ^(reset|ready)$ ]] ||
+        [ "$RETIRE_ROOT" != "$expected_root" ] || [[ ! "$RETIRE_ENGINE" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || ! validate_domain "$RETIRE_OLD_DOMAIN" ||
+        ! validate_domain "$RETIRE_TARGET" || ! validate_site_prefix "$RETIRE_PROJECT" ||
+        [ "$RETIRE_PROJECT" = kvs ] || ! retirement_ids_ok "$RETIRE_IDS" ||
+        ! retirement_ids_ok "$RETIRE_NETWORKS" || { [ "$RETIRE_IDS" = - ] && [ "$RETIRE_NETWORKS" = - ]; }; then
+        echo 'ERROR: pending retirement does not belong to this installation or has invalid resource identities.' >&2
+        return 1
+    fi
+    if [ "$RETIRE_TARGET" != "$DOMAIN" ]; then
+        echo "ERROR: pending retirement targets $RETIRE_TARGET; the requested domain is $DOMAIN. The record and containers were kept." >&2
+        return 1
+    fi
+    expected_engine=$(retirement_engine) || return 1
+    if [ "$expected_engine" != "$RETIRE_ENGINE" ]; then
+        echo 'ERROR: pending retirement belongs to a different Docker engine. The record and resources were kept.' >&2
+        return 1
+    fi
+    if [ "${1:-}" = initial ]; then
+        if { [ "$RETIRE_PHASE" = ready ] && [ "$PREVIOUS_DOMAIN" != "$RETIRE_TARGET" ]; } ||
+            { [ "$RETIRE_PHASE" = reset ] && [ "$PREVIOUS_DOMAIN" != "$RETIRE_TARGET" ] && [ "$PREVIOUS_DOMAIN" != "$RETIRE_OLD_DOMAIN" ]; }; then
+            echo 'ERROR: the saved domain changed after retirement preparation. The record and containers were kept.' >&2
+            return 1
+        fi
+        retirement_validate_ids || return 1
+        retirement_list "$RETIRE_PROJECT" || return 1
+        if ! retirement_subset "$RETIRE_CURRENT_IDS" "$RETIRE_IDS" || ! retirement_subset "$RETIRE_CURRENT_NETWORKS" "$RETIRE_NETWORKS"; then
+            echo 'ERROR: retirement resources were replaced. Preparation was stopped before cache/TLS changes.' >&2
+            return 1
+        fi
+    fi
+}
+
+retirement_validate_ids() {
+    local id found owner
+    local -a ids
+    if [ "$RETIRE_IDS" != - ]; then
+        IFS=, read -r -a ids <<< "$RETIRE_IDS"
+        for id in "${ids[@]}"; do
+            found=$(database_docker_query ps -aq --no-trunc --filter "id=$id") || {
+                echo 'ERROR: could not check a recorded container identity.' >&2; return 1;
+            }
+            [ -n "$found" ] || continue
+            owner=$(database_docker_query inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$id") || return 1
+            if [ "$found" != "$id" ] || [ "$owner" != "$RETIRE_PROJECT" ]; then
+                echo 'ERROR: a recorded container belongs to a different project. The record and resources were kept.' >&2
+                return 1
+            fi
+        done
+    fi
+    if [ "$RETIRE_NETWORKS" != - ]; then
+        IFS=, read -r -a ids <<< "$RETIRE_NETWORKS"
+        for id in "${ids[@]}"; do
+            found=$(database_docker_query network ls --no-trunc --filter "id=$id" --format '{{.ID}}') || {
+                echo 'ERROR: could not check a recorded network identity.' >&2; return 1;
+            }
+            [ -n "$found" ] || continue
+            owner=$(database_docker_query network inspect --format '{{index .Labels "com.docker.compose.project"}}' "$id") || return 1
+            if [ "$found" != "$id" ] || [ "$owner" != "$RETIRE_PROJECT" ]; then
+                echo 'ERROR: a recorded network belongs to a different project. The record and resources were kept.' >&2
+                return 1
+            fi
+        done
+    fi
+}
+
+retirement_list() {
+    local project="$1" networks id name ids
+    RETIRE_CURRENT_IDS='' RETIRE_CURRENT_NETWORKS=''
+    if ! ids=$(database_docker_query ps -aq --no-trunc --filter "label=com.docker.compose.project=$project") ||
+        ! networks=$(database_docker_query network ls --no-trunc --filter "label=com.docker.compose.project=$project" --format '{{.ID}}|{{.Name}}'); then
+        echo 'ERROR: could not read retirement resources. No missing resource was inferred.' >&2
+        return 1
+    fi
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        [[ "$id" =~ ^[0-9a-f]{64}$ ]] || return 1
+        RETIRE_CURRENT_IDS+="${RETIRE_CURRENT_IDS:+,}$id"
+    done <<< "$ids"
+    while IFS='|' read -r id name; do
+        [ -n "$id" ] || continue
+        [[ "$id" =~ ^[0-9a-f]{64}$ ]] || return 1
+        [ "$name" = "${project}_kvs-network" ] || continue
+        RETIRE_CURRENT_NETWORKS+="${RETIRE_CURRENT_NETWORKS:+,}$id"
+    done <<< "$networks"
+}
+
+retirement_write() {
+    local record="v2|$RETIRE_PHASE|$RETIRE_ROOT|$RETIRE_ENGINE|$RETIRE_OLD_DOMAIN|$RETIRE_TARGET|$RETIRE_PROJECT|$RETIRE_IDS|$RETIRE_NETWORKS"
+    if ! set_env_value KVS_IMPORT_PENDING_RETIREMENT "'$record'"; then
+        echo 'ERROR: could not save the pending retirement record. Preparation was stopped.' >&2
+        return 1
+    fi
+    KVS_IMPORT_PENDING_RETIREMENT=$record
+}
+
+retirement_mask_completion() {
+    RETIRE_CLEAR_COMPLETION=no
+    if [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] && [ -n "${KVS_IMPORT_COMPLETED:-}" ]; then
+        echo -e "${YELLOW}The domain changes from $PREVIOUS_DOMAIN to $DOMAIN: the import completed under the old one does not count for it.${NC}"
+        RETIRE_CLEAR_COMPLETION=yes
+        unset KVS_IMPORT_COMPLETED
+    fi
+}
+
+retirement_prepare_identity() {
+    local reset_prefix=no
+    if [ -n "${KVS_IMPORT_PENDING_RETIREMENT:-}" ]; then
+        [ "$IMPORT_MODE" = true ] || { echo 'ERROR: a pending retirement requires the import to be selected again.' >&2; return 1; }
+        retirement_load initial || return 1
+    elif [ "$IMPORT_MODE" = true ] && [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] &&
+        [ "$PREVIOUS_DOMAIN" != example.com ] && [ "$(sed -n 's/^MODE=//p' .env 2>/dev/null | tail -n 1)" != multi ]; then
+        reset_prefix=yes
+        RETIRE_PROJECT=${COMPOSE_PROJECT_NAME:-}
+        if [ -n "$RETIRE_PROJECT" ] && [ "$RETIRE_PROJECT" != kvs ]; then
+            validate_site_prefix "$RETIRE_PROJECT" || return 1
+            retirement_list "$RETIRE_PROJECT" || return 1
+            if [ -n "$RETIRE_CURRENT_IDS" ]; then
+                RETIRE_ENGINE=$(retirement_engine) || return 1
+                COMPOSE_FILE=$(compose_files_for "${MODE:-}") require_compose_config || return 1
+                RETIRE_PHASE=reset
+                RETIRE_ROOT=$(retirement_root) || return 1
+                RETIRE_OLD_DOMAIN=$PREVIOUS_DOMAIN
+                RETIRE_TARGET=$DOMAIN
+                RETIRE_IDS=${RETIRE_CURRENT_IDS:--}
+                RETIRE_NETWORKS=${RETIRE_CURRENT_NETWORKS:--}
+                retirement_write || return 1
+            fi
+        fi
+    fi
+    if [ "${RETIRE_CLEAR_COMPLETION:-no}" = yes ]; then
+        remove_env_value KVS_IMPORT_COMPLETED || return 1
+    fi
+    if [ "${RETIRE_PHASE:-}" = reset ]; then
+        set_env_value DOMAIN "$RETIRE_TARGET" || return 1
+        set_env_value SITE_PREFIX kvs || return 1
+        RETIRE_PHASE=ready
+        retirement_write || return 1
+    elif [ "${RETIRE_PHASE:-}" != ready ]; then
+        set_env_value DOMAIN "$DOMAIN" || return 1
+        [ "$reset_prefix" != yes ] || set_env_value SITE_PREFIX kvs || return 1
+    fi
+}
+
+retirement_subset() {
+    local current="$1" saved="$2" id
+    local -a ids
+    [ -n "$current" ] || return 0
+    IFS=, read -r -a ids <<< "$current"
+    for id in "${ids[@]}"; do
+        case ",$saved," in *",$id,"*) ;; *) return 1 ;; esac
+    done
+}
+
+retirement_finish() {
+    local id
+    local -a ids networks
+    [ -n "${KVS_IMPORT_PENDING_RETIREMENT:-}" ] || return 0
+    # No extra source: validate the value loaded by the existing setup reads.
+    retirement_load || return 1
+    [ "$RETIRE_PHASE" = ready ] || return 1
+    retirement_validate_ids || return 1
+    retirement_list "$RETIRE_PROJECT" || return 1
+    if ! retirement_subset "$RETIRE_CURRENT_IDS" "$RETIRE_IDS" || ! retirement_subset "$RETIRE_CURRENT_NETWORKS" "$RETIRE_NETWORKS"; then
+        echo 'ERROR: retirement resources were replaced. The new resources and pending record were kept.' >&2
+        return 1
+    fi
+    COMPOSE_FILE=$(compose_files_for "$MODE") require_compose_config 'Remaining earlier-project resources were kept; cache/TLS choices may already have changed their containers.' || return 1
+    if [ -n "$RETIRE_CURRENT_IDS$RETIRE_CURRENT_NETWORKS" ]; then
+        echo -e "${YELLOW}Removing the containers of ${RETIRE_PROJECT} (${RETIRE_OLD_DOMAIN}); its volumes stay: docker volume ls --filter name=${RETIRE_PROJECT}_${NC}"
+    fi
+    IFS=, read -r -a ids <<< "$RETIRE_CURRENT_IDS"
+    IFS=, read -r -a networks <<< "$RETIRE_CURRENT_NETWORKS"
+    for id in "${ids[@]}"; do
+        [ -n "$id" ] || continue
+        docker stop "$id" >/dev/null || { echo 'ERROR: earlier-container stop failed; the pending record was kept.' >&2; return 1; }
+        docker rm "$id" >/dev/null || { echo 'ERROR: earlier-container removal failed; the pending record was kept.' >&2; return 1; }
+    done
+    for id in "${networks[@]}"; do
+        [ -n "$id" ] || continue
+        docker network rm "$id" >/dev/null || { echo 'ERROR: earlier-network removal failed; the pending record was kept.' >&2; return 1; }
+    done
+    retirement_list "$RETIRE_PROJECT" || return 1
+    if [ -n "$RETIRE_CURRENT_IDS$RETIRE_CURRENT_NETWORKS" ]; then
+        echo 'ERROR: earlier-project resources remain; the pending record was kept.' >&2
+        return 1
+    fi
+    remove_env_value KVS_IMPORT_PENDING_RETIREMENT || { echo 'ERROR: retirement completed but its pending record could not be cleared.' >&2; return 1; }
+    unset KVS_IMPORT_PENDING_RETIREMENT
+}
+
 parse_publish_endpoint() {
     local endpoint="$1"
     local host=""
@@ -3084,7 +3317,7 @@ fi
 chmod 600 .env
 
 # Load environment
-unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED KVS_IMPORT_PENDING_RETIREMENT
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
@@ -3307,16 +3540,9 @@ if [ "$IMPORT_FILES_ONLY" = yes ]; then
     exit 0
 fi
 
-# An import completed under another domain (a development subdomain tried
-# before the real one) does not count for this one: the real domain gets
-# its own import, into its own database.
-if [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] && [ -n "${KVS_IMPORT_COMPLETED:-}" ]; then
-    echo -e "${YELLOW}The domain changes from $PREVIOUS_DOMAIN to $DOMAIN: the import completed under the old one does not count for it.${NC}"
-    remove_env_value KVS_IMPORT_COMPLETED || exit 1
-    unset KVS_IMPORT_COMPLETED
-fi
+retirement_load initial || exit 1
+retirement_mask_completion
 require_single_kvs_archive || exit 1
-set_env_value DOMAIN "$DOMAIN"
 export DOMAIN EMAIL
 
 IMPORT_DATABASE_FORMAT=$IMPORT_DATABASE_FORMAT_REQUEST
@@ -3378,28 +3604,10 @@ compose_files_for() {
     printf '%s\n' "$compose_files"
 }
 
-# An import under a new domain gets its own stack: the prefix follows the
-# domain, and the containers of the earlier stack (a development subdomain
-# tried first) go, since the two cannot share the ports. Their volumes
-# stay until removed by hand. Multi-site installations manage their sites
-# through site-manager.sh and are left alone here.
-if [ "$IMPORT_MODE" = true ] && [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] &&
-    [ "$PREVIOUS_DOMAIN" != example.com ] && [ "$(sed -n 's/^MODE=//p' .env 2>/dev/null | tail -n 1)" != multi ]; then
-    PREVIOUS_PROJECT=${COMPOSE_PROJECT_NAME:-}
-    if [ -n "$PREVIOUS_PROJECT" ] && [ "$PREVIOUS_PROJECT" != kvs ] &&
-        docker ps -aq --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | grep -q .; then
-        # The new stack is built from the same compose files: when Compose
-        # cannot read them, the earlier site keeps its containers. They are
-        # the files configure_mode records, not the COMPOSE_FILE of .env.
-        COMPOSE_FILE=$(compose_files_for "$MODE") require_compose_config || exit 1
-        echo -e "${YELLOW}Removing the containers of ${PREVIOUS_PROJECT} (${PREVIOUS_DOMAIN}); its volumes stay: docker volume ls --filter name=${PREVIOUS_PROJECT}_${NC}"
-        docker ps -q --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | xargs -r docker stop >/dev/null 2>&1 || true
-        docker ps -aq --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | xargs -r docker rm >/dev/null 2>&1 || true
-        docker network rm "${PREVIOUS_PROJECT}_kvs-network" >/dev/null 2>&1 || true
-    fi
-    # The prefix is chosen again, from the new domain by default.
-    set_env_value SITE_PREFIX kvs || exit 1
-fi
+# An import under a new domain gets its own stack:
+# Save its earlier resource identities before selecting the new prefix. The
+# containers keep running until the mode and resulting Compose files are valid.
+retirement_prepare_identity || exit 1
 
 # Site prefix for container naming (multi-site support)
 select_site_prefix() {
@@ -4103,7 +4311,6 @@ select_cache() {
 # deleted by hand since. The check before the volume question reads them
 # again once the mode and the profiles are settled.
 COMPOSE_FILE=$(compose_files_for "$MODE") require_compose_config || exit 1
-select_cache
 
 # Mode selection (single/multi)
 require_multi_compose_version() {
@@ -4262,6 +4469,8 @@ configure_mode() {
 }
 
 configure_mode || exit $?
+select_cache
+retirement_finish || exit 1
 
 prepare_multi_site_proxy() {
     local tls_mode="public"

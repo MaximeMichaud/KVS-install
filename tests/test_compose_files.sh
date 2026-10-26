@@ -337,9 +337,16 @@ comes_before "$late" "$(line_of 'database_configure_resources || exit 1')" "the 
 comes_before "$late" "$(first_line_with 'echo "Stopping existing containers..."')" "the check must come before the running containers are stopped"
 comes_before "$late" "$(first_line_with 'docker compose build')" "the check must come before anything is built"
 
-earlier=$(line_of '        COMPOSE_FILE=$(compose_files_for "$MODE") require_compose_config || exit 1')
-comes_before "$(line_of 'require_compose_config() {')" "$earlier" "require_compose_config must be defined before its first use"
-comes_before "$(line_of 'compose_files_for() {')" "$earlier" "compose_files_for must be defined before its first use"
-comes_before "$earlier" "$(first_line_with 'Removing the containers of')" \
-    "the check must come before the containers of an earlier stack are removed"
+prepare=$(line_of 'retirement_prepare_identity || exit 1')
+comes_before "$(line_of 'require_compose_config() {')" "$prepare" "require_compose_config must be defined before preparation calls it"
+comes_before "$(line_of 'compose_files_for() {')" "$prepare" "compose_files_for must be defined before preparation calls it"
+earlier=$(line_of '                COMPOSE_FILE=$(compose_files_for "${MODE:-}") require_compose_config || return 1')
+comes_before "$earlier" "$(line_of '                retirement_write || return 1')" "the saved retirement must start with readable Compose files"
+retire=$(line_of 'retirement_finish || exit 1')
+comes_before "$(line_of 'configure_mode || exit $?')" "$(line_of 'select_cache')" "mode validation must precede cache retirement"
+comes_before "$(line_of 'select_cache')" "$retire" "earlier-project retirement must follow the selected mode and cache"
+final_retirement_check=$(first_line_with 'Remaining earlier-project resources were kept; cache/TLS choices may already have changed their containers.')
+comes_before "$(line_of 'retirement_finish() {')" "$final_retirement_check" "retirement must validate the final Compose configuration"
+comes_before "$final_retirement_check" "$(first_line_with 'Removing the containers of')" \
+    "the final check must come before the containers of an earlier stack are removed"
 echo 'PASS: setup.sh checks the compose files before it stops anything'

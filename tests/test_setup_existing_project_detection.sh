@@ -211,13 +211,192 @@ echo "ok 1 - setup scopes existing-resource detection to the Compose project fro
 run_fresh_install_case
 echo "ok 2 - fresh setup detects resources only after deriving the final Compose project"
 
+# A refused preparation keeps the earlier site running. Exercise the actual
+# setup entry point through local synthetic import inspection and mode choice,
+# then retry with only the rejected input corrected. No dump is loaded and the
+# strict engine fixture forwards only Compose config to an unavailable socket.
+python3 - "$REPO_ROOT" "$TMP_ROOT/preparation" <<'PY'
+#!/usr/bin/env python3
+"""Run setup preparation and retry through the actual local import inspection."""
+from pathlib import Path
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+REPO=Path(sys.argv[1])
+BASE=Path(sys.argv[2]);BASE.mkdir()
+label='current'
+source=(REPO/'docker/setup.sh').read_text()
+cases = [
+    dict(name='invalid-mode', mode='single', choice='3', retry={'MODE_CHOICE': '1'}),
+    dict(name='missing-mode', mode='', choice='', retry={'MODE_CHOICE': '1'}),
+    dict(name='ordinary-success', mode='single', choice='1', retry={}),
+    dict(name='interrupted-stop', mode='single', choice='1', kill='stop', retry={'KILL_AT':''}),
+    dict(name='custom-prefix-partial', mode='single', choice='1', custom=True, retry={'INTERRUPT_PREFIX':''}),
+    dict(name='unsupported-zerossl', mode='single', choice='2', ssl='2', retry={'SSL_CHOICE': '3'}),
+    dict(name='unsupported-compose', mode='single', choice='2', version='2.20.0', retry={'COMPOSE_VERSION': '2.35.0'}),
+]
+rows = []
+for case in cases:
+    root = BASE / ('preparation-' + label) / case['name']
+    assert not root.exists(), root
+    d = root / 'docker'
+    for directory in ['lib', 'bin', 'kvs-archive', 'docker-config', 'multi-site', 'site', 'oldsite/admin/include']:
+        (d / directory).mkdir(parents=True, exist_ok=True)
+    for name in ['lib/import.sh', 'lib/database.sh', 'lib/native-import.sh', 'bin/resolve-bases.sh', 'images.lock', 'docker-compose.yml', 'docker-compose.multi.yml']:
+        shutil.copy2(REPO / 'docker' / name, d / name)
+    initial = ('DOMAIN=example.test\nSITE_PREFIX=kvs-saved\nCOMPOSE_PROJECT_NAME=kvs-saved\n'
+               'EMAIL=admin@example.test\nSSL_PROVIDER=selfsigned\n'
+               'MARIADB_VERSION=12.3\nMARIADB_PASSWORD=fixture\nMARIADB_ROOT_PASSWORD=fixture-root\n'
+               'PHP_VERSION=8.1\nCOMPOSE_PROFILES=dragonfly,direct-tls\nIONCUBE=NO\nKEEP=stable\n'
+               'MODE=' + case['mode'] + '\n')
+    if case['name'] == 'invalid-mode':
+        initial += 'KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z\n'
+    (d / '.env').write_text(initial)
+    (d / '.env').chmod(0o600)
+    (d / 'RELEASE').write_text('synthetic-recovery-audit\n')
+    old = d / 'oldsite/admin/include'
+    (old / 'setup.php').write_text("<?php\n$config['project_path']='/var/www/old';\n$config['project_url']='https://example.test';\n$config['tables_prefix']='ktvs_';\n")
+    (old / 'setup_db.php').write_text('<?php\n')
+    (old / 'version.php').write_text("<?php\n$config['project_version']='7.0.2';\n")
+    (old / 'functions_base.php').write_text('<?php // synthetic plain PHP\n')
+    (d / 'dump.sql').write_text("CREATE TABLE `ktvs_options` (`variable` varchar(100), `value` text);\nINSERT INTO `ktvs_options` VALUES ('INITIAL_VERSION','7.0.2');\n-- Dump completed on 2026-10-26 12:00:00\n")
+    engine = {}
+    for i, name in enumerate(['kvs-saved', 'kvs-other', 'kvs-custom', 'kvs-foreign']):
+        active = name == 'kvs-saved'
+        engine[name] = dict(id=hex(i + 10)[2:] * 64, existing=active, running=active,
+                            network=active, network_id=str(i + 1) * 64,
+                            network_owner=name, volume=active, ports=[80, 443])
+    (d / 'engine-state.json').write_text(json.dumps(engine, indent=2) + '\n')
+    shutil.copyfile(REPO / 'tests/fixtures/setup-retirement-docker.py', d / 'bin/docker')
+    (d / 'bin/docker').chmod(0o755)
+    manager = d / 'multi-site/site-manager.sh'
+    manager.write_text('#!/bin/bash\n[[ "$#" == 3 && "$1" == primary-remove && "$2" == other.test && ( "$3" == kvs-saved || "$3" == kvs-other ) ]] || exit 97\nprintf \'["site-manager","%s","%s","%s"]\\n\' "$@" >> "$CALLS"\n')
+    manager.chmod(0o755)
+    (d / 'bin/blocked').write_text('#!/bin/bash\nprintf "FORBIDDEN_COMMAND %s\\n" "$0" >&2\nexit 97\n')
+    (d / 'bin/blocked').chmod(0o755)
+    for tool in ['curl', 'wget', 'ssh', 'scp', 'rsync', 'sudo', 'apt', 'apt-get', 'pacman', 'paru', 'systemctl', 'git', 'gum', 'openssl']:
+        (d / 'bin' / tool).symlink_to('blocked')
+    body = source
+    for old_text, new_text in [
+        ('if [ "$EUID" -ne 0 ]; then', 'if false; then'),
+        ('/opt/kvs/logs', str(d / 'logs')),
+        ('\ninstall_gum >/dev/null 2>&1 || true\n', '\n: # No host installation.\n'),
+        ('\npreflight_checks\n', '\n: # No host preflight.\n'),
+    ]:
+        assert body.count(old_text) == 1, old_text
+        body = body.replace(old_text, new_text)
+    body = body.replace('\n: # No host preflight.\n', '''
+export DRIVER_PID=$BASHPID
+mv() {
+    command mv "$@" || return $?
+    if [ "${INTERRUPT_PREFIX:-}" = yes ] && [ "${!#}" = .env ] &&
+        [ "${key:-}" = SITE_PREFIX ] && [ "${value:-}" = kvs-custom ]; then
+        kill -KILL "$DRIVER_PID"
+    fi
+}
+''')
+    body = body.replace('/var/www/', str(d / 'site') + '/')
+    point = '\nprepare_multi_site_proxy() {\n'
+    assert body.count(point) == 1
+    body = body.replace(point, '''
+/usr/bin/docker compose config --format json > current-model.json
+/usr/bin/env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_PROJECT_NAME -u SITE_PREFIX /usr/bin/docker compose config --format json > fresh-model.json
+printf '%s' "${KVS_IMPORT_PENDING_RETIREMENT+x}" > pending-memory
+/usr/bin/printenv KVS_IMPORT_PENDING_RETIREMENT > pending-child || true
+printf 'PREPARATION_FINISHED\\n'
+exit 0
+''' + point)
+    (d / 'setup.sh').write_text(body)
+    env = dict(PATH=str(d / 'bin') + ':/usr/bin:/bin', TMPDIR=os.environ.get('TMPDIR',str(BASE)),
+               HEADLESS='y', DOMAIN='other.test', SSL_CHOICE=case.get('ssl', '3'),
+               MARIADB_VERSION_CONFIRMED='yes', KVS_PHP_VERSION='8.1', CACHE_CHOICE='1',
+               PREFIX_CHOICE='3' if case.get('custom') else '1', MODE_CHOICE=case['choice'], IONCUBE_CHOICE='1',
+               DOCKER_HOST='unix://' + str(d / 'absent.sock'), DOCKER_CONFIG=str(d / 'docker-config'),
+               ENGINE_STATE=str(d / 'engine-state.json'), ENGINE_EVENTS=str(d / 'engine-events.jsonl'),
+               CALLS=str(d / 'calls.jsonl'), DOCKER_BIN='/usr/bin/docker',
+               KILL_AT=case.get('kill',''), INTERRUPT_PREFIX='yes' if case.get('custom') else '',
+               COMPOSE_VERSION=case.get('version', '2.35.0'), ACME_RUNNING='no', CADDY_RUNNING='no',
+               IMPORT_SITE_DIR=str(d / 'oldsite'), IMPORT_DB_DUMP=str(d / 'dump.sql'))
+
+    def invoke(phase, selected_env):
+        (d / 'calls.jsonl').write_text('')
+        process = subprocess.run(['/bin/bash', './setup.sh'], cwd=d, env=selected_env,
+                                 capture_output=True, text=True, input='kvs-custom\n' if case.get('custom') else '', timeout=40)
+        output = process.stdout + process.stderr
+        (d / ('output-' + phase + '.log')).write_text(output)
+        calls = [json.loads(line) for line in (d / 'calls.jsonl').read_text().splitlines()]
+        assert 'FORBIDDEN_' not in output and not any(c[0].startswith('FORBIDDEN') for c in calls), (case, output, calls)
+        saved = subprocess.run(['/bin/bash', '-c', 'source .env; printf "%s\\0%s\\0%s\\0%s\\0%s\\0%s" "$DOMAIN" "$SITE_PREFIX" "$COMPOSE_PROJECT_NAME" "${MODE-}" "${KVS_IMPORT_PENDING_RETIREMENT-}" "$KEEP"'],
+                               cwd=d, env={'PATH': '/usr/bin:/bin'}, capture_output=True, text=True, check=True).stdout.split('\0')
+        models = {}
+        if process.returncode == 0:
+            for which in ['current', 'fresh']:
+                config = json.loads((d / (which + '-model.json')).read_text())
+                models[which] = {'name': config['name'], 'services': sorted(config['services'])}
+        return dict(status=process.returncode, output=output, calls=calls, saved=saved,
+                    pending_memory=(d / 'pending-memory').read_text() if process.returncode == 0 else None,
+                    pending_child=(d / 'pending-child').read_text() if process.returncode == 0 else None,
+                    file=(d / '.env').read_text(), models=models,
+                    state=json.loads((d / 'engine-state.json').read_text()))
+
+    first = invoke('first', env)
+    if case['name']=='invalid-mode' and first['saved'][4]:
+        # A saved exported receipt must disappear from both the later process
+        # state and a fresh reader once retirement succeeds.
+        pending_file=d/'.env'
+        pending_text=pending_file.read_text()
+        assert pending_text.count('KVS_IMPORT_PENDING_RETIREMENT=')==1
+        pending_file.write_text(pending_text.replace('KVS_IMPORT_PENDING_RETIREMENT=', 'export KVS_IMPORT_PENDING_RETIREMENT='))
+        foreign_env=dict(env,MODE_CHOICE='1',ENGINE_ID='another-synthetic-engine')
+        before_foreign=(d/'.env').read_bytes()
+        foreign=invoke('different-engine',foreign_env)
+        assert foreign['status']==1 and (d/'.env').read_bytes()==before_foreign
+        assert foreign['state']['kvs-saved']['running']
+        assert not any(c[:2] in [['docker','stop'],['docker','rm']] or c[:3]==['docker','network','rm'] for c in foreign['calls'])
+        assert 'different Docker engine' in foreign['output']
+    second_env = dict(env)
+    second_env.update(case['retry'])
+    second = invoke('second', second_env)
+    refused = bool(case['retry'])
+    first_ok = first['status'] == (-9 if case.get('kill') or case.get('custom') else 1 if refused else 0)
+    if case.get('kill'):
+        first_ok = first_ok and first['state']['kvs-saved']['existing'] and not first['state']['kvs-saved']['running']
+    elif refused:
+        first_ok = first_ok and first['state']['kvs-saved']['running'] and first['state']['kvs-saved']['existing']
+    else:
+        first_ok = first_ok and not first['state']['kvs-saved']['existing']
+    target_prefix='kvs-custom' if case.get('custom') else 'kvs-other'
+    second_ok = (second['status'] == 0 and second['saved'][:3] == ['other.test', target_prefix, target_prefix]
+                 and not second['saved'][4] and second['saved'][5] == 'stable'
+                 and not second['state']['kvs-saved']['existing'] and not second['state']['kvs-saved']['network']
+                 and second['state']['kvs-saved']['volume']
+                 and second['pending_memory'] == '' and second['pending_child'] == ''
+                 and second['models']['current'] == second['models']['fresh'])
+    row = dict(case=case, passed=bool(first_ok and second_ok), first_ok=bool(first_ok), second_ok=bool(second_ok),
+               first=first, second=second, source_sha256=hashlib.sha256(source.encode()).hexdigest(),
+               environment_changes={k: [env.get(k), second_env[k]] for k in second_env if env.get(k) != second_env[k]})
+    rows.append(row)
+    assert row['passed'], (case, first['output'], second['output'], first['state'], second['state'])
+    print(label, case['name'], 'first', first['status'], 'old running', first['state']['kvs-saved']['running'],
+          'retry', second['status'], 'saved', second['saved'][:3], 'PASS' if row['passed'] else 'FAIL', flush=True)
+(BASE / ('preparation-' + label + '.json')).write_text(json.dumps(rows, indent=2) + '\n')
+print(label, sum(row['passed'] for row in rows), '/', len(rows), flush=True)
+
+PY
+echo 'ok 3 - invalid import preparation preserves the earlier project and remains recoverable'
+
 # The earlier changed-domain import acts on the saved project before the
 # final prefix is chosen. Run its actual loading and decision blocks; the
 # executable Docker double also catches calls made through xargs.
 awk '
     $0 == "remove_env_value() {" || $0 == "set_env_value() {" ||
         $0 == "validate_site_prefix() {" || $0 == "select_site_prefix() {" ||
-        $0 == "compose_files_for() {" || $0 == "require_compose_config() {" { capture = 1 }
+        $0 == "compose_files_for() {" || $0 == "require_compose_config() {" ||
+        $0 == "validate_domain() {" || /^retirement_[a-z_]+\(\) \{$/ { capture = 1 }
     capture { print }
     capture && /^}$/ { capture = 0 }
 ' "$REPO_ROOT/docker/setup.sh" > "$TMP_ROOT/project-functions.sh"
@@ -231,44 +410,33 @@ awk '
     /^# Site prefix for container naming / { exit }
     capture { print }
 ' "$REPO_ROOT/docker/setup.sh" > "$TMP_ROOT/project-retire.sh"
+awk '
+    $0 == "database_docker_query() {" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+' "$REPO_ROOT/docker/lib/database.sh" > "$TMP_ROOT/database-query.sh"
 mkdir -p "$TMP_ROOT/prior-bin"
-cat > "$TMP_ROOT/prior-bin/docker" <<'EOF'
-#!/bin/bash
-printf '%s\n' "$*" >> "$DOCKER_CALL_LOG"
-case "$1" in
-    ps)
-        [ "$#" -eq 4 ] && [ "$3" = --filter ] || exit 99
-        case "$4" in
-            label=com.docker.compose.project=kvs-saved) echo saved-container ;;
-            label=com.docker.compose.project=kvs-decoy) echo decoy-container ;;
-            label=com.docker.compose.project=kvs-inherited) echo inherited-container ;;
-            label=com.docker.compose.project=kvs) echo legacy-container ;;
-        esac
-        exit 0
-        ;;
-esac
-case "$*" in
-    'compose config --quiet'|'stop saved-container'|'rm saved-container'|'network rm kvs-saved_kvs-network'|\
-    'stop decoy-container'|'rm decoy-container'|'network rm kvs-decoy_kvs-network'|\
-    'stop inherited-container'|'rm inherited-container'|'network rm kvs-inherited_kvs-network') exit 0 ;;
-esac
-echo FORBIDDEN_DOCKER_CALL >> "$DOCKER_CALL_LOG"
-exit 99
-EOF
+cp "$REPO_ROOT/tests/fixtures/setup-retirement-docker.py" "$TMP_ROOT/prior-bin/docker"
 chmod +x "$TMP_ROOT/prior-bin/docker"
 cat > "$TMP_ROOT/project-driver.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 source "$PROJECT_TEST_ROOT/project-functions.sh"
+source "$PROJECT_TEST_ROOT/database-query.sh"
+COMPOSE_STUB_ONLY=yes
+export COMPOSE_STUB_ONLY
+MAX_SITE_PREFIX_LENGTH=235
 RED='' GREEN='' YELLOW='' NC=''
 check_mariadb_stop_grace_period() { :; }
 check_cloudflare_configuration() { :; }
 source "$PROJECT_TEST_ROOT/project-load.sh"
 DOMAIN=$NEXT_DOMAIN
 IMPORT_MODE=true
-set_env_value DOMAIN "$DOMAIN"
 export DOMAIN
+retirement_load initial
+retirement_mask_completion
 source "$PROJECT_TEST_ROOT/project-retire.sh"
+retirement_finish
 EOF
 
 for project_form in plain quoted exported commented indented duplicate reference real_fake fake_only absent inherited empty legacy; do
@@ -304,19 +472,26 @@ for project_form in plain quoted exported commented indented duplicate reference
             PATH="$TMP_ROOT/prior-bin:$PATH" DOCKER_CALL_LOG="$case_dir/calls" PROJECT_TEST_ROOT="$TMP_ROOT" NEXT_DOMAIN="$next_domain" \
                 bash "$TMP_ROOT/project-driver.sh"
         ) > "$case_dir/output" 2>&1 || fail "$project_form/$domain_change failed: $(cat "$case_dir/output")"
-        : > "$case_dir/expected-calls"
-        if [ "$domain_change" = changed ] && [ -n "$expected_project" ]; then
-            printf '%s\n' 'ps -aq --filter label=com.docker.compose.project=kvs-saved' 'compose config --quiet' \
-                'ps -q --filter label=com.docker.compose.project=kvs-saved' 'stop saved-container' \
-                'ps -aq --filter label=com.docker.compose.project=kvs-saved' 'rm saved-container' \
-                'network rm kvs-saved_kvs-network' > "$case_dir/expected-calls"
-        fi
         [ -f "$case_dir/calls" ] || : > "$case_dir/calls"
-        cmp -s "$case_dir/calls" "$case_dir/expected-calls" || fail "$project_form/$domain_change selected the wrong project: $(cat "$case_dir/calls")"
+        python3 - "$case_dir/calls" "$expected_project" "$domain_change" <<'PY'
+import json,sys
+calls=[json.loads(line) for line in open(sys.argv[1])]
+expected=[]
+if sys.argv[2] and sys.argv[3]=='changed':
+    expected=[['docker','stop','a'*64],['docker','rm','a'*64],['docker','network','rm','1'*64]]
+mutations=[c for c in calls if c[:2] in [['docker','stop'],['docker','rm']] or c[:3]==['docker','network','rm']]
+assert mutations==expected,(mutations,expected)
+assert all(not c[0].startswith('FORBIDDEN') for c in calls)
+for call in calls:
+    for arg in call:
+        if arg.startswith('label=com.docker.compose.project='):
+            assert arg=='label=com.docker.compose.project=kvs-saved',call
+if not expected:assert calls==[],calls
+PY
         [ "$(stat -c %a "$case_dir/.env")" = 600 ] || fail 'the saved file mode changed'
     done
 done
-echo 'ok 3 - changed-domain imports select the parsed saved project and exclude inherited-only or multiline lookalikes'
+echo 'ok 4 - changed-domain imports select the parsed saved project and exclude inherited-only or multiline lookalikes'
 
 # A setup run exports the selected project before it inspects resources.
 # Read the saved settings in a fresh process too: that export must not hide
@@ -386,7 +561,7 @@ for prefix_path in choose normalize; do
         [ "$(stat -c %a "$work_dir/.env")" = 600 ] || fail 'project persistence changed file permissions'
     done
 done
-echo 'ok 4 - selected and normalized projects survive a fresh load without changing unrelated values'
+echo 'ok 5 - selected and normalized projects survive a fresh load without changing unrelated values'
 
 # The selected prefix itself must survive the reload that follows a
 # changed-domain reset and the later reloads before the images are built.
@@ -399,6 +574,10 @@ cat > "$TMP_ROOT/prefix-driver.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 source "$PROJECT_TEST_ROOT/project-functions.sh"
+source "$PROJECT_TEST_ROOT/database-query.sh"
+COMPOSE_STUB_ONLY=yes
+export COMPOSE_STUB_ONLY
+MAX_SITE_PREFIX_LENGTH=235
 RED='' GREEN='' YELLOW='' CYAN='' NC=''
 HEADLESS=y PREFIX_CHOICE=1 MAX_SITE_PREFIX_LENGTH=235
 KVS_EMAIL_OVERRIDE_SET=false KVS_EMAIL_OVERRIDE=''
@@ -407,8 +586,9 @@ check_cloudflare_configuration() { :; }
 source "$PROJECT_TEST_ROOT/project-load.sh"
 DOMAIN=$NEXT_DOMAIN
 IMPORT_MODE=true
-set_env_value DOMAIN "$DOMAIN"
 export DOMAIN
+retirement_load initial
+retirement_mask_completion
 source "$PROJECT_TEST_ROOT/project-retire.sh"
 source "$PROJECT_TEST_ROOT/prefix-flow.sh"
 EOF
@@ -463,4 +643,4 @@ for prefix_path in choose reset; do
         [ "$(stat -c %a "$case_dir/.env")" = 600 ] || fail 'prefix persistence changed saved file permissions'
     done
 done
-echo 'ok 5 - selected and reset prefixes preserve exported, interpolated and multiline settings'
+echo 'ok 6 - selected and reset prefixes preserve exported, interpolated and multiline settings'

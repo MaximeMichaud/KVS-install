@@ -306,7 +306,9 @@ comes_before "$(line_of 'select_import_source')" "$refusal" \
     "the refusal must come once the import source, and so the site version, is known"
 comes_before "$(line_of 'import_check_leftover_dump')" "$refusal" \
     "the refusal must come after the check of a leftover dump"
-comes_before "$refusal" "$(first_line_with 'Removing the containers of')" \
+comes_before "$refusal" "$(line_of 'retirement_prepare_identity || exit 1')" \
+    "the refusal must come before preparing the changed-domain identity"
+comes_before "$refusal" "$(line_of 'retirement_finish || exit 1')" \
     "the refusal must come before the containers of an earlier stack are removed"
 comes_before "$refusal" "$(line_of 'choose_mariadb_version')" \
     "the refusal must come before the MariaDB series is chosen"

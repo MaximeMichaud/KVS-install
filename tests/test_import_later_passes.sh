@@ -343,7 +343,7 @@ branch=$(grep -n '^    import_files_only$' "$SETUP" | cut -d: -f1)
 [ -n "$branch" ] || fail 'the main flow must run import_files_only'
 sed -n "$((branch - 1))p;$((branch + 1))p" "$SETUP" | tr '\n' ' ' | grep -Fq 'if [ "$IMPORT_FILES_ONLY" = yes ]; then     exit 0' ||
     fail 'the pass of the files alone must exit right after it'
-for later in '^if \[ -n "\$PREVIOUS_DOMAIN" \].*KVS_IMPORT_COMPLETED' '^set_env_value DOMAIN "\$DOMAIN"$' '^select_import_source$' '^import_require_empty_volume$' \
+for later in '^retirement_load initial \|\| exit 1$' '^retirement_prepare_identity \|\| exit 1$' '^select_import_source$' '^import_require_empty_volume$' \
     'docker compose down 2>/dev/null' '^import_fetch_source$' '^import_stage_dump$'; do
     line=$(grep -En -- "$later" "$SETUP" | head -n 1 | cut -d: -f1)
     [ -n "$line" ] && [ "$line" -gt "$branch" ] || fail "the pass of the files alone must end before '$later'"
@@ -359,9 +359,26 @@ pass 'the pass of the files alone ends before .env, the images, the containers a
     awk '$0 == "# Load environment" { capture = 1 } $0 == "# Domain validation" { exit } capture { print }' "$SETUP"
     awk '$0 == "if [ -n \"$KVS_DOMAIN_OVERRIDE\" ]; then" { capture = 1 } capture { print } $0 == "DOMAIN=${DOMAIN,,}" { exit }' "$SETUP"
 } > "$TEST_DIR/load-domain.sh"
-awk '/^# An import completed under another domain / { capture = 1 } /^require_single_kvs_archive / { exit } capture { print }' \
+awk '/^retirement_load initial / { capture = 1 } /^require_single_kvs_archive / { exit } capture { print }' \
     "$SETUP" > "$TEST_DIR/invalidate-domain.sh"
-extract remove_env_value import_check_completed > "$TEST_DIR/completed.sh"
+# These receipt fixtures run both phases against an empty engine. The full
+# setup entry-point test covers source inspection between masking and saving.
+cat >> "$TEST_DIR/invalidate-domain.sh" <<'EOF'
+: "${IMPORT_MODE:=false}"
+retirement_prepare_identity || exit 1
+EOF
+extract remove_env_value set_env_value import_check_completed validate_domain validate_site_prefix \
+    retirement_root retirement_ids_ok retirement_engine retirement_load retirement_validate_ids \
+    retirement_list retirement_write retirement_mask_completion retirement_prepare_identity retirement_subset \
+    > "$TEST_DIR/completed.sh"
+MAX_SITE_PREFIX_LENGTH=235
+database_docker_query() {
+    case "$*" in
+        'ps -aq --no-trunc --filter label=com.docker.compose.project='*|\
+        'network ls --no-trunc --filter label=com.docker.compose.project='*) return 0 ;;
+    esac
+    fail 'receipt fixtures must only inspect an empty earlier project'
+}
 # shellcheck source=/dev/null
 source "$TEST_DIR/completed.sh"
 mkdir "$TEST_DIR/domain-cases"
