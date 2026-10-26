@@ -40,6 +40,86 @@ GREEN=''
 NC=''
 RESUME_IMPORT=false
 
+# Selecting a provider must preserve other settings and survive a fresh
+# environment load, including an initially absent provider assignment.
+selection_work="$TEST_DIR/provider-selection"
+mkdir -p "$selection_work"
+{
+    extract_function remove_env_value
+    extract_function set_env_value
+} > "$selection_work/writer.sh"
+awk '
+    /^# SSL provider selection FIRST/ { capture = 1 }
+    /^# Email is optional for self-signed/ { exit }
+    capture { print }
+' "$ROOT_DIR/docker/setup.sh" > "$selection_work/selection.sh"
+cat > "$selection_work/driver.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+RED='' GREEN='' YELLOW='' CYAN='' NC=''
+# shellcheck source=/dev/null
+source "$1/writer.sh"
+# shellcheck source=/dev/null
+source .env
+# shellcheck source=/dev/null
+source "$1/selection.sh"
+printf '%s' "$SSL_PROVIDER" > selected-provider
+EOF
+cat > "$selection_work/read-saved.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+# shellcheck source=/dev/null
+source .env
+printf '%s\0%s\0%s\0%s\0' "${SSL_PROVIDER:-}" "$KEEP" "${EXTRA:-}" "${SHADOW_SSL_PROVIDER:-}"
+EOF
+for selection in 1:letsencrypt 2:zerossl 3:selfsigned; do
+    ssl_choice=${selection%%:*}
+    provider=${selection#*:}
+    for form in plain quoted exported shared-first shared-last absent multiline lookalike-key interpolated duplicate; do
+        (
+            mkdir -p "$selection_work/$provider-$form"
+            cd "$selection_work/$provider-$form"
+            printf 'KEEP=stable\n' > .env
+            case "$form" in
+                shared-first|shared-last) ;;
+                *) printf 'EXTRA=neighbor\n' >> .env ;;
+            esac
+            case "$form" in
+                plain|multiline|lookalike-key) printf 'SSL_PROVIDER=selfsigned\n' >> .env ;;
+                quoted) printf 'SSL_PROVIDER="selfsigned"\n' >> .env ;;
+                exported) printf 'export SSL_PROVIDER=selfsigned\n' >> .env ;;
+                shared-first) printf 'export SSL_PROVIDER="selfsigned" EXTRA="neighbor"\n' >> .env ;;
+                shared-last) printf 'export EXTRA="neighbor" SSL_PROVIDER="selfsigned"\n' >> .env ;;
+                interpolated)
+                    # shellcheck disable=SC2016
+                    printf 'PROVIDER_SEED=selfsigned\nSSL_PROVIDER="${PROVIDER_SEED}"\n' >> .env
+                    ;;
+                duplicate) printf 'SSL_PROVIDER=zerossl\nexport SSL_PROVIDER=selfsigned\n' >> .env ;;
+            esac
+            expected_keep=stable
+            expected_shadow=''
+            if [ "$form" = multiline ]; then
+                expected_keep=$'first\nSSL_PROVIDER=selfsigned\nlast'
+                printf 'KEEP="%s"\n' "$expected_keep" >> .env
+            elif [ "$form" = lookalike-key ]; then
+                expected_shadow=selfsigned
+                printf 'SHADOW_SSL_PROVIDER=selfsigned\n' >> .env
+            fi
+            chmod 0600 .env
+            SSL_CHOICE=$ssl_choice bash "$selection_work/driver.sh" "$selection_work" > selection.log 2>&1
+            [ "$(cat selected-provider)" = "$provider" ] || fail "$form did not select $provider"
+            env -u SSL_PROVIDER -u KEEP -u EXTRA -u SHADOW_SSL_PROVIDER -u BASH_ENV \
+                bash "$selection_work/read-saved.sh" > saved-values
+            mapfile -d '' -t saved < saved-values
+            [ "${saved[0]}" = "$provider" ] || fail "$form did not persist $provider"
+            [ "${saved[1]}" = "$expected_keep" ] || fail "$provider/$form changed the unrelated multiline value"
+            [ "${saved[2]}" = neighbor ] || fail "$provider/$form lost a shared export"
+            [ "${saved[3]}" = "$expected_shadow" ] || fail "$provider/$form changed a different key"
+            [ "$(stat -c %a .env)" = 600 ] || fail "$provider/$form changed environment permissions"
+        ) || fail "provider selection failed for $provider/$form"
+    done
+done
+
 sleep() {
     return 0
 }

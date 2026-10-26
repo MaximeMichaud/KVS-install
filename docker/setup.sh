@@ -3495,19 +3495,19 @@ fi
 case $SSL_CHOICE in
     2)
         SSL_PROVIDER="zerossl"
-        sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=zerossl/" .env
+        set_env_value SSL_PROVIDER "zerossl" || exit 1
         echo -e "${GREEN}Selected ZeroSSL${NC}"
         ;;
     3)
         SSL_PROVIDER="selfsigned"
-        sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=selfsigned/" .env
+        set_env_value SSL_PROVIDER "selfsigned" || exit 1
         echo -e "${YELLOW}Selected self-signed certificate${NC}"
         echo -e "${YELLOW}  → Use for: local development, or with a reverse proxy (Cloudflare, HAProxy, nginx, etc.)${NC}"
         echo -e "${YELLOW}  → Direct NGINX certificates are trusted automatically by PHP and cron${NC}"
         ;;
     *)
         SSL_PROVIDER="letsencrypt"
-        sed -i "s/SSL_PROVIDER=.*/SSL_PROVIDER=letsencrypt/" .env
+        set_env_value SSL_PROVIDER "letsencrypt" || exit 1
         echo -e "${GREEN}Selected Let's Encrypt${NC}"
         ;;
 esac
