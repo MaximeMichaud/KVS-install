@@ -4235,6 +4235,12 @@ configure_mode() {
         return 1
     fi
 
+    if [ "$MODE" = "multi" ] && [ "$SSL_PROVIDER" = "zerossl" ]; then
+        echo -e "${RED}ERROR: Multi-site mode does not support selecting ZeroSSL explicitly${NC}"
+        echo "Use Let's Encrypt, or self-signed certificates for local testing."
+        return 1
+    fi
+
     configure_direct_tls_profile || return $?
 
     if [ "$MODE" = "multi" ]; then
@@ -4245,12 +4251,6 @@ configure_mode() {
 }
 
 configure_mode || exit $?
-
-if [ "$MODE" = "multi" ] && [ "$SSL_PROVIDER" = "zerossl" ]; then
-    echo -e "${RED}ERROR: Multi-site mode does not support selecting ZeroSSL explicitly${NC}"
-    echo "Use Let's Encrypt, or self-signed certificates for local testing."
-    exit 1
-fi
 
 prepare_multi_site_proxy() {
     local tls_mode="public"

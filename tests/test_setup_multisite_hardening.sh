@@ -201,6 +201,7 @@ EOF
 
     printf '%s\n' 'MODE=multi' > .env
     MODE=multi
+    SSL_PROVIDER=letsencrypt
     unset MODE_CHOICE
     HEADLESS=y
     MOCK_COMPOSE_VERSION=2.23.3
@@ -214,6 +215,77 @@ EOF
     [ "$MODE" = multi ] || fail "headless re-run changed a persisted multi mode"
     [ "$PROGRESS_TOTAL" = 13 ] || fail "headless multi re-run used the wrong progress total"
 )
+
+# An unsupported TLS provider must be rejected before retiring the ACME
+# service. Reload the saved settings and retry with a supported provider.
+zerossl_work="$TEST_DIR/zerossl"
+mkdir -p "$zerossl_work"
+extract_function set_env_value "$zerossl_work/set-env.sh"
+for transition in single-to-multi persisted-multi explicit-multi; do
+    for acme_present in true false; do
+        (
+            mkdir -p "$zerossl_work/$transition-$acme_present"
+            cd "$zerossl_work/$transition-$acme_present"
+            MODE=multi
+            cat > .env <<'EOF'
+MODE=multi
+DOMAIN=primary.example.com
+SITE_PREFIX=kvs-primary
+SSL_PROVIDER=zerossl
+COMPOSE_PROFILES=dragonfly,direct-tls
+EOF
+            if [ "$transition" = single-to-multi ]; then
+                sed -i 's/^MODE=multi$/MODE=single/' .env
+            fi
+            # shellcheck source=/dev/null
+            source .env
+            # shellcheck source=/dev/null
+            source "$zerossl_work/set-env.sh"
+            unset COMPOSE_FILE
+            MODE_CHOICE=2
+            [ "$transition" != persisted-multi ] || MODE_CHOICE=''
+            MOCK_ACME_PRESENT=$acme_present
+            MOCK_CADDY_RUNNING=false
+            MOCK_COMPOSE_VERSION=2.35.0
+            MOCK_DOCKER_LOG="$PWD/docker.log"
+            : > "$MOCK_DOCKER_LOG"
+            set +e
+            configure_mode > rejected.log 2>&1
+            rejected_status=$?
+            set -e
+            [ "$rejected_status" -eq 1 ] || fail "$transition accepted multi-site ZeroSSL"
+            grep -Fq 'Multi-site mode does not support selecting ZeroSSL explicitly' rejected.log ||
+                fail "$transition lost the provider diagnostic"
+            [ "$MOCK_ACME_PRESENT" = "$acme_present" ] || fail "$transition removed ACME before refusing"
+            if grep -Eq '^(stop|rm) ' "$MOCK_DOCKER_LOG"; then
+                fail "$transition selected a container for removal before refusing"
+            fi
+            # shellcheck disable=SC2016
+            saved_profiles=$(env -u COMPOSE_PROFILES -u BASH_ENV bash -c 'source .env; printf "%s" "$COMPOSE_PROFILES"')
+            [ "$saved_profiles" = dragonfly,direct-tls ] || fail "$transition changed the TLS profile before refusing"
+
+            # Mode and Compose file selection can already be saved. A retry
+            # must work from that actual partial state, without restoring it.
+            # shellcheck source=/dev/null
+            source .env
+            SSL_PROVIDER=letsencrypt
+            set_env_value SSL_PROVIDER "$SSL_PROVIDER"
+            : > "$MOCK_DOCKER_LOG"
+            configure_mode > accepted.log 2>&1
+            [ "$MOCK_ACME_PRESENT" = false ] || fail "$transition retained ACME after a valid retry"
+            # shellcheck disable=SC2016
+            saved_profiles=$(env -u COMPOSE_PROFILES -u BASH_ENV bash -c 'source .env; printf "%s" "$COMPOSE_PROFILES"')
+            [ "$saved_profiles" = dragonfly ] || fail "$transition did not persist the accepted TLS profile"
+            [ "$MODE" = multi ] && [ "$PROGRESS_TOTAL" = 13 ] || fail "$transition changed the accepted mode"
+            expected_removals=0
+            [ "$acme_present" != true ] || expected_removals=1
+            actual_stops=$(grep -Fxc 'stop kvs-primary-acme' "$MOCK_DOCKER_LOG" || true)
+            actual_removals=$(grep -Fxc 'rm kvs-primary-acme' "$MOCK_DOCKER_LOG" || true)
+            [ "$actual_stops" -eq "$expected_removals" ] && [ "$actual_removals" -eq "$expected_removals" ] ||
+                fail "$transition did not remove exactly the existing ACME service on retry"
+        ) || fail "ZeroSSL refusal/retry failed for $transition/$acme_present"
+    done
+done
 
 # Profile changes must use the saved values, regardless of their shell
 # representation, and remain effective when Compose next reads .env.
