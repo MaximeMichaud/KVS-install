@@ -3674,6 +3674,7 @@ detect_ioncube() {
 
     # Create temp directory for extraction
     local TEMP_DIR="/tmp/kvs-detect-$$"
+    local detected_ioncube=""
     mkdir -p "$TEMP_DIR"
 
     # Extract a key PHP file for inspection (functions_base.php loads early)
@@ -3688,10 +3689,10 @@ detect_ioncube() {
            grep -q "_il_exec" "$TEST_FILE" 2>/dev/null || \
            head -n 1 "$TEST_FILE" | grep -qE '^\s*<\?php\s+//[0-9a-f]{5,6}'; then
             echo -e "${GREEN}✓ IonCube encoded files detected${NC}"
-            set_env_value IONCUBE "YES" || return $?
+            detected_ioncube=YES
         else
             echo -e "${GREEN}✓ Plain PHP files detected (no IonCube)${NC}"
-            set_env_value IONCUBE "NO" || return $?
+            detected_ioncube=NO
         fi
     else
         # Fallback: try admin/index.php
@@ -3702,18 +3703,24 @@ detect_ioncube() {
                grep -q "_il_exec" "$TEST_FILE" 2>/dev/null || \
                head -n 1 "$TEST_FILE" | grep -qE '^\s*<\?php\s+//[0-9a-f]{5,6}'; then
                 echo -e "${GREEN}✓ IonCube encoded files detected${NC}"
-                set_env_value IONCUBE "YES" || return $?
+                detected_ioncube=YES
             else
                 echo -e "${GREEN}✓ Plain PHP files detected (no IonCube)${NC}"
-                set_env_value IONCUBE "NO" || return $?
+                detected_ioncube=NO
             fi
         else
             echo -e "${YELLOW}Could not extract PHP files for inspection. Defaulting to IonCube=YES${NC}"
         fi
     fi
 
-    # Cleanup
-    rm -rf "$TEMP_DIR"
+    local detection_write_status=0
+    if [ -n "$detected_ioncube" ]; then
+        set_env_value IONCUBE "$detected_ioncube" || detection_write_status=$?
+    fi
+
+    # Remove extracted files even when the detected setting could not be saved.
+    rm -rf "$TEMP_DIR" || return $?
+    [ "$detection_write_status" -eq 0 ] || return "$detection_write_status"
 
     # Reload .env to get detected value
     source .env

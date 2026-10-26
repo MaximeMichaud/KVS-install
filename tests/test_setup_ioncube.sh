@@ -270,6 +270,54 @@ done
 IMPORT_SITE_IONCUBE=''
 echo 'PASS: detected and selected loader settings survive fresh loads without changing neighboring values'
 
+# A failed save must return its error after removing the files extracted
+# solely for detection. The production caller uses errexit as this driver does.
+cat > "$TEST_DIR/detection-write-failure.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+RED='' GREEN='' YELLOW='' CYAN='' NC=''
+IMPORT_SITE_IONCUBE=''
+# shellcheck source=/dev/null
+source "$1/functions.sh"
+# shellcheck source=/dev/null
+source .env
+set_env_value() {
+    printf '%s\n' "$TEMP_DIR" > "$DETECTION_PATH"
+    return 23
+}
+detect_ioncube "$1/no-site"
+echo 'UNEXPECTED_CONTINUATION'
+EOF
+for source in archive index; do
+    for encoding in plain encoded; do
+        work
+        archive_file=admin/include/functions_base.php
+        [ "$source" != index ] || archive_file=admin/index.php
+        zip_site "$encoding" "$TEST_DIR/work/kvs-archive/KVS_7.0.2_[example.com].zip" "$archive_file"
+        cp .env "$TEST_DIR/before-write-failure.env"
+        export DETECTION_PATH="$TEST_DIR/extraction-path"
+        : > "$DETECTION_PATH"
+        if bash "$TEST_DIR/detection-write-failure.sh" "$TEST_DIR" > "$TEST_DIR/write-failure-output" 2>&1; then
+            fail "$source/$encoding continued after a failed loader setting write"
+        else
+            failure_status=$?
+        fi
+        extraction_dir=$(cat "$DETECTION_PATH")
+        [ -n "$extraction_dir" ] || fail "$source/$encoding did not reach the failing write"
+        if [ -e "$extraction_dir" ]; then
+            # Clean only the directory reported by this owned test process.
+            rm -rf -- "$extraction_dir"
+            fail "$source/$encoding left extracted files after the failed write"
+        fi
+        [ "$failure_status" -eq 23 ] || fail "$source/$encoding lost the persistence error"
+        cmp -s .env "$TEST_DIR/before-write-failure.env" || fail "$source/$encoding changed the failed configuration"
+        if grep -Fq UNEXPECTED_CONTINUATION "$TEST_DIR/write-failure-output"; then
+            fail "$source/$encoding continued past the failed detection"
+        fi
+    done
+done
+echo 'PASS: failed detection writes preserve their error and clean extracted files'
+
 # No IONCUBE rewrite of setup.sh may match anything but the IONCUBE line,
 # whatever its quotes, branch or delimiter.
 unanchored=$(grep -E '(^|[^[:alnum:]_])sed ' "$ROOT_DIR/docker/setup.sh" |
