@@ -644,3 +644,61 @@ for prefix_path in choose reset; do
     done
 done
 echo 'ok 6 - selected and reset prefixes preserve exported, interpolated and multiline settings'
+
+# Retirement uses the prior installation's parsed mode. The newly accepted
+# mode may differ; it must not turn a multi-site installation into an old
+# single-site project or treat text inside another value as a mode setting.
+# shellcheck disable=SC2016  # Expanded by the isolated driver after preparation.
+sed 's/^retirement_finish$/MODE=$ACCEPTED_MODE\nretirement_finish/' \
+    "$TMP_ROOT/project-driver.sh" > "$TMP_ROOT/mode-driver.sh"
+for mode_form in single multi quoted_single single_quoted_multi double_quoted_multi commented_multi exported_multi indented_multi \
+    duplicate_multi reference_multi real_and_multiline multiline_only inherited_multi inherited_single absent empty; do
+    for accepted_mode in single multi; do
+        case_dir="$TMP_ROOT/mode-$mode_form-$accepted_mode"
+        mkdir -p "$case_dir"
+        printf 'DOMAIN=example.test\nSITE_PREFIX=kvs-saved\nCOMPOSE_PROJECT_NAME=kvs-saved\nEXTRA=preserved\n' > "$case_dir/.env"
+        previous_mode=single
+        mode_environment=()
+        case "$mode_form" in
+            single|real_and_multiline) echo 'MODE=single' >> "$case_dir/.env" ;;
+            multi) echo 'MODE=multi' >> "$case_dir/.env"; previous_mode=multi ;;
+            quoted_single) echo "MODE='single'" >> "$case_dir/.env" ;;
+            single_quoted_multi) echo "MODE='multi'" >> "$case_dir/.env"; previous_mode=multi ;;
+            double_quoted_multi) echo 'MODE="multi"' >> "$case_dir/.env"; previous_mode=multi ;;
+            commented_multi) echo 'MODE=multi # existing installation' >> "$case_dir/.env"; previous_mode=multi ;;
+            exported_multi) echo 'export MODE=multi' >> "$case_dir/.env"; previous_mode=multi ;;
+            indented_multi) echo '  MODE=multi' >> "$case_dir/.env"; previous_mode=multi ;;
+            duplicate_multi) printf 'MODE=single\nexport MODE=multi\n' >> "$case_dir/.env"; previous_mode=multi ;;
+            reference_multi)
+                # shellcheck disable=SC2016  # Expanded only by the actual setup load.
+                printf 'MODE_SEED=multi\nMODE="${MODE_SEED}"\n' >> "$case_dir/.env"
+                previous_mode=multi ;;
+            inherited_multi) mode_environment=(MODE=multi); previous_mode=multi ;;
+            inherited_single) mode_environment=(MODE=single) ;;
+            empty) echo "MODE=''" >> "$case_dir/.env" ;;
+        esac
+        case "$mode_form" in
+            real_and_multiline|multiline_only) printf 'KEEP="first\nMODE=multi\nlast"\n' >> "$case_dir/.env" ;;
+        esac
+        chmod 600 "$case_dir/.env"
+        (
+            cd "$case_dir"
+            env -u MODE "${mode_environment[@]}" PATH="$TMP_ROOT/prior-bin:$PATH" \
+                DOCKER_CALL_LOG="$case_dir/calls" PROJECT_TEST_ROOT="$TMP_ROOT" NEXT_DOMAIN=other.test \
+                ACCEPTED_MODE="$accepted_mode" bash "$TMP_ROOT/mode-driver.sh"
+        ) > "$case_dir/output" 2>&1 || fail "$mode_form/$accepted_mode failed: $(cat "$case_dir/output")"
+        [ -f "$case_dir/calls" ] || : > "$case_dir/calls"
+        python3 - "$case_dir/calls" "$previous_mode" <<'PY'
+import json,sys
+calls=[json.loads(line) for line in open(sys.argv[1])]
+mutations=[c for c in calls if c[:2] in [['docker','stop'],['docker','rm']] or c[:3]==['docker','network','rm']]
+expected=[] if sys.argv[2]=='multi' else [['docker','stop','a'*64],['docker','rm','a'*64],['docker','network','rm','1'*64]]
+assert mutations==expected,(mutations,expected)
+assert all(not c[0].startswith('FORBIDDEN') for c in calls)
+PY
+        # shellcheck disable=SC2016  # A separate reader checks the persisted neighbor.
+        saved_extra=$(env -u MODE -u EXTRA bash -c 'source "$1/.env"; printf "%s" "$EXTRA"' bash "$case_dir")
+        [ "$saved_extra" = preserved ] || fail 'prior-mode handling changed an unrelated value'
+    done
+done
+echo 'ok 7 - retirement follows the parsed prior mode, independently of the next mode'

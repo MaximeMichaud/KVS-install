@@ -970,7 +970,7 @@ retirement_prepare_identity() {
         [ "$IMPORT_MODE" = true ] || { echo 'ERROR: a pending retirement requires the import to be selected again.' >&2; return 1; }
         retirement_load initial || return 1
     elif [ "$IMPORT_MODE" = true ] && [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] &&
-        [ "$PREVIOUS_DOMAIN" != example.com ] && [ "$(sed -n 's/^MODE=//p' .env 2>/dev/null | tail -n 1)" != multi ]; then
+        [ "$PREVIOUS_DOMAIN" != example.com ] && [ "${MODE:-}" != multi ]; then
         reset_prefix=yes
         RETIRE_PROJECT=${COMPOSE_PROJECT_NAME:-}
         if [ -n "$RETIRE_PROJECT" ] && [ "$RETIRE_PROJECT" != kvs ]; then
