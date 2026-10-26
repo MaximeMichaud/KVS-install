@@ -62,6 +62,13 @@ questions_harness="$TEST_DIR/questions.sh"
 for name in setup_select_manticore setup_note_manticore_rebuild select_manticore set_env_value remove_env_value; do
     grep -q "^${name}() {" "$questions_harness" || fail "$name not found in setup.sh"
 done
+# Match the normal caller's file-owned input policy before Step 6.
+awk '
+    $0 == "# Load environment" { capture = 1; next }
+    capture { print }
+    capture && $0 == "source .env" { exit }
+' "$SETUP" > "$TEST_DIR/initial-load.sh"
+
 # Compose lists the images of the service and of the services it depends
 # on: the database's comes with Manticore's.
 cat > "$TEST_DIR/bin/docker" <<'MOCK'
@@ -95,7 +102,7 @@ pending() { grep -Fxq 'MANTICORE_REBUILD_PENDING=true' "$TEST_DIR/site/.env"; }
 # shell, from the site directory.
 run_request() {
     rm -f "$TEST_DIR/calls"
-    (cd "$TEST_DIR/site" && bash -c 'set -e; source "$1"; ENABLE_MANTICORE="$2"; IMPORT_MODE="$3"; RESUME_IMPORT="$4"; setup_request_manticore_rebuild' \
+    (cd "$TEST_DIR/site" && bash -c 'set -e; source "$1"; source "$TEST_ROOT/initial-load.sh"; ENABLE_MANTICORE="$2"; IMPORT_MODE="$3"; RESUME_IMPORT="$4"; setup_request_manticore_rebuild' \
         _ "$request_harness" "$@") > "$TEST_DIR/out" 2>&1
 }
 
@@ -193,6 +200,8 @@ setup_run() {
         IMPORT_MODE=$5
         setup_note_manticore_rebuild
         [ "$6" = step6 ] || exit 3
+        # Setup reloads the saved settings after the database question.
+        source .env
         rm -f "$TEST_ROOT/calls"
         RESUME_IMPORT=false
         setup_request_manticore_rebuild
@@ -443,5 +452,56 @@ cmp -s "$TEST_DIR/site/.env" "$TEST_DIR/before-clear.env" || fail 'failed marker
 [ "$(cat "$TEST_DIR/failed-clear-memory")" = true ] || fail 'failed marker removal discarded the loaded request'
 check_calls 'failed marker removal' requested
 echo 'PASS: a failed marker removal keeps the saved and loaded request and returns its error'
+
+
+# Read the saved marker through setup's actual initial load. A marker can
+# use any supported assignment form; unrelated multiline text cannot ask
+# for a rebuild. Clearing it after a successful request prevents another.
+for marker_form in plain quoted exported indented commented duplicate interpolated multiline fake_only false duplicate_false; do
+    expected_keep=stable expected_pending='' expected_request=requested
+    case "$marker_form" in
+        plain|multiline) saved_marker='MANTICORE_REBUILD_PENDING=true' ;;
+        quoted) saved_marker="MANTICORE_REBUILD_PENDING='true'" ;;
+        exported) saved_marker='export MANTICORE_REBUILD_PENDING=true' ;;
+        indented) saved_marker='  MANTICORE_REBUILD_PENDING=true' ;;
+        commented) saved_marker='MANTICORE_REBUILD_PENDING=true # interrupted run' ;;
+        duplicate) saved_marker=$'MANTICORE_REBUILD_PENDING=false\nexport MANTICORE_REBUILD_PENDING=true' ;;
+        interpolated)
+            # shellcheck disable=SC2016  # Parsed by the production initial load.
+            saved_marker=$'REBUILD_SEED=true\nMANTICORE_REBUILD_PENDING="${REBUILD_SEED}"'
+            ;;
+        fake_only) saved_marker=''; expected_request=kept ;;
+        false) saved_marker='MANTICORE_REBUILD_PENDING=false'; expected_pending=false; expected_request=kept ;;
+        duplicate_false)
+            saved_marker=$'MANTICORE_REBUILD_PENDING=true\nexport MANTICORE_REBUILD_PENDING=false'
+            expected_pending=false expected_request=kept
+            ;;
+    esac
+    case "$marker_form" in
+        multiline|fake_only)
+            expected_keep='first
+MANTICORE_REBUILD_PENDING=true
+last'
+            ;;
+    esac
+    write_env 'ENABLE_MANTICORE=true' 'EXTRA=neighbor' "$saved_marker" "KEEP=\"$expected_keep\""
+    run_request true false false || fail "$marker_form request failed: $(cat "$TEST_DIR/out")"
+    check_calls "$marker_form saved marker" "$expected_request"
+    run_request true false false || fail "$marker_form second request failed: $(cat "$TEST_DIR/out")"
+    check_calls "$marker_form second request" kept
+    # shellcheck disable=SC2016  # A fresh reader checks persisted values.
+    env -i PATH="$PATH" bash -ec 'source "$1/.env"; printf "%s\0%s\0%s" "${MANTICORE_REBUILD_PENDING-}" "$KEEP" "$EXTRA"' \
+        bash "$TEST_DIR/site" > "$TEST_DIR/read-marker-values"
+    python3 - "$TEST_DIR/read-marker-values" "$expected_pending" "$expected_keep" <<'PY'
+from pathlib import Path
+import sys
+values=Path(sys.argv[1]).read_text().split('\0')
+assert values==[sys.argv[2],sys.argv[3],'neighbor'],values
+PY
+done
+write_env 'ENABLE_MANTICORE=true'
+MANTICORE_REBUILD_PENDING=true run_request true false false || fail 'inherited-only marker check failed'
+check_calls 'inherited-only marker' kept
+echo 'PASS: parsed pending markers request exactly one rebuild, while unrelated or inherited-only text requests none'
 
 echo "All Manticore rebuild request tests passed"

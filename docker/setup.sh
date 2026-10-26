@@ -3317,7 +3317,7 @@ fi
 chmod 600 .env
 
 # Load environment
-unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED KVS_IMPORT_PENDING_RETIREMENT
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED KVS_IMPORT_PENDING_RETIREMENT MANTICORE_REBUILD_PENDING
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
@@ -5896,7 +5896,7 @@ setup_request_manticore_rebuild() {
     local images image
     [ "${ENABLE_MANTICORE:-false}" = true ] || return 0
     [ "$IMPORT_MODE" = true ] ||
-        [ "$(sed -n 's/^MANTICORE_REBUILD_PENDING=//p' .env | tail -n 1)" = true ] || return 0
+        [ "${MANTICORE_REBUILD_PENDING:-}" = true ] || return 0
     if [ "${RESUME_IMPORT:-false}" = true ]; then
         # The images of the service and of those it depends on, one per line.
         images=$(setup_resume_docker_query "Checking the saved Manticore image..." \
