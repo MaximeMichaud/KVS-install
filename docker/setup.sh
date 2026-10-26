@@ -2025,14 +2025,26 @@ import_inspect_remote() {
     # Paths are validated above; quote each whole list for Bash and Compose.
     if [ -f .env ]; then
         if [ -n "$IMPORT_EXCLUDE" ]; then
-            set_env_value IMPORT_EXCLUDE "'$IMPORT_EXCLUDE'" || true
+            set_env_value IMPORT_EXCLUDE "'$IMPORT_EXCLUDE'" || {
+                echo "ERROR: Could not save IMPORT_EXCLUDE to .env; the import was stopped before transfer." >&2
+                exit 1
+            }
         else
-            remove_env_value IMPORT_EXCLUDE
+            remove_env_value IMPORT_EXCLUDE || {
+                echo "ERROR: Could not remove IMPORT_EXCLUDE from .env; the import was stopped before transfer." >&2
+                exit 1
+            }
         fi
         if [ -n "$IMPORT_INCLUDE" ]; then
-            set_env_value IMPORT_INCLUDE "'$IMPORT_INCLUDE'" || true
+            set_env_value IMPORT_INCLUDE "'$IMPORT_INCLUDE'" || {
+                echo "ERROR: Could not save IMPORT_INCLUDE to .env; the import was stopped before transfer." >&2
+                exit 1
+            }
         else
-            remove_env_value IMPORT_INCLUDE
+            remove_env_value IMPORT_INCLUDE || {
+                echo "ERROR: Could not remove IMPORT_INCLUDE from .env; the import was stopped before transfer." >&2
+                exit 1
+            }
         fi
     fi
     if [ -n "$IMPORT_EXCLUDE$IMPORT_INCLUDE" ]; then

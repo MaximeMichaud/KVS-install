@@ -61,7 +61,7 @@ pass 'the exporter is asked to skip the size measure, or given the budget'
 # import_inspect_remote against a stub exporter: the budget it hands over
 # and the tools, rewrites and take-over it asks for land in calls. It runs
 # in a directory without .env by default; filter round trips provide one.
-extract remove_env_value set_env_value import_save_nginx_config import_remote_size_text import_remote_earlier_pass import_inspect_remote > "$TEST_DIR/inspect.sh"
+extract remove_env_value set_env_value import_save_nginx_config import_remote_size_text import_remote_earlier_pass import_inspect_remote select_import_source import_files_only import_fetch_source > "$TEST_DIR/inspect.sh"
 # shellcheck source=/dev/null
 source "$TEST_DIR/inspect.sh"
 inspect() {
@@ -78,6 +78,8 @@ inspect() {
         IMPORT_SSH_KEY='' IMPORT_SSH_ACCEPT_NEW=y IMPORT_EXCLUDE=${FIXTURE_EXCLUDE:-} IMPORT_INCLUDE=${FIXTURE_INCLUDE:-}
         IMPORT_DATABASE_FORMAT=auto IMPORT_REMOTE_SUDO_ERROR='' IMPORT_EXPORTER="$ROOT_DIR/kvs-export.sh"
         IMPORT_NGINX_REWRITES=${FIXTURE_REWRITES:-} IMPORT_MODE=true IMPORT_REUSE_SITE_DIR=${FIXTURE_REUSE:-}
+        IMPORT_SOURCE=remote IMPORT_CHOICE='' IMPORT_DATABASE_FORMAT_REQUEST=auto
+        PREVIOUS_DOMAIN=example.test IMPORT_LIB="$ROOT_DIR/docker/lib/import.sh"
         import_ensure_tool() { echo "tool $1" >> "$TEST_DIR/calls"; }
         import_ssh_setup() { IMPORT_SSH_TARGET=root@old.test; }
         import_ssh_close() { return 0; }
@@ -88,6 +90,22 @@ inspect() {
         import_remote_free_space_check() { return 0; }
         import_prepare_source_nginx_rewrites() { echo rewrites >> "$TEST_DIR/calls"; }
         import_take_over_site() { echo take-over >> "$TEST_DIR/calls"; }
+        import_check_completed() { return 0; }
+        import_check_kvs_archive_version() { return 0; }
+        refuse_unbuildable_kvs_php() { return 0; }
+        import_record_source_domain() { return 0; }
+        import_check_domain() { return 0; }
+        import_confirm() { echo confirmation >> "$TEST_DIR/calls"; }
+        import_fetch_remote() { echo transfer >> "$TEST_DIR/calls"; }
+        import_validate_local_materials() { return 0; }
+        # Fail the real editor at its temporary-file boundary for one key.
+        # Bash exposes the editor's local key to this command function.
+        mktemp() {
+            if [ -n "${FIXTURE_FAIL_KEY:-}" ] && [ "${key:-}" = "$FIXTURE_FAIL_KEY" ]; then
+                return 73
+            fi
+            command mktemp "$@"
+        }
         import_remote_detect() {
             echo "budget $4" >> "$TEST_DIR/calls"
             printf '%s\0%s\0' "$5" "$6" > "$TEST_DIR/detected-filters"
@@ -105,7 +123,20 @@ inspect() {
             source "$TEST_DIR/filter-load.sh" || exit $?
         fi
         : > "$TEST_DIR/calls"
-        import_inspect_remote
+        case "${FIXTURE_ENTRY:-inspect}" in
+            normal)
+                IMPORT_FILES_ONLY=no
+                select_import_source
+                import_fetch_source
+                echo entry-success >> "$TEST_DIR/calls"
+                ;;
+            files-only)
+                IMPORT_FILES_ONLY=yes
+                import_files_only
+                echo entry-success >> "$TEST_DIR/calls"
+                ;;
+            *) import_inspect_remote ;;
+        esac
     ) > "$TEST_DIR/inspect.out" 2>&1 || status=$?
     provided "$TEST_DIR/inspect.out"
     return "$status"
@@ -144,6 +175,77 @@ for filter_case in single multiple assignments punctuation tabs empty; do
     grep -Fxq 'OTHER=preserved' "$filter_dir/.env" || fail "$filter_case changed another saved setting"
 done
 pass 'saved multi-path filters reach the next inspection unchanged without executing path tokens'
+
+# Real callers must stop on persistence errors even when called in a
+# conditional context, where Bash does not propagate failures via errexit.
+for filter_entry in normal files-only; do
+    for filter_case in save_first save_second remove_first remove_second guard_first guard_second save_ok remove_ok; do
+        filter_dir="$TEST_DIR/persist-$filter_entry-$filter_case"
+        mkdir -p "$filter_dir"
+        printf 'DOMAIN=example.test\nOTHER=preserved\n' > "$filter_dir/.env"
+        cp "$filter_dir/.env" "$TEST_DIR/expected-env"
+        filter_exclude='cache extra=path'; filter_include='.hidden mount=storage'
+        filter_key=IMPORT_EXCLUDE; filter_operation=save; filter_fail=''; filter_saved=no
+        case "$filter_case" in
+            save_first) filter_fail=IMPORT_EXCLUDE ;;
+            save_second)
+                filter_key=IMPORT_INCLUDE; filter_fail=IMPORT_INCLUDE
+                printf "IMPORT_EXCLUDE='cache extra=path'\n" >> "$TEST_DIR/expected-env"
+                ;;
+            remove_first|remove_second|remove_ok)
+                filter_exclude=''; filter_include=''; filter_operation=remove
+                printf "IMPORT_EXCLUDE=''\nIMPORT_INCLUDE=''\n" >> "$filter_dir/.env"
+                if [ "$filter_case" = remove_first ]; then
+                    filter_fail=IMPORT_EXCLUDE
+                    cp "$filter_dir/.env" "$TEST_DIR/expected-env"
+                elif [ "$filter_case" = remove_second ]; then
+                    filter_key=IMPORT_INCLUDE; filter_fail=IMPORT_INCLUDE
+                    printf "IMPORT_INCLUDE=''\n" >> "$TEST_DIR/expected-env"
+                fi
+                ;;
+            guard_first)
+                filter_saved=yes
+                printf "IMPORT_EXCLUDE=cache extra=path\nIMPORT_INCLUDE='.hidden'\n" >> "$filter_dir/.env"
+                cp "$filter_dir/.env" "$TEST_DIR/expected-env"
+                ;;
+            guard_second)
+                filter_saved=yes; filter_key=IMPORT_INCLUDE
+                printf "IMPORT_EXCLUDE='cache'\nIMPORT_INCLUDE=.hidden mount=storage\n" >> "$filter_dir/.env"
+                printf "IMPORT_INCLUDE=.hidden mount=storage\nIMPORT_EXCLUDE='cache'\n" >> "$TEST_DIR/expected-env"
+                ;;
+            save_ok)
+                printf "IMPORT_EXCLUDE='cache extra=path'\nIMPORT_INCLUDE='.hidden mount=storage'\n" >> "$TEST_DIR/expected-env"
+                ;;
+        esac
+        chmod 600 "$filter_dir/.env"
+        filter_owner=$(stat -c '%u:%g' "$filter_dir/.env")
+        filter_status=0
+        FIXTURE_INSPECT_DIR="$filter_dir" FIXTURE_EXCLUDE="$filter_exclude" FIXTURE_INCLUDE="$filter_include" \
+            FIXTURE_ENTRY="$filter_entry" FIXTURE_FAIL_KEY="$filter_fail" FIXTURE_FROM_SAVED="$filter_saved" inspect || filter_status=$?
+        case "$filter_case" in
+            *_ok)
+                [ "$filter_status" = 0 ] || fail "$filter_entry/$filter_case failed: $(cat "$TEST_DIR/inspect.out")"
+                grep -Fxq transfer "$TEST_DIR/calls" || fail 'a successful inspection did not reach its transfer boundary'
+                ;;
+            *)
+                [ "$filter_status" = 1 ] || fail "$filter_entry/$filter_case did not stop on a persistence error: $(cat "$TEST_DIR/inspect.out")"
+                grep -Fq "Could not $filter_operation $filter_key from .env" "$TEST_DIR/inspect.out" ||
+                    grep -Fq "Could not $filter_operation $filter_key to .env" "$TEST_DIR/inspect.out" ||
+                    fail "$filter_entry/$filter_case did not identify the failed setting"
+                if grep -Eq '^(confirmation|transfer|entry-success)$' "$TEST_DIR/calls"; then
+                    fail "$filter_entry/$filter_case continued after a persistence error"
+                fi
+                if grep -Fq 'kept in .env for the next pass' "$TEST_DIR/inspect.out"; then
+                    fail "$filter_entry/$filter_case claimed a failed save succeeded"
+                fi
+                ;;
+        esac
+        cmp -s "$TEST_DIR/expected-env" "$filter_dir/.env" || fail "$filter_entry/$filter_case changed unexpected settings"
+        [ "$(stat -c '%a:%u:%g' "$filter_dir/.env")" = "600:$filter_owner" ] || fail 'filter persistence changed file permissions or ownership'
+        if compgen -G "$filter_dir/.env.tmp.*" > /dev/null; then fail 'filter persistence left a temporary file'; fi
+    done
+done
+pass 'both import callers stop before confirmation or transfer on failed filter saves and removals'
 
 # The size of a site that already holds an earlier pass from the same old
 # server is not measured, on any pass.
