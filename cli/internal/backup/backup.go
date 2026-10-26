@@ -29,6 +29,7 @@ import (
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/diskspace"
 	"github.com/MaximeMichaud/KVS-install/cli/internal/dockerx"
+	"github.com/MaximeMichaud/KVS-install/cli/internal/instance"
 )
 
 // The commands below run inside the MariaDB container. The password comes
@@ -1407,23 +1408,14 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// domainOf reads DOMAIN from an .env, so a backup says which site it
-// belongs to without the rest of kvsctl.
+// domainOf uses the same .env parsing as the live instance, so restore
+// recognizes the site a backup belongs to regardless of its .env syntax.
 func domainOf(path string) string {
-	f, err := os.Open(path)
+	env, err := instance.ReadEnv(path)
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		key, value, ok := strings.Cut(strings.TrimSpace(scanner.Text()), "=")
-		if !ok || strings.TrimSpace(key) != "DOMAIN" {
-			continue
-		}
-		return strings.Trim(strings.TrimSpace(value), `"'`)
-	}
-	return ""
+	return env["DOMAIN"]
 }
 
 // excerpt is the start of an answer that was not the one expected, short

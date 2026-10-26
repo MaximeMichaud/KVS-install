@@ -1630,9 +1630,9 @@ func TestArchivesWithoutASequence(t *testing.T) {
 	}
 }
 
-// backup.json records the KVS version the site runs when it is given, and
-// says nothing of it when it is not.
-func TestCreateRecordsTheKVSVersion(t *testing.T) {
+// backup.json records the KVS version when given and the effective domain
+// of the site, so restore recognizes archives of the same installation.
+func TestCreateRecordsSiteIdentity(t *testing.T) {
 	plentyOfSpace(t)
 	stubServer(t, dumpOf("SELECT 1;\n"))
 	for _, kvs := range []string{"6.3.2", ""} {
@@ -1665,6 +1665,49 @@ func TestCreateRecordsTheKVSVersion(t *testing.T) {
 		if list, _ := List(dir); len(list) != 1 || list[0].KVSVersion != kvs {
 			t.Errorf("List = %+v", list)
 		}
+	}
+	t.Setenv("DOMAIN", "inherited.test")
+	t.Setenv("BACKUP_TEST_SUFFIX", "unrelated")
+	for _, c := range []struct {
+		name, env, example, want string
+	}{
+		{"plain", "DOMAIN=example.test\n", "", "example.test"},
+		{"inline comment", "DOMAIN=example.test # this site\n", "", "example.test"},
+		{"quoted comment", "DOMAIN=\"example.test\" # this site\n", "", "example.test"},
+		{"export", "export DOMAIN=example.test\n", "", "example.test"},
+		{"duplicate", "DOMAIN=old.test\nDOMAIN=example.test\n", "", "example.test"},
+		{"reference", "SITE_DOMAIN=example.test\nDOMAIN=${SITE_DOMAIN}\n", "", "example.test"},
+		{"example isolation", "DOMAIN=example.${BACKUP_TEST_SUFFIX:-test}\n", "BACKUP_TEST_SUFFIX=test\n", "example.test"},
+		{"inherited", "DOMAIN\n", "", "inherited.test"},
+		{"absent", "UNRELATED=value\n", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			env := filepath.Join(dir, ".env")
+			if err := os.WriteFile(env, []byte(c.env), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(c.example), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Create(context.Background(), dir, "0.2.0", "kvs-mariadb", env, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			meta, _, err := Describe(result.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta.Domain != c.want {
+				t.Errorf("backup identifies site %q, want the effective domain %q", meta.Domain, c.want)
+			}
+			if list, err := List(dir); err != nil || len(list) != 1 || list[0].Domain != c.want {
+				t.Errorf("backup listing has the wrong site identity: %+v, %v", list, err)
+			}
+			if archived, err := ArchivedEnv(result.Path); err != nil || string(archived) != c.env {
+				t.Errorf("recording the domain changed the archived .env: %q, %v", archived, err)
+			}
+		})
 	}
 }
 
