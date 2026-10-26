@@ -36,6 +36,7 @@ extract_function remove_compose_profile "$mode_function"
 extract_function require_multi_compose_version "$mode_function"
 extract_function compose_files_for "$mode_function"
 extract_function set_compose_file "$mode_function"
+extract_function remove_env_value "$mode_function"
 extract_function select_mode "$mode_function"
 extract_function configure_direct_tls_profile "$mode_function"
 extract_function configure_mode "$mode_function"
@@ -49,10 +50,6 @@ set_env_value() {
     else
         printf '%s=%s\n' "$key" "$value" >> .env
     fi
-}
-
-remove_env_value() {
-    sed -i "/^$1=/d" .env
 }
 
 version_at_least() {
@@ -361,6 +358,99 @@ EOF
         done
     ) || fail "saved release pins failed for $form"
 done
+
+# Once the release override is gone, remove every saved spelling of its
+# selection while retaining other assignments, even on the same line.
+for form in plain double single commented exported indented tabbed indented-export exported-quoted duplicate combined-first combined-last combined-duplicate absent; do
+    (
+        mkdir -p "$release_pins_work/removed-$form/docker-config"
+        cd "$release_pins_work/removed-$form"
+        cat > docker-compose.yml <<'EOF'
+services:
+  nginx:
+    image: synthetic-nginx:source
+    environment:
+      KEEP: ${KEEP}
+      EXTRA: ${EXTRA:-}
+      COMPOSE_FILES: ${COMPOSE_FILES}
+EOF
+        cat > .env <<'EOF'
+MODE=single
+DOMAIN=pinned.example.com
+SITE_PREFIX=kvs-pinned
+SSL_PROVIDER=selfsigned
+COMPOSE_PROFILES=
+EOF
+        saved_files=docker-compose.yml:docker-compose.release.yml
+        case "$form" in
+            plain) printf 'COMPOSE_FILE=%s\n' "$saved_files" >> .env ;;
+            double) printf 'COMPOSE_FILE="%s"\n' "$saved_files" >> .env ;;
+            single) printf "COMPOSE_FILE='%s'\n" "$saved_files" >> .env ;;
+            commented) printf 'COMPOSE_FILE=%s # installed release\n' "$saved_files" >> .env ;;
+            exported) printf 'export COMPOSE_FILE=%s\n' "$saved_files" >> .env ;;
+            indented) printf '  COMPOSE_FILE=%s\n' "$saved_files" >> .env ;;
+            tabbed) printf '\tCOMPOSE_FILE=%s\n' "$saved_files" >> .env ;;
+            indented-export) printf '  export COMPOSE_FILE=%s\n' "$saved_files" >> .env ;;
+            exported-quoted) printf 'export COMPOSE_FILE="%s"\n' "$saved_files" >> .env ;;
+            duplicate) printf 'COMPOSE_FILE=docker-compose.yml\nexport COMPOSE_FILE="%s"\n' "$saved_files" >> .env ;;
+            combined-first) printf 'export COMPOSE_FILE="%s" EXTRA=kept\n' "$saved_files" >> .env ;;
+            combined-last) printf 'export EXTRA="kept" COMPOSE_FILE="%s"\n' "$saved_files" >> .env ;;
+            combined-duplicate) printf 'export COMPOSE_FILE="%s" EXTRA="kept" COMPOSE_FILE="%s"\n' "$saved_files" "$saved_files" >> .env ;;
+        esac
+        cat >> .env <<'EOF'
+KEEP="first line
+  COMPOSE_FILE=inside-another-value
+last line"
+# export COMPOSE_FILE=comment
+COMPOSE_FILES=unrelated
+EOF
+        unset COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE EXTRA KEEP
+        COMPOSE_PROJECT_NAME=kvs-unset-test
+        export COMPOSE_PROJECT_NAME
+        DOCKER_HOST="unix://$PWD/no-engine.sock"
+        DOCKER_CONFIG="$PWD/docker-config"
+        export DOCKER_HOST DOCKER_CONFIG
+        # shellcheck source=/dev/null
+        source "$profiles_work/load-env.sh"
+        # shellcheck source=/dev/null
+        source "$profiles_work/set-env.sh"
+        MODE_CHOICE=1
+        configure_mode > configured.log
+        "$REAL_DOCKER" compose config --format json > active-model.json || fail "$form kept a missing override active"
+        env -u COMPOSE_FILE -u EXTRA -u KEEP "$REAL_DOCKER" compose config --format json > reloaded-model.json ||
+            fail "$form left a missing override in .env"
+        expected_extra=
+        case "$form" in combined-*) expected_extra=kept ;; esac
+        for model in active-model.json reloaded-model.json; do
+            jq -e --arg keep $'first line\n  COMPOSE_FILE=inside-another-value\nlast line' --arg extra "$expected_extra" \
+                '.services.nginx.environment | .KEEP == $keep and .EXTRA == $extra and .COMPOSE_FILES == "unrelated"' \
+                "$model" >/dev/null || fail "$form/$model changed an unrelated setting"
+        done
+        grep -Fxq '# export COMPOSE_FILE=comment' .env || fail "$form changed an unrelated comment"
+        cp .env removed.env
+        remove_env_value COMPOSE_FILE
+        cmp -s removed.env .env || fail "$form removal was not idempotent"
+    ) || fail "removed release pins failed for $form"
+done
+
+# A bare value consumes the rest of its line in Compose. Bash instead sees
+# another assignment, so choosing either interpretation would change data.
+(
+    cd "$release_pins_work"
+    for ambiguous in 'OTHER=literal COMPOSE_FILE=embedded' 'export COMPOSE_FILE=missing.yml EXTRA=kept'; do
+        printf '%s\n' "$ambiguous" > .env
+        cp .env ambiguous.env
+        if remove_env_value COMPOSE_FILE > remove.out 2> remove.err; then
+            fail "removal accepted different settings in Bash and Compose"
+        fi
+        cmp -s ambiguous.env .env || fail "refused removal changed .env"
+    done
+    printf '%s\n' 'OTHER=literal OTHER_KEY=embedded' > unrelated.env
+    cat unrelated.env > .env
+    printf '%s\n' 'export COMPOSE_FILE=missing.yml' >> .env
+    remove_env_value COMPOSE_FILE
+    cmp -s unrelated.env .env || fail "removal changed an unrelated ambiguous line"
+)
 (
     cd "$release_pins_work"
     cat > .env <<'EOF'

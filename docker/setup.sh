@@ -2979,8 +2979,105 @@ validate_email() {
 
 
 remove_env_value() {
-    local key="$1"
-    sed -i "/^${key}=/d" .env
+    local key="$1" data output="" offset=0 record begin end word character complete
+    local index following removed cursor temporary
+    local -a words starts ends drop
+
+    # A trailing marker preserves every newline through command substitution.
+    data=$(cat .env && printf '.') || return 1
+    data=${data%.}
+    while [ "$offset" -lt "${#data}" ]; do
+        record=$offset
+        words=() starts=() ends=() drop=()
+        while [ "$offset" -lt "${#data}" ]; do
+            character=${data:offset:1}
+            case "$character" in
+                $'\n') offset=$((offset + 1)); break ;;
+                ' '|$'\t'|$'\r') offset=$((offset + 1)); continue ;;
+                '#')
+                    while [ "$offset" -lt "${#data}" ] && [ "${data:offset:1}" != $'\n' ]; do
+                        offset=$((offset + 1))
+                    done
+                    continue
+                    ;;
+            esac
+            begin=$offset
+            complete=false
+            while [ "$offset" -lt "${#data}" ]; do
+                character=${data:offset:1}
+                case "$character" in
+                    ' '|$'\t'|$'\r'|$'\n')
+                        word=${data:begin:offset-begin}
+                        # Parse only: quotes, substitutions and escaped spaces
+                        # stay in their word without evaluating any value.
+                        if BASH_ENV=/dev/null "$BASH" -n <<< "for kvs_env_word in $word; do :; done" 2>/dev/null; then
+                            complete=true
+                            break
+                        fi
+                        ;;
+                esac
+                offset=$((offset + 1))
+            done
+            word=${data:begin:offset-begin}
+            if [ "$complete" != true ] && ! BASH_ENV=/dev/null "$BASH" -n <<< "for kvs_env_word in $word; do :; done" 2>/dev/null; then
+                echo "ERROR: Could not safely remove $key from .env; the file was not changed." >&2
+                return 1
+            fi
+            words+=("$word") starts+=("$begin") ends+=("$offset")
+            drop+=(false)
+        done
+        removed=0
+        for index in "${!words[@]}"; do
+            case "${words[$index]}" in
+                "$key="*) drop[index]=true; removed=$((removed + 1)) ;;
+            esac
+        done
+        if [ "$removed" -eq 0 ]; then
+            output+=${data:record:offset-record}
+            continue
+        fi
+        # Compose takes the rest of a bare value as that value, while
+        # Bash can read following words as separate assignments.
+        for index in "${!words[@]}"; do
+            [ "$index" -lt "$((${#words[@]} - 1))" ] || break
+            [[ "${words[$index]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+            case "${words[$index]#*=}" in
+                \"*\"|\'*\') ;;
+                *)
+                    echo "ERROR: Could not safely remove $key: .env has different settings in Bash and Compose on the affected line. The file was not changed." >&2
+                    return 1
+                    ;;
+            esac
+        done
+        for index in "${!words[@]}"; do
+            [ "${words[$index]}" = export ] || continue
+            following=$((index + 1))
+            while [ "$following" -lt "${#words[@]}" ] && [ "${drop[$following]}" = true ]; do
+                following=$((following + 1))
+            done
+            if [ "$following" -eq "${#words[@]}" ]; then
+                drop[index]=true
+                removed=$((removed + 1))
+            fi
+        done
+        [ "$removed" -ne "${#words[@]}" ] || continue
+        cursor=$record
+        for index in "${!words[@]}"; do
+            [ "${drop[$index]}" = true ] || continue
+            begin=${starts[$index]}
+            end=${ends[$index]}
+            output+=${data:cursor:begin-cursor}
+            cursor=$end
+        done
+        output+=${data:cursor:offset-cursor}
+    done
+    [ "$output" != "$data" ] || return 0
+    temporary=$(mktemp ./.env.tmp.XXXXXX) || return 1
+    if ! cp -p -- .env "$temporary" || ! printf '%s' "$output" > "$temporary" ||
+        ! mv -f -- "$temporary" .env; then
+        rm -f -- "$temporary"
+        return 1
+    fi
 }
 
 add_compose_profile() {
