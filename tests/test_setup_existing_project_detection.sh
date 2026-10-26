@@ -316,3 +316,73 @@ for project_form in plain quoted exported commented indented duplicate reference
     done
 done
 echo 'ok 3 - changed-domain imports select the parsed saved project and exclude inherited-only or multiline lookalikes'
+
+# A setup run exports the selected project before it inspects resources.
+# Read the saved settings in a fresh process too: that export must not hide
+# an older duplicate, a missing assignment, or damage to another value.
+for prefix_path in choose normalize; do
+    for project_form in plain quoted exported indented commented duplicate reference real_fake export_fake fake_only absent inherited shared_export; do
+        case_dir="$TMP_ROOT/persist-$prefix_path-$project_form"
+        work_dir="$case_dir/docker"
+        mock_bin="$case_dir/bin"
+        mkdir -p "$work_dir" "$case_dir/logs"
+        saved_prefix=scope-target
+        expected_project=scope-target
+        if [ "$prefix_path" = choose ]; then saved_prefix=kvs; expected_project=kvs-mysite; fi
+        sed -e 's/^DOMAIN=.*/DOMAIN=mysite.test/' -e "s/^SITE_PREFIX=.*/SITE_PREFIX=$saved_prefix/" \
+            -e '/^COMPOSE_PROJECT_NAME=/d' "$REPO_ROOT/docker/.env.example" > "$work_dir/.env"
+        printf '\nEXTRA=preserved\n' >> "$work_dir/.env"
+        case "$project_form" in
+            plain|real_fake) echo 'COMPOSE_PROJECT_NAME=kvs-old' >> "$work_dir/.env" ;;
+            quoted) echo "COMPOSE_PROJECT_NAME='kvs-old'" >> "$work_dir/.env" ;;
+            exported|export_fake) echo 'export COMPOSE_PROJECT_NAME=kvs-old' >> "$work_dir/.env" ;;
+            indented) echo '  COMPOSE_PROJECT_NAME=kvs-old' >> "$work_dir/.env" ;;
+            commented) echo 'COMPOSE_PROJECT_NAME=kvs-old # saved project' >> "$work_dir/.env" ;;
+            duplicate) printf 'COMPOSE_PROJECT_NAME=kvs-decoy\nexport COMPOSE_PROJECT_NAME=kvs-old\n' >> "$work_dir/.env" ;;
+            reference)
+                # shellcheck disable=SC2016  # Expanded by the real setup loader.
+                printf 'PROJECT_SEED=kvs-old\nCOMPOSE_PROJECT_NAME="${PROJECT_SEED}"\n' >> "$work_dir/.env" ;;
+            shared_export) echo 'export COMPOSE_PROJECT_NAME="kvs-old" RELATED="preserved"' >> "$work_dir/.env" ;;
+        esac
+        case "$project_form" in
+            real_fake|export_fake|fake_only) printf '%s\n' 'KEEP="first' 'COMPOSE_PROJECT_NAME=kvs-decoy' 'last"' >> "$work_dir/.env" ;;
+        esac
+        make_setup_copy "$case_dir/setup.sh" "$case_dir/logs"
+        make_mocks "$mock_bin"
+        status=0
+        project_environment=()
+        [ "$project_form" != inherited ] || project_environment=(COMPOSE_PROJECT_NAME=kvs-inherited)
+        (
+            cd "$work_dir"
+            env -u COMPOSE_PROJECT_NAME "${project_environment[@]}" \
+                PATH="$mock_bin:/usr/bin:/bin" DOCKER_CALL_LOG="$case_dir/docker-calls" \
+                EXPECTED_PROJECT="$expected_project" INCLUDE_CURRENT_PROJECT=false \
+                HEADLESS=y PREFLIGHT_BYPASS=y PREFIX_CHOICE=1 SSL_CHOICE=3 \
+                "$case_dir/setup.sh"
+        ) > "$case_dir/output" 2>&1 || status=$?
+        [ "$status" -ne 0 ] || fail 'the fixture must stop before building, with no KVS archive'
+        assert_file_contains "$case_dir/output" 'No KVS archive found in ./kvs-archive/'
+        assert_file_contains "$case_dir/docker-calls" "ps -aq --filter label=com.docker.compose.project=$expected_project"
+        assert_file_contains "$case_dir/docker-calls" "volume ls -q --filter label=com.docker.compose.project=$expected_project"
+        (
+            cd "$work_dir"
+            # shellcheck disable=SC2016  # Read saved values in the fresh child shell.
+            env -u COMPOSE_PROJECT_NAME -u KEEP -u RELATED \
+                EXPECTED_PROJECT="$expected_project" PROJECT_FORM="$project_form" bash -c '
+                set -eu
+                source .env
+                [ "${COMPOSE_PROJECT_NAME-}" = "$EXPECTED_PROJECT" ]
+                [ "$SITE_PREFIX" = "$EXPECTED_PROJECT" ]
+                [ "$EXTRA" = preserved ]
+                case "$PROJECT_FORM" in
+                    real_fake|export_fake|fake_only)
+                        expected_keep=$(printf "%s\n" first COMPOSE_PROJECT_NAME=kvs-decoy last)
+                        [ "$KEEP" = "$expected_keep" ] ;;
+                    shared_export) [ "$RELATED" = preserved ] ;;
+                esac
+            '
+        ) || fail "$prefix_path/$project_form did not preserve the saved project and unrelated values"
+        [ "$(stat -c %a "$work_dir/.env")" = 600 ] || fail 'project persistence changed file permissions'
+    done
+done
+echo 'ok 4 - selected and normalized projects survive a fresh load without changing unrelated values'
