@@ -5352,7 +5352,7 @@ import_count_rows() (
 # Record the import in .env, drop the staged dump and write the row counts
 # of every table so they can be compared with the old server.
 import_finish() {
-    local report table_list table_name query rows completed_at
+    local report table_list table_name query rows completed_at receipt_line
 
     [ "$IMPORT_MODE" = true ] || return 0
     report="$LOG_DIR/import-rows.txt"
@@ -5384,7 +5384,9 @@ import_finish() {
     completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     echo "  Saving the import report and completion receipt..."
     set_env_value KVS_IMPORT_COMPLETED "$completed_at" || exit 1
-    if [ "$(grep -Fxc "KVS_IMPORT_COMPLETED=$completed_at" .env)" -ne 1 ]; then
+    # The writer appends the assignment and preserves an explicit export.
+    if ! receipt_line=$(tail -n 1 .env) ||
+        [ "${receipt_line#export }" != "KVS_IMPORT_COMPLETED=$completed_at" ]; then
         echo "ERROR: the import completion receipt was not persisted; the marker and staged dump are preserved." >&2
         exit 1
     fi

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Exercise recovery orchestration without a client server or host changes.
-# shellcheck disable=SC2034,SC2317
+# shellcheck disable=SC2034,SC2317,SC2329
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 docker_cli=$(command -v docker || true)
@@ -15,7 +15,7 @@ source = Path(sys.argv[1]).read_text()
 names = ('validate_domain', 'check_mariadb_stop_grace_period', 'check_cloudflare_configuration', 'parse_publish_endpoint',
          'resolve_public_port_configuration', 'setup_resume_import',
          'setup_resume_assert_database', 'setup_start_runtime_services', 'setup_start_cron', 'import_count_rows',
-         'setup_resume_docker_query', 'setup_resume_database_snapshot', 'import_finish')
+         'setup_resume_docker_query', 'setup_resume_database_snapshot', 'import_finish', 'remove_env_value', 'set_env_value')
 with open(sys.argv[2], 'w') as target:
     for name in names:
         match = re.search(r'^' + name + r'\(\) [\{(]\n.*?^[\})]\n', source, re.M | re.S)
@@ -223,3 +223,111 @@ if bash "$root/docker/setup.sh" --resume-import --dev > "$fixture/conflict.log" 
 fi
 grep -q 'cannot be combined' "$fixture/conflict.log"
 echo 'PASS: import recovery preserves saved configuration, container identity, staging and completion proof.'
+
+# Completion checks the assignment actually persisted by the real writer,
+# not receipt-looking lines inside other values. Read errors stop cleanup.
+for receipt_case in new exported multiline combined noop_fake wrong_fake write_failure read_failure token_failure; do
+    directory="$fixture/receipt-$receipt_case"
+    mkdir -p "$directory/logs" "$directory/native" "$directory/staging"
+    printf 'DOMAIN=example.test\nEXTRA=preserved\n' > "$directory/.env"
+    # shellcheck disable=SC2016  # Evaluated once by the fixture's initial source.
+    printf '%s\n' 'READ_PROBE=$(printf "evaluated\n" >> parse-count)' >> "$directory/.env"
+    case "$receipt_case" in
+        exported|combined|token_failure) echo 'export KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z' >> "$directory/.env" ;;
+    esac
+    case "$receipt_case" in
+        multiline|combined|noop_fake|wrong_fake)
+            printf 'KEEP="first\nKVS_IMPORT_COMPLETED=2030-01-02T03:04:05Z\nlast"\n' >> "$directory/.env" ;;
+    esac
+    chmod 600 "$directory/.env"
+    cp "$directory/.env" "$directory/before.env"
+    for artifact in token dump raw native/payload staging/kvs-export.manifest; do
+        echo 'owned placeholder' > "$directory/$artifact"
+    done
+    status=0
+    (
+        cd "$directory"
+        # Restore the real writer after the earlier row-count failure stub.
+        # shellcheck source=/dev/null
+        source "$fixture/setup-functions.sh"
+        unset KVS_IMPORT_COMPLETED
+        # shellcheck source=/dev/null
+        source .env
+        IMPORT_MODE=true LOG_DIR="$directory/logs" IMPORT_SITE_DIR=/synthetic-site IMPORT_DB_DUMP=dump
+        IMPORT_TABLES_PREFIX=fixture_ IMPORT_STAGED_DUMP=dump IMPORT_RAW_DUMP=raw
+        IMPORT_NATIVE_STAGE=native IMPORT_STAGING=staging
+        readback_fault_active=no
+        date() { printf '2030-01-02T03:04:05Z\n'; }
+        import_count_rows() { printf 'fixture_options\t2\n'; }
+        run_root_mariadb() {
+            case "$*" in
+                *'SELECT table_name'*) echo fixture_options ;;
+                *'DELETE FROM fixture_options'*)
+                    echo delete-token >> calls
+                    [ "$receipt_case" != token_failure ] || return 71
+                    rm token ;;
+                *) echo unexpected >> calls; return 97 ;;
+            esac
+        }
+        mktemp() {
+            [ "$receipt_case" != write_failure ] || return 73
+            command mktemp "$@"
+        }
+        mv() {
+            command mv "$@" || return
+            if [ "${!#}" = .env ]; then readback_fault_active=yes; fi
+        }
+        # Fault both the old and new readback command after the real final
+        # rename, leaving the successful write available to a fresh oracle.
+        grep() {
+            if [ "$receipt_case" = read_failure ] && [ "$readback_fault_active" = yes ] && [ "${!#}" = .env ]; then return 74; fi
+            command grep "$@"
+        }
+        tail() {
+            if [ "$receipt_case" = read_failure ] && [ "$readback_fault_active" = yes ] && [ "${!#}" = .env ]; then return 74; fi
+            command tail "$@"
+        }
+        case "$receipt_case" in
+            noop_fake) set_env_value() { :; } ;;
+            wrong_fake) set_env_value() { echo 'KVS_IMPORT_COMPLETED=2000-01-01T00:00:00Z' >> .env; } ;;
+        esac
+        import_finish
+    ) > "$directory/output" 2>&1 || status=$?
+    [ "$(cat "$directory/parse-count")" = evaluated ] || { echo 'FAIL: completion evaluated .env again'; exit 1; }
+    case "$receipt_case" in
+        new|exported|multiline|combined)
+            [ "$status" -eq 0 ] || { echo "FAIL: completion rejected $receipt_case: $(cat "$directory/output")"; exit 1; }
+            for artifact in token dump raw native staging/kvs-export.manifest; do
+                [ ! -e "$directory/$artifact" ] || { echo "FAIL: completion retained $artifact"; exit 1; }
+            done
+            grep -Fxq delete-token "$directory/calls" ;;
+        *)
+            [ "$status" -ne 0 ] || { echo "FAIL: completion accepted $receipt_case"; exit 1; }
+            for artifact in token dump raw native/payload staging/kvs-export.manifest; do
+                [ -f "$directory/$artifact" ] || { echo "FAIL: $receipt_case removed $artifact"; exit 1; }
+            done
+            if [ "$receipt_case" != token_failure ] && [ -e "$directory/calls" ]; then
+                echo 'FAIL: failed receipt validation reached token deletion'; exit 1
+            fi ;;
+    esac
+    case "$receipt_case" in
+        noop_fake|write_failure) cmp -s "$directory/.env" "$directory/before.env" ;;
+    esac
+    # shellcheck disable=SC2016  # A fresh child reads the persisted state.
+    actual=$(cd "$directory" && env -u KVS_IMPORT_COMPLETED bash -c 'source .env; printf "%s" "${KVS_IMPORT_COMPLETED-}"')
+    expected=2030-01-02T03:04:05Z
+    case "$receipt_case" in
+        noop_fake|write_failure) expected='' ;;
+        wrong_fake) expected=2000-01-01T00:00:00Z ;;
+    esac
+    [ "$actual" = "$expected" ] || { echo 'FAIL: persisted receipt differs from the write result'; exit 1; }
+    case "$receipt_case" in
+        multiline|combined|noop_fake|wrong_fake)
+            # shellcheck disable=SC2016  # The child reads the unrelated value.
+            actual=$(cd "$directory" && env -u KEEP bash -c 'source .env; printf "%s" "$KEEP"')
+            [ "$actual" = $'first\nKVS_IMPORT_COMPLETED=2030-01-02T03:04:05Z\nlast' ] || { echo 'FAIL: receipt validation changed a multiline value'; exit 1; } ;;
+    esac
+    grep -Fxq 'EXTRA=preserved' "$directory/.env"
+    [ "$(stat -c %a "$directory/.env")" = 600 ]
+done
+echo 'PASS: completion verifies persisted receipts, preserves multiline values and stops cleanup on write or read failure.'
