@@ -2951,7 +2951,7 @@ fi
 chmod 600 .env
 
 # Load environment
-unset CLOUDFLARE_ENABLED
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
@@ -2987,7 +2987,7 @@ add_compose_profile() {
     local profile="$1"
     local profiles
 
-    profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' .env | tail -n 1)
+    profiles="${COMPOSE_PROFILES:-}"
     case ",${profiles}," in
         *",${profile},"*) ;;
         ",,") profiles="$profile" ;;
@@ -3005,7 +3005,7 @@ remove_compose_profile() {
     local item
     local -a profile_items
 
-    profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' .env | tail -n 1)
+    profiles="${COMPOSE_PROFILES:-}"
     IFS=',' read -r -a profile_items <<< "$profiles"
     for item in "${profile_items[@]}"; do
         [ -n "$item" ] || continue

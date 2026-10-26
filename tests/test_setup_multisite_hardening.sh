@@ -17,6 +17,7 @@ fail() {
 
 command -v docker >/dev/null 2>&1 || fail "Docker Compose is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
+REAL_DOCKER=$(command -v docker)
 extract_function() {
     local function_name="$1"
     local destination="$2"
@@ -216,6 +217,79 @@ EOF
     [ "$MODE" = multi ] || fail "headless re-run changed a persisted multi mode"
     [ "$PROGRESS_TOTAL" = 13 ] || fail "headless multi re-run used the wrong progress total"
 )
+
+# Profile changes must use the saved values, regardless of their shell
+# representation, and remain effective when Compose next reads .env.
+profiles_work="$TEST_DIR/profiles"
+mkdir -p "$profiles_work/docker-config"
+extract_function set_env_value "$profiles_work/set-env.sh"
+awk '
+    $0 == "# Load environment" { capture = 1 }
+    /^check_mariadb_stop_grace_period / { exit }
+    capture { print }
+' "$ROOT_DIR/docker/setup.sh" > "$profiles_work/load-env.sh"
+cat > "$profiles_work/compose.yml" <<'EOF'
+services:
+  base:
+    image: synthetic-profile-fixture:latest
+  cache:
+    image: synthetic-profile-fixture:latest
+    profiles: [dragonfly]
+  extra:
+    image: synthetic-profile-fixture:latest
+    profiles: [custom]
+  acme:
+    image: synthetic-profile-fixture:latest
+    profiles: [direct-tls]
+  inherited:
+    image: synthetic-profile-fixture:latest
+    profiles: [external]
+EOF
+for action in enable disable; do
+    for form in plain double single commented exported interpolated duplicate absent empty; do
+        (
+            cd "$profiles_work"
+            unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+            export DOCKER_HOST="unix://$profiles_work/no-engine.sock" DOCKER_CONFIG="$profiles_work/docker-config"
+            # The old helpers read the file alone, even when the shell
+            # supplied profiles and the file supplied none.
+            COMPOSE_PROFILES=external
+            export COMPOSE_PROFILES
+            profiles=dragonfly,custom
+            [ "$action" != disable ] || profiles+=,direct-tls
+            : > .env
+            case "$form" in
+                plain) printf 'COMPOSE_PROFILES=%s\n' "$profiles" > .env ;;
+                double) printf 'COMPOSE_PROFILES="%s"\n' "$profiles" > .env ;;
+                single) printf "COMPOSE_PROFILES='%s'\n" "$profiles" > .env ;;
+                commented) printf 'COMPOSE_PROFILES=%s # active services\n' "$profiles" > .env ;;
+                exported) printf 'export COMPOSE_PROFILES=%s\n' "$profiles" > .env ;;
+                interpolated) printf "SAVED_PROFILES=%s\nCOMPOSE_PROFILES=\${SAVED_PROFILES}\n" "$profiles" > .env ;;
+                duplicate) printf 'COMPOSE_PROFILES=external\nCOMPOSE_PROFILES=%s\n' "$profiles" > .env ;;
+                empty) printf 'COMPOSE_PROFILES=\n' > .env ;;
+            esac
+            # shellcheck source=/dev/null
+            source "$profiles_work/load-env.sh"
+            # Use the production writer as well as the profile helpers.
+            # shellcheck source=/dev/null
+            source "$profiles_work/set-env.sh"
+            compose_args=(compose --project-name kvs-profile-test --file compose.yml --env-file .env config --services)
+            "$REAL_DOCKER" "${compose_args[@]}" > initial-services || fail "$action/$form must be valid before configuration"
+            MODE=single SITE_PREFIX=kvs-profiles
+            SSL_PROVIDER=selfsigned
+            [ "$action" != enable ] || SSL_PROVIDER=letsencrypt
+            configure_direct_tls_profile
+            expected=(base)
+            case "$form" in absent|empty) ;; *) expected+=(cache extra) ;; esac
+            [ "$action" != enable ] || expected+=(acme)
+            printf '%s\n' "${expected[@]}" | LC_ALL=C sort > expected-services
+            "$REAL_DOCKER" "${compose_args[@]}" | LC_ALL=C sort > active-services
+            env -u COMPOSE_PROFILES "$REAL_DOCKER" "${compose_args[@]}" | LC_ALL=C sort > reloaded-services
+            cmp -s expected-services active-services || fail "$action/$form changed unrelated active profiles"
+            cmp -s expected-services reloaded-services || fail "$action/$form did not preserve the selected services in .env"
+        ) || fail "saved profiles failed for $action/$form"
+    done
+done
 
 # kvsctl pins the images of the installed release in
 # docker-compose.release.yml and records the file in COMPOSE_FILE. Re-running
