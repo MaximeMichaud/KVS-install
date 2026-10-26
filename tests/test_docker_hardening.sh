@@ -2157,9 +2157,7 @@ test_remote_entries_are_shown_and_their_patterns_reach_the_transfer() {
         fail "the transfer must receive the exclusion patterns of the report"
     # shellcheck disable=SC2016  # Literal setup.sh line.
     grep -Fq 'import_remote_load_excludes "$IMPORT_REMOTE_REPORT"' "$setup" || fail "the patterns must be read from the report"
-    # shellcheck disable=SC2016  # Literal setup.sh line.
-    grep -Fq 'IMPORT_EXCLUDE="${IMPORT_EXCLUDE-$(sed -n '"'"'s/^IMPORT_EXCLUDE=//p'"'"' .env 2>/dev/null | tail -n 1)}"' "$setup" ||
-        fail "a re-run must read the choice back from .env"
+    # test_import_later_passes.sh exercises saved filters through fresh loads.
     awk '/^import_remote_show_entries\(\) \{/,/^\}/; /^import_remote_show_servers\(\) \{/,/^\}/; /^import_remote_load_excludes\(\) \{/,/^\}/' "$setup" > "$lib"
     (
         # shellcheck disable=SC2034  # Read by the sourced helpers.

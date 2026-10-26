@@ -116,7 +116,11 @@ inspect() {
             # A path must never run as a command while .env is reloaded.
             backup() { echo unexpected-path-command > "$TEST_DIR/filter-command"; return 127; }
             media() { echo unexpected-path-command > "$TEST_DIR/filter-command"; return 127; }
-            unset IMPORT_EXCLUDE IMPORT_INCLUDE
+            if [ "${FIXTURE_FILTERS_INHERITED:-no}" = yes ]; then
+                export IMPORT_EXCLUDE IMPORT_INCLUDE
+            else
+                unset IMPORT_EXCLUDE IMPORT_INCLUDE
+            fi
             # shellcheck source=/dev/null
             source "$TEST_DIR/filter-defaults.sh"
             # shellcheck source=/dev/null
@@ -175,6 +179,50 @@ for filter_case in single multiple assignments punctuation tabs empty; do
     grep -Fxq 'OTHER=preserved' "$filter_dir/.env" || fail "$filter_case changed another saved setting"
 done
 pass 'saved multi-path filters reach the next inspection unchanged without executing path tokens'
+
+# A filter-looking line inside another value is not a setting, even on a
+# fresh pass after inspection removes genuine empty filter assignments.
+for filter_entry in normal files-only; do
+    for filter_case in double single empty quoted inherited inherited_empty; do
+        filter_dir="$TEST_DIR/defaults-$filter_entry-$filter_case"
+        mkdir -p "$filter_dir"
+        filter_quote='"'
+        [ "$filter_case" != single ] || filter_quote="'"
+        printf 'DOMAIN=example.test\nOTHER=preserved\nKEEP=%sfirst line\nIMPORT_EXCLUDE=phantom/skip\nIMPORT_INCLUDE=phantom/take\nlast line%s\n' \
+            "$filter_quote" "$filter_quote" > "$filter_dir/.env"
+        cp "$filter_dir/.env" "$TEST_DIR/expected-env"
+        filter_exclude=''; filter_include=''; filter_inherited=no
+        case "$filter_case" in
+            empty) printf "IMPORT_EXCLUDE=''\nIMPORT_INCLUDE=''\n" >> "$filter_dir/.env" ;;
+            quoted|inherited)
+                filter_exclude='cache extra=path'; filter_include='.hidden mount=storage'
+                if [ "$filter_case" = quoted ]; then
+                    printf "export IMPORT_EXCLUDE='cache extra=path'\nIMPORT_INCLUDE='.hidden mount=storage'\n" >> "$TEST_DIR/expected-env"
+                    cp "$TEST_DIR/expected-env" "$filter_dir/.env"
+                else
+                    filter_inherited=yes
+                    printf "IMPORT_EXCLUDE='cache extra=path'\nIMPORT_INCLUDE='.hidden mount=storage'\n" >> "$TEST_DIR/expected-env"
+                fi
+                ;;
+            inherited_empty) filter_inherited=yes ;;
+        esac
+        chmod 600 "$filter_dir/.env"
+        printf '%s\0%s\0' "$filter_exclude" "$filter_include" > "$TEST_DIR/expected-filters"
+        for filter_pass in first fresh; do
+            FIXTURE_INSPECT_DIR="$filter_dir" FIXTURE_ENTRY="$filter_entry" FIXTURE_FROM_SAVED=yes \
+                FIXTURE_EXCLUDE="$filter_exclude" FIXTURE_INCLUDE="$filter_include" FIXTURE_FILTERS_INHERITED="$filter_inherited" inspect ||
+                fail "$filter_entry/$filter_case/$filter_pass failed: $(cat "$TEST_DIR/inspect.out")"
+            cmp -s "$TEST_DIR/expected-filters" "$TEST_DIR/detected-filters" ||
+                fail "$filter_entry/$filter_case/$filter_pass used a multiline value as a filter"
+            cmp -s "$TEST_DIR/expected-env" "$filter_dir/.env" ||
+                fail "$filter_entry/$filter_case/$filter_pass persisted an unexpected setting"
+            # The next process has no explicit filter input: it must read
+            # only the settings actually persisted by the first pass.
+            filter_inherited=no
+        done
+    done
+done
+pass 'both import callers ignore filter-looking multiline contents on first and fresh passes'
 
 # Real callers must stop on persistence errors even when called in a
 # conditional context, where Bash does not propagate failures via errexit.

@@ -1179,8 +1179,8 @@ fi
 # What the transfer leaves behind and takes along, on top of what the
 # exporter decides on its own; the choice of the first pass is kept in
 # .env so the second pass repeats it.
-IMPORT_EXCLUDE="${IMPORT_EXCLUDE-$(sed -n 's/^IMPORT_EXCLUDE=//p' .env 2>/dev/null | tail -n 1)}"
-IMPORT_INCLUDE="${IMPORT_INCLUDE-$(sed -n 's/^IMPORT_INCLUDE=//p' .env 2>/dev/null | tail -n 1)}"
+IMPORT_EXCLUDE="${IMPORT_EXCLUDE-}"
+IMPORT_INCLUDE="${IMPORT_INCLUDE-}"
 IMPORT_EXCLUDE_PATTERNS=()
 IMPORT_CHOICE="${IMPORT_CHOICE:-}"
 IMPORT_SOURCES_GIVEN=0
