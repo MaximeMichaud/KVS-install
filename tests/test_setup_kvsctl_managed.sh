@@ -21,9 +21,12 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 awk '
+    /^readonly SUPPORTED_PHP_VERSIONS=/ { print }
     $0 == "kvsctl_manages_stack() {" || $0 == "preflight_checks() {" ||
         $0 == "kvsctl_keep_mariadb_series() {" || $0 == "choose_mariadb_version() {" ||
         $0 == "kvsctl_note_php_change() {" || $0 == "preflight_kernel_writeback_status() {" ||
+        $0 == "php_version_is_supported() {" || $0 == "kvs_documented_php_version() {" ||
+        $0 == "refuse_unbuildable_kvs_php() {" || $0 == "select_php_version() {" || $0 == "set_php_bases() {" ||
         $0 == "set_env_value() {" || $0 == "remove_env_value() {" { capture = 1 }
     capture { print }
     capture && /^}$/ { capture = 0 }
@@ -36,6 +39,9 @@ declare -F kvsctl_manages_stack preflight_checks kvsctl_keep_mariadb_series choo
 
 CYAN='' GREEN='' RED='' YELLOW='' NC=''
 DOCKER_DIR="$TEST_DIR/root/docker"
+mkdir -p "$TEST_DIR/bin"
+cp "$ROOT_DIR/docker/bin/resolve-bases.sh" "$TEST_DIR/bin/resolve-bases.sh"
+cp "$ROOT_DIR/docker/images.lock" "$TEST_DIR/images.lock"
 
 # workdir <kind>: the docker directory setup.sh runs from, in an
 # installation root. "adopted" holds the record kvsctl adopt writes and no
@@ -206,6 +212,9 @@ php_version_in_env() {
 note() (
     workdir "$1"
     printf 'IONCUBE=YES\nPHP_VERSION=%s\n' "$3" > .env
+    # The production caller has already loaded the selected version.
+    # shellcheck source=/dev/null
+    source .env
     KVSCTL_PHP_CHANGE=''
     kvsctl_note_php_change "$2"
     printf 'repeated at the end: %s\n' "$KVSCTL_PHP_CHANGE"
@@ -240,21 +249,33 @@ echo 'PASS: an installation kvsctl manages keeps its PHP series and is pointed a
 # before the bases are written, so a managed installation keeps its series
 # and its bases, and any other gets the series picked.
 awk '
-    /^PHP_VERSION_BEFORE_SETUP=/ { capture = 1 }
+    /^# Reload .env to get user.s IonCube choice/ { capture = 1 }
     capture { print }
     capture && $0 == "set_php_bases" { exit }
 ' "$ROOT_DIR/docker/setup.sh" > "$TEST_DIR/php-flow.sh"
 grep -Fxq 'set_php_bases' "$TEST_DIR/php-flow.sh" ||
     fail "setup.sh must capture PHP_VERSION_BEFORE_SETUP and then pin the bases: $(cat "$TEST_DIR/php-flow.sh")"
 
-# php_flow <kind>: that part of setup.sh on a .env holding PHP 8.1, with a
-# selection that picks 8.3 and bases that record the series they are for.
+# Read the persisted series and exact lock references in a fresh process.
+php_bases_match() (
+    local expected="$1" actual fpm cli
+    cd "$DOCKER_DIR"
+    fpm=$("$TEST_DIR/bin/resolve-bases.sh" --get php-fpm "$expected") || return 1
+    cli=$("$TEST_DIR/bin/resolve-bases.sh" --get php-cli "$expected") || return 1
+    actual=$(env -u PHP_VERSION -u PHP_FPM_BASE -u PHP_CLI_BASE bash -c \
+        'source .env; printf "%s\n%s\n%s" "$PHP_VERSION" "$PHP_FPM_BASE" "$PHP_CLI_BASE"') || return 1
+    [ "$actual" = "$(printf '%s\n%s\n%s' "$expected" "$fpm" "$cli")" ]
+)
+
+# php_flow <kind>: actual loading, selection and pinned-base resolution
+# start from 8.1 and receive the documented explicit request for 8.3.
 php_flow() (
     workdir "$1"
-    printf 'PHP_VERSION=8.1\n' > .env
+    mkdir kvs-archive
+    touch 'kvs-archive/KVS_7.0.2_[example.test].zip'
+    printf 'PHP_VERSION=8.1\nIONCUBE=NO\n' > .env
     KVSCTL_PHP_CHANGE=''
-    select_php_version() { set_env_value PHP_VERSION 8.3; }
-    set_php_bases() { printf 'bases pinned for %s\n' "$(sed -n 's/^PHP_VERSION=//p' .env)"; }
+    HEADLESS=y KVS_PHP_VERSION=8.3 IMPORT_MODE=false DOMAIN=example.test
     # shellcheck source=/dev/null
     source "$TEST_DIR/php-flow.sh"
 )
@@ -262,17 +283,69 @@ php_flow() (
 php_flow release > "$TEST_DIR/out" 2>&1 || fail "the PHP selection failed: $(cat "$TEST_DIR/out")"
 grep -Fq "PHP stays on 8.1 instead of the 8.3 selected above" "$TEST_DIR/out" ||
     fail "the setup flow must tell a managed installation that its PHP series stays: $(cat "$TEST_DIR/out")"
-grep -Fxq 'bases pinned for 8.1' "$TEST_DIR/out" ||
+php_bases_match 8.1 ||
     fail "a managed installation must get the bases of the series it keeps: $(cat "$TEST_DIR/out")"
 [ "$(php_version_in_env)" = 8.1 ] || fail "the setup flow must keep the PHP series of a managed installation: $(cat "$DOCKER_DIR/.env")"
 php_flow adopted > "$TEST_DIR/out" 2>&1 || fail "the PHP selection failed: $(cat "$TEST_DIR/out")"
-grep -Fxq 'bases pinned for 8.1' "$TEST_DIR/out" ||
+php_bases_match 8.1 ||
     fail "an adopted installation must keep its PHP series: $(cat "$TEST_DIR/out")"
 php_flow plain > "$TEST_DIR/out" 2>&1 || fail "the PHP selection failed: $(cat "$TEST_DIR/out")"
-grep -Fxq 'bases pinned for 8.3' "$TEST_DIR/out" ||
+php_bases_match 8.3 ||
     fail "an installation kvsctl does not manage must get the series picked: $(cat "$TEST_DIR/out")"
 if grep -Fq 'kvsctl' "$TEST_DIR/out"; then fail "an installation kvsctl does not manage must not hear of it: $(cat "$TEST_DIR/out")"; fi
 echo 'PASS: the setup flow notes a PHP change after the selection and before the bases'
+
+# Export, duplicate precedence and multiline values are interpreted by
+# the real loader before selection. The resolver must use the version
+# selected or restored, while inherited-only input is not a saved series.
+for kind in plain adopted; do
+    for php_form in exported indented quoted commented duplicate interpolated real_fake export_fake absent inherited; do
+        (
+            workdir "$kind"
+            mkdir kvs-archive
+            touch 'kvs-archive/KVS_7.0.2_[example.test].zip'
+            printf 'IONCUBE=NO\nEXTRA=preserved\n' > .env
+            saved=8.3
+            case "$php_form" in
+                exported|export_fake) echo 'export PHP_VERSION=8.3' >> .env ;;
+                indented) echo '  PHP_VERSION=8.3' >> .env ;;
+                quoted) echo "PHP_VERSION='8.3'" >> .env ;;
+                commented) echo 'PHP_VERSION=8.3 # saved series' >> .env ;;
+                duplicate) printf 'PHP_VERSION=8.2\nPHP_VERSION=8.3\n' >> .env ;;
+                interpolated) printf 'PHP_SERIES_SEED=8.3\nPHP_VERSION="${PHP_SERIES_SEED}"\n' >> .env ;;
+                real_fake) echo 'PHP_VERSION=8.3' >> .env ;;
+                absent|inherited) saved='' ;;
+            esac
+            case "$php_form" in
+                real_fake|export_fake) printf 'KEEP="first\nPHP_VERSION=8.4\nlast"\n' >> .env ;;
+            esac
+            chmod 600 .env
+            unset PHP_VERSION PHP_FPM_BASE PHP_CLI_BASE
+            [ "$php_form" != inherited ] || export PHP_VERSION=8.4
+            HEADLESS=y KVS_PHP_VERSION=8.1 IMPORT_MODE=false DOMAIN=example.test KVSCTL_PHP_CHANGE=''
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/php-flow.sh"
+            expected=8.1
+            if [ "$kind" = adopted ] && [ -n "$saved" ]; then expected=$saved; fi
+            php_bases_match "$expected" || fail "$kind/$php_form selected inconsistent PHP bases"
+            # The actual build follows later reloads of these settings.
+            # shellcheck source=/dev/null
+            source .env
+            [ "$PHP_VERSION" = "$expected" ] || fail 'the reloaded PHP series changed'
+            case "$php_form" in
+                exported|export_fake|inherited)
+                    [ "$(printenv PHP_VERSION)" = "$expected" ] || fail 'the selected exported PHP series is stale' ;;
+            esac
+            case "$php_form" in
+                real_fake|export_fake)
+                    [ "$KEEP" = $'first\nPHP_VERSION=8.4\nlast' ] || fail 'PHP selection changed an unrelated multiline value' ;;
+            esac
+            grep -Fxq EXTRA=preserved .env || fail 'PHP selection changed another setting'
+            [ "$(stat -c %a .env)" = 600 ] || fail 'PHP selection changed saved file permissions'
+        ) > "$TEST_DIR/php-syntax.out" 2>&1 || fail "$kind/$php_form failed: $(cat "$TEST_DIR/php-syntax.out")"
+    done
+done
+echo 'PASS: parsed saved PHP series, selection and locked bases agree for ordinary and adopted installations'
 
 # kvsctl backup and kvsctl restore run on any installation, adopted or not,
 # and every kvsctl run that changes one holds kvsctl/lock; one that did not

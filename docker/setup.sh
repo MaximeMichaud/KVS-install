@@ -3767,12 +3767,14 @@ select_php_version() {
             echo -e "${YELLOW}the loader refuse every encoded file, so the site returns 500.${NC}"
             echo -e "${YELLOW}Proceeding because KVS_PHP_VERSION was set explicitly.${NC}"
             set_env_value PHP_VERSION "$requested"
+            PHP_VERSION=$requested
             echo "Set PHP version to $requested"
             return
         fi
 
         echo "KVS ${kvs_version:-archive} requires PHP $documented"
         set_env_value PHP_VERSION "$documented"
+        PHP_VERSION=$documented
         echo -e "${GREEN}Set PHP $documented${NC}"
         return
     fi
@@ -3798,6 +3800,7 @@ select_php_version() {
     fi
 
     set_env_value PHP_VERSION "$choice"
+    PHP_VERSION=$choice
     echo -e "${GREEN}Set PHP $choice${NC}"
 }
 
@@ -3806,7 +3809,7 @@ select_php_version() {
 set_php_bases() {
     local series fpm cli resolver
     resolver="$(dirname "${BASH_SOURCE[0]}")/bin/resolve-bases.sh"
-    series=$(grep -E '^PHP_VERSION=' .env | tail -n 1 | cut -d= -f2)
+    series=${PHP_VERSION:-}
     if ! fpm=$("$resolver" --get php-fpm "$series") ||
         ! cli=$("$resolver" --get php-cli "$series"); then
         echo -e "${RED}ERROR: PHP $series has no pinned base in docker/images.lock${NC}"
@@ -3828,7 +3831,7 @@ kvsctl_note_php_change() {
     local after
 
     kvsctl_manages_stack || return 0
-    after=$(sed -n 's/^PHP_VERSION=//p' .env | tail -n 1)
+    after=${PHP_VERSION:-}
     if [ -z "$before" ] || [ "$after" = "$before" ]; then
         return 0
     fi
@@ -3836,6 +3839,7 @@ kvsctl_note_php_change() {
         echo -e "${RED}ERROR: could not write PHP_VERSION=${before} back to .env${NC}" >&2
         return 1
     fi
+    PHP_VERSION=$before
     KVSCTL_PHP_CHANGE="kvsctl manages this installation, so PHP stays on ${before} instead of the ${after} selected above. To move the site to PHP ${after}, set PHP_VERSION=${after} in .env and run 'kvsctl upgrade', which installs the images of that series."
     echo -e "${YELLOW}${KVSCTL_PHP_CHANGE}${NC}"
 }
@@ -3971,13 +3975,15 @@ if [ "$IONCUBE" = "YES" ]; then
     select_ioncube
 fi
 
-# Reload .env to get user's IonCube choice
+# Reload .env to get user's IonCube choice and saved PHP series.
+# A shell PHP_VERSION is not the operator override (KVS_PHP_VERSION).
+PHP_VERSION=
 source .env
 
 # Select PHP last: the IonCube decision above constrains which versions run.
 # On an installation kvsctl manages, the series it had stays, so the bases
 # are those of the series this run builds.
-PHP_VERSION_BEFORE_SETUP=$(sed -n 's/^PHP_VERSION=//p' .env | tail -n 1)
+PHP_VERSION_BEFORE_SETUP=${PHP_VERSION:-}
 select_php_version
 kvsctl_note_php_change "$PHP_VERSION_BEFORE_SETUP" || exit 1
 set_php_bases
