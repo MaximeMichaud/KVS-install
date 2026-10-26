@@ -3632,13 +3632,13 @@ detect_ioncube() {
     case "${IMPORT_SITE_IONCUBE:-}" in
         yes)
             echo -e "${GREEN}✓ IonCube encoded files detected in the imported site${NC}"
-            sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env || return $?
+            set_env_value IONCUBE "YES" || return $?
             IONCUBE=YES
             return
             ;;
         no)
             echo -e "${GREEN}✓ Plain PHP files detected in the imported site (no IonCube)${NC}"
-            sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env || return $?
+            set_env_value IONCUBE "NO" || return $?
             IONCUBE=NO
             return
             ;;
@@ -3651,13 +3651,13 @@ detect_ioncube() {
         case "$(import_site_ioncube "$site")" in
             yes)
                 echo -e "${GREEN}✓ IonCube encoded files detected in the site under $site${NC}"
-                sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env || return $?
+                set_env_value IONCUBE "YES" || return $?
                 IONCUBE=YES
                 return
                 ;;
             no)
                 echo -e "${GREEN}✓ Plain PHP files detected in the site under $site (no IonCube)${NC}"
-                sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env || return $?
+                set_env_value IONCUBE "NO" || return $?
                 IONCUBE=NO
                 return
                 ;;
@@ -3688,10 +3688,10 @@ detect_ioncube() {
            grep -q "_il_exec" "$TEST_FILE" 2>/dev/null || \
            head -n 1 "$TEST_FILE" | grep -qE '^\s*<\?php\s+//[0-9a-f]{5,6}'; then
             echo -e "${GREEN}✓ IonCube encoded files detected${NC}"
-            sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
+            set_env_value IONCUBE "YES" || return $?
         else
             echo -e "${GREEN}✓ Plain PHP files detected (no IonCube)${NC}"
-            sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
+            set_env_value IONCUBE "NO" || return $?
         fi
     else
         # Fallback: try admin/index.php
@@ -3702,10 +3702,10 @@ detect_ioncube() {
                grep -q "_il_exec" "$TEST_FILE" 2>/dev/null || \
                head -n 1 "$TEST_FILE" | grep -qE '^\s*<\?php\s+//[0-9a-f]{5,6}'; then
                 echo -e "${GREEN}✓ IonCube encoded files detected${NC}"
-                sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
+                set_env_value IONCUBE "YES" || return $?
             else
                 echo -e "${GREEN}✓ Plain PHP files detected (no IonCube)${NC}"
-                sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
+                set_env_value IONCUBE "NO" || return $?
             fi
         else
             echo -e "${YELLOW}Could not extract PHP files for inspection. Defaulting to IonCube=YES${NC}"
@@ -3855,11 +3855,11 @@ select_ioncube() {
 
     case $IONCUBE_CHOICE in
         2)
-            sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
+            set_env_value IONCUBE "NO" || return $?
             echo -e "${YELLOW}IonCube disabled${NC}"
             ;;
         *)
-            sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
+            set_env_value IONCUBE "YES" || return $?
             echo -e "${GREEN}IonCube enabled${NC}"
             ;;
     esac

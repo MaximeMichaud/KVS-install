@@ -22,6 +22,8 @@ extract_function() {
 }
 
 {
+    extract_function remove_env_value setup.sh
+    extract_function set_env_value setup.sh
     extract_function detect_ioncube setup.sh
     extract_function select_ioncube setup.sh
     extract_function import_site_ioncube lib/import.sh
@@ -30,7 +32,7 @@ extract_function() {
 source "$TEST_DIR/functions.sh"
 declare -F detect_ioncube select_ioncube import_site_ioncube > /dev/null ||
     fail 'setup.sh must define detect_ioncube and select_ioncube, lib/import.sh import_site_ioncube'
-CYAN='' GREEN='' YELLOW='' NC=''
+RED='' CYAN='' GREEN='' YELLOW='' NC=''
 
 # php_file <encoded|plain> <file>: a KVS PHP file, ionCube encoded or not.
 php_file() {
@@ -71,8 +73,9 @@ work() {
 only_ioncube_changed() {
     local expected="$TEST_DIR/expected"
 
-    sed "s/^IONCUBE=YES\$/IONCUBE=$1/" "$TEST_DIR/start.env" > "$expected"
-    cmp -s "$expected" .env ||
+    sed '/^IONCUBE=/d' "$TEST_DIR/start.env" > "$expected"
+    sed '/^IONCUBE=/d' .env > "$TEST_DIR/other-settings"
+    cmp -s "$expected" "$TEST_DIR/other-settings" ||
         fail "$2 changed more than the IONCUBE line of .env.example: $(diff "$TEST_DIR/start.env" .env || true)"
     if ! { [ "$(grep -c '^IONCUBE=' .env)" -eq 1 ] && grep -Fxq "IONCUBE=$1" .env; }; then
         fail "$2 must leave one IONCUBE=$1 line: $(grep -n 'IONCUBE' .env || true)"
@@ -183,6 +186,89 @@ for source in imported site archive index; do
 done
 IMPORT_SITE_IONCUBE=''
 echo 'PASS: the loader choice follows newly detected encoding and persists the selected value'
+
+# Saved syntax must not change the detected or explicitly selected loader
+# value, nor any neighboring setting, after a fresh environment load.
+seed_loader_setting() {
+    local form="$1" initial="$2"
+
+    printf 'KEEP=stable\n' > .env
+    case "$form" in
+        shared-first|shared-last) ;;
+        *) printf 'EXTRA=neighbor\n' >> .env ;;
+    esac
+    case "$form" in
+        plain|multiline) printf 'IONCUBE=%s\n' "$initial" >> .env ;;
+        exported) printf 'export IONCUBE=%s\n' "$initial" >> .env ;;
+        indented) printf '  IONCUBE=%s\n' "$initial" >> .env ;;
+        shared-first) printf 'export IONCUBE="%s" EXTRA="neighbor"\n' "$initial" >> .env ;;
+        shared-last) printf 'export EXTRA="neighbor" IONCUBE="%s"\n' "$initial" >> .env ;;
+        duplicate) printf 'IONCUBE=YES\nexport IONCUBE=%s\n' "$initial" >> .env ;;
+        interpolated)
+            # shellcheck disable=SC2016
+            printf 'LOADER_SEED=%s\nIONCUBE="${LOADER_SEED}"\n' "$initial" >> .env
+            ;;
+    esac
+    expected_keep=stable
+    if [ "$form" = multiline ]; then
+        expected_keep=$'first\nIONCUBE=YES\nlast'
+        printf 'KEEP="%s"\n' "$expected_keep" >> .env
+    fi
+    chmod 0600 .env
+}
+
+assert_saved_loader() {
+    local expected="$1" description="$2"
+    local -a saved
+
+    # shellcheck disable=SC2016
+    env -u IONCUBE -u KEEP -u EXTRA -u BASH_ENV bash -c \
+        'source .env; printf "%s\0%s\0%s\0" "${IONCUBE:-}" "$KEEP" "${EXTRA:-}"' > "$TEST_DIR/saved-loader"
+    mapfile -d '' -t saved < "$TEST_DIR/saved-loader"
+    [ "${saved[0]}" = "$expected" ] || fail "$description did not persist IONCUBE=$expected"
+    [ "${saved[1]}" = "$expected_keep" ] || fail "$description changed an unrelated multiline value"
+    [ "${saved[2]}" = neighbor ] || fail "$description lost a shared export"
+    [ "$(stat -c %a .env)" = 600 ] || fail "$description changed environment permissions"
+}
+
+for source in imported site archive index selection; do
+    for value in YES NO; do
+        for form in plain exported indented multiline absent shared-first shared-last duplicate interpolated; do
+            work
+            initial=YES
+            [ "$value" != YES ] || initial=NO
+            seed_loader_setting "$form" "$initial"
+            IONCUBE=$initial
+            encoding=plain
+            [ "$value" != YES ] || encoding=encoded
+            IMPORT_SITE_IONCUBE=''
+            site="$TEST_DIR/no-site"
+            rm -rf "$TEST_DIR/site"
+            case "$source" in
+                imported)
+                    IMPORT_SITE_IONCUBE=no
+                    [ "$value" != YES ] || IMPORT_SITE_IONCUBE=yes
+                    ;;
+                site)
+                    site="$TEST_DIR/site"
+                    php_file "$encoding" "$site/admin/include/functions_base.php"
+                    ;;
+                archive) zip_site "$encoding" "$TEST_DIR/work/kvs-archive/KVS_7.0.2_[example.com].zip" ;;
+                index) zip_site "$encoding" "$TEST_DIR/work/kvs-archive/KVS_7.0.2_[example.com].zip" admin/index.php ;;
+            esac
+            if [ "$source" = selection ]; then
+                IONCUBE_CHOICE=2
+                [ "$value" != YES ] || IONCUBE_CHOICE=1
+                select_ioncube > "$TEST_DIR/syntax-output" 2>&1 || fail "selection failed for $form/$value"
+            else
+                detect_ioncube "$site" > "$TEST_DIR/syntax-output" 2>&1 || fail "$source detection failed for $form/$value"
+            fi
+            assert_saved_loader "$value" "$source/$form/$value"
+        done
+    done
+done
+IMPORT_SITE_IONCUBE=''
+echo 'PASS: detected and selected loader settings survive fresh loads without changing neighboring values'
 
 # No IONCUBE rewrite of setup.sh may match anything but the IONCUBE line,
 # whatever its quotes, branch or delimiter.

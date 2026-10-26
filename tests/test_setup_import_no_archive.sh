@@ -41,6 +41,8 @@ extract_function() {
 source "$ROOT_DIR/docker/lib/import.sh"
 functions_file="$TEST_DIR/functions.sh"
 {
+    extract_function remove_env_value
+    extract_function set_env_value
     extract_function import_check_kvs_archive_version
     extract_function detect_ioncube
     extract_function import_save_nginx_config
