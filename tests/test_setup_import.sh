@@ -451,6 +451,95 @@ test_setup_and_init_are_wired_for_imports() {
     pass "setup and init are wired for imports"
 }
 
+# shellcheck disable=SC2034,SC2329  # Variables and stubs used by sourced setup functions.
+test_source_domain_persistence_errors_stop_import() {
+    local lib="$TMP_ROOT/source-domain-functions.sh" name source_kind scenario case_dir
+    local detected failure operation status actual owner
+
+    : > "$lib"
+    for name in remove_env_value set_env_value import_record_source_domain select_import_source import_fetch_source; do
+        awk -v signature="$name() {" '$0 == signature { capture = 1 } capture { print } capture && /^}$/ { exit }' \
+            "$REPO_ROOT/docker/setup.sh" >> "$lib"
+    done
+    for source_kind in archive directory remote; do
+        for scenario in save_missing_error save_stale_error remove_error save_missing_ok save_stale_ok remove_ok remove_absent_ok; do
+            case_dir="$TMP_ROOT/source-domain-$source_kind-$scenario"
+            mkdir -p "$case_dir"
+            printf 'DOMAIN=dev.example.test\nOTHER=preserved\n' > "$case_dir/.env"
+            case "$scenario" in
+                save_stale_*|remove_error|remove_ok) echo 'IMPORT_SOURCE_DOMAIN=stale.example.test' >> "$case_dir/.env" ;;
+            esac
+            detected=source.example.test; operation=save; failure=no
+            case "$scenario" in remove_*) detected=''; operation=remove ;; esac
+            case "$scenario" in *_error) failure=yes ;; esac
+            chmod 600 "$case_dir/.env"
+            owner=$(stat -c '%u:%g' "$case_dir/.env")
+            status=0
+            (
+                cd "$case_dir"
+                # shellcheck source=/dev/null
+                source "$lib"
+                unset IMPORT_SOURCE_DOMAIN
+                # shellcheck source=/dev/null
+                source .env
+                HEADLESS=y RED='' GREEN='' YELLOW='' CYAN='' NC=''
+                IMPORT_SOURCE=$source_kind IMPORT_MODE=true IMPORT_CHOICE='' IMPORT_LIB=unused
+                IMPORT_SITE_DIR=/synthetic-source
+                inspect_fixture() {
+                    IMPORT_DETECTED_DOMAIN=$detected
+                    set_env_value IMPORT_EXCLUDE "'fixture/cache'"
+                    cp .env before-domain.env
+                }
+                import_inspect_archive() { inspect_fixture; }
+                import_inspect_directory() { inspect_fixture; }
+                import_inspect_remote() { inspect_fixture; }
+                import_check_completed() { return 0; }
+                import_check_kvs_archive_version() { return 0; }
+                refuse_unbuildable_kvs_php() { return 0; }
+                import_check_domain() { echo domain-check >> calls; }
+                import_confirm() { echo confirmation >> calls; }
+                import_fetch_archive() { echo transfer >> calls; }
+                import_fetch_remote() { echo transfer >> calls; }
+                import_place_site() { echo transfer >> calls; }
+                import_validate_local_materials() { return 0; }
+                # Only the final rename for this key fails. Real staged
+                # edits and the earlier independent filter write proceed.
+                mv() {
+                    if [ "$failure" = yes ] && [ "${key:-}" = IMPORT_SOURCE_DOMAIN ] && [ "${!#}" = .env ]; then
+                        echo rename-failure >> calls
+                        return 73
+                    fi
+                    command mv "$@"
+                }
+                : > calls
+                select_import_source
+                echo selected >> calls
+                import_fetch_source
+            ) > "$case_dir/output" 2>&1 || status=$?
+            # Calling conditionally deliberately disables errexit: the
+            # failure must still propagate through the real source chooser.
+            if [ "$failure" = yes ]; then
+                [ "$status" = 1 ] || fail "$source_kind/$scenario did not stop on a source-domain persistence error"
+                grep -Fq "Could not $operation IMPORT_SOURCE_DOMAIN" "$case_dir/output" || fail 'the failed source-domain operation must be named'
+                grep -Fxq rename-failure "$case_dir/calls" || fail 'the writer did not reach its final rename'
+                if grep -Eq '^(domain-check|confirmation|selected|transfer)$' "$case_dir/calls"; then
+                    fail "$source_kind/$scenario continued after the failed domain write"
+                fi
+                cmp -s "$case_dir/before-domain.env" "$case_dir/.env" || fail 'the failed domain write must preserve earlier independent settings'
+            else
+                [ "$status" = 0 ] || fail "$source_kind/$scenario failed: $(cat "$case_dir/output")"
+                grep -Fxq transfer "$case_dir/calls" || fail 'successful persistence did not reach the bounded transfer'
+                actual=$(cd "$case_dir" && env -u IMPORT_SOURCE_DOMAIN -u IMPORT_EXCLUDE bash -c 'source .env; printf "%s\n%s" "${IMPORT_SOURCE_DOMAIN-}" "$IMPORT_EXCLUDE"')
+                [ "$actual" = "$(printf '%s\n%s' "$detected" fixture/cache)" ] || fail 'fresh source-domain readback differs from the saved choice'
+            fi
+            grep -Fxq 'OTHER=preserved' "$case_dir/.env" || fail 'an unrelated setting changed'
+            [ "$(stat -c '%a:%u:%g' "$case_dir/.env")" = "600:$owner" ] || fail 'source-domain persistence changed file permissions or ownership'
+            if compgen -G "$case_dir/.env.tmp.*" > /dev/null; then fail 'source-domain persistence left a temporary file'; fi
+        done
+    done
+    pass 'all source choices stop before confirmation or transfer when source-domain persistence fails'
+}
+
 test_cached_dump_inspection_preserves_output() {
     local dump="$TMP_ROOT/cached-source.sql" inspection identity
     make_dump "$dump" yes
@@ -516,6 +605,7 @@ test_sql_escaping_survives_quotes_and_like_wildcards
 test_site_placement_copies_once_and_refuses_a_used_directory
 test_free_space_check_uses_the_nearest_existing_parent
 test_setup_and_init_are_wired_for_imports
+test_source_domain_persistence_errors_stop_import
 test_cached_dump_inspection_preserves_output
 test_dump_preparation_stops_after_a_decompression_failure
 

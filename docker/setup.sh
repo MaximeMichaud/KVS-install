@@ -1514,9 +1514,15 @@ select_import_source() {
 import_record_source_domain() {
     [ -f .env ] || return 0
     if [[ "$IMPORT_DETECTED_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
-        set_env_value IMPORT_SOURCE_DOMAIN "$IMPORT_DETECTED_DOMAIN" || true
+        set_env_value IMPORT_SOURCE_DOMAIN "$IMPORT_DETECTED_DOMAIN" || {
+            echo "ERROR: Could not save IMPORT_SOURCE_DOMAIN to .env; the import was stopped before transfer." >&2
+            exit 1
+        }
     else
-        remove_env_value IMPORT_SOURCE_DOMAIN
+        remove_env_value IMPORT_SOURCE_DOMAIN || {
+            echo "ERROR: Could not remove IMPORT_SOURCE_DOMAIN from .env; the import was stopped before transfer." >&2
+            exit 1
+        }
     fi
 }
 
