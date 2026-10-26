@@ -672,6 +672,46 @@ source "$TEST_DIR/files-only.sh"
         grep -Fq 'The containers of kvs-example-test still run on these files' "$TEST_DIR/files-only.out" || fail 'the running copy warning disappeared'
         cmp -s .env env.copy || fail 'recognizing the saved domain changed .env'
     done
+    # Saved project identity follows the same parsed file as the domain.
+    # A project-looking line in another value is never a container target.
+    for project_form in plain quoted exported commented indented duplicate reference real_fake fake_only absent inherited empty; do
+        printf 'DOMAIN=example.test\nKVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z\n' > .env
+        expected_project=kvs-example-test
+        case "$project_form" in
+            plain|real_fake) echo 'COMPOSE_PROJECT_NAME=kvs-example-test' >> .env ;;
+            quoted) echo "COMPOSE_PROJECT_NAME='kvs-example-test'" >> .env ;;
+            exported) echo 'export COMPOSE_PROJECT_NAME=kvs-example-test' >> .env ;;
+            commented) echo 'COMPOSE_PROJECT_NAME=kvs-example-test # saved project' >> .env ;;
+            indented) echo '  COMPOSE_PROJECT_NAME=kvs-example-test' >> .env ;;
+            duplicate) printf 'COMPOSE_PROJECT_NAME=kvs-decoy\nexport COMPOSE_PROJECT_NAME=kvs-example-test\n' >> .env ;;
+            reference) printf 'PROJECT_SEED=kvs-example-test\nCOMPOSE_PROJECT_NAME="${PROJECT_SEED}"\n' >> .env ;;
+            fake_only|absent|inherited) expected_project='' ;;
+            empty) echo "COMPOSE_PROJECT_NAME=''" >> .env; expected_project='' ;;
+        esac
+        case "$project_form" in
+            real_fake|fake_only) printf '%s\n' 'KEEP="first' 'COMPOSE_PROJECT_NAME=kvs-decoy' 'last"' >> .env ;;
+        esac
+        unset COMPOSE_PROJECT_NAME
+        [ "$project_form" != inherited ] || export COMPOSE_PROJECT_NAME=kvs-inherited
+        # shellcheck source=/dev/null
+        source "$TEST_DIR/load-domain.sh"
+        cp .env env.copy
+        : > "$TEST_DIR/docker-calls"
+        FIXTURE_RUNNING=yes import_files_only > "$TEST_DIR/files-only.out" 2>&1 || fail "$project_form files-only failed"
+        if [ -n "$expected_project" ]; then
+            [ "$(cat "$TEST_DIR/docker-calls")" = "docker ps -q --filter label=com.docker.compose.project=$expected_project" ] ||
+                fail "$project_form inspected another project"
+            grep -Fq "The containers of $expected_project still run on these files" "$TEST_DIR/files-only.out" ||
+                fail "$project_form hid the running project warning"
+        else
+            [ ! -s "$TEST_DIR/docker-calls" ] || fail "$project_form invented a saved project"
+            if grep -Fq 'still run on these files' "$TEST_DIR/files-only.out"; then fail "$project_form invented a running project"; fi
+        fi
+        cmp -s .env env.copy || fail "$project_form changed saved settings"
+    done
+    printf 'DOMAIN=example.test\nCOMPOSE_PROJECT_NAME=kvs-example-test\nKVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z\n' > .env
+    # shellcheck source=/dev/null
+    source "$TEST_DIR/load-domain.sh"
     : > "$TEST_DIR/calls"
     FIXTURE_RUNNING=no import_files_only > "$TEST_DIR/files-only.out" 2>&1
     provided "$TEST_DIR/files-only.out"

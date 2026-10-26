@@ -210,3 +210,109 @@ echo "ok 1 - setup scopes existing-resource detection to the Compose project fro
 
 run_fresh_install_case
 echo "ok 2 - fresh setup detects resources only after deriving the final Compose project"
+
+# The earlier changed-domain import acts on the saved project before the
+# final prefix is chosen. Run its actual loading and decision blocks; the
+# executable Docker double also catches calls made through xargs.
+awk '
+    $0 == "remove_env_value() {" || $0 == "set_env_value() {" ||
+        $0 == "compose_files_for() {" || $0 == "require_compose_config() {" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { capture = 0 }
+' "$REPO_ROOT/docker/setup.sh" > "$TMP_ROOT/project-functions.sh"
+awk '
+    $0 == "# Load environment" { capture = 1 }
+    $0 == "# Domain validation" { capture = 0 }
+    capture { print }
+' "$REPO_ROOT/docker/setup.sh" > "$TMP_ROOT/project-load.sh"
+awk '
+    /^# An import under a new domain gets its own stack:/ { capture = 1 }
+    /^# Site prefix for container naming / { exit }
+    capture { print }
+' "$REPO_ROOT/docker/setup.sh" > "$TMP_ROOT/project-retire.sh"
+mkdir -p "$TMP_ROOT/prior-bin"
+cat > "$TMP_ROOT/prior-bin/docker" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$DOCKER_CALL_LOG"
+case "$1" in
+    ps)
+        [ "$#" -eq 4 ] && [ "$3" = --filter ] || exit 99
+        case "$4" in
+            label=com.docker.compose.project=kvs-saved) echo saved-container ;;
+            label=com.docker.compose.project=kvs-decoy) echo decoy-container ;;
+            label=com.docker.compose.project=kvs-inherited) echo inherited-container ;;
+            label=com.docker.compose.project=kvs) echo legacy-container ;;
+        esac
+        exit 0
+        ;;
+esac
+case "$*" in
+    'compose config --quiet'|'stop saved-container'|'rm saved-container'|'network rm kvs-saved_kvs-network'|\
+    'stop decoy-container'|'rm decoy-container'|'network rm kvs-decoy_kvs-network'|\
+    'stop inherited-container'|'rm inherited-container'|'network rm kvs-inherited_kvs-network') exit 0 ;;
+esac
+echo FORBIDDEN_DOCKER_CALL >> "$DOCKER_CALL_LOG"
+exit 99
+EOF
+chmod +x "$TMP_ROOT/prior-bin/docker"
+cat > "$TMP_ROOT/project-driver.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+source "$PROJECT_TEST_ROOT/project-functions.sh"
+RED='' GREEN='' YELLOW='' NC=''
+check_mariadb_stop_grace_period() { :; }
+check_cloudflare_configuration() { :; }
+source "$PROJECT_TEST_ROOT/project-load.sh"
+DOMAIN=$NEXT_DOMAIN
+IMPORT_MODE=true
+set_env_value DOMAIN "$DOMAIN"
+export DOMAIN
+source "$PROJECT_TEST_ROOT/project-retire.sh"
+EOF
+
+for project_form in plain quoted exported commented indented duplicate reference real_fake fake_only absent inherited empty legacy; do
+    for domain_change in same changed; do
+        case_dir="$TMP_ROOT/prior-$project_form-$domain_change"
+        mkdir -p "$case_dir"
+        printf 'DOMAIN=example.test\nSITE_PREFIX=kvs-saved\nMODE=single\n' > "$case_dir/.env"
+        expected_project=kvs-saved
+        case "$project_form" in
+            plain|real_fake) echo 'COMPOSE_PROJECT_NAME=kvs-saved' >> "$case_dir/.env" ;;
+            quoted) echo "COMPOSE_PROJECT_NAME='kvs-saved'" >> "$case_dir/.env" ;;
+            exported) echo 'export COMPOSE_PROJECT_NAME=kvs-saved' >> "$case_dir/.env" ;;
+            commented) echo 'COMPOSE_PROJECT_NAME=kvs-saved # saved project' >> "$case_dir/.env" ;;
+            indented) echo '  COMPOSE_PROJECT_NAME=kvs-saved' >> "$case_dir/.env" ;;
+            duplicate) printf 'COMPOSE_PROJECT_NAME=kvs-decoy\nexport COMPOSE_PROJECT_NAME=kvs-saved\n' >> "$case_dir/.env" ;;
+            reference)
+                # shellcheck disable=SC2016  # Expanded only when setup loads the fixture.
+                printf 'PROJECT_SEED=kvs-saved\nCOMPOSE_PROJECT_NAME="${PROJECT_SEED}"\n' >> "$case_dir/.env" ;;
+            fake_only|absent|inherited) expected_project='' ;;
+            empty) echo "COMPOSE_PROJECT_NAME=''" >> "$case_dir/.env"; expected_project='' ;;
+            legacy) echo 'COMPOSE_PROJECT_NAME=kvs' >> "$case_dir/.env"; expected_project='' ;;
+        esac
+        case "$project_form" in
+            real_fake|fake_only) printf '%s\n' 'KEEP="first' 'COMPOSE_PROJECT_NAME=kvs-decoy' 'last"' >> "$case_dir/.env" ;;
+        esac
+        chmod 600 "$case_dir/.env"
+        next_domain=example.test
+        [ "$domain_change" = same ] || next_domain=other.test
+        (
+            cd "$case_dir"
+            unset COMPOSE_PROJECT_NAME
+            [ "$project_form" != inherited ] || export COMPOSE_PROJECT_NAME=kvs-inherited
+            PATH="$TMP_ROOT/prior-bin:$PATH" DOCKER_CALL_LOG="$case_dir/calls" PROJECT_TEST_ROOT="$TMP_ROOT" NEXT_DOMAIN="$next_domain" \
+                bash "$TMP_ROOT/project-driver.sh"
+        ) > "$case_dir/output" 2>&1 || fail "$project_form/$domain_change failed: $(cat "$case_dir/output")"
+        : > "$case_dir/expected-calls"
+        if [ "$domain_change" = changed ] && [ -n "$expected_project" ]; then
+            printf '%s\n' 'ps -aq --filter label=com.docker.compose.project=kvs-saved' 'compose config --quiet' \
+                'ps -q --filter label=com.docker.compose.project=kvs-saved' 'stop saved-container' \
+                'ps -aq --filter label=com.docker.compose.project=kvs-saved' 'rm saved-container' \
+                'network rm kvs-saved_kvs-network' > "$case_dir/expected-calls"
+        fi
+        [ -f "$case_dir/calls" ] || : > "$case_dir/calls"
+        cmp -s "$case_dir/calls" "$case_dir/expected-calls" || fail "$project_form/$domain_change selected the wrong project: $(cat "$case_dir/calls")"
+        [ "$(stat -c %a "$case_dir/.env")" = 600 ] || fail 'the saved file mode changed'
+    done
+done
+echo 'ok 3 - changed-domain imports select the parsed saved project and exclude inherited-only or multiline lookalikes'

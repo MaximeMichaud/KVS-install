@@ -2491,7 +2491,7 @@ import_files_only() {
     echo ""
     echo -e "${GREEN}The site files in $destination are those of the old server as of this pass; no dump was received, the database and the containers were left as they were.${NC}"
     echo "Next: once the writes on the old site are frozen, the same command without IMPORT_FILES_ONLY (with VOLUME_CHOICE=1 after a completed import) exports a fresh dump, copies what changed since this pass and loads the database."
-    project=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env 2>/dev/null | tail -n 1)
+    project=${COMPOSE_PROJECT_NAME:-}
     if [ "$env_domain" = "$DOMAIN" ] && [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] &&
         docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null | grep -q .; then
         echo -e "${YELLOW}The containers of $project still run on these files, now with the old server's setup.php and setup_db.php: the copy of the site they serve fails until that pass sets the files up for this server again.${NC}"
@@ -3084,7 +3084,7 @@ fi
 chmod 600 .env
 
 # Load environment
-unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE KVS_IMPORT_COMPLETED
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
@@ -3385,7 +3385,7 @@ compose_files_for() {
 # through site-manager.sh and are left alone here.
 if [ "$IMPORT_MODE" = true ] && [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] &&
     [ "$PREVIOUS_DOMAIN" != example.com ] && [ "$(sed -n 's/^MODE=//p' .env 2>/dev/null | tail -n 1)" != multi ]; then
-    PREVIOUS_PROJECT=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env 2>/dev/null | tail -n 1)
+    PREVIOUS_PROJECT=${COMPOSE_PROJECT_NAME:-}
     if [ -n "$PREVIOUS_PROJECT" ] && [ "$PREVIOUS_PROJECT" != kvs ] &&
         docker ps -aq --filter "label=com.docker.compose.project=${PREVIOUS_PROJECT}" 2>/dev/null | grep -q .; then
         # The new stack is built from the same compose files: when Compose
