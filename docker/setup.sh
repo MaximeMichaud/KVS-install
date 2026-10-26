@@ -2337,7 +2337,7 @@ import_files_only() {
     echo ""
     echo -e "${CYAN}Site files from the old server, nothing else (IMPORT_FILES_ONLY=yes): no dump, the database and the containers stay as they are${NC}"
     import_inspect_remote
-    env_domain=$(sed -n 's/^DOMAIN=//p' .env 2>/dev/null | tail -n 1)
+    env_domain=$PREVIOUS_DOMAIN
     if [ "$env_domain" = "$DOMAIN" ]; then
         completed=$(sed -n 's/^KVS_IMPORT_COMPLETED=//p' .env 2>/dev/null | tail -n 1)
     fi
@@ -2955,6 +2955,8 @@ unset CLOUDFLARE_ENABLED
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
+# Capture the parsed saved domain before explicit overrides change it.
+PREVIOUS_DOMAIN=${DOMAIN,,}
 
 # Domain validation
 
@@ -3179,7 +3181,6 @@ fi
 # An import completed under another domain (a development subdomain tried
 # before the real one) does not count for this one: the real domain gets
 # its own import, into its own database.
-PREVIOUS_DOMAIN=$(sed -n 's/^DOMAIN=//p' .env 2>/dev/null | tail -n 1)
 if [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] && grep -q '^KVS_IMPORT_COMPLETED=' .env 2>/dev/null; then
     echo -e "${YELLOW}The domain changes from $PREVIOUS_DOMAIN to $DOMAIN: the import completed under the old one does not count for it.${NC}"
     remove_env_value KVS_IMPORT_COMPLETED

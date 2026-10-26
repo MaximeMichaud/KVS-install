@@ -148,7 +148,7 @@ branch=$(grep -n '^    import_files_only$' "$SETUP" | cut -d: -f1)
 [ -n "$branch" ] || fail 'the main flow must run import_files_only'
 sed -n "$((branch - 1))p;$((branch + 1))p" "$SETUP" | tr '\n' ' ' | grep -Fq 'if [ "$IMPORT_FILES_ONLY" = yes ]; then     exit 0' ||
     fail 'the pass of the files alone must exit right after it'
-for later in '^PREVIOUS_DOMAIN=\$\(sed' '^set_env_value DOMAIN "\$DOMAIN"$' '^select_import_source$' '^import_require_empty_volume$' \
+for later in '^if \[ -n "\$PREVIOUS_DOMAIN" \].*KVS_IMPORT_COMPLETED' '^set_env_value DOMAIN "\$DOMAIN"$' '^select_import_source$' '^import_require_empty_volume$' \
     'docker compose down 2>/dev/null' '^import_fetch_source$' '^import_stage_dump$'; do
     line=$(grep -En -- "$later" "$SETUP" | head -n 1 | cut -d: -f1)
     [ -n "$line" ] && [ "$line" -gt "$branch" ] || fail "the pass of the files alone must end before '$later'"
@@ -156,6 +156,50 @@ done
 validated=$(grep -n 'ERROR: Invalid domain format: \$DOMAIN' "$SETUP" | tail -n 1 | cut -d: -f1)
 [ "$validated" -lt "$branch" ] || fail 'the domain must be validated before the pass of the files alone'
 pass 'the pass of the files alone ends before .env, the images, the containers and the volume are touched'
+
+# Exercise the production loading and override order. These configuration
+# checks are unrelated to the saved-domain comparison and touch no host.
+{
+    printf '%s\n' 'check_mariadb_stop_grace_period() { :; }' 'check_cloudflare_configuration() { :; }'
+    awk '$0 == "# Load environment" { capture = 1 } $0 == "# Domain validation" { exit } capture { print }' "$SETUP"
+    awk '$0 == "if [ -n \"$KVS_DOMAIN_OVERRIDE\" ]; then" { capture = 1 } capture { print } $0 == "DOMAIN=${DOMAIN,,}" { exit }' "$SETUP"
+} > "$TEST_DIR/load-domain.sh"
+awk '/^# An import completed under another domain / { capture = 1 } /^require_single_kvs_archive / { exit } capture { print }' \
+    "$SETUP" > "$TEST_DIR/invalidate-domain.sh"
+extract remove_env_value import_check_completed > "$TEST_DIR/completed.sh"
+# shellcheck source=/dev/null
+source "$TEST_DIR/completed.sh"
+mkdir "$TEST_DIR/domain-cases"
+for saved_domain in 'DOMAIN=example.test' "DOMAIN='example.test'" 'DOMAIN="example.test"' \
+    'DOMAIN=example.test # current site' 'DOMAIN=EXAMPLE.TEST' 'export DOMAIN=example.test' \
+    $'DOMAIN=old.test\nDOMAIN=example.test'; do
+    for override_domain in '' other.test; do
+        (
+            cd "$TEST_DIR/domain-cases"
+            printf '%s\nKVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z\n' "$saved_domain" > .env
+            unset DOMAIN
+            KVS_DOMAIN_OVERRIDE=$override_domain
+            HEADLESS=y VOLUME_CHOICE=2 RED='' GREEN='' YELLOW='' CYAN='' NC=''
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/load-domain.sh"
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/invalidate-domain.sh"
+            IMPORT_MODE=true IMPORT_SOURCE=remote
+            import_check_completed > "$TEST_DIR/completed.out"
+            if [ -z "$override_domain" ]; then
+                grep -Fxq 'KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z' .env || fail "the same domain lost its completed import: $saved_domain"
+                [ "$IMPORT_MODE" = false ] && [ -z "$IMPORT_SOURCE" ] || fail 'a completed same-site import must ignore the source'
+            else
+                if grep -q '^KVS_IMPORT_COMPLETED=' .env; then fail "another domain kept the old import marker: $saved_domain"; fi
+                [ "$IMPORT_MODE" = true ] || fail 'a genuine domain change must allow its own import'
+            fi
+            IMPORT_MODE=true IMPORT_SOURCE=remote VOLUME_CHOICE=1
+            import_check_completed > "$TEST_DIR/completed.out"
+            [ "$IMPORT_MODE" = true ] || fail 'explicit reimport consent must still be honored'
+        ) || fail "saved-domain recognition failed for $saved_domain (override=$override_domain)"
+    done
+done
+pass 'completed imports follow the parsed saved domain, genuine overrides and explicit reimport consent'
 
 # A dump an earlier run staged next to the record, whole.
 make_dump() {
@@ -271,6 +315,9 @@ source "$TEST_DIR/files-only.sh"
     DOMAIN=example.test HEADLESS=y RED='' GREEN='' YELLOW='' CYAN='' NC=''
     IMPORT_DATABASE_FORMAT_REQUEST=auto IMPORT_LIB=unused
     printf 'DOMAIN=example.test\nCOMPOSE_PROJECT_NAME=kvs-example-test\nKVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z\n' > .env
+    KVS_DOMAIN_OVERRIDE=''
+    # shellcheck source=/dev/null
+    source "$TEST_DIR/load-domain.sh"
     cp .env env.copy
     import_inspect_remote() { echo inspect >> "$TEST_DIR/calls"; }
     import_fetch_remote() { echo fetch >> "$TEST_DIR/calls"; }
@@ -292,6 +339,18 @@ source "$TEST_DIR/files-only.sh"
     grep -Fq 'Never run this once the site is live here' "$TEST_DIR/files-only.out" || fail 'the risk after the cutover must be spelled out'
     grep -Fq 'no dump was received, the database and the containers were left as they were' "$TEST_DIR/files-only.out" || fail 'missing report'
     grep -Fq 'The containers of kvs-example-test still run on these files' "$TEST_DIR/files-only.out" || fail 'the running copy must be pointed out'
+    for saved_domain in "DOMAIN='example.test'" 'DOMAIN="example.test"' 'DOMAIN=example.test # current site' \
+        'DOMAIN=EXAMPLE.TEST' 'export DOMAIN=example.test'; do
+        printf '%s\nCOMPOSE_PROJECT_NAME=kvs-example-test\nKVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z\n' "$saved_domain" > .env
+        # shellcheck source=/dev/null
+        source "$TEST_DIR/load-domain.sh"
+        cp .env env.copy
+        FIXTURE_RUNNING=yes import_files_only > "$TEST_DIR/files-only.out" 2>&1 || fail 'the pass of the files alone failed'
+        provided "$TEST_DIR/files-only.out"
+        grep -Fq 'An import completed here on 2026-10-01T10:00:00Z' "$TEST_DIR/files-only.out" || fail "a completed import was hidden by domain syntax: $saved_domain"
+        grep -Fq 'The containers of kvs-example-test still run on these files' "$TEST_DIR/files-only.out" || fail 'the running copy warning disappeared'
+        cmp -s .env env.copy || fail 'recognizing the saved domain changed .env'
+    done
     : > "$TEST_DIR/calls"
     FIXTURE_RUNNING=no import_files_only > "$TEST_DIR/files-only.out" 2>&1
     provided "$TEST_DIR/files-only.out"
