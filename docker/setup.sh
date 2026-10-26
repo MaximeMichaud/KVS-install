@@ -3632,12 +3632,14 @@ detect_ioncube() {
     case "${IMPORT_SITE_IONCUBE:-}" in
         yes)
             echo -e "${GREEN}✓ IonCube encoded files detected in the imported site${NC}"
-            sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
+            sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env || return $?
+            IONCUBE=YES
             return
             ;;
         no)
             echo -e "${GREEN}✓ Plain PHP files detected in the imported site (no IonCube)${NC}"
-            sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
+            sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env || return $?
+            IONCUBE=NO
             return
             ;;
     esac
@@ -3649,12 +3651,14 @@ detect_ioncube() {
         case "$(import_site_ioncube "$site")" in
             yes)
                 echo -e "${GREEN}✓ IonCube encoded files detected in the site under $site${NC}"
-                sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env
+                sed -i "s/^IONCUBE=.*/IONCUBE=YES/" .env || return $?
+                IONCUBE=YES
                 return
                 ;;
             no)
                 echo -e "${GREEN}✓ Plain PHP files detected in the site under $site (no IonCube)${NC}"
-                sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env
+                sed -i "s/^IONCUBE=.*/IONCUBE=NO/" .env || return $?
+                IONCUBE=NO
                 return
                 ;;
         esac

@@ -123,6 +123,67 @@ for choice in 2 1; do
     only_ioncube_changed "$value" "select_ioncube (choice $choice)"
 done
 
+# The immediate loader question must see the newly detected encoding,
+# regardless of what IONCUBE contained before this setup invocation.
+awk '
+    /^# IonCube version selection \(only if IonCube detected\)/ { capture = 1 }
+    /^# Reload .env to get user/ { exit }
+    capture { print }
+' "$ROOT_DIR/docker/setup.sh" > "$TEST_DIR/loader-choice.sh"
+for source in imported site archive index; do
+    for encoding in plain encoded; do
+        for initial in YES NO; do
+            for choice in 1 2; do
+                work
+                IMPORT_SITE_IONCUBE=''
+                site="$TEST_DIR/no-site"
+                rm -rf "$TEST_DIR/site"
+                case "$source" in
+                    imported)
+                        IMPORT_SITE_IONCUBE=no
+                        [ "$encoding" != encoded ] || IMPORT_SITE_IONCUBE=yes
+                        ;;
+                    site)
+                        site="$TEST_DIR/site"
+                        php_file "$encoding" "$site/admin/include/functions_base.php"
+                        ;;
+                    archive) zip_site "$encoding" "$TEST_DIR/work/kvs-archive/KVS_7.0.2_[example.com].zip" ;;
+                    index) zip_site "$encoding" "$TEST_DIR/work/kvs-archive/KVS_7.0.2_[example.com].zip" admin/index.php ;;
+                esac
+                sed -i "s/^IONCUBE=YES\$/IONCUBE=$initial/" .env
+                DOMAIN=example.com
+                IONCUBE=$initial
+                IONCUBE_CHOICE=$choice
+                detect_ioncube "$site" > "$TEST_DIR/detected-output" 2>&1 ||
+                    fail "detection failed for $source/$encoding/$initial"
+                detected=NO
+                [ "$encoding" != encoded ] || detected=YES
+                [ "$IONCUBE" = "$detected" ] ||
+                    fail "$source/$encoding retained stale IONCUBE=$IONCUBE from $initial"
+                # Exercise the production decision before its later reload.
+                # shellcheck source=/dev/null
+                source "$TEST_DIR/loader-choice.sh" > "$TEST_DIR/choice-output" 2>&1
+                expected=NO
+                if [ "$encoding" = encoded ] && [ "$choice" = 1 ]; then
+                    expected=YES
+                fi
+                if [ "$encoding" = encoded ]; then
+                    grep -Fq 'IonCube Loader' "$TEST_DIR/choice-output" ||
+                        fail "$source did not offer the loader choice for newly detected encoded files"
+                elif grep -Fq 'IonCube Loader' "$TEST_DIR/choice-output"; then
+                    fail "$source offered the loader choice after detecting plain PHP"
+                fi
+                # shellcheck disable=SC2016
+                saved=$(env -u IONCUBE -u BASH_ENV bash -c 'source .env; printf "%s" "$IONCUBE"')
+                [ "$saved" = "$expected" ] ||
+                    fail "$source/$encoding/$initial/choice-$choice saved IONCUBE=$saved instead of $expected"
+            done
+        done
+    done
+done
+IMPORT_SITE_IONCUBE=''
+echo 'PASS: the loader choice follows newly detected encoding and persists the selected value'
+
 # No IONCUBE rewrite of setup.sh may match anything but the IONCUBE line,
 # whatever its quotes, branch or delimiter.
 unanchored=$(grep -E '(^|[^[:alnum:]_])sed ' "$ROOT_DIR/docker/setup.sh" |
