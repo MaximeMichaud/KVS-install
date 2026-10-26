@@ -2022,14 +2022,15 @@ import_inspect_remote() {
     if [ "$IMPORT_NGINX_REWRITES" = source ] && [ "${IMPORT_FILES_ONLY:-no}" != yes ]; then
         import_prepare_source_nginx_rewrites
     fi
+    # Paths are validated above; quote each whole list for Bash and Compose.
     if [ -f .env ]; then
         if [ -n "$IMPORT_EXCLUDE" ]; then
-            set_env_value IMPORT_EXCLUDE "$IMPORT_EXCLUDE" || true
+            set_env_value IMPORT_EXCLUDE "'$IMPORT_EXCLUDE'" || true
         else
             remove_env_value IMPORT_EXCLUDE
         fi
         if [ -n "$IMPORT_INCLUDE" ]; then
-            set_env_value IMPORT_INCLUDE "$IMPORT_INCLUDE" || true
+            set_env_value IMPORT_INCLUDE "'$IMPORT_INCLUDE'" || true
         else
             remove_env_value IMPORT_INCLUDE
         fi

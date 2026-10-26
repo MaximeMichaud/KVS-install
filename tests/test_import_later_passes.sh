@@ -60,21 +60,22 @@ pass 'the exporter is asked to skip the size measure, or given the budget'
 
 # import_inspect_remote against a stub exporter: the budget it hands over
 # and the tools, rewrites and take-over it asks for land in calls. It runs
-# in a directory without .env.
-extract import_save_nginx_config import_remote_size_text import_remote_earlier_pass import_inspect_remote > "$TEST_DIR/inspect.sh"
+# in a directory without .env by default; filter round trips provide one.
+extract remove_env_value set_env_value import_save_nginx_config import_remote_size_text import_remote_earlier_pass import_inspect_remote > "$TEST_DIR/inspect.sh"
 # shellcheck source=/dev/null
 source "$TEST_DIR/inspect.sh"
 inspect() {
     local status=0
+    local inspect_dir=${FIXTURE_INSPECT_DIR:-$TEST_DIR/inspect-cwd}
 
-    mkdir -p "$TEST_DIR/inspect-cwd" "$TEST_DIR/logs"
+    mkdir -p "$inspect_dir" "$TEST_DIR/logs"
     (
-        cd "$TEST_DIR/inspect-cwd"
+        cd "$inspect_dir"
         LOG_DIR="$TEST_DIR/logs" HEADLESS=y RED='' GREEN='' YELLOW='' CYAN='' NC=''
         DOMAIN=example.test IMPORT_STAGING="$TEST_DIR/import" IMPORT_MARKER_DIR="$TEST_DIR/import"
         IMPORT_TRANSFER_JOBS=4 IMPORT_SIZE_TIMEOUT=300 IMPORT_REMOTE_PASSWORD=fixture
         IMPORT_REMOTE_HOST=old.test IMPORT_REMOTE_PORT=22 IMPORT_REMOTE_USER=root IMPORT_REMOTE_DIR=${FIXTURE_DIR-/var/www/site}
-        IMPORT_SSH_KEY='' IMPORT_SSH_ACCEPT_NEW=y IMPORT_EXCLUDE='' IMPORT_INCLUDE=''
+        IMPORT_SSH_KEY='' IMPORT_SSH_ACCEPT_NEW=y IMPORT_EXCLUDE=${FIXTURE_EXCLUDE:-} IMPORT_INCLUDE=${FIXTURE_INCLUDE:-}
         IMPORT_DATABASE_FORMAT=auto IMPORT_REMOTE_SUDO_ERROR='' IMPORT_EXPORTER="$ROOT_DIR/kvs-export.sh"
         IMPORT_NGINX_REWRITES=${FIXTURE_REWRITES:-} IMPORT_MODE=true IMPORT_REUSE_SITE_DIR=${FIXTURE_REUSE:-}
         import_ensure_tool() { echo "tool $1" >> "$TEST_DIR/calls"; }
@@ -89,9 +90,20 @@ inspect() {
         import_take_over_site() { echo take-over >> "$TEST_DIR/calls"; }
         import_remote_detect() {
             echo "budget $4" >> "$TEST_DIR/calls"
+            printf '%s\0%s\0' "$5" "$6" > "$TEST_DIR/detected-filters"
             printf 'kvs_export=1\nsite_dir=/var/www/site\nproject_path=/var/www/site\nkvs_version=7.0.2\n' > "$3"
             printf 'tables_prefix=ktvs_\ndb_ok=%s\nrsync=yes\ncompressor=zstd\ndomain=example.test\n' "${FIXTURE_DB_OK:-yes}" >> "$3"
         }
+        if [ "${FIXTURE_FROM_SAVED:-no}" = yes ]; then
+            # A path must never run as a command while .env is reloaded.
+            backup() { echo unexpected-path-command > "$TEST_DIR/filter-command"; return 127; }
+            media() { echo unexpected-path-command > "$TEST_DIR/filter-command"; return 127; }
+            unset IMPORT_EXCLUDE IMPORT_INCLUDE
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/filter-defaults.sh"
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/filter-load.sh" || exit $?
+        fi
         : > "$TEST_DIR/calls"
         import_inspect_remote
     ) > "$TEST_DIR/inspect.out" 2>&1 || status=$?
@@ -99,6 +111,39 @@ inspect() {
     return "$status"
 }
 budget() { sed -n 's/^budget //p' "$TEST_DIR/calls"; }
+
+# Exercise the real persistence block and loading order for the next pass.
+# The earlier inspection fixtures intentionally have no .env to update.
+sed -n '/^IMPORT_EXCLUDE=/p; /^IMPORT_INCLUDE=/p' "$SETUP" > "$TEST_DIR/filter-defaults.sh"
+awk '
+    $0 == "# Load environment" { capture = 1 }
+    /^check_mariadb_stop_grace_period / { exit }
+    capture { print }
+' "$SETUP" > "$TEST_DIR/filter-load.sh"
+for filter_case in single multiple assignments punctuation tabs empty; do
+    filter_dir="$TEST_DIR/filters-$filter_case"
+    mkdir -p "$filter_dir"
+    printf 'DOMAIN=example.test\nOTHER=preserved\n' > "$filter_dir/.env"
+    chmod 600 "$filter_dir/.env"
+    case "$filter_case" in
+        single) filter_exclude=cache; filter_include=.hidden ;;
+        multiple) filter_exclude='contents/videos_sources backup'; filter_include='.hidden media' ;;
+        assignments) filter_exclude='cache extra=path'; filter_include='.hidden mount=storage' ;;
+        punctuation) filter_exclude='._@%+,-=first dir/._@%+,-=last'; filter_include='.hidden m=storage' ;;
+        tabs) filter_exclude=$'cache\textra=path'; filter_include=$'.hidden\tmount=storage' ;;
+        empty) filter_exclude=''; filter_include='' ;;
+    esac
+    printf '%s\0%s\0' "$filter_exclude" "$filter_include" > "$TEST_DIR/expected-filters"
+    FIXTURE_INSPECT_DIR="$filter_dir" FIXTURE_EXCLUDE="$filter_exclude" FIXTURE_INCLUDE="$filter_include" inspect ||
+        fail "$filter_case initial filter inspection failed: $(cat "$TEST_DIR/inspect.out")"
+    cmp -s "$TEST_DIR/expected-filters" "$TEST_DIR/detected-filters" || fail "$filter_case changed the initial filters"
+    FIXTURE_INSPECT_DIR="$filter_dir" FIXTURE_FROM_SAVED=yes inspect ||
+        fail "$filter_case saved filters could not be reloaded: $(cat "$TEST_DIR/inspect.out")"
+    cmp -s "$TEST_DIR/expected-filters" "$TEST_DIR/detected-filters" || fail "$filter_case changed the filters on the next pass"
+    [ ! -e "$TEST_DIR/filter-command" ] || fail "$filter_case executed a path as a command"
+    grep -Fxq 'OTHER=preserved' "$filter_dir/.env" || fail "$filter_case changed another saved setting"
+done
+pass 'saved multi-path filters reach the next inspection unchanged without executing path tokens'
 
 # The size of a site that already holds an earlier pass from the same old
 # server is not measured, on any pass.
