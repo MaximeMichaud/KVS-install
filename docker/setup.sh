@@ -663,6 +663,119 @@ include_www_for_domain() {
     [ "$dot_count" -eq 1 ]
 }
 
+remove_env_value() {
+    local key="$1" env_file="${2:-.env}" data output="" offset=0 record begin end word character complete
+    local index following removed cursor temporary preceding
+    local export_result="${3:-}" export_prefix=""
+    local -a words starts ends drop
+
+    # A trailing marker preserves every newline through command substitution.
+    data=$(cat -- "$env_file" && printf '.') || return 1
+    data=${data%.}
+    while [ "$offset" -lt "${#data}" ]; do
+        record=$offset
+        words=() starts=() ends=() drop=()
+        while [ "$offset" -lt "${#data}" ]; do
+            character=${data:offset:1}
+            case "$character" in
+                $'\n') offset=$((offset + 1)); break ;;
+                ' '|$'\t'|$'\r') offset=$((offset + 1)); continue ;;
+                '#')
+                    while [ "$offset" -lt "${#data}" ] && [ "${data:offset:1}" != $'\n' ]; do
+                        offset=$((offset + 1))
+                    done
+                    continue
+                    ;;
+            esac
+            begin=$offset
+            complete=false
+            while [ "$offset" -lt "${#data}" ]; do
+                character=${data:offset:1}
+                case "$character" in
+                    ' '|$'\t'|$'\r'|$'\n')
+                        word=${data:begin:offset-begin}
+                        # Parse only: quotes, substitutions and escaped spaces
+                        # stay in their word without evaluating any value.
+                        if BASH_ENV=/dev/null "$BASH" -n <<< "for kvs_env_word in $word; do :; done" 2>/dev/null; then
+                            complete=true
+                            break
+                        fi
+                        ;;
+                esac
+                offset=$((offset + 1))
+            done
+            word=${data:begin:offset-begin}
+            if [ "$complete" != true ] && ! BASH_ENV=/dev/null "$BASH" -n <<< "for kvs_env_word in $word; do :; done" 2>/dev/null; then
+                echo "ERROR: Could not safely remove $key from .env; the file was not changed." >&2
+                return 1
+            fi
+            words+=("$word") starts+=("$begin") ends+=("$offset")
+            drop+=(false)
+        done
+        removed=0
+        for index in "${!words[@]}"; do
+            case "${words[$index]}" in
+                "$key="*)
+                    drop[index]=true
+                    removed=$((removed + 1))
+                    for ((preceding = 0; preceding < index; preceding++)); do
+                        if [ "${words[$preceding]}" = export ]; then
+                            export_prefix="export "
+                            break
+                        fi
+                    done
+                    ;;
+            esac
+        done
+        if [ "$removed" -eq 0 ]; then
+            output+=${data:record:offset-record}
+            continue
+        fi
+        # Compose takes the rest of a bare value as that value, while
+        # Bash can read following words as separate assignments.
+        for index in "${!words[@]}"; do
+            [ "$index" -lt "$((${#words[@]} - 1))" ] || break
+            [[ "${words[$index]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+            case "${words[$index]#*=}" in
+                \"*\"|\'*\') ;;
+                *)
+                    echo "ERROR: Could not safely remove $key: .env has different settings in Bash and Compose on the affected line. The file was not changed." >&2
+                    return 1
+                    ;;
+            esac
+        done
+        for index in "${!words[@]}"; do
+            [ "${words[$index]}" = export ] || continue
+            following=$((index + 1))
+            while [ "$following" -lt "${#words[@]}" ] && [ "${drop[$following]}" = true ]; do
+                following=$((following + 1))
+            done
+            if [ "$following" -eq "${#words[@]}" ]; then
+                drop[index]=true
+                removed=$((removed + 1))
+            fi
+        done
+        [ "$removed" -ne "${#words[@]}" ] || continue
+        cursor=$record
+        for index in "${!words[@]}"; do
+            [ "${drop[$index]}" = true ] || continue
+            begin=${starts[$index]}
+            end=${ends[$index]}
+            output+=${data:cursor:begin-cursor}
+            cursor=$end
+        done
+        output+=${data:cursor:offset-cursor}
+    done
+    [ -z "$export_result" ] || printf -v "$export_result" '%s' "$export_prefix"
+    [ "$output" != "$data" ] || return 0
+    temporary=$(mktemp "${env_file}.tmp.XXXXXX") || return 1
+    if ! cp -p -- "$env_file" "$temporary" || ! printf '%s' "$output" > "$temporary" ||
+        ! mv -f -- "$temporary" "$env_file"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+}
+
 set_env_value() {
     local key="$1"
     local value="$2"
@@ -670,7 +783,8 @@ set_env_value() {
     local temporary
     local temporary_owner
     local line
-    local matches=0
+    local last_line=""
+    local env_prefix=""
 
     [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
     [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
@@ -678,8 +792,9 @@ set_env_value() {
         ! temporary=$(mktemp ./.env.tmp.XXXXXX); then
         return 1
     fi
-    if ! sed "/^${key}=/d" .env > "$temporary" ||
-        ! printf '%s=%s\n' "$key" "$value" >> "$temporary" ||
+    if ! cat .env > "$temporary" ||
+        ! remove_env_value "$key" "$temporary" env_prefix ||
+        ! printf '%s%s=%s\n' "$env_prefix" "$key" "$value" >> "$temporary" ||
         ! chmod 600 "$temporary"; then
         rm -f -- "$temporary"
         return 1
@@ -694,11 +809,9 @@ set_env_value() {
         return 1
     fi
     while IFS= read -r line || [ -n "$line" ]; do
-        if [ "$line" = "${key}=${value}" ]; then
-            matches=$((matches + 1))
-        fi
+        last_line=$line
     done < "$temporary"
-    if [ "$matches" -ne 1 ] || ! mv -f -- "$temporary" .env; then
+    if [ "$last_line" != "${env_prefix}${key}=${value}" ] || ! mv -f -- "$temporary" .env; then
         rm -f -- "$temporary"
         return 1
     fi
@@ -2978,107 +3091,6 @@ validate_email() {
 
 
 
-remove_env_value() {
-    local key="$1" data output="" offset=0 record begin end word character complete
-    local index following removed cursor temporary
-    local -a words starts ends drop
-
-    # A trailing marker preserves every newline through command substitution.
-    data=$(cat .env && printf '.') || return 1
-    data=${data%.}
-    while [ "$offset" -lt "${#data}" ]; do
-        record=$offset
-        words=() starts=() ends=() drop=()
-        while [ "$offset" -lt "${#data}" ]; do
-            character=${data:offset:1}
-            case "$character" in
-                $'\n') offset=$((offset + 1)); break ;;
-                ' '|$'\t'|$'\r') offset=$((offset + 1)); continue ;;
-                '#')
-                    while [ "$offset" -lt "${#data}" ] && [ "${data:offset:1}" != $'\n' ]; do
-                        offset=$((offset + 1))
-                    done
-                    continue
-                    ;;
-            esac
-            begin=$offset
-            complete=false
-            while [ "$offset" -lt "${#data}" ]; do
-                character=${data:offset:1}
-                case "$character" in
-                    ' '|$'\t'|$'\r'|$'\n')
-                        word=${data:begin:offset-begin}
-                        # Parse only: quotes, substitutions and escaped spaces
-                        # stay in their word without evaluating any value.
-                        if BASH_ENV=/dev/null "$BASH" -n <<< "for kvs_env_word in $word; do :; done" 2>/dev/null; then
-                            complete=true
-                            break
-                        fi
-                        ;;
-                esac
-                offset=$((offset + 1))
-            done
-            word=${data:begin:offset-begin}
-            if [ "$complete" != true ] && ! BASH_ENV=/dev/null "$BASH" -n <<< "for kvs_env_word in $word; do :; done" 2>/dev/null; then
-                echo "ERROR: Could not safely remove $key from .env; the file was not changed." >&2
-                return 1
-            fi
-            words+=("$word") starts+=("$begin") ends+=("$offset")
-            drop+=(false)
-        done
-        removed=0
-        for index in "${!words[@]}"; do
-            case "${words[$index]}" in
-                "$key="*) drop[index]=true; removed=$((removed + 1)) ;;
-            esac
-        done
-        if [ "$removed" -eq 0 ]; then
-            output+=${data:record:offset-record}
-            continue
-        fi
-        # Compose takes the rest of a bare value as that value, while
-        # Bash can read following words as separate assignments.
-        for index in "${!words[@]}"; do
-            [ "$index" -lt "$((${#words[@]} - 1))" ] || break
-            [[ "${words[$index]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-            case "${words[$index]#*=}" in
-                \"*\"|\'*\') ;;
-                *)
-                    echo "ERROR: Could not safely remove $key: .env has different settings in Bash and Compose on the affected line. The file was not changed." >&2
-                    return 1
-                    ;;
-            esac
-        done
-        for index in "${!words[@]}"; do
-            [ "${words[$index]}" = export ] || continue
-            following=$((index + 1))
-            while [ "$following" -lt "${#words[@]}" ] && [ "${drop[$following]}" = true ]; do
-                following=$((following + 1))
-            done
-            if [ "$following" -eq "${#words[@]}" ]; then
-                drop[index]=true
-                removed=$((removed + 1))
-            fi
-        done
-        [ "$removed" -ne "${#words[@]}" ] || continue
-        cursor=$record
-        for index in "${!words[@]}"; do
-            [ "${drop[$index]}" = true ] || continue
-            begin=${starts[$index]}
-            end=${ends[$index]}
-            output+=${data:cursor:begin-cursor}
-            cursor=$end
-        done
-        output+=${data:cursor:offset-cursor}
-    done
-    [ "$output" != "$data" ] || return 0
-    temporary=$(mktemp ./.env.tmp.XXXXXX) || return 1
-    if ! cp -p -- .env "$temporary" || ! printf '%s' "$output" > "$temporary" ||
-        ! mv -f -- "$temporary" .env; then
-        rm -f -- "$temporary"
-        return 1
-    fi
-}
 
 add_compose_profile() {
     local profile="$1"
@@ -5663,8 +5675,6 @@ setup_request_manticore_rebuild() {
     # shellcheck source=lib/manticore.sh
     source "$(dirname "${BASH_SOURCE[0]}")/lib/manticore.sh" || return 1
     log_command manticore_request_rebuild || return 1
-    # remove_env_value, like the rest of the questionnaire, is not defined
-    # on a resume.
     sed -i '/^MANTICORE_REBUILD_PENDING=/d' .env
 }
 

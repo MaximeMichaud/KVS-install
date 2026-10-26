@@ -9,7 +9,7 @@ trap 'rm -rf "$work"' EXIT
 real_docker=$(type -P docker)
 # shellcheck source=/dev/null
 source "$root/docker/lib/database.sh"
-source <(sed -n '/^set_env_value() {/,/^}/p' "$root/docker/setup.sh")
+source <(sed -n '/^remove_env_value() {/,/^}/p; /^set_env_value() {/,/^}/p' "$root/docker/setup.sh")
 cd "$work"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 database_available_memory_mb() { echo "${AVAILABLE_MB:-24576}"; }

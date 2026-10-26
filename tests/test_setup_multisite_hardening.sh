@@ -229,6 +229,8 @@ cat > "$profiles_work/compose.yml" <<'EOF'
 services:
   base:
     image: synthetic-profile-fixture:latest
+    environment:
+      KEEP: ${KEEP}
   cache:
     image: synthetic-profile-fixture:latest
     profiles: [dragonfly]
@@ -265,6 +267,11 @@ for action in enable disable; do
                 duplicate) printf 'COMPOSE_PROFILES=external\nCOMPOSE_PROFILES=%s\n' "$profiles" > .env ;;
                 empty) printf 'COMPOSE_PROFILES=\n' > .env ;;
             esac
+            # This is part of KEEP, even when it spells the new setting
+            # exactly. Updating profiles must leave the entire value intact.
+            witness_profiles=dragonfly,custom,direct-tls
+            [ "$action" != disable ] || witness_profiles=dragonfly,custom
+            printf 'KEEP="first line\nCOMPOSE_PROFILES=%s\nlast line"\n' "$witness_profiles" >> .env
             # shellcheck source=/dev/null
             source "$profiles_work/load-env.sh"
             # Use the production writer as well as the profile helpers.
@@ -284,6 +291,19 @@ for action in enable disable; do
             env -u COMPOSE_PROFILES "$REAL_DOCKER" "${compose_args[@]}" | LC_ALL=C sort > reloaded-services
             cmp -s expected-services active-services || fail "$action/$form changed unrelated active profiles"
             cmp -s expected-services reloaded-services || fail "$action/$form did not preserve the selected services in .env"
+            printf -v expected_keep 'first line\nCOMPOSE_PROFILES=%s\nlast line' "$witness_profiles"
+            env -u COMPOSE_PROFILES -u KEEP "$REAL_DOCKER" compose --project-name kvs-profile-test \
+                --file compose.yml --env-file .env config --format json > reloaded-model.json
+            jq -e --arg keep "$expected_keep" '.services.base.environment.KEEP == $keep' \
+                reloaded-model.json >/dev/null || fail "$action/$form changed another key's multiline value"
+            export_status=0
+            exported_profiles=$(env -u COMPOSE_PROFILES -u BASH_ENV bash -c 'source .env; printenv COMPOSE_PROFILES') || export_status=$?
+            if [ "$form" = exported ]; then
+                [ "$export_status" -eq 0 ] && [ "$exported_profiles" = "$COMPOSE_PROFILES" ] ||
+                    fail "$action/$form stopped exporting the saved profiles to child processes"
+            else
+                [ "$export_status" -eq 1 ] || fail "$action/$form unexpectedly exported a saved setting"
+            fi
         ) || fail "saved profiles failed for $action/$form"
     done
 done

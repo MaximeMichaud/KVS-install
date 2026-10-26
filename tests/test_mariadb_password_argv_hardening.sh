@@ -183,7 +183,9 @@ fi
 # every external command argument. Values may only flow through shell builtins
 # and file contents, never sed, grep, or another external argv.
 setup_env_helper="$TEST_DIR/setup-env-helper.sh"
-extract_function set_env_value "$ROOT_DIR/docker/setup.sh" > \
+extract_function remove_env_value "$ROOT_DIR/docker/setup.sh" > \
+    "$setup_env_helper"
+extract_function set_env_value "$ROOT_DIR/docker/setup.sh" >> \
     "$setup_env_helper"
 [ -s "$setup_env_helper" ] || fail "could not extract set_env_value"
 
@@ -209,6 +211,8 @@ external_log="$TEST_DIR/setup-env-external.log"
     }
 
     stat() { trace_external stat "$@"; command stat "$@"; }
+    cat() { trace_external cat "$@"; command cat "$@"; }
+    cp() { trace_external cp "$@"; command cp "$@"; }
     mktemp() { trace_external mktemp "$@"; command mktemp "$@"; }
     sed() { trace_external sed "$@"; command sed "$@"; }
     chmod() { trace_external chmod "$@"; command chmod "$@"; }
@@ -216,6 +220,9 @@ external_log="$TEST_DIR/setup-env-external.log"
     mv() { trace_external mv "$@"; command mv "$@"; }
     rm() { trace_external rm "$@"; command rm "$@"; }
     grep() { trace_external grep "$@"; command grep "$@"; }
+    real_bash=$BASH
+    trace_bash() { trace_external bash "$@"; "$real_bash" "$@"; }
+    BASH=trace_bash
 
     # shellcheck disable=SC1090
     source "$setup_env_helper"
@@ -233,8 +240,6 @@ assert_secret_is_not_an_argument "$external_log" "$ROOT_SECRET" \
     "the persisted root password leaked into an external command argument"
 assert_secret_is_not_an_argument "$external_log" "$KVS_SECRET" \
     "the persisted KVS password leaked into an external command argument"
-[ "$(grep -c '^command=sed$' "$external_log")" -eq 2 ] ||
-    fail "set_env_value did not perform one bounded sed filter per password"
 if grep -Eq '^command=grep$' "$external_log"; then
     fail "set_env_value unexpectedly delegated value verification to grep"
 fi
