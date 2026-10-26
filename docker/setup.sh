@@ -5918,7 +5918,8 @@ setup_request_manticore_rebuild() {
     # shellcheck source=lib/manticore.sh
     source "$(dirname "${BASH_SOURCE[0]}")/lib/manticore.sh" || return 1
     log_command manticore_request_rebuild || return 1
-    sed -i '/^MANTICORE_REBUILD_PENDING=/d' .env
+    remove_env_value MANTICORE_REBUILD_PENDING || return $?
+    unset MANTICORE_REBUILD_PENDING
 }
 
 # Step 6: Start runtime services without restarting MariaDB or starting cron.

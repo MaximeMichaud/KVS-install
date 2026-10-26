@@ -43,6 +43,7 @@ request_harness="$TEST_DIR/request.sh"
     echo "log_command() { \"\$@\"; }"
     extract_function database_docker_query "$ROOT_DIR/docker/lib/database.sh"
     extract_function setup_resume_docker_query
+    extract_function remove_env_value
     extract_function setup_request_manticore_rebuild
 } > "$request_harness"
 for name in setup_request_manticore_rebuild setup_resume_docker_query; do
@@ -355,5 +356,92 @@ PY
     done
 done
 echo 'PASS: parsed prior search state decides rebuilds, including interrupted and unchanged reruns'
+
+
+# Once the volume has the rebuild request, clear only its saved marker.
+# Fresh processes must not inherit a completed request, and unrelated
+# multiline values or exported neighbors must survive the cleanup.
+for marker_form in exported indented plain multiline fake_only shared_first shared_last shadow; do
+    case "$marker_form" in
+        exported) marker_setting='export MANTICORE_REBUILD_PENDING=true' ;;
+        indented) marker_setting='  MANTICORE_REBUILD_PENDING=true' ;;
+        plain|multiline) marker_setting='MANTICORE_REBUILD_PENDING=true' ;;
+        fake_only) marker_setting='' ;;
+        shared_first) marker_setting='export MANTICORE_REBUILD_PENDING="true" EXTRA="neighbor"' ;;
+        shared_last) marker_setting='export EXTRA="neighbor" MANTICORE_REBUILD_PENDING="true"' ;;
+        shadow) marker_setting=$'MANTICORE_REBUILD_PENDING=true\nSHADOW_MANTICORE_REBUILD_PENDING=true' ;;
+    esac
+    expected_keep=stable expected_shadow=''
+    case "$marker_form" in
+        multiline|fake_only)
+            expected_keep='first
+MANTICORE_REBUILD_PENDING=true
+last'
+            ;;
+    esac
+    [ "$marker_form" != shadow ] || expected_shadow=true
+    write_env 'ENABLE_MANTICORE=true' "$marker_setting" "KEEP=\"$expected_keep\""
+    case "$marker_form" in shared_*) ;; *) echo 'EXTRA=neighbor' >> "$TEST_DIR/site/.env" ;; esac
+    rm -f "$TEST_DIR/calls"
+    (
+        cd "$TEST_DIR/site"
+        # shellcheck disable=SC2016  # Expanded only by the isolated driver.
+        bash -ec '
+            source "$1"
+            unset MANTICORE_REBUILD_PENDING
+            set -a
+            source .env
+            set +a
+            IMPORT_MODE=true RESUME_IMPORT=false
+            setup_request_manticore_rebuild
+            printf "%s\0%s\0" "${MANTICORE_REBUILD_PENDING+x}" "${MANTICORE_REBUILD_PENDING-}" > "$TEST_ROOT/marker-memory"
+            /bin/bash -c "printf %s \"\${MANTICORE_REBUILD_PENDING+x}\"" >> "$TEST_ROOT/marker-memory"
+        ' bash "$request_harness"
+    ) > "$TEST_DIR/out" 2>&1 || fail "$marker_form cleanup failed: $(cat "$TEST_DIR/out")"
+    check_calls "$marker_form completed marker" requested
+    # shellcheck disable=SC2016  # A fresh process reads only the saved file.
+    env -i PATH="$PATH" bash -ec 'source "$1/.env"; printf "%s\0%s\0%s\0%s" "${MANTICORE_REBUILD_PENDING-}" "$KEEP" "$EXTRA" "${SHADOW_MANTICORE_REBUILD_PENDING-}"' \
+        bash "$TEST_DIR/site" > "$TEST_DIR/marker-saved"
+    python3 - "$TEST_DIR" "$expected_keep" "$expected_shadow" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);keep,shadow=sys.argv[2:]
+saved=(p/'marker-saved').read_text().split('\0')
+assert saved==['',keep,'neighbor',shadow],saved
+memory=(p/'marker-memory').read_text().split('\0')
+assert memory==['','',''],memory
+assert (p/'site/.env').stat().st_mode & 0o777==0o600
+assert not list((p/'site').glob('.env.tmp.*'))
+PY
+done
+echo 'PASS: completed rebuild markers disappear from saved settings, memory and exports without changing other values'
+
+# Failure to persist the cleared marker must remain a failure and keep its
+# loaded value, so a retry can safely request the rebuild again.
+write_env 'ENABLE_MANTICORE=true' 'export MANTICORE_REBUILD_PENDING=true' 'EXTRA=neighbor'
+cp "$TEST_DIR/site/.env" "$TEST_DIR/before-clear.env"
+rm -f "$TEST_DIR/calls"
+status=0
+(
+    cd "$TEST_DIR/site"
+    # shellcheck disable=SC2016  # The failure oracle observes the driver's state.
+    bash -ec '
+        source "$1"
+        set -a
+        source .env
+        set +a
+        IMPORT_MODE=true RESUME_IMPORT=false
+        remove_env_value() { return 23; }
+        result=0
+        setup_request_manticore_rebuild || result=$?
+        printf "%s" "${MANTICORE_REBUILD_PENDING-}" > "$TEST_ROOT/failed-clear-memory"
+        exit "$result"
+    ' bash "$request_harness"
+) > "$TEST_DIR/out" 2>&1 || status=$?
+[ "$status" = 23 ] || fail "a failed marker removal returned $status instead of 23"
+cmp -s "$TEST_DIR/site/.env" "$TEST_DIR/before-clear.env" || fail 'failed marker removal changed .env'
+[ "$(cat "$TEST_DIR/failed-clear-memory")" = true ] || fail 'failed marker removal discarded the loaded request'
+check_calls 'failed marker removal' requested
+echo 'PASS: a failed marker removal keeps the saved and loaded request and returns its error'
 
 echo "All Manticore rebuild request tests passed"
