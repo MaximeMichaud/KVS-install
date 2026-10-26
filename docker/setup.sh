@@ -4657,7 +4657,7 @@ select_manticore() {
 # and stays there until setup_request_manticore_rebuild has asked for the
 # build. Search left off needs none: switching it on later asks again.
 setup_select_manticore() {
-    if [ "$(sed -n 's/^ENABLE_MANTICORE=//p' .env | tail -n 1)" != true ]; then
+    if [ "${ENABLE_MANTICORE:-false}" != true ]; then
         set_env_value MANTICORE_REBUILD_PENDING true || exit 1
     fi
     select_manticore

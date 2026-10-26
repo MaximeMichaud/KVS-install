@@ -291,4 +291,69 @@ done < <(awk -v from="$resume_start" -v to="$resume_line" \
     'NR > from && NR < to && match($0, /^[A-Za-z_][A-Za-z0-9_]*\(\) \{$/) { sub(/\(\) \{$/, ""); print }' "$SETUP")
 echo "PASS: setup notes each change when it happens and asks before Manticore starts, resumes included"
 
+
+# The previous search state is a parsed setting. A line in another value
+# cannot suppress the rebuild when search returns, and spelling true with
+# quotes, export or interpolation must not restart unchanged indexes.
+for state_form in quoted exported interpolated false_multiline true_multiline absent; do
+    for selected_choice in 1 2 default; do
+        prior_enabled=true
+        expected_keep=stable
+        case "$state_form" in
+            quoted) saved_state="ENABLE_MANTICORE='true'" ;;
+            exported) saved_state='export ENABLE_MANTICORE=true' ;;
+            interpolated)
+                # shellcheck disable=SC2016  # Parsed by the actual setup load.
+                saved_state=$'SEARCH_SEED=true\nENABLE_MANTICORE="${SEARCH_SEED}"'
+                ;;
+            false_multiline)
+                saved_state=$'ENABLE_MANTICORE=false\nKEEP="first\nENABLE_MANTICORE=true\nlast"'
+                expected_keep=$'first\nENABLE_MANTICORE=true\nlast'
+                prior_enabled=false
+                ;;
+            true_multiline)
+                saved_state=$'ENABLE_MANTICORE=true\nKEEP="first\nENABLE_MANTICORE=false\nlast"'
+                expected_keep=$'first\nENABLE_MANTICORE=false\nlast'
+                ;;
+            absent) saved_state=''; prior_enabled=false ;;
+        esac
+        choice=$selected_choice
+        [ "$choice" != default ] || choice=''
+        expected_enabled=false
+        if [ "$choice" = 1 ] || { [ -z "$choice" ] && [ "$prior_enabled" = true ]; }; then
+            expected_enabled=true
+        fi
+        needs_rebuild=false
+        if [ "$expected_enabled" = true ] && [ "$prior_enabled" = false ]; then
+            needs_rebuild=true
+        fi
+        write_env 'KEEP=stable' 'EXTRA=neighbor' "$saved_state"
+        status=0
+        setup_run "$choice" true false stop || status=$?
+        [ "$status" = 3 ] || fail "$state_form/$selected_choice preparation failed: $(cat "$TEST_DIR/out")"
+        if pending; then observed_pending=true; else observed_pending=false; fi
+        [ "$observed_pending" = "$needs_rebuild" ] ||
+            fail "$state_form/$selected_choice recorded pending=$observed_pending, expected $needs_rebuild"
+        setup_run '' true false step6 || fail "$state_form/$selected_choice retry failed: $(cat "$TEST_DIR/out")"
+        if [ "$needs_rebuild" = true ]; then
+            check_calls "$state_form/$selected_choice rebuild after interruption" requested
+        else
+            check_calls "$state_form/$selected_choice unchanged indexes" kept
+        fi
+        if pending; then fail "$state_form/$selected_choice retained the completed request"; fi
+        setup_run '' true false step6 || fail "$state_form/$selected_choice third run failed: $(cat "$TEST_DIR/out")"
+        check_calls "$state_form/$selected_choice third run" kept
+        # shellcheck disable=SC2016  # Only the fresh Bash process expands these.
+        env -i PATH="$PATH" bash -ec 'source "$1/.env"; printf "%s\0%s\0%s" "$ENABLE_MANTICORE" "$KEEP" "$EXTRA"' \
+            bash "$TEST_DIR/site" > "$TEST_DIR/saved-state"
+        python3 - "$TEST_DIR/saved-state" "$expected_enabled" "$expected_keep" <<'PY'
+from pathlib import Path
+import sys
+saved=Path(sys.argv[1]).read_text().split('\0')
+assert saved==[sys.argv[2],sys.argv[3],'neighbor'],saved
+PY
+    done
+done
+echo 'PASS: parsed prior search state decides rebuilds, including interrupted and unchanged reruns'
+
 echo "All Manticore rebuild request tests passed"
