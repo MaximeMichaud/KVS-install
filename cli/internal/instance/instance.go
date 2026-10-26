@@ -485,8 +485,8 @@ func (i *Instance) IonCube() bool {
 
 // PublishedEndpoint is the host and port the site is reached on from this
 // machine. HTTPS_PORT carries the PORT, IPv4:PORT and [IPv6]:PORT forms
-// docker/setup.sh publishes (parse_publish_endpoint); a wildcard bind and a
-// value kvsctl cannot read are reached through the loopback.
+// docker/setup.sh publishes (parse_publish_endpoint); a wildcard bind is
+// reached through the loopback of its address family.
 func (i *Instance) PublishedEndpoint() (host, port string) {
 	endpoint := strings.TrimSpace(i.Env["HTTPS_PORT"])
 	if endpoint == "" {
@@ -500,8 +500,10 @@ func (i *Instance) PublishedEndpoint() (host, port string) {
 		return "127.0.0.1", "443"
 	}
 	switch host {
-	case "", "0.0.0.0", "::":
+	case "", "0.0.0.0":
 		host = "127.0.0.1"
+	case "::":
+		host = "::1"
 	}
 	return host, port
 }
