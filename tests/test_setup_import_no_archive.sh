@@ -113,6 +113,31 @@ test_the_encoding_of_the_imported_site_decides() {
     pass "the encoding of the imported site decides"
 }
 
+test_unknown_archive_keeps_the_existing_loader_setting() {
+    local value expected saved
+
+    for value in NO YES absent; do
+        fresh_workdir
+        printf 'KEEP=stable\n' > .env
+        unset IONCUBE
+        expected=YES
+        if [ "$value" != absent ]; then
+            IONCUBE=$value
+            expected=$value
+            printf 'IONCUBE=%s\n' "$value" >> .env
+        fi
+        printf 'unreadable archive fixture\n' > 'kvs-archive/KVS_7.0.2_[example.com].zip'
+        cp .env "$TEST_DIR/unknown-before.env"
+        IMPORT_SITE_IONCUBE='' detect_ioncube "$TEST_DIR/no-site" > "$TEST_DIR/out" || fail "unknown encoding must keep the saved setting"
+        grep -Fq 'Keeping the existing IonCube configuration.' "$TEST_DIR/out" ||
+            fail "unknown encoding must not announce a new default while retaining $value"
+        cmp -s .env "$TEST_DIR/unknown-before.env" || fail "unknown encoding changed the saved configuration"
+        saved=$(env -u IONCUBE -u BASH_ENV bash -c 'source .env; printf "%s" "${IONCUBE:-YES}"')
+        [ "$saved" = "$expected" ] || fail "unknown encoding did not preserve the effective loader setting"
+    done
+    pass "unknown encoding reports that the existing loader configuration is kept"
+}
+
 test_the_old_configuration_is_saved_next_to_the_import_marker() {
     local report="$TEST_DIR/report.txt"
 
@@ -253,6 +278,7 @@ EOF
 
 test_the_archive_is_optional_but_must_match_the_site
 test_the_encoding_of_the_imported_site_decides
+test_unknown_archive_keeps_the_existing_loader_setting
 test_the_old_configuration_is_saved_next_to_the_import_marker
 test_the_rewrites_come_from_the_site_the_operator_the_archive_or_the_old_server
 

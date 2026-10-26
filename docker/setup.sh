@@ -3709,7 +3709,7 @@ detect_ioncube() {
                 detected_ioncube=NO
             fi
         else
-            echo -e "${YELLOW}Could not extract PHP files for inspection. Defaulting to IonCube=YES${NC}"
+            echo -e "${YELLOW}Could not extract PHP files for inspection. Keeping the existing IonCube configuration.${NC}"
         fi
     fi
 
