@@ -396,6 +396,132 @@ for saved_domain in 'DOMAIN=example.test' "DOMAIN='example.test'" 'DOMAIN="examp
 done
 pass 'completed imports follow the parsed saved domain, genuine overrides and explicit reimport consent'
 
+# A receipt belongs to the parsed file, including empty and duplicate
+# assignments. A physical line inside another value is not a receipt.
+for receipt_form in exported indented quoted empty_single empty_double last_empty multiline real_and_multiline inherited absent; do
+    for override_domain in '' other.test; do
+        (
+            case_dir="$TEST_DIR/receipt-$receipt_form-${override_domain:-same}"
+            mkdir -p "$case_dir"
+            cd "$case_dir"
+            printf 'DOMAIN=example.test\nCOMPOSE_PROJECT_NAME=kvs-example-test\nEXTRA=preserved\n' > .env
+            expected=''
+            case "$receipt_form" in
+                exported) echo 'export KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z' >> .env; expected=2026-10-01T10:00:00Z ;;
+                indented) echo '  KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z' >> .env; expected=2026-10-01T10:00:00Z ;;
+                quoted) echo "KVS_IMPORT_COMPLETED='2026-10-01T10:00:00Z'" >> .env; expected=2026-10-01T10:00:00Z ;;
+                empty_single) echo "KVS_IMPORT_COMPLETED=''" >> .env ;;
+                empty_double) echo 'KVS_IMPORT_COMPLETED=""' >> .env ;;
+                last_empty) printf 'KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z\nKVS_IMPORT_COMPLETED=\n' >> .env ;;
+                real_and_multiline) echo 'KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z' >> .env; expected=2026-10-01T10:00:00Z ;;
+            esac
+            case "$receipt_form" in
+                multiline|real_and_multiline)
+                    printf 'KEEP="first\nKVS_IMPORT_COMPLETED=2030-01-02T03:04:05Z\nlast"\n' >> .env ;;
+            esac
+            chmod 600 .env
+            unset DOMAIN KVS_IMPORT_COMPLETED
+            [ "$receipt_form" != inherited ] || export KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z
+            KVS_DOMAIN_OVERRIDE=$override_domain HEADLESS=y VOLUME_CHOICE=2
+            RED='' GREEN='' YELLOW='' CYAN='' NC=''
+            IMPORT_MODE=true IMPORT_SOURCE=remote IMPORT_DATABASE_FORMAT_REQUEST=auto IMPORT_LIB=unused
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/load-domain.sh"
+            cp .env before.env
+            import_inspect_remote() { echo inspect >> calls; }
+            import_fetch_remote() { echo fetch >> calls; }
+            docker() { [ "$1" = ps ] || fail 'files-only requested a Docker mutation'; }
+            import_files_only > files-only.out 2>&1 || fail "files-only receipt check failed: $(cat files-only.out)"
+            cmp -s .env before.env || fail 'files-only changed the saved receipt'
+            [ "$(paste -sd' ' calls)" = 'inspect fetch' ] || fail 'files-only did not inspect and fetch'
+            receipt=no
+            if [ -n "$expected" ] && [ -z "$override_domain" ]; then receipt=yes; fi
+            if [ "$receipt" = yes ]; then
+                grep -Fq "An import completed here on $expected" files-only.out || fail "files-only missed $receipt_form"
+            elif grep -Fq 'An import completed here on' files-only.out; then
+                fail "files-only invented a receipt from $receipt_form"
+            fi
+            # The full-import branch invalidates an old domain before
+            # checking completion; files-only must remain before it.
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/invalidate-domain.sh"
+            import_check_completed > completed.out
+            if [ "$receipt" = yes ]; then
+                [ "$IMPORT_MODE" = false ] && [ -z "$IMPORT_SOURCE" ] || fail "the saved $receipt_form receipt was missed"
+            else
+                [ "$IMPORT_MODE" = true ] && [ "$IMPORT_SOURCE" = remote ] || fail "a receipt was invented from $receipt_form"
+            fi
+            [ -z "$override_domain" ] || expected=''
+            actual=$(env -u KVS_IMPORT_COMPLETED bash -c 'source .env; printf "%s" "${KVS_IMPORT_COMPLETED-}"')
+            [ "$actual" = "$expected" ] || fail 'the saved receipt disagrees with its domain'
+            grep -Fxq 'EXTRA=preserved' .env || fail 'receipt handling changed another setting'
+            case "$receipt_form" in
+                multiline|real_and_multiline)
+                    actual=$(bash -c 'source .env; printf "%s" "$KEEP"')
+                    [ "$actual" = $'first\nKVS_IMPORT_COMPLETED=2030-01-02T03:04:05Z\nlast' ] || fail 'receipt handling changed a multiline value' ;;
+            esac
+            IMPORT_MODE=true IMPORT_SOURCE=remote VOLUME_CHOICE=1
+            import_check_completed > completed.out
+            [ "$IMPORT_MODE" = true ] || fail 'explicit replacement consent was lost'
+        ) || fail "receipt parsing failed for $receipt_form (override=$override_domain)"
+    done
+done
+pass 'receipt syntax, empty values, inheritance and multiline data agree across both import branches'
+
+# A fresh reader at the deletion boundary must see no receipt. Failed
+# removals must stop even when the caller handles its exit status.
+extract import_replace_database_volume > "$TEST_DIR/replace-volume.sh"
+for receipt_action in domain replace; do
+    for receipt_failure in no yes; do
+        case_dir="$TEST_DIR/receipt-lifecycle-$receipt_action-$receipt_failure"
+        mkdir -p "$case_dir"
+        printf 'DOMAIN=example.test\nexport KVS_IMPORT_COMPLETED=2026-10-01T10:00:00Z\nEXTRA=preserved\n' > "$case_dir/.env"
+        chmod 600 "$case_dir/.env"
+        cp "$case_dir/.env" "$case_dir/before.env"
+        status=0
+        (
+            cd "$case_dir"
+            KVS_DOMAIN_OVERRIDE=''
+            [ "$receipt_action" != domain ] || KVS_DOMAIN_OVERRIDE=other.test
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/load-domain.sh"
+            # shellcheck source=/dev/null
+            source "$TEST_DIR/replace-volume.sh"
+            HEADLESS=y VOLUME_CHOICE=2 RED='' GREEN='' YELLOW='' CYAN='' NC=''
+            IMPORT_MODE=true IMPORT_SOURCE=remote IMPORT_VOLUME_TO_DELETE=synthetic-volume
+            mktemp() {
+                if [ "$receipt_failure" = yes ] && [ "${key:-}" = KVS_IMPORT_COMPLETED ]; then return 73; fi
+                command mktemp "$@"
+            }
+            delete_database_volume() {
+                echo boundary >> calls
+                actual=$(env -u KVS_IMPORT_COMPLETED bash -c 'source .env; printf "%s" "${KVS_IMPORT_COMPLETED-}"')
+                [ -z "$actual" ] || fail 'volume deletion preceded receipt removal'
+            }
+            if [ "$receipt_action" = domain ]; then
+                # shellcheck source=/dev/null
+                source "$TEST_DIR/invalidate-domain.sh"
+            else
+                import_replace_database_volume
+            fi
+            import_check_completed > completed.out
+            [ "$IMPORT_MODE" = true ] || fail 'a removed receipt remained effective in the same process'
+            echo finished >> calls
+        ) > "$case_dir/output" 2>&1 || status=$?
+        if [ "$receipt_failure" = yes ]; then
+            [ "$status" -ne 0 ] || fail 'failed receipt removal continued'
+            [ ! -e "$case_dir/calls" ] || fail 'failed receipt removal reached a later boundary'
+            cmp -s "$case_dir/.env" "$case_dir/before.env" || fail 'failed removal changed the saved receipt'
+        else
+            [ "$status" -eq 0 ] || fail "receipt removal failed: $(cat "$case_dir/output")"
+            if [ "$receipt_action" = replace ]; then
+                [ "$(paste -sd' ' "$case_dir/calls")" = 'boundary finished' ] || fail 'replacement did not follow receipt removal'
+            fi
+        fi
+    done
+done
+pass 'domain changes and volume replacement clear effective receipts only after successful removal'
+
 # A dump an earlier run staged next to the record, whole.
 make_dump() {
     mkdir -p "$TEST_DIR/import"

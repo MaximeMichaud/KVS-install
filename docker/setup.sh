@@ -1259,7 +1259,7 @@ import_check_completed() {
     local completed_on answer
 
     [ "$IMPORT_MODE" = true ] || return 0
-    completed_on=$(grep '^KVS_IMPORT_COMPLETED=' .env 2>/dev/null | cut -d= -f2-) || completed_on=""
+    completed_on=${KVS_IMPORT_COMPLETED:-}
     [ -n "$completed_on" ] || return 0
     if [ "${VOLUME_CHOICE:-}" = "1" ]; then
         echo ""
@@ -2472,7 +2472,7 @@ import_files_only() {
     import_inspect_remote
     env_domain=$PREVIOUS_DOMAIN
     if [ "$env_domain" = "$DOMAIN" ]; then
-        completed=$(sed -n 's/^KVS_IMPORT_COMPLETED=//p' .env 2>/dev/null | tail -n 1)
+        completed=${KVS_IMPORT_COMPLETED:-}
     fi
     echo ""
     echo "The files of $destination become those of the old server (files it no longer has are removed); the database, the dump and the containers stay as they are."
@@ -3084,7 +3084,7 @@ fi
 chmod 600 .env
 
 # Load environment
-unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE KVS_IMPORT_COMPLETED
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
@@ -3310,9 +3310,10 @@ fi
 # An import completed under another domain (a development subdomain tried
 # before the real one) does not count for this one: the real domain gets
 # its own import, into its own database.
-if [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] && grep -q '^KVS_IMPORT_COMPLETED=' .env 2>/dev/null; then
+if [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN" != "$DOMAIN" ] && [ -n "${KVS_IMPORT_COMPLETED:-}" ]; then
     echo -e "${YELLOW}The domain changes from $PREVIOUS_DOMAIN to $DOMAIN: the import completed under the old one does not count for it.${NC}"
-    remove_env_value KVS_IMPORT_COMPLETED
+    remove_env_value KVS_IMPORT_COMPLETED || exit 1
+    unset KVS_IMPORT_COMPLETED
 fi
 require_single_kvs_archive || exit 1
 set_env_value DOMAIN "$DOMAIN"
@@ -5184,7 +5185,8 @@ import_stage_dump() {
 # been prepared and validated, including native payload checksums and schema.
 import_replace_database_volume() {
     [ "$IMPORT_MODE" = true ] || return 0
-    remove_env_value KVS_IMPORT_COMPLETED
+    remove_env_value KVS_IMPORT_COMPLETED || exit 1
+    unset KVS_IMPORT_COMPLETED
     if [ -n "$IMPORT_VOLUME_TO_DELETE" ]; then
         echo -e "  ${YELLOW}Deleting the database volume $IMPORT_VOLUME_TO_DELETE...${NC}"
         delete_database_volume "$IMPORT_VOLUME_TO_DELETE" || exit 1
@@ -5386,6 +5388,7 @@ import_finish() {
         echo "ERROR: the import completion receipt was not persisted; the marker and staged dump are preserved." >&2
         exit 1
     fi
+    KVS_IMPORT_COMPLETED=$completed_at
     run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';" || exit 1
     echo "  Removing temporary import files..."
     [ -n "$IMPORT_STAGED_DUMP" ] && rm -f "$IMPORT_STAGED_DUMP"
