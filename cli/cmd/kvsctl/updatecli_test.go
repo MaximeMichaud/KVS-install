@@ -73,6 +73,46 @@ func TestReplaceBinary(t *testing.T) {
 		t.Fatalf("the download was left behind: %v", err)
 	}
 
+	t.Run("cancellation during the version check", func(t *testing.T) {
+		current := readFile(t, self)
+		marker := filepath.Join(t.TempDir(), "checking")
+		t.Setenv("KVSCTL_TEST_VERSION_MARKER", marker)
+		build := fakeBuild(t, "printf ready > \"$KVSCTL_TEST_VERSION_MARKER\"\nexec sleep 30")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			done <- replaceBinary(ctx, self, build, "26.12.0")
+		}()
+		t.Cleanup(func() {
+			cancel()
+			<-stopped
+		})
+		waitFor(t, "candidate version command", func() bool {
+			_, err := os.Stat(marker)
+			return err == nil
+		})
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "interrupted") || strings.Contains(err.Error(), "no answer in") {
+				t.Errorf("an operator cancellation was not reported as an interruption: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the candidate version command did not stop after cancellation")
+		}
+		if got := readFile(t, self); got != current {
+			t.Errorf("cancellation changed the current binary: %q", got)
+		}
+		if got := readFile(t, self+".previous"); got != running {
+			t.Errorf("cancellation changed the previous binary: %q", got)
+		}
+		if _, err := os.Stat(self + ".new"); !os.IsNotExist(err) {
+			t.Errorf("cancellation left the downloaded candidate behind: %v", err)
+		}
+	})
+
 	old := versionTimeout
 	versionTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { versionTimeout = old })

@@ -210,6 +210,9 @@ func checkBinary(ctx context.Context, path, version string) error {
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.WaitDelay = time.Second
 	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return fmt.Errorf("the downloaded kvsctl version check was interrupted: %w", ctx.Err())
+		}
 		if ctx.Err() != nil {
 			err = fmt.Errorf("no answer in %s", versionTimeout)
 		}
