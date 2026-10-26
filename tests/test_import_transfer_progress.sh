@@ -211,6 +211,40 @@ test_every_line_holds_within_79_columns() {
     echo 'PASS: every line holds within 79 columns, on a terminal and in a log'
 }
 
+# A large first sample can arrive in a later wall-clock second, before
+# there is an earlier sample to measure against. Its initial rates must
+# still fit, and the next, shorter block must erase every old line.
+test_a_late_large_first_sample_keeps_the_rates_readable() {
+    local mode pid
+    local -a pids=()
+
+    for mode in yes no; do
+        {
+            sleep 2
+            printf ' 10988825450908 0%% 999.99MB/s 999:59:59 (xfr#999099999, ir-chk=1/999099999)\r'
+            sleep 1.1
+            printf ' 10989873922050 0%% 999.99MB/s 999:59:59 (xfr#999249999, ir-chk=1/999249999)\r'
+        } | IMPORT_PROGRESS_ENTRIES=999999999 import_rsync_progress 10995116277760 999999999 "$mode" \
+            "$TEST_DIR/late.$mode.state" > "$TEST_DIR/late.$mode" &
+        pids+=("$!")
+    done
+    for pid in "${pids[@]}"; do wait "$pid"; done
+    for mode in yes no; do
+        [ "$(widest "$TEST_DIR/late.$mode")" -le 79 ] || fail "late initial rates exceed 79 columns ($mode): $(cat -v "$TEST_DIR/late.$mode")"
+        has "$TEST_DIR/late.$mode" 'entries/s checked' 'the check rate must remain visible'
+        [ "$(cat "$TEST_DIR/late.$mode.state")" = '10989873922050 999249999' ] || fail 'wrapping rates changed the saved transfer totals'
+    done
+    screen 80 before-summary < "$TEST_DIR/late.yes" > "$TEST_DIR/late.during"
+    screen 80 < "$TEST_DIR/late.yes" > "$TEST_DIR/late.after"
+    [ "$(grep -c 'entries/s checked' "$TEST_DIR/late.during")" -eq 1 ] || fail 'a shorter redraw left a stale check rate'
+    [ "$(grep -c 'elapsed' "$TEST_DIR/late.during")" -eq 1 ] || fail 'a shorter redraw left a stale elapsed time'
+    if grep -Eq 'Rates:|elapsed|entries/s checked' "$TEST_DIR/late.after"; then
+        fail 'the summary left part of the longer rate block on the terminal'
+    fi
+    has "$TEST_DIR/late.after" 'Transferred 999,249,999 files' 'the summary must keep the full file count'
+    echo 'PASS: late initial rates fit and shorter redraws leave no stale lines or changed totals'
+}
+
 # A repeat of a large site copies few files and checks all the others:
 # the old time left followed the bytes and the files alone and showed two
 # seconds while six thousand entries were still to check at a hundred a
@@ -982,6 +1016,7 @@ if [ "$#" -gt 0 ]; then
 fi
 # The tests that take seconds of real time run side by side.
 for name in test_the_progress_never_wraps_an_80_column_terminal test_every_line_holds_within_79_columns \
+    test_a_late_large_first_sample_keeps_the_rates_readable \
     test_the_time_left_counts_the_entries_still_to_check test_an_earlier_count_measures_the_progress \
     test_the_time_left_follows_the_recent_pace test_a_narrow_terminal_cuts_the_lines \
     test_a_timed_out_count_measures_against_the_earlier_one test_a_count_out_of_time_is_not_run_again \

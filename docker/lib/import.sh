@@ -2650,7 +2650,7 @@ import_rsync_progress() {
             if (average > 0) return rest / average
             return -1
         }
-        function report(final,    t, elapsed, i, o, byte_rate, file_rate, check_rate, checked, n, pct, whole, estimate, outdated, dt, pace_bytes, pace_files, pace_checked, known, partial, left, r, text) {
+        function report(final,    t, elapsed, i, o, byte_rate, file_rate, check_rate, checked, n, pct, whole, estimate, outdated, dt, pace_bytes, pace_files, pace_checked, known, partial, left, r, text, check_text) {
             t = now()
             if (!final) {
                 if (terminal == "yes" && t == shown) return
@@ -2757,7 +2757,13 @@ import_rsync_progress() {
                 }
             }
             text = sprintf("  Rates:   %s/s, %s files/s copied", size(byte_rate), commas(file_rate))
-            if (found > 0) text = text sprintf(", %s entries/s checked", (elapsed > 0 ? commas(check_rate) : "?"))
+            if (found > 0) {
+                check_text = sprintf("%s entries/s checked", (elapsed > 0 ? commas(check_rate) : "?"))
+                if (length(text ", " check_text) > 79) {
+                    line[++n] = text
+                    text = "           " check_text
+                } else text = text ", " check_text
+            }
             line[++n] = text
             known = (total_bytes > 0 || total_files > 0 || (whole > 0 && found > 0))
             if (!known) {
