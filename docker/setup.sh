@@ -3823,7 +3823,7 @@ select_mariadb_version() {
 
     if [ "$DB_CHOICE" -ge 1 ] && [ "$DB_CHOICE" -le "${#VERSIONS[@]}" ]; then
         SELECTED_VERSION="${VERSIONS[$((DB_CHOICE-1))]}"
-        sed -i "s/MARIADB_VERSION=.*/MARIADB_VERSION=$SELECTED_VERSION/" .env
+        set_env_value MARIADB_VERSION "$SELECTED_VERSION" || return $?
         echo -e "${GREEN}Selected MariaDB $SELECTED_VERSION${NC}"
     fi
 }

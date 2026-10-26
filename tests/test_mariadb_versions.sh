@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC2016  # The grep patterns are literal lines of the scripts.
+# shellcheck disable=SC2016  # Literal script patterns and fixtures for fresh Bash/Compose loads.
 # The MariaDB series the Docker setup and the standalone installer offer, the
 # defaults of the Compose files, .env.example, the multi-site manager and the
 # README must name the same LTS series with the same default, newest first,
@@ -8,6 +8,7 @@
 set -u
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+MARIADB_TEST_PATH=$PATH
 EXPECTED_DEFAULT=12.3
 EXPECTED_SERIES="12.3 11.8 11.4"
 
@@ -129,3 +130,116 @@ if ! grep -Fq 'no entry for alpine' "$TEST_DIR/out" || ! grep -Fq 'VOLUME VERSIO
     fail "a lock without Alpine must leave the version unknown and say why: $(cat "$TEST_DIR/out")"
 fi
 echo 'PASS: setup.sh reads the MariaDB version of an existing volume with the Alpine of docker/images.lock'
+
+
+# A selected series must survive a new shell and Compose load without
+# changing neighboring settings, including text that only resembles a key.
+for function_name in remove_env_value set_env_value select_mariadb_version; do
+    awk -v name="$function_name" '
+        $0 == name "() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { exit }
+    ' "$ROOT_DIR/docker/setup.sh" >> "$TEST_DIR/selector-functions.sh"
+done
+grep '^readonly MARIADB_LTS_VERSIONS=' "$ROOT_DIR/docker/setup.sh" >> "$TEST_DIR/selector-functions.sh"
+printf '[{"cycle":"12.3","eol":"2035-01-01","support":"2034-01-01"},{"cycle":"11.8","eol":"2035-01-01","support":"2034-01-01"},{"cycle":"11.4","eol":"2035-01-01","support":"2034-01-01"}]\n' > "$TEST_DIR/api.json"
+cat > "$TEST_DIR/selector-driver.sh" <<'EOF'
+set -e
+RED='' GREEN='' YELLOW='' CYAN='' NC=''
+curl() {
+    [ "$*" = '-s --connect-timeout 5 https://endoflife.date/api/mariadb.json' ] || return 99
+    cat "$MARIADB_TEST_ROOT/api.json"
+}
+source "$MARIADB_TEST_ROOT/selector-functions.sh"
+source .env
+if [ "${FAIL_WRITE:-}" = yes ]; then
+    set_env_value() { return 23; }
+fi
+select_mariadb_version
+echo SELECTION_FINISHED
+EOF
+
+for form in plain quoted exported indented commented duplicate interpolated multiline absent shadow_only real_shadow shared_first shared_last fake_only; do
+    for choice in 1 2 3; do
+        case_dir="$TEST_DIR/selection-$form-$choice"
+        mkdir -p "$case_dir"
+        case "$choice" in
+            1) expected=12.3 ;;
+            2) expected=11.8 ;;
+            3) expected=11.4 ;;
+        esac
+        case "$form" in
+            plain|multiline|real_shadow) settings='MARIADB_VERSION=11.8' ;;
+            quoted) settings="MARIADB_VERSION='11.8'" ;;
+            exported) settings='export MARIADB_VERSION=11.8' ;;
+            indented) settings='  MARIADB_VERSION=11.8' ;;
+            commented) settings='MARIADB_VERSION=11.8 # existing series' ;;
+            duplicate) settings=$'MARIADB_VERSION=11.4\nexport MARIADB_VERSION=11.8' ;;
+            interpolated) settings=$'DB_SEED=11.8\nMARIADB_VERSION="${DB_SEED}"' ;;
+            shared_first) settings='export MARIADB_VERSION="11.8" EXTRA="neighbor"' ;;
+            shared_last) settings='export EXTRA="neighbor" MARIADB_VERSION="11.8"' ;;
+            *) settings='' ;;
+        esac
+        keep=stable shadow=''
+        case "$form" in multiline|fake_only) keep=$'first\nMARIADB_VERSION=11.4\nlast' ;; esac
+        case "$form" in shadow_only|real_shadow) shadow=11.4 ;; esac
+        printf '%s\nKEEP="%s"\n' "$settings" "$keep" > "$case_dir/.env"
+        case "$form" in shared_*) ;; *) echo 'EXTRA=neighbor' >> "$case_dir/.env" ;; esac
+        [ -z "$shadow" ] || printf 'SHADOW_MARIADB_VERSION=%s\n' "$shadow" >> "$case_dir/.env"
+        chmod 600 "$case_dir/.env"
+        cat > "$case_dir/compose.yml" <<'EOF'
+services:
+  db:
+    image: mariadb:${MARIADB_VERSION:-12.3}
+    environment:
+      EXTRA: ${EXTRA:-}
+      KEEP: ${KEEP:-}
+      SHADOW: ${SHADOW_MARIADB_VERSION:-}
+EOF
+        (
+            cd "$case_dir" || exit 1
+            env -i PATH="$MARIADB_TEST_PATH" TMPDIR="${TMPDIR:-$TEST_DIR}" MARIADB_TEST_ROOT="$TEST_DIR" DB_CHOICE="$choice" \
+                bash "$TEST_DIR/selector-driver.sh"
+        ) > "$case_dir/output" 2>&1 || fail "$form/$choice selection failed: $(cat "$case_dir/output")"
+        grep -Fq "Selected MariaDB $expected" "$case_dir/output" || fail 'selection did not report its saved series'
+        env -i PATH="$MARIADB_TEST_PATH" bash -c 'source "$1/.env"; printf "%s\0%s\0%s\0%s" "${MARIADB_VERSION-}" "${EXTRA-}" "$KEEP" "${SHADOW_MARIADB_VERSION-}"' \
+            bash "$case_dir" > "$case_dir/saved" || fail 'fresh load failed'
+        (
+            cd "$case_dir" || exit 1
+            env -i PATH="$MARIADB_TEST_PATH" DOCKER_HOST="unix://$case_dir/absent.sock" DOCKER_CONFIG="$case_dir/docker-config" \
+                docker compose -p kvs-version-selection -f compose.yml config --format json
+        ) > "$case_dir/model.json" 2> "$case_dir/compose.err" || fail "Compose rejected $form/$choice: $(cat "$case_dir/compose.err")"
+        if ! python3 - "$case_dir" "$expected" "$keep" "$shadow" <<'PY'
+from pathlib import Path
+import json,sys
+p=Path(sys.argv[1]);expected,keep,shadow=sys.argv[2:]
+saved=(p/'saved').read_text().split('\0')
+assert saved==[expected,'neighbor',keep,shadow],(p.name,saved)
+model=json.loads((p/'model.json').read_text())['services']['db']
+assert model['image']=='mariadb:'+expected,model
+assert model['environment']==dict(EXTRA='neighbor',KEEP=keep,SHADOW=shadow),model
+assert (p/'.env').stat().st_mode & 0o777==0o600
+assert not list(p.glob('.env.tmp.*'))
+PY
+        then
+            fail "$form/$choice did not preserve the selected series and its neighbors"
+        fi
+    done
+done
+echo 'PASS: all offered MariaDB choices survive fresh Bash and Compose loads without changing other values'
+
+case_dir="$TEST_DIR/refused-selection"
+mkdir -p "$case_dir"
+printf 'MARIADB_VERSION=11.8\nEXTRA=neighbor\n' > "$case_dir/.env"
+cp "$case_dir/.env" "$case_dir/before.env"
+(
+    cd "$case_dir" || exit 1
+    env -i PATH="$MARIADB_TEST_PATH" MARIADB_TEST_ROOT="$TEST_DIR" DB_CHOICE=1 FAIL_WRITE=yes bash "$TEST_DIR/selector-driver.sh"
+) > "$case_dir/output" 2>&1
+status=$?
+[ "$status" = 23 ] || fail "a refused MariaDB setting returned $status instead of 23"
+cmp -s "$case_dir/.env" "$case_dir/before.env" || fail 'a refused selection changed .env'
+if grep -Eq 'Selected MariaDB|SELECTION_FINISHED' "$case_dir/output"; then
+    fail 'a failed MariaDB write reported success or continued'
+fi
+echo 'PASS: a failed MariaDB setting stops selection before announcing success'
