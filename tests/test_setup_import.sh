@@ -441,7 +441,7 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "ssh://' "$setup" || fail "a later pass must check the free space for the dump alone"
     grep -Fq 'the import completed under the old one does not count' "$setup" || fail "a domain change must forget the completion of the earlier import"
     grep -Fq 'Removing the containers of ${PREVIOUS_PROJECT} (${PREVIOUS_DOMAIN}); its volumes stay' "$setup" || fail "an import under a new domain must retire the earlier stack and say what stays"
-    grep -B1 -F "sed -i 's/^SITE_PREFIX=.*/SITE_PREFIX=kvs/' .env" "$setup" | grep -Fq 'The prefix is chosen again' || fail "an import under a new domain must choose the prefix again"
+    grep -B1 -F 'set_env_value SITE_PREFIX kvs || exit 1' "$setup" | grep -Fq 'The prefix is chosen again' || fail "an import under a new domain must choose the prefix again"
     grep -Fq 'Storage servers use external hosts' "$configure" || fail "external storage hosts must be tolerated"
     grep -Fq "GEOIP_UPDATE_CLAUSE=\", '\\\$.geoip_database', '\$GEOIP_DB'\"" "$settings" || fail "the GeoIP path must always follow the container"
     grep -Fq "adopt_setup_php_binary ffmpeg_path /usr/bin/ffmpeg" "$config_php" || fail "an ffmpeg path from another server must be replaced"

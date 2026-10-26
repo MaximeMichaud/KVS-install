@@ -216,6 +216,7 @@ echo "ok 2 - fresh setup detects resources only after deriving the final Compose
 # executable Docker double also catches calls made through xargs.
 awk '
     $0 == "remove_env_value() {" || $0 == "set_env_value() {" ||
+        $0 == "validate_site_prefix() {" || $0 == "select_site_prefix() {" ||
         $0 == "compose_files_for() {" || $0 == "require_compose_config() {" { capture = 1 }
     capture { print }
     capture && /^}$/ { capture = 0 }
@@ -386,3 +387,80 @@ for prefix_path in choose normalize; do
     done
 done
 echo 'ok 4 - selected and normalized projects survive a fresh load without changing unrelated values'
+
+# The selected prefix itself must survive the reload that follows a
+# changed-domain reset and the later reloads before the images are built.
+awk '
+    $0 == "# Only ask about prefix if using default" { capture = 1 }
+    $0 == "warn_if_existing_project_resources \"$COMPOSE_PROJECT_NAME\"" { exit }
+    capture { print }
+' "$REPO_ROOT/docker/setup.sh" > "$TMP_ROOT/prefix-flow.sh"
+cat > "$TMP_ROOT/prefix-driver.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+source "$PROJECT_TEST_ROOT/project-functions.sh"
+RED='' GREEN='' YELLOW='' CYAN='' NC=''
+HEADLESS=y PREFIX_CHOICE=1 MAX_SITE_PREFIX_LENGTH=235
+KVS_EMAIL_OVERRIDE_SET=false KVS_EMAIL_OVERRIDE=''
+check_mariadb_stop_grace_period() { :; }
+check_cloudflare_configuration() { :; }
+source "$PROJECT_TEST_ROOT/project-load.sh"
+DOMAIN=$NEXT_DOMAIN
+IMPORT_MODE=true
+set_env_value DOMAIN "$DOMAIN"
+export DOMAIN
+source "$PROJECT_TEST_ROOT/project-retire.sh"
+source "$PROJECT_TEST_ROOT/prefix-flow.sh"
+EOF
+for prefix_path in choose reset; do
+    for prefix_form in plain quoted exported indented commented duplicate reference real_fake export_fake shared_export; do
+        case_dir="$TMP_ROOT/prefix-$prefix_path-$prefix_form"
+        mkdir -p "$case_dir"
+        saved_prefix=kvs expected_prefix=kvs-example next_domain=example.test
+        if [ "$prefix_path" = reset ]; then saved_prefix=kvs-saved; expected_prefix=kvs-other; next_domain=other.test; fi
+        printf 'DOMAIN=example.test\nMODE=single\nCOMPOSE_PROJECT_NAME=kvs-saved\nEXTRA=preserved\n' > "$case_dir/.env"
+        case "$prefix_form" in
+            plain|real_fake) printf 'SITE_PREFIX=%s\n' "$saved_prefix" >> "$case_dir/.env" ;;
+            quoted) printf "SITE_PREFIX='%s'\n" "$saved_prefix" >> "$case_dir/.env" ;;
+            exported|export_fake) printf 'export SITE_PREFIX=%s\n' "$saved_prefix" >> "$case_dir/.env" ;;
+            indented) printf '  SITE_PREFIX=%s\n' "$saved_prefix" >> "$case_dir/.env" ;;
+            commented) printf 'SITE_PREFIX=%s # saved prefix\n' "$saved_prefix" >> "$case_dir/.env" ;;
+            duplicate) printf 'SITE_PREFIX=kvs-decoy\nexport SITE_PREFIX=%s\n' "$saved_prefix" >> "$case_dir/.env" ;;
+            reference)
+                printf 'PREFIX_SEED=%s\n' "$saved_prefix" >> "$case_dir/.env"
+                # shellcheck disable=SC2016  # Expanded by the actual loader.
+                echo 'SITE_PREFIX="${PREFIX_SEED}"' >> "$case_dir/.env" ;;
+            shared_export) printf 'export SITE_PREFIX="%s" RELATED="preserved"\n' "$saved_prefix" >> "$case_dir/.env" ;;
+        esac
+        case "$prefix_form" in
+            real_fake|export_fake) printf '%s\n' 'KEEP="first' 'SITE_PREFIX=kvs-decoy' 'last"' >> "$case_dir/.env" ;;
+        esac
+        chmod 600 "$case_dir/.env"
+        (
+            cd "$case_dir"
+            env -u SITE_PREFIX -u COMPOSE_PROJECT_NAME PATH="$TMP_ROOT/prior-bin:$PATH" \
+                DOCKER_CALL_LOG="$case_dir/calls" PROJECT_TEST_ROOT="$TMP_ROOT" NEXT_DOMAIN="$next_domain" \
+                bash "$TMP_ROOT/prefix-driver.sh"
+        ) > "$case_dir/output" 2>&1 || fail "$prefix_path/$prefix_form setup failed: $(cat "$case_dir/output")"
+        (
+            cd "$case_dir"
+            # shellcheck disable=SC2016  # Neither exported parent value may hide a stale saved prefix.
+            env -u SITE_PREFIX -u COMPOSE_PROJECT_NAME -u KEEP -u RELATED \
+                EXPECTED_PREFIX="$expected_prefix" PREFIX_FORM="$prefix_form" bash -c '
+                set -eu
+                source .env
+                [ "$SITE_PREFIX" = "$EXPECTED_PREFIX" ]
+                [ "$COMPOSE_PROJECT_NAME" = "$EXPECTED_PREFIX" ]
+                [ "$EXTRA" = preserved ]
+                case "$PREFIX_FORM" in
+                    real_fake|export_fake)
+                        expected_keep=$(printf "%s\n" first SITE_PREFIX=kvs-decoy last)
+                        [ "$KEEP" = "$expected_keep" ] ;;
+                    shared_export) [ "$RELATED" = preserved ] ;;
+                esac
+            '
+        ) || fail "$prefix_path/$prefix_form saved an inconsistent prefix or changed another value"
+        [ "$(stat -c %a "$case_dir/.env")" = 600 ] || fail 'prefix persistence changed saved file permissions'
+    done
+done
+echo 'ok 5 - selected and reset prefixes preserve exported, interpolated and multiline settings'

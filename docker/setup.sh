@@ -3398,7 +3398,7 @@ if [ "$IMPORT_MODE" = true ] && [ -n "$PREVIOUS_DOMAIN" ] && [ "$PREVIOUS_DOMAIN
         docker network rm "${PREVIOUS_PROJECT}_kvs-network" >/dev/null 2>&1 || true
     fi
     # The prefix is chosen again, from the new domain by default.
-    sed -i 's/^SITE_PREFIX=.*/SITE_PREFIX=kvs/' .env
+    set_env_value SITE_PREFIX kvs || exit 1
 fi
 
 # Site prefix for container naming (multi-site support)
@@ -3452,7 +3452,7 @@ select_site_prefix() {
             ;;
     esac
 
-    sed -i "s/^SITE_PREFIX=.*/SITE_PREFIX=$SITE_PREFIX/" .env
+    set_env_value SITE_PREFIX "$SITE_PREFIX" || exit 1
     # Set COMPOSE_PROJECT_NAME to match SITE_PREFIX for consistent volume naming
     set_env_value COMPOSE_PROJECT_NAME "$SITE_PREFIX" || exit 1
 }
