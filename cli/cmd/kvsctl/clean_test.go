@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,6 +14,73 @@ import (
 	"github.com/MaximeMichaud/KVS-install/cli/internal/instance"
 	"github.com/MaximeMichaud/KVS-install/cli/internal/runlog"
 )
+
+func TestCleanReportsDownloadInspectionErrors(t *testing.T) {
+	for _, recorded := range []bool{false, true} {
+		for _, dryRun := range []bool{false, true} {
+			for _, kind := range []string{"unreadable", "not-directory"} {
+				t.Run(fmt.Sprintf("recorded=%t/dry-run=%t/%s", recorded, dryRun, kind), func(t *testing.T) {
+					if kind == "unreadable" && os.Geteuid() == 0 {
+						t.Skip("root can read directories without read permission")
+					}
+					root := newRoot(t)
+					stateDir := filepath.Join(root, "kvsctl")
+					if err := os.MkdirAll(stateDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if recorded {
+						saveState(t, root, &instance.State{Current: "0.3.0", Previous: "0.2.0"})
+					}
+					cache := filepath.Join(stateDir, "downloads")
+					sentinel := cache
+					if kind == "unreadable" {
+						if err := os.Mkdir(cache, 0o700); err != nil {
+							t.Fatal(err)
+						}
+						sentinel = filepath.Join(cache, "bundle.tar.gz")
+					}
+					const contents = "cached bundle sentinel"
+					if err := os.WriteFile(sentinel, []byte(contents), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if kind == "unreadable" {
+						t.Cleanup(func() { _ = os.Chmod(cache, 0o700) })
+						if err := os.Chmod(cache, 0); err != nil {
+							t.Fatal(err)
+						}
+					}
+					_, readErr := os.ReadDir(cache)
+					var want *os.PathError
+					if !errors.As(readErr, &want) || errors.Is(readErr, os.ErrNotExist) {
+						t.Fatalf("cache fixture must fail inspection: %v", readErr)
+					}
+					// Inspection must fail before contacting an engine or removing files.
+					t.Setenv("DOCKER_HOST", "invalid://unused")
+					args := []string{"clean", "--root", root, "--yes", "--manifest", "file://" + filepath.Join(root, "no-manifest.json")}
+					if dryRun {
+						args = append(args, "--dry-run")
+					}
+					out, err := runKvsctl(t, args...)
+					var got *os.PathError
+					if !errors.As(err, &got) || got.Path != cache || !errors.Is(err, want.Err) {
+						t.Errorf("clean hid the cache inspection error %v: error=%v, output=%q", readErr, err, out)
+					}
+					if strings.Contains(out, "nothing to clean") {
+						t.Errorf("clean reported an empty cache after inspection failed: %q", out)
+					}
+					if kind == "unreadable" {
+						if err := os.Chmod(cache, 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if data, err := os.ReadFile(sentinel); err != nil || string(data) != contents {
+						t.Errorf("clean changed the cache after inspection failed: contents=%q, error=%v", data, err)
+					}
+				})
+			}
+		}
+	}
+}
 
 func writeOverride(t *testing.T, stateDir, version string, images map[string]string) {
 	t.Helper()

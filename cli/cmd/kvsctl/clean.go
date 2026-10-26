@@ -223,7 +223,9 @@ func (p *cleanPlan) empty() bool {
 func cleanTargets(stateDir string, state *instance.State) (*cleanPlan, error) {
 	plan := &cleanPlan{ImageVersions: map[string][]string{}}
 	downloads := filepath.Join(stateDir, "downloads")
-	if entries, err := os.ReadDir(downloads); err == nil && len(entries) > 0 {
+	if entries, err := os.ReadDir(downloads); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	} else if len(entries) > 0 {
 		plan.Downloads = downloads
 	}
 	if state == nil {
