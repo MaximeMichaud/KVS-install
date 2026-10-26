@@ -297,6 +297,70 @@ done
 # every service from the Dockerfiles under an installed release.
 release_pins_work="$TEST_DIR/release-pins"
 mkdir -p "$release_pins_work"
+# Exercise the real environment loader and writer: every supported spelling
+# must keep the same image and build policy when Compose reads the result.
+for form in plain double single commented exported interpolated duplicate absent empty; do
+    (
+        mkdir -p "$release_pins_work/$form/docker-config"
+        cd "$release_pins_work/$form"
+        cat > docker-compose.yml <<'EOF'
+services:
+  nginx:
+    image: synthetic-nginx:source
+    build: .
+EOF
+        cat > docker-compose.release.yml <<'EOF'
+services:
+  nginx:
+    build: !reset null
+    image: synthetic-nginx:release
+EOF
+        cat > .env <<'EOF'
+MODE=single
+DOMAIN=pinned.example.com
+SITE_PREFIX=kvs-pinned
+SSL_PROVIDER=selfsigned
+COMPOSE_PROFILES=
+EOF
+        saved_files=docker-compose.yml:docker-compose.release.yml
+        case "$form" in
+            plain) printf 'COMPOSE_FILE=%s\n' "$saved_files" >> .env ;;
+            double) printf 'COMPOSE_FILE="%s"\n' "$saved_files" >> .env ;;
+            single) printf "COMPOSE_FILE='%s'\n" "$saved_files" >> .env ;;
+            commented) printf 'COMPOSE_FILE=%s # installed release\n' "$saved_files" >> .env ;;
+            exported) printf 'export COMPOSE_FILE=%s\n' "$saved_files" >> .env ;;
+            interpolated) printf "SAVED_FILES=%s\nCOMPOSE_FILE=\${SAVED_FILES}\n" "$saved_files" >> .env ;;
+            duplicate) printf 'COMPOSE_FILE=docker-compose.yml\nCOMPOSE_FILE="%s"\n' "$saved_files" >> .env ;;
+            empty) printf 'COMPOSE_FILE=\n' >> .env ;;
+        esac
+        # An inherited list must not activate pins the saved file never named.
+        COMPOSE_FILE=$saved_files
+        export COMPOSE_FILE
+        unset COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+        export COMPOSE_PROJECT_NAME=kvs-pins-test
+        DOCKER_HOST="unix://$PWD/no-engine.sock"
+        DOCKER_CONFIG="$PWD/docker-config"
+        export DOCKER_HOST DOCKER_CONFIG
+        # shellcheck source=/dev/null
+        source "$profiles_work/load-env.sh"
+        # shellcheck source=/dev/null
+        source "$profiles_work/set-env.sh"
+        MODE_CHOICE=1
+        configure_mode > configured.log
+        "$REAL_DOCKER" compose config --format json > active-model.json
+        env -u COMPOSE_FILE "$REAL_DOCKER" compose config --format json > reloaded-model.json
+        expected_image=synthetic-nginx:release
+        expected_build=false
+        case "$form" in
+            absent|empty) expected_image=synthetic-nginx:source; expected_build=true ;;
+        esac
+        for model in active-model.json reloaded-model.json; do
+            jq -e --arg image "$expected_image" --argjson build "$expected_build" \
+                '.services.nginx | .image == $image and has("build") == $build' \
+                "$model" >/dev/null || fail "$form/$model changed the installed image or build policy"
+        done
+    ) || fail "saved release pins failed for $form"
+done
 (
     cd "$release_pins_work"
     cat > .env <<'EOF'
@@ -314,11 +378,8 @@ EOF
 exit 0
 EOF
     chmod 0755 multi-site/site-manager.sh
-    DOMAIN=pinned.example.com
-    SITE_PREFIX=kvs-pinned
-    SSL_PROVIDER=letsencrypt
-    COMPOSE_PROFILES=dragonfly
-    MODE=single
+    # shellcheck source=/dev/null
+    source "$profiles_work/load-env.sh"
     MODE_CHOICE=1
     configure_mode > kept.log
     grep -Fxq 'COMPOSE_FILE=docker-compose.yml:docker-compose.release.yml' .env ||

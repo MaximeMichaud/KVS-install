@@ -238,7 +238,13 @@ run_check() {
         printf 'MODE=%s\n' "$2"
         [ -z "${3:-}" ] || printf 'COMPOSE_FILE=%s\n' "$3"
     } > "$project/.env"
-    (cd "$project" && MODE=$2 && eval "$1") > "$TEST_DIR/out" 2>&1
+    (
+        cd "$project"
+        unset COMPOSE_FILE
+        # shellcheck source=/dev/null
+        source .env
+        eval "$1"
+    ) > "$TEST_DIR/out" 2>&1
 }
 # broken <file>: a compose file Compose cannot read.
 broken() {
@@ -260,9 +266,15 @@ grep -Eq '^  .*(interpolation|BROKEN)' "$TEST_DIR/out" || fail "the refusal must
 rm "$project/docker-compose.override.yml"
 broken docker-compose.release.yml
 for check in "$first_check" "$earlier_check"; do
-    if run_check "$check" single docker-compose.yml:docker-compose.release.yml; then
-        fail "broken release pins that COMPOSE_FILE names must stop the setup: $check"
-    fi
+    for saved_files in \
+        docker-compose.yml:docker-compose.release.yml \
+        '"docker-compose.yml:docker-compose.release.yml"' \
+        "'docker-compose.yml:docker-compose.release.yml'" \
+        'docker-compose.yml:docker-compose.release.yml # installed release'; do
+        if run_check "$check" single "$saved_files"; then
+            fail "broken release pins that COMPOSE_FILE names must stop the setup: $check ($saved_files)"
+        fi
+    done
     run_check "$check" single ||
         fail "release pins that COMPOSE_FILE does not name are not used, so not read: $check: $(cat "$TEST_DIR/out")"
 done

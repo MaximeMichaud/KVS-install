@@ -2951,7 +2951,7 @@ fi
 chmod 600 .env
 
 # Load environment
-unset CLOUDFLARE_ENABLED COMPOSE_PROFILES
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
@@ -3237,7 +3237,7 @@ compose_files_for() {
         compose_files="${compose_files}:docker-compose.override.yml"
     fi
     if [ -f docker-compose.release.yml ]; then
-        current=$(sed -n 's/^COMPOSE_FILE=//p' .env | tail -n 1)
+        current="${COMPOSE_FILE:-}"
         case ":${current}:" in
             *":docker-compose.release.yml:"*) compose_files="${compose_files}:docker-compose.release.yml" ;;
         esac
