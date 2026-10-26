@@ -454,7 +454,7 @@ test_setup_and_init_are_wired_for_imports() {
 # shellcheck disable=SC2034,SC2329  # Variables and stubs used by sourced setup functions.
 test_source_domain_persistence_errors_stop_import() {
     local lib="$TMP_ROOT/source-domain-functions.sh" name source_kind scenario case_dir
-    local detected failure operation status actual owner
+    local detected expected_domain failure operation status actual owner
 
     : > "$lib"
     for name in remove_env_value set_env_value import_record_source_domain select_import_source import_fetch_source; do
@@ -462,15 +462,21 @@ test_source_domain_persistence_errors_stop_import() {
             "$REPO_ROOT/docker/setup.sh" >> "$lib"
     done
     for source_kind in archive directory remote; do
-        for scenario in save_missing_error save_stale_error remove_error save_missing_ok save_stale_ok remove_ok remove_absent_ok; do
+        for scenario in save_missing_error save_stale_error remove_error save_missing_ok save_stale_ok remove_ok remove_absent_ok \
+            remove_exported_ok remove_inherited_ok remove_exported_invalid_ok remove_shared_export_ok save_exported_ok remove_exported_error; do
             case_dir="$TMP_ROOT/source-domain-$source_kind-$scenario"
             mkdir -p "$case_dir"
             printf 'DOMAIN=dev.example.test\nOTHER=preserved\n' > "$case_dir/.env"
             case "$scenario" in
                 save_stale_*|remove_error|remove_ok) echo 'IMPORT_SOURCE_DOMAIN=stale.example.test' >> "$case_dir/.env" ;;
+                remove_exported_*|save_exported_ok) echo 'export IMPORT_SOURCE_DOMAIN=stale.example.test' >> "$case_dir/.env" ;;
+                remove_shared_export_ok) echo "export IMPORT_SOURCE_DOMAIN='stale.example.test' RELATED='retained'" >> "$case_dir/.env" ;;
             esac
             detected=source.example.test; operation=save; failure=no
             case "$scenario" in remove_*) detected=''; operation=remove ;; esac
+            [ "$scenario" != remove_exported_invalid_ok ] || detected=invalid_host
+            expected_domain=$detected
+            [ "$operation" != remove ] || expected_domain=''
             case "$scenario" in *_error) failure=yes ;; esac
             chmod 600 "$case_dir/.env"
             owner=$(stat -c '%u:%g' "$case_dir/.env")
@@ -480,8 +486,14 @@ test_source_domain_persistence_errors_stop_import() {
                 # shellcheck source=/dev/null
                 source "$lib"
                 unset IMPORT_SOURCE_DOMAIN
+                if [ "$scenario" = remove_inherited_ok ]; then
+                    export IMPORT_SOURCE_DOMAIN=stale.example.test
+                fi
                 # shellcheck source=/dev/null
                 source .env
+                # Check the child-process environment, including on fatal
+                # persistence errors, rather than an unexported Bash value.
+                trap '/usr/bin/printenv IMPORT_SOURCE_DOMAIN > source-on-exit || true' EXIT
                 HEADLESS=y RED='' GREEN='' YELLOW='' CYAN='' NC=''
                 IMPORT_SOURCE=$source_kind IMPORT_MODE=true IMPORT_CHOICE='' IMPORT_LIB=unused
                 IMPORT_SITE_DIR=/synthetic-source
@@ -514,6 +526,9 @@ test_source_domain_persistence_errors_stop_import() {
                 : > calls
                 select_import_source
                 echo selected >> calls
+                # Production reloads saved settings before initialization.
+                # shellcheck source=/dev/null
+                source .env
                 import_fetch_source
             ) > "$case_dir/output" 2>&1 || status=$?
             # Calling conditionally deliberately disables errexit: the
@@ -526,18 +541,28 @@ test_source_domain_persistence_errors_stop_import() {
                     fail "$source_kind/$scenario continued after the failed domain write"
                 fi
                 cmp -s "$case_dir/before-domain.env" "$case_dir/.env" || fail 'the failed domain write must preserve earlier independent settings'
+                if [ "$scenario" = remove_exported_error ]; then
+                    [ "$(cat "$case_dir/source-on-exit")" = stale.example.test ] || fail 'a failed removal changed the exported domain'
+                fi
             else
                 [ "$status" = 0 ] || fail "$source_kind/$scenario failed: $(cat "$case_dir/output")"
                 grep -Fxq transfer "$case_dir/calls" || fail 'successful persistence did not reach the bounded transfer'
                 actual=$(cd "$case_dir" && env -u IMPORT_SOURCE_DOMAIN -u IMPORT_EXCLUDE bash -c 'source .env; printf "%s\n%s" "${IMPORT_SOURCE_DOMAIN-}" "$IMPORT_EXCLUDE"')
-                [ "$actual" = "$(printf '%s\n%s' "$detected" fixture/cache)" ] || fail 'fresh source-domain readback differs from the saved choice'
+                [ "$actual" = "$(printf '%s\n%s' "$expected_domain" fixture/cache)" ] || fail 'fresh source-domain readback differs from the saved choice'
+                if [ -s "$case_dir/source-on-exit" ] && [ "$(cat "$case_dir/source-on-exit")" != "$expected_domain" ]; then
+                    fail "$source_kind/$scenario passed a cleared source domain to a child process"
+                fi
+                if [ "$scenario" = remove_shared_export_ok ]; then
+                    actual=$(cd "$case_dir" && env -u RELATED bash -c 'source .env; printenv RELATED')
+                    [ "$actual" = retained ] || fail 'clearing the source domain changed another exported setting'
+                fi
             fi
             grep -Fxq 'OTHER=preserved' "$case_dir/.env" || fail 'an unrelated setting changed'
             [ "$(stat -c '%a:%u:%g' "$case_dir/.env")" = "600:$owner" ] || fail 'source-domain persistence changed file permissions or ownership'
             if compgen -G "$case_dir/.env.tmp.*" > /dev/null; then fail 'source-domain persistence left a temporary file'; fi
         done
     done
-    pass 'all source choices stop before confirmation or transfer when source-domain persistence fails'
+    pass 'all source choices stop on persistence errors and keep cleared source domains out of child processes'
 }
 
 test_cached_dump_inspection_preserves_output() {

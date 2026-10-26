@@ -1523,6 +1523,7 @@ import_record_source_domain() {
             echo "ERROR: Could not remove IMPORT_SOURCE_DOMAIN from .env; the import was stopped before transfer." >&2
             exit 1
         }
+        unset IMPORT_SOURCE_DOMAIN
     fi
 }
 
