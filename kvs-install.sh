@@ -402,10 +402,9 @@ php_extension_dir() {
   esac
 }
 
-# Apply the PHP release to install. An IonCube encoded archive only runs on
-# the release its encoder targeted, so the documented one is kept. An
-# unencoded archive runs on any supported release, so the operator picks:
-# KVS_PHP_VERSION in headless mode, a prompt otherwise.
+# Apply the recommended PHP runtime for this KVS release. IonCube encoding
+# can support several PHP versions, so an explicit override remains possible
+# with a compatibility warning. Unencoded archives also offer a prompt.
 select_php_version_for_archive() {
   local documented="$1"
   local kvs_version="$2"
@@ -419,7 +418,7 @@ select_php_version_for_archive() {
 
   if [[ "${IONCUBE:-YES}" == "YES" ]]; then
     if [[ -n "$requested" && "$requested" != "$documented" ]]; then
-      echo "Warning: the archive is IonCube encoded for PHP $documented. With PHP $requested the loader refuses every encoded file." >&2
+      echo "Warning: the archive is IonCube encoded. PHP $documented is recommended; PHP $requested must be compatible with its encoding and ionCube Loader." >&2
       echo "Proceeding because KVS_PHP_VERSION was set explicitly." >&2
       PHP="$requested"
     else
@@ -428,9 +427,8 @@ select_php_version_for_archive() {
   else
     choice="$requested"
     if [[ -z "$choice" && "${HEADLESS:-}" != "y" ]]; then
-      echo "KVS $kvs_version is documented for PHP $documented."
-      echo "The archive is not IonCube encoded, so any supported release can run it."
-      echo "Newer releases are untested by Kernel Team."
+      echo "The default for KVS $kvs_version is PHP $documented."
+      echo "The archive is not IonCube encoded, so you can choose another supported PHP release."
       until php_version_is_supported "$choice"; do
         read -rp "PHP version to install [$SUPPORTED_PHP_VERSIONS] (default: $documented): " choice
         choice=${choice:-$documented}
@@ -467,7 +465,12 @@ configure_php_for_kvs_archive() {
   version_minor=$((10#${BASH_REMATCH[2]}))
   version_patch=$((10#${BASH_REMATCH[3]}))
   documented="7.4"
-  if ((version_major > 6 ||
+  # KVS 7.0.3 archives can target the PHP 8.2 Encoder, incompatible with
+  # PHP 8.1. PHP 8.3 runs those files and is recommended by Kernel Team.
+  if ((version_major > 7 ||
+       (version_major == 7 && (version_minor > 0 || version_patch >= 3)))); then
+    documented="8.3"
+  elif ((version_major > 6 ||
        (version_major == 6 && version_minor > 2) ||
        (version_major == 6 && version_minor == 2 && version_patch >= 1))); then
     documented="8.1"

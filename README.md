@@ -176,6 +176,10 @@ The ionCube loader ships in every PHP-FPM and cron image, and `IONCUBE` in `dock
 
 With the loader disabled, the PHP-FPM entrypoint turns on opcache JIT on PHP 8 and newer (the loader and JIT do not run together), which `setup.sh` used to append to `docker/php/php.ini`.
 
+Both installers select **PHP 8.3 for KVS 7.0.3 and newer**. These archives can contain files encoded for PHP 8.2, which cannot run on PHP 8.1. With a compatible loader, that encoding [runs on PHP 8.3](https://blog.ioncube.com/2026/06/08/ioncube-loader-running-existing-encoded-files-on-future-php-versions/), the runtime [KVS recommends for 7.0.3](https://www.kernel-video-sharing.com/en/news/148/). KVS 6.2.1 through 7.0.2 keeps PHP 8.1. `KVS_PHP_VERSION` remains an explicit override; the installer warns that the chosen runtime must support the archive's encoding.
+
+For an existing installation managed by `kvsctl`, `setup.sh` preserves the current PHP series and reports the upgrade needed. Set `PHP_VERSION=8.3` in `docker/.env` and run `kvsctl upgrade` to install matching PHP-FPM and cron images. Updating the CLI alone does not change the PHP runtime.
+
 #### yt-dlp
 
 KVS runs yt-dlp in the PHP-FPM container (the Grabbers plugin page) and in the cron container (the imports). Both images carry the yt-dlp release their Dockerfiles pin, checked against the sha256 the release publishes: the build yt-dlp makes for Linux on the server's architecture, which brings its own Python and the optional libraries yt-dlp uses, browser impersonation (`curl_cffi`) included. Sites change what yt-dlp parses, and an old release stops downloading from them, so the cron container looks for a newer release when it starts and every Sunday at 04:00 UTC, and installs it in the `yt-dlp` volume once its sha256 is the one the release publishes in `SHA2-256SUMS` and it runs as `www-data`, the user PHP-FPM and the KVS task run it as (the update itself runs as root). Both containers mount that volume and run the newer of its release and the one of their image: they run the same yt-dlp, an update outlives a recreated container, and a newer image is never held back by an older release left in the volume. The cron container logs the updates in `/var/log/yt-dlp-update.log` (`docker compose exec cron cat /var/log/yt-dlp-update.log`).
@@ -234,7 +238,7 @@ MODE_CHOICE=1 \
 | `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry, 2=Continue anyway, 3=Exit |
 | `MARIADB_HOST_PORT`, `CACHE_HOST_PORT`, `MANTICORE_MYSQL_HOST_PORT`, `MANTICORE_HTTP_HOST_PORT` | port | `3306`, `11211`, `9306`, `9308` | Loopback ports the stack publishes for the host's tools (MariaDB, cache, Manticore); move one when a service of the host already listens there |
 | `DISABLE_KVS_SUPPORT_ACCESS` | `true`/`false` | `false` | Turn off KVS support access (Kernel Team login with kvs_support); the admin dashboard re-enables it |
-| `KVS_PHP_VERSION` | `8.1`-`8.4` | detected | PHP release for an unencoded archive (IONCUBE_CHOICE=2 or IONCUBE=NO); an encoded archive keeps the release KVS documents. KVS 6.2.0 and older needs PHP 7.4, which the Docker installation does not build: `setup.sh` stops on such an archive unless this names a release for its unencoded files |
+| `KVS_PHP_VERSION` | `8.1`-`8.4` | detected | PHP runtime override; encoded archives use the recommended default unless explicitly overridden, with a compatibility warning. KVS 6.2.0 and older needs PHP 7.4, which the Docker installation does not build: `setup.sh` stops on such an archive unless this names a release for its unencoded files |
 | `KVS_INSTALL_BRANCH` | branch | `main` | Branch of this repository installed into `/opt/kvs`, to try a change before it is merged (run the `kvs-install.sh` of that branch); works outside headless mode too |
 
 #### Standalone Headless (Legacy)
@@ -248,7 +252,7 @@ AUTOPACKAGEUPDATE=YES \
 ./kvs-install.sh
 ```
 
-With `IONCUBE=NO` the archive is treated as unencoded and `KVS_PHP_VERSION` picks the PHP release to install (7.4, 8.1, 8.2, 8.3 or 8.4); interactive runs ask instead. An IonCube encoded archive keeps the release KVS documents for it.
+With `IONCUBE=NO` the archive is treated as unencoded and `KVS_PHP_VERSION` picks the PHP release to install (7.4, 8.1, 8.2, 8.3 or 8.4); interactive runs ask instead. An IonCube encoded archive uses the recommended default unless `KVS_PHP_VERSION` explicitly overrides it, with a compatibility warning.
 
 ### Importing an existing site (Docker, experimental)
 
@@ -510,11 +514,11 @@ Your input is valuable: if you believe certain enhancements should be prioritize
 
 ## Supports
 
-The technologies used depend on what KVS supports, which means that some may not be the most up-to-date if KVS has not yet provided support for them. (For example, PHP 8.3/8.4 is not yet officially supported by KVS and thus not recommended.)
+The PHP default depends on the KVS release and its ionCube encoding. Older encoded releases keep their compatible runtime; KVS 7.0.3 and newer defaults to PHP 8.3.
 
 - NGINX mainline: the image `docker/images.lock` pins for Docker, the nginx.org mainline packages for the standalone installation
 - MariaDB 11.4 LTS, 11.8 LTS or 12.3 LTS (Default)
-- PHP 8.1 for KVS 6.2.1 and newer; PHP 7.4 for older KVS, with the standalone installation only (the Docker installation builds 8.1 to 8.4)
+- PHP 8.3 for KVS 7.0.3 and newer; PHP 8.1 for KVS 6.2.1 through 7.0.2; PHP 7.4 for older KVS, with the standalone installation only (the Docker installation builds 8.1 to 8.4)
 - phpMyAdmin 5.2.3 (or newer)
 
 ## Customization and Limitations

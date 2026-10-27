@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d /tmp/kvs-setup-kvsctl.XXXXXX)
+TEST_DIR=$(mktemp -d -t kvs-setup-kvsctl.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -267,15 +267,15 @@ php_bases_match() (
     [ "$actual" = "$(printf '%s\n%s\n%s' "$expected" "$fpm" "$cli")" ]
 )
 
-# php_flow <kind>: actual loading, selection and pinned-base resolution
-# start from 8.1 and receive the documented explicit request for 8.3.
+# php_flow <kind> [KVS version] [encoding] [requested PHP]: actual loading,
+# selection and pinned-base resolution, starting from a saved PHP 8.1.
 php_flow() (
     workdir "$1"
     mkdir kvs-archive
-    touch 'kvs-archive/KVS_7.0.2_[example.test].zip'
-    printf 'PHP_VERSION=8.1\nIONCUBE=NO\n' > .env
+    touch "kvs-archive/KVS_${2:-7.0.2}_[example.test].zip"
+    printf 'PHP_VERSION=8.1\nIONCUBE=%s\n' "${3:-NO}" > .env
     KVSCTL_PHP_CHANGE=''
-    HEADLESS=y KVS_PHP_VERSION=8.3 IMPORT_MODE=false DOMAIN=example.test
+    HEADLESS=y KVS_PHP_VERSION=${4-8.3} IMPORT_MODE=false DOMAIN=example.test
     # shellcheck source=/dev/null
     source "$TEST_DIR/php-flow.sh"
 )
@@ -294,6 +294,16 @@ php_bases_match 8.3 ||
     fail "an installation kvsctl does not manage must get the series picked: $(cat "$TEST_DIR/out")"
 if grep -Fq 'kvsctl' "$TEST_DIR/out"; then fail "an installation kvsctl does not manage must not hear of it: $(cat "$TEST_DIR/out")"; fi
 echo 'PASS: the setup flow notes a PHP change after the selection and before the bases'
+
+# 7.0.3 must select and persist 8.3 without an explicit override, including
+# both image bases. A release-managed installation keeps its existing
+# images and must report the required kvsctl upgrade instead.
+php_flow plain 7.0.3 YES '' > "$TEST_DIR/out" 2>&1 || fail "the 7.0.3 PHP selection failed: $(cat "$TEST_DIR/out")"
+php_bases_match 8.3 || fail "7.0.3 must persist PHP 8.3 and its matching image bases: $(cat "$TEST_DIR/out")"
+php_flow release 7.0.3 YES '' > "$TEST_DIR/out" 2>&1 || fail "the managed 7.0.3 PHP selection failed: $(cat "$TEST_DIR/out")"
+php_bases_match 8.1 || fail "a managed 7.0.3 installation must keep its existing PHP images"
+grep -Fq "$kept_message" "$TEST_DIR/out" || fail "a managed 7.0.3 installation must explain how to upgrade to PHP 8.3"
+echo 'PASS: 7.0.3 persists PHP 8.3 and its bases, or reports the managed upgrade'
 
 # Export, duplicate precedence and multiline values are interpreted by
 # the real loader before selection. The resolver must use the version

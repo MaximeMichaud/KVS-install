@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d /tmp/kvs-setup-php.XXXXXX)
+TEST_DIR=$(mktemp -d -t kvs-setup-php.XXXXXX)
 
 cleanup() {
     rm -rf "$TEST_DIR"
@@ -107,6 +107,25 @@ seed_archive 7.0.2
 IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y
 run_case "encoded 7.0.2" 8.1 select_php_version
 
+# Issue #33: PHP 8.2-encoded 7.0.3 files need a newer runtime than 8.1.
+for version in 7.0.3 7.0.10 7.1.0 8.0.0; do
+    seed_archive "$version"
+    IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y
+    run_case "encoded $version" 8.3 select_php_version
+done
+seed_archive 7.0.3
+IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=''
+run_case "encoded 7.0.3 stays non-interactive" 8.3 select_php_version < /dev/null
+IONCUBE=NO HEADLESS=y
+run_case "unencoded 7.0.3 default" 8.3 select_php_version
+HEADLESS=''
+run_case "unencoded 7.0.3 empty answer" 8.3 select_php_version <<< ""
+IONCUBE=YES KVS_PHP_VERSION=8.2 HEADLESS=y
+run_case "encoded 7.0.3 explicit PHP 8.2" 8.2 select_php_version
+if grep -Fq 'refuse every encoded file' "$TEST_DIR/out"; then
+    fail "a PHP 8.2 override for 7.0.3 must not be described as incompatible"
+fi
+
 seed_archive 6.2.0
 IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y
 refused "encoded 6.2.0" 6.2.0 select_php_version
@@ -166,6 +185,9 @@ run_case "imported 7.0.2 without an archive" 8.1 select_php_version
 grep -q "Detected KVS version: 7.0.2" "$TEST_DIR/out" ||
     fail "the imported site's version must be the one detected"
 seed_no_archive
+IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y IMPORT_MODE=true IMPORT_SITE_VERSION=7.0.3
+run_case "imported 7.0.3 without an archive" 8.3 select_php_version
+seed_no_archive
 IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y IMPORT_MODE=false IMPORT_SITE_VERSION=7.0.2
 run_case "no archive outside an import" 8.1 select_php_version
 grep -q "Could not read the KVS version" "$TEST_DIR/out" ||
@@ -184,6 +206,11 @@ marker=$(kvs_documented_php_version "$TEST_DIR/site") ||
     fail "a site in place must give its version"
 [ "$marker" = $'6.2.0\t7.4' ] ||
     fail "the version of the site in place decides the PHP release: $marker"
+sed -i 's/6.2.0/7.0.3/' "$TEST_DIR/site/admin/include/version.php"
+marker=$(kvs_documented_php_version "$TEST_DIR/site") ||
+    fail "a 7.0.3 site in place must give its version"
+[ "$marker" = $'7.0.3\t8.3' ] ||
+    fail "a 7.0.3 site in place must select PHP 8.3: $marker"
 rm -f "$TEST_DIR/site/admin/include/version.php"
 kvs_documented_php_version "$TEST_DIR/site" > /dev/null 2>&1 &&
     fail "without version.php the site in place gives nothing"

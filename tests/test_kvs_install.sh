@@ -118,6 +118,18 @@ test_headless_php_detection() {
   assert_equal "8.1" "$PHP" "KVS 7.0.2 must use PHP 8.1" || return 1
   assert_equal "/usr/lib/php/20210902" "$php_path" "KVS 7.0.2 used the wrong PHP extension path" || return 1
 
+  # Issue #33: 7.0.3 archives can contain PHP 8.2-encoded files, which
+  # cannot run on PHP 8.1. Use the PHP 8.3 runtime recommended by KVS.
+  local version
+  for version in 7.0.3 7.0.10 7.1.0 8.0.0; do
+    rm "$archive"
+    archive="$temp_dir/KVS_${version}_[example.com].zip"
+    : >"$archive"
+    installQuestions || fail "headless KVS $version detection failed" || return 1
+    assert_equal "8.3" "$PHP" "KVS $version must default to PHP 8.3" || return 1
+    assert_equal "/usr/lib/php/20230831" "$php_path" "KVS $version used the wrong PHP extension path" || return 1
+  done
+
   rm "$archive"
   installQuestions >/dev/null 2>&1
   status=$?
@@ -191,6 +203,24 @@ test_php_version_choice_for_unencoded_archive() {
   configure_php_for_kvs_archive "$archive" <<<"8.4" >/dev/null 2>&1 ||
     fail "interactive encoded detection failed" || return 1
   assert_equal "8.1" "$PHP" "encoded archive must not offer a PHP choice" || return 1
+
+  rm "$archive"
+  archive="$temp_dir/KVS_7.0.3_[example.com].zip"
+  : >"$archive"
+  configure_php_for_kvs_archive "$archive" </dev/null >/dev/null 2>&1 || return 1
+  assert_equal "8.3" "$PHP" "encoded 7.0.3 must default to PHP 8.3 without prompting" || return 1
+  IONCUBE=NO
+  configure_php_for_kvs_archive "$archive" <<<"" >/dev/null 2>&1 || return 1
+  assert_equal "8.3" "$PHP" "unencoded 7.0.3 must default to PHP 8.3 interactively" || return 1
+
+  # An explicit compatible choice must not be described as guaranteed to fail.
+  IONCUBE=YES
+  KVS_PHP_VERSION=8.2
+  configure_php_for_kvs_archive "$archive" >"$temp_dir/output" 2>&1 || return 1
+  assert_equal "8.2" "$PHP" "encoded 7.0.3 must honor an explicit PHP 8.2 request" || return 1
+  if grep -Fq 'refuses every encoded file' "$temp_dir/output"; then
+    fail "a PHP 8.2 override for 7.0.3 must not be described as incompatible" || return 1
+  fi
 
   HEADLESS=y
   IONCUBE=YES
