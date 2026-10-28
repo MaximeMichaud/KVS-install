@@ -90,6 +90,7 @@ echo json_encode([
     'imagick' => extension_loaded('imagick'),
     'memcached' => extension_loaded('memcached'),
     'gd' => extension_loaded('gd'),
+    'ftp' => function_exists('ftp_ssl_connect'),
 ]);
 """)
         script.chmod(0o644)
@@ -113,7 +114,7 @@ echo json_encode([
                         data = json.loads(response.split(b"\r\n\r\n", 1)[1])
                         assert data["version"] == version, data
                         assert data["ioncube"] == (ioncube == "yes"), data
-                        assert all(data[key] for key in ("opcache", "imagick", "memcached", "gd")), data
+                        assert all(data[key] for key in ("opcache", "imagick", "memcached", "gd", "ftp")), data
                         return data
                     except (OSError, EOFError):
                         time.sleep(0.1)
@@ -156,10 +157,11 @@ def main():
         "run", "--rm", "--network", "none", "--entrypoint", "php", args.image,
         "-r", 'echo json_encode([PHP_VERSION, extension_loaded("ionCube Loader"), '
         'extension_loaded("imagick"), extension_loaded("memcached"), '
-        'extension_loaded("mysqli"), extension_loaded("pdo_mysql")]);',
+        'extension_loaded("mysqli"), extension_loaded("pdo_mysql"), '
+        'function_exists("ftp_connect"), function_exists("ftp_ssl_connect")]);',
     )
     data = json.loads(result.stdout)
-    assert data == [args.version, True, True, True, True, True], data
+    assert data == [args.version, True, True, True, True, True, True, True], data
     if args.version.startswith("8.1."):
         result = docker(
             "run", "--rm", "--network", "none", "--entrypoint", "php", args.image,

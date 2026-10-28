@@ -153,6 +153,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -s /usr/bin/wget /usr/local/bin/wget \
     && ln -sf /usr/bin/mariadb-dump /usr/bin/mysqldump
 
+# The ftp extension. KVS reaches FTP storage and conversion servers with it,
+# and its conversion engine refuses every task of a conversion server set to
+# copy the files to the storage servers itself when ftp_connect() is missing,
+# local storage included ("FTP functions not supported", error code 4). The
+# official images build it in up to PHP 8.1 (--enable-ftp) and no longer
+# from 8.2, so it is built here from the PHP sources of the base when the
+# base lacks it, with the SSL support ftp_ssl_connect() needs: PHP 8.2 and
+# 8.3 name that option --with-openssl-dir, 8.4 --with-ftp-ssl. The last line
+# fails the build of a series that would still lack FTP over SSL. The PHP-FPM
+# image runs the same step.
+RUN set -eux; \
+    if ! php -r 'exit(extension_loaded("ftp") ? 0 : 1);'; then \
+        case "$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')" in \
+            8.2|8.3) ftp_ssl=--with-openssl-dir=/usr ;; \
+            *) ftp_ssl=--with-ftp-ssl ;; \
+        esac; \
+        docker-php-ext-configure ftp "$ftp_ssl"; \
+        docker-php-ext-install -j"$(nproc)" ftp; \
+    fi; \
+    php -r 'exit(function_exists("ftp_ssl_connect") ? 0 : 1);'
+
 # Build the PECL extensions from the tarballs checked above, the way the core
 # extensions are built. pecl install would take a checked tarball too, but it
 # writes its build tree with fresh timestamps, which left imagick's .stub.php

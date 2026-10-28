@@ -2,8 +2,9 @@
 # The PHP-FPM and cron images: what their builds download is pinned and
 # checked before use, for each architecture they build on, both entrypoints
 # read IONCUBE and YT_DLP_AUTO_UPDATE the same way and update yt-dlp only
-# through the yt-dlp volume, opcache JIT follows the ionCube loader, and
-# setup.sh takes back the JIT block it used to append to the tracked php.ini.
+# through the yt-dlp volume, opcache JIT follows the ionCube loader,
+# setup.sh takes back the JIT block it used to append to the tracked php.ini,
+# and both build the ftp extension the official bases dropped in PHP 8.2.
 # shellcheck disable=SC2016  # Patterns hold the literal ${...} of the Dockerfiles.
 set -euo pipefail
 
@@ -289,6 +290,30 @@ test_pecl_extensions_are_built_from_checked_tarballs() {
             fail "$dockerfile leaves the PHP sources in the image"
     done
     pass "the PECL extensions are built offline from tarballs whose sha256 is checked first"
+}
+
+test_both_images_build_the_ftp_extension() {
+    local dockerfile
+    local run
+    local -a runs=()
+
+    for dockerfile in "$PHP_DOCKERFILE" "$CRON_DOCKERFILE"; do
+        run=$(one_instruction_with "$dockerfile" 'docker-php-ext-install -j"$(nproc)" ftp')
+        runs+=("$run")
+        # The PHP 8.1 bases have it built in, where a second copy would load
+        # twice; the 8.2 and newer bases lack it, and KVS then refuses the
+        # conversion tasks that copy files to the storage servers.
+        [[ "$run" == *"if ! php -r 'exit(extension_loaded(\"ftp\") ? 0 : 1);'; then"* ]] ||
+            fail "$dockerfile must build ftp exactly when its base lacks it"
+        [[ "$run" == *'8.2|8.3) ftp_ssl=--with-openssl-dir=/usr ;;'* && "$run" == *'*) ftp_ssl=--with-ftp-ssl ;;'* ]] ||
+            fail "$dockerfile must pass the FTP over SSL option each PHP series names"
+        [[ "$run" == *'docker-php-ext-configure ftp "$ftp_ssl";'* ]] ||
+            fail "$dockerfile must configure ftp with its SSL support"
+        [[ "$run" == *"; php -r 'exit(function_exists(\"ftp_ssl_connect\") ? 0 : 1);'" ]] ||
+            fail "$dockerfile must end the ftp step by checking ftp_ssl_connect()"
+    done
+    [ "${runs[0]}" = "${runs[1]}" ] || fail "the PHP-FPM and cron images must build ftp the same way"
+    pass "both images build the ftp extension with SSL when their base lacks it, then check it"
 }
 
 # Writes the mount table of a sandbox, in the format of /proc/self/mountinfo,
@@ -760,6 +785,7 @@ test_setup_takes_back_the_jit_block_it_appended() {
 
 test_both_images_pin_a_download_per_architecture
 test_ioncube_loader_is_pinned_and_checked
+test_both_images_build_the_ftp_extension
 test_both_images_install_the_same_yt_dlp
 test_pecl_extensions_are_built_from_checked_tarballs
 test_ioncube_words_are_strict_and_predictable
