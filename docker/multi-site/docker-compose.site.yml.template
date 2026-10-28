@@ -94,6 +94,9 @@ services:
       - ../../../php/php.ini:/usr/local/etc/php/conf.d/kvs.ini:ro
       # The newer yt-dlp releases the cron container installs, read here.
       - yt-dlp:/var/lib/yt-dlp:ro
+      # The PHP sessions, kept when the container is recreated, so nobody is
+      # logged out (php/docker-entrypoint.sh).
+      - php-sessions:/var/lib/php/sessions
     environment:
       - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-512M}
       - PHP_UPLOAD_MAX_FILESIZE=${PHP_UPLOAD_MAX_FILESIZE:-2048M}
@@ -327,3 +330,4 @@ volumes:
   nginx-includes:
   nginx-logs:
   yt-dlp:
+  php-sessions:

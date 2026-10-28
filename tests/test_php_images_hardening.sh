@@ -4,7 +4,8 @@
 # read IONCUBE and YT_DLP_AUTO_UPDATE the same way and update yt-dlp only
 # through the yt-dlp volume, opcache JIT follows the ionCube loader,
 # setup.sh takes back the JIT block it used to append to the tracked php.ini,
-# and both build the ftp extension the official bases dropped in PHP 8.2.
+# both build the ftp extension the official bases dropped in PHP 8.2, and
+# PHP-FPM keeps its sessions in the php-sessions volume when it is mounted.
 # shellcheck disable=SC2016  # Patterns hold the literal ${...} of the Dockerfiles.
 set -euo pipefail
 
@@ -322,10 +323,13 @@ test_both_images_build_the_ftp_extension() {
 # (with-volume), as the Compose files mount it, or nothing mounted there
 # (without-volume), as in a container whose compose file is older than the
 # volume. The latter still names that directory, as the source of a bind
-# mount elsewhere: only the mount point may count.
+# mount elsewhere: only the mount point may count. The php-sessions volume is
+# mounted on $sandbox/sessions as well, unless the third argument is
+# without-sessions.
 write_mountinfo() {
     local sandbox="$1"
     local volume="$2"
+    local sessions="${3:-with-sessions}"
 
     {
         echo '1601 1500 0:85 / / rw,relatime master:1 - overlay overlay rw'
@@ -335,19 +339,23 @@ write_mountinfo() {
         else
             echo "1622 1601 259:2 ${sandbox}/volume /var/www/kvs rw,relatime master:1 - ext4 /dev/nvme0n1p2 rw"
         fi
+        if [ "$sessions" = with-sessions ]; then
+            echo "1623 1601 259:2 /var/lib/docker/volumes/kvs_php-sessions/_data ${sandbox}/sessions rw,relatime master:1 - ext4 /dev/nvme0n1p2 rw"
+        fi
     } > "$sandbox/mountinfo"
 }
 
 # Copies an entrypoint to $sandbox/docker-entrypoint.sh, with its paths moved
-# into the sandbox, whose conf.d starts with the loader enabled and whose
-# yt-dlp links to the volume, mounted, as the image and the Compose files
-# build them.
+# into the sandbox, whose conf.d starts with the loader enabled, whose
+# yt-dlp links to the volume, mounted, and whose sessions directory is the
+# php-sessions volume, as the image and the Compose files build them.
 make_entrypoint_sandbox() {
     local entrypoint="$1"
     local sandbox="$2"
 
     rm -rf "$sandbox"
-    mkdir -p "$sandbox/conf.d" "$sandbox/cron.d" "$sandbox/bin" "$sandbox/lib/yt-dlp" "$sandbox/volume"
+    mkdir -p "$sandbox/conf.d" "$sandbox/cron.d" "$sandbox/bin" "$sandbox/lib/yt-dlp" "$sandbox/volume" \
+        "$sandbox/sessions"
     echo 'zend_extension=ioncube_loader_lin_8.1.so' > "$sandbox/conf.d/00-ioncube.ini"
     : > "$sandbox/cron.d/yt-dlp-update"
     ln -s "$sandbox/volume" "$sandbox/lib/yt-dlp/updates"
@@ -356,6 +364,7 @@ make_entrypoint_sandbox() {
         -e "s|/etc/cron.d|${sandbox}/cron.d|g" \
         -e "s|/usr/local/lib/yt-dlp|${sandbox}/lib/yt-dlp|g" \
         -e "s|/var/lib/yt-dlp|${sandbox}/volume|g" \
+        -e "s|/var/lib/php/sessions|${sandbox}/sessions|g" \
         -e "s|/usr/local/bin/yt-dlp-update|${sandbox}/bin/yt-dlp-update|g" \
         -e "s|/var/log/yt-dlp-update.log|${sandbox}/yt-dlp-update.log|g" \
         -e "s|/proc/self/mountinfo|${sandbox}/mountinfo|g" \
@@ -366,6 +375,14 @@ make_entrypoint_sandbox() {
 [ "${TEST_PHP_MAJOR:-8}" -ge 8 ]
 EOF
     chmod +x "$sandbox/bin/php"
+    # It gives the sessions directory to www-data, which takes root: the stub
+    # records the call, and fails when TEST_CHOWN_FAILS is set.
+    cat > "$sandbox/bin/chown" << EOF
+#!/bin/sh
+echo "\$*" >> "${sandbox}/chown-calls"
+[ -z "\${TEST_CHOWN_FAILS:-}" ]
+EOF
+    chmod +x "$sandbox/bin/chown"
 }
 
 # Runs a sandboxed entrypoint with "true" as the command, given the sandbox
@@ -378,6 +395,7 @@ run_entrypoint() {
         "PATH=${sandbox}/bin:/usr/bin:/bin"
         "KVS_MEMCACHE_LOOPBACK=false"
         "TEST_PHP_MAJOR=${TEST_PHP_MAJOR:-8}"
+        "TEST_CHOWN_FAILS=${TEST_CHOWN_FAILS:-}"
     )
 
     if [ "$ioncube" != unset ]; then
@@ -712,6 +730,91 @@ test_opcache_jit_follows_the_loader() {
     pass "opcache JIT is on exactly when the ionCube loader is off, and php.ini can still override it"
 }
 
+# The sessions outlive a recreated container in the php-sessions volume. The
+# entrypoint sends them there only when it is mounted: an additional
+# multi-site site keeps the compose file it was added with, which may be
+# older than the volume, and its sessions then stay in /tmp, as before.
+test_php_sessions_use_the_volume() {
+    local sandbox="$TEST_DIR/sessions-php"
+    local session_ini="$sandbox/conf.d/10-sessions.ini"
+    local env_file="$TEST_DIR/sessions.env"
+    local json="$TEST_DIR/sessions.json"
+    local compose_file
+    local mounted
+    local run
+
+    make_entrypoint_sandbox "$PHP_ENTRYPOINT" "$sandbox"
+    chmod 0755 "$sandbox/sessions"
+    run_entrypoint "$sandbox" unset
+    [ "$(grep -v '^;' "$session_ini")" = "session.save_path = \"${sandbox}/sessions\"" ] ||
+        fail "with the php-sessions volume mounted, the sessions must be kept there: $(cat "$session_ini" 2>&1)"
+    [ "$(cat "$sandbox/chown-calls")" = "www-data:www-data ${sandbox}/sessions" ] ||
+        fail "the entrypoint must give the sessions volume to www-data: $(cat "$sandbox/chown-calls" 2>&1)"
+    [ "$(stat -c %a "$sandbox/sessions")" = 700 ] || fail "only www-data may read the sessions"
+    grep -Fxq "PHP sessions kept in the php-sessions volume (${sandbox}/sessions)" "$sandbox/stdout" ||
+        fail "the entrypoint must log where the sessions are kept: $(cat "$sandbox/stdout")"
+    [ ! -s "$sandbox/stderr" ] || fail "the sessions volume must not be warned about: $(cat "$sandbox/stderr")"
+
+    # Without the volume, the ini of the previous start goes, PHP keeps the
+    # sessions in /tmp, and the log says why and what to do.
+    write_mountinfo "$sandbox" with-volume without-sessions
+    run_entrypoint "$sandbox" unset
+    [ ! -e "$session_ini" ] || fail "without the php-sessions volume, the sessions must stay in /tmp"
+    grep -Fq "WARNING: no volume is mounted on ${sandbox}/sessions, so the PHP sessions stay in /tmp" "$sandbox/stderr" ||
+        fail "the entrypoint must say on stderr that the php-sessions volume is missing: $(cat "$sandbox/stderr")"
+    grep -Fq 'copy multi-site/docker-compose.site.yml.template over it again' "$sandbox/stderr" ||
+        fail "the entrypoint must say how an additional multi-site site gets the php-sessions volume"
+
+    # A volume that cannot be given to www-data keeps them in /tmp too.
+    write_mountinfo "$sandbox" with-volume
+    TEST_CHOWN_FAILS=1 run_entrypoint "$sandbox" unset
+    [ ! -e "$session_ini" ] || fail "the sessions must not go to a directory www-data may not own"
+    grep -Fq "WARNING: cannot give ${sandbox}/sessions to www-data, so the PHP sessions stay in /tmp" "$sandbox/stderr" ||
+        fail "the entrypoint must say why the sessions stay in /tmp: $(cat "$sandbox/stderr")"
+
+    # The cron container serves no session and never mounted php.ini.
+    sandbox="$TEST_DIR/sessions-cron"
+    make_entrypoint_sandbox "$CRON_ENTRYPOINT" "$sandbox"
+    run_entrypoint "$sandbox" unset
+    [ ! -e "$sandbox/conf.d/10-sessions.ini" ] || fail "the cron entrypoint must not write a sessions ini"
+
+    # php.ini names no save path, which would win over the volume, and the
+    # sessions stay files.
+    ! grep -Eq '^[[:space:]]*session\.save_path' "$ROOT_DIR/docker/php/php.ini" ||
+        fail "docker/php/php.ini must leave session.save_path to the entrypoint"
+    grep -Fxq 'session.save_handler = files' "$ROOT_DIR/docker/php/php.ini" ||
+        fail "docker/php/php.ini must keep the sessions in files"
+
+    # The image owns the mount point, whose owner and mode Docker gives a
+    # new volume: the www-data of UID 1000, the user of the FPM workers.
+    run=$(one_instruction_with "$PHP_DOCKERFILE" 'install -d -o www-data -g www-data -m 0700 /var/lib/php/sessions')
+    [[ "$run" == *'usermod -u 1000 www-data && groupmod -g 1000 www-data && install -d '* ]] ||
+        fail "the sessions directory must be created once www-data has UID 1000"
+
+    printf 'DOMAIN=sessions.fixture.test\nSITE_PREFIX=kvs-sessions\nMARIADB_PASSWORD=fixture\nMARIADB_ROOT_PASSWORD=fixture\n' \
+        > "$env_file"
+    for compose_file in "$ROOT_DIR/docker/docker-compose.yml" \
+        "$ROOT_DIR/docker/multi-site/docker-compose.site.yml.template"; do
+        # The ini loads before the php.ini the stack mounts, so a save path
+        # an operator writes there still wins.
+        mounted=$(sed -n 's|.*php/php\.ini:/usr/local/etc/php/conf\.d/\([^:]*\):ro$|\1|p' "$compose_file")
+        [ -n "$mounted" ] || fail "$compose_file no longer mounts php.ini into conf.d"
+        [ "$(printf '%s\n' "$mounted" 10-sessions.ini | LC_ALL=C sort | head -n 1)" = 10-sessions.ini ] ||
+            fail "the sessions ini must load before ${mounted}"
+        env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_PROJECT_NAME -u COMPOSE_ENV_FILES \
+            docker compose --env-file "$env_file" -f "$compose_file" config --format json > "$json" ||
+            fail "docker compose rejected $compose_file"
+        jq -e '
+            .volumes["php-sessions"] != null and (.volumes["php-sessions"].external // false) == false and
+            ([.services["php-fpm"].volumes[] | select(.target == "/var/lib/php/sessions")] ==
+                [{"type": "volume", "source": "php-sessions", "target": "/var/lib/php/sessions", "volume": {}}]) and
+            ([.services | to_entries[] | select(.key != "php-fpm") |
+                select(any(.value.volumes[]?; .source == "php-sessions"))] == [])' "$json" > /dev/null ||
+            fail "$compose_file must mount the php-sessions volume, writable, in php-fpm alone"
+    done
+    pass "PHP-FPM keeps its sessions in the php-sessions volume when it is mounted, in /tmp otherwise, and says so"
+}
+
 # Runs the function setup.sh uses, from a directory laid out like docker/.
 run_jit_block_removal() {
     local workdir="$1"
@@ -792,6 +895,7 @@ test_ioncube_words_are_strict_and_predictable
 test_yt_dlp_auto_update_is_read_strictly_by_both_entrypoints
 test_yt_dlp_updates_need_the_volume
 test_opcache_jit_follows_the_loader
+test_php_sessions_use_the_volume
 test_setup_takes_back_the_jit_block_it_appended
 
 echo "1..$TESTS_RUN"

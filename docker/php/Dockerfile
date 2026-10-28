@@ -292,9 +292,13 @@ RUN chmod 0755 /usr/local/bin/yt-dlp \
 COPY fpm-config.sh /usr/local/lib/kvs/fpm-config.sh
 
 # Symlink PHP to /usr/bin (KVS scripts expect it there), and give www-data
-# the UID and GID 1000 that own the KVS files on the host.
+# the UID and GID 1000 that own the KVS files on the host. The php-sessions
+# volume mounts on /var/lib/php/sessions, and Docker gives a new volume the
+# owner and mode of that directory: only the FPM workers read the sessions,
+# and they can list them, which the session garbage collector needs.
 RUN ln -sf /usr/local/bin/php /usr/bin/php \
-    && usermod -u 1000 www-data && groupmod -g 1000 www-data
+    && usermod -u 1000 www-data && groupmod -g 1000 www-data \
+    && install -d -o www-data -g www-data -m 0700 /var/lib/php/sessions
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/

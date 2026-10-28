@@ -188,6 +188,10 @@ KVS runs yt-dlp in the PHP-FPM container (the Grabbers plugin page) and in the c
 
 The updates need the `yt-dlp` volume, which a `docker-compose.yml` older than it does not mount: the containers of such a stack keep the release of their image and say so in their log, rather than leave an update in the cron container, where PHP-FPM would not run it and a recreated container would lose it. An additional multi-site site runs the `docker-compose.yml` copied from `multi-site/docker-compose.site.yml.template` when it was added, so a site added before the volume gets it the way it gets the log caps (see [Logs](#logs)): copy the template over its `docker-compose.yml` again, carrying over any local change, then run `docker compose build` and `docker compose up -d` in `multi-site/sites/<domain>`.
 
+#### PHP sessions
+
+The PHP sessions, which hold who is logged in to the site and to the admin panel, are kept in the `php-sessions` volume, so a recreated PHP-FPM container, which `kvsctl upgrade` brings whenever the release changes its image, logs nobody out. They used to be in `/tmp` of the container and went with it: the upgrade that brings the volume logs everyone out one last time, except the members KVS remembers through its "remember me" login option. A `docker-compose.yml` older than the volume keeps them in `/tmp`, and the PHP-FPM log says so; an additional multi-site site gets the volume the way it gets the `yt-dlp` one (see [yt-dlp](#yt-dlp)). A `session.save_path` set in `docker/php/php.ini` still takes precedence.
+
 ### Standalone Installation
 
 For traditional bare-metal installation on Debian systems.

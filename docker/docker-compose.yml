@@ -90,6 +90,9 @@ services:
       - ./geoip:/usr/share/geoip:ro
       # The newer yt-dlp releases the cron container installs, read here.
       - yt-dlp:/var/lib/yt-dlp:ro
+      # The PHP sessions, kept when an upgrade recreates the container, so
+      # nobody is logged out (php/docker-entrypoint.sh).
+      - php-sessions:/var/lib/php/sessions
     environment:
       - DOMAIN=${DOMAIN}
       - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
@@ -428,3 +431,4 @@ volumes:
   nginx-includes:
   manticore-data:
   yt-dlp:
+  php-sessions:

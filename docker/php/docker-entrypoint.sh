@@ -141,6 +141,37 @@ apply_yt_dlp_auto_update() {
     echo "yt-dlp updates disabled (${reason}): yt-dlp stays at the release of the image"
 }
 
+# PHP sessions are files, and in /tmp they live in the layer of the
+# container: the container an upgrade recreates starts without them, which
+# logs out every visitor and admin. docker-compose.yml mounts the
+# php-sessions volume on /var/lib/php/sessions, and the sessions are kept
+# there instead. Docker gives the volume the owner and mode of that
+# directory in the image, but only while the volume is empty: they are set
+# again here, for a volume that holds files already. A compose file older
+# than the volume (the copy an additional multi-site site got when it was
+# added) keeps the sessions in /tmp, as before, and is reported. The ini
+# sorts before kvs.ini (the stack's php.ini), so a session.save_path
+# written there still wins.
+apply_session_storage() {
+    local directory="/var/lib/php/sessions"
+    local session_ini="/usr/local/etc/php/conf.d/10-sessions.ini"
+
+    rm -f "$session_ini"
+    if ! awk -v directory="$directory" '$5 == directory { found = 1 } END { exit !found }' /proc/self/mountinfo; then
+        echo "WARNING: no volume is mounted on ${directory}, so the PHP sessions stay in /tmp and a recreated container logs everyone out: the docker-compose.yml of this stack is older than the php-sessions volume (an additional multi-site site: copy multi-site/docker-compose.site.yml.template over it again)" >&2
+        return
+    fi
+    if ! chown www-data:www-data "$directory" || ! chmod 0700 "$directory"; then
+        echo "WARNING: cannot give ${directory} to www-data, so the PHP sessions stay in /tmp" >&2
+        return
+    fi
+    {
+        echo "; Written by docker-entrypoint.sh because the php-sessions volume is mounted."
+        echo "session.save_path = \"${directory}\""
+    } > "$session_ini"
+    echo "PHP sessions kept in the php-sessions volume (${directory})"
+}
+
 case "${1:-}" in
     php-fpm|/usr/local/sbin/php-fpm)
         # shellcheck source=docker/php/fpm-config.sh
@@ -153,6 +184,7 @@ start_memcache_loopback
 apply_ioncube_setting
 apply_opcache_jit_setting
 apply_yt_dlp_auto_update
+apply_session_storage
 
 # Apply PHP configuration from environment variables
 # Write to a separate file (zzz- prefix loads last, overrides kvs.ini)
