@@ -13,6 +13,10 @@
 ARG PHP_VERSION=8.1
 ARG PHP_BASE=php:8.1-cli@sha256:76e563191d1ade120313a8736df24154d21da5155c0756f147c0b01bd19d9087
 ARG PHP_FROM=${PHP_BASE:-php:${PHP_VERSION}-cli}
+FROM ${PHP_FROM} AS ffmpeg-build
+COPY build-ffmpeg.sh /usr/local/bin/build-ffmpeg
+RUN bash /usr/local/bin/build-ffmpeg
+
 FROM ${PHP_FROM}
 
 # The PHP series the base runs.
@@ -122,8 +126,12 @@ RUN set -eux; \
 # one snapshot of the suite, and Debian removes the old binaries as soon as a
 # security update lands, so a pinned apt line stops building a few days later.
 # The base image digest above is what makes this layer reproducible.
+# The locally rebuilt packages include libavcodec, so no stock decoder
+# remains reachable through an absolute binary path or the shared library.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=bind,from=ffmpeg-build,source=/packages,target=/packages \
+    apt-get update && apt-get install -y --no-install-recommends \
+    /packages/*.deb \
     cron \
     mariadb-client \
     libmemcached-dev \
@@ -133,7 +141,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     unzip \
     ca-certificates \
-    ffmpeg \
     aria2 \
     procps \
     imagemagick \
@@ -152,6 +159,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -s /usr/bin/convert /usr/local/bin/convert \
     && ln -s /usr/bin/wget /usr/local/bin/wget \
     && ln -sf /usr/bin/mariadb-dump /usr/bin/mysqldump
+
+# Keep the complete corresponding source available with the GPL binaries.
+COPY --from=ffmpeg-build /source/ /usr/local/share/kvs-ffmpeg-source/
+
+# Preserve Debian's resource limits and append the media security rules.
+COPY media-security-policy.xml /usr/local/share/kvs-media-security-policy.xml
+RUN sed -i '/<\/policymap>/d' /etc/ImageMagick-7/policy.xml \
+    && sed -n '/<policymap>/,$p' /usr/local/share/kvs-media-security-policy.xml \
+        | sed '1d' >> /etc/ImageMagick-7/policy.xml
 
 # The ftp extension. KVS reaches FTP storage and conversion servers with it,
 # and its conversion engine refuses every task of a conversion server set to
@@ -280,6 +296,11 @@ RUN chown root:root /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update /etc/cron.d/c
     && chmod 0755 /usr/local/bin/yt-dlp-update \
     && install -o www-data -g www-data -m 0660 /dev/null /var/log/cron.log \
     && install -o root -g root -m 0600 /dev/null /var/log/yt-dlp-update.log
+
+# Fail the build if security restrictions or normal media processing fail.
+COPY media-security-check.sh /usr/local/bin/kvs-media-security-check
+RUN chmod 0755 /usr/local/bin/kvs-media-security-check \
+    && su -s /bin/sh www-data -c /usr/local/bin/kvs-media-security-check
 
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

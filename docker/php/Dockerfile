@@ -22,6 +22,10 @@
 ARG PHP_VERSION=8.1
 ARG PHP_BASE=php:8.1-fpm@sha256:a3118db1911fdd3b3ac66605122ddc859286688ced86fc860fec6d19cc2d6c55
 ARG PHP_FROM=${PHP_BASE:-php:${PHP_VERSION}-fpm}
+FROM ${PHP_FROM} AS ffmpeg-build
+COPY build-ffmpeg.sh /usr/local/bin/build-ffmpeg
+RUN bash /usr/local/bin/build-ffmpeg
+
 FROM ${PHP_FROM}
 
 # The PHP series the base runs.
@@ -132,8 +136,12 @@ RUN set -eux; \
 # security update lands, so a pinned apt line stops building a few days later.
 # The base image digest above is what makes this layer reproducible: it fixes
 # the suite and the apt sources the packages come from.
+# The locally rebuilt packages include libavcodec, so no stock decoder
+# remains reachable through an absolute binary path or the shared library.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=bind,from=ffmpeg-build,source=/packages,target=/packages \
+    apt-get update && apt-get install -y --no-install-recommends \
+    /packages/*.deb \
     libfreetype6-dev \
     libjpeg62-turbo-dev \
     libpng-dev \
@@ -148,7 +156,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libheif-plugin-aomdec \
     libavif-dev \
     libaom-dev \
-    ffmpeg \
     aria2 \
     procps \
     mariadb-client \
@@ -164,6 +171,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -s /usr/bin/convert /usr/local/bin/convert \
     && ln -s /usr/bin/wget /usr/local/bin/wget \
     && ln -sf /usr/bin/mariadb-dump /usr/bin/mysqldump
+
+# Keep the complete corresponding source available with the GPL binaries.
+COPY --from=ffmpeg-build /source/ /usr/local/share/kvs-ffmpeg-source/
+
+# Preserve Debian's resource limits and append the media security rules.
+COPY media-security-policy.xml /usr/local/share/kvs-media-security-policy.xml
+RUN sed -i '/<\/policymap>/d' /etc/ImageMagick-7/policy.xml \
+    && sed -n '/<policymap>/,$p' /usr/local/share/kvs-media-security-policy.xml \
+        | sed '1d' >> /etc/ImageMagick-7/policy.xml
 
 # Optional: For MaxMind GeoIP (not needed if using Cloudflare)
 # Add to apt-get above: libmaxminddb0 libmaxminddb-dev
@@ -299,6 +315,11 @@ COPY fpm-config.sh /usr/local/lib/kvs/fpm-config.sh
 RUN ln -sf /usr/local/bin/php /usr/bin/php \
     && usermod -u 1000 www-data && groupmod -g 1000 www-data \
     && install -d -o www-data -g www-data -m 0700 /var/lib/php/sessions
+
+# Fail the build if security restrictions or normal media processing fail.
+COPY media-security-check.sh /usr/local/bin/kvs-media-security-check
+RUN chmod 0755 /usr/local/bin/kvs-media-security-check \
+    && su -s /bin/sh www-data -c /usr/local/bin/kvs-media-security-check
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/

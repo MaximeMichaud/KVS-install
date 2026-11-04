@@ -180,6 +180,33 @@ Both installers select **PHP 8.3 for KVS 7.0.3 and newer**. These archives can c
 
 For an existing installation managed by `kvsctl`, `setup.sh` preserves the current PHP series and reports the upgrade needed. Set `PHP_VERSION=8.3` in `docker/.env` and run `kvsctl upgrade` to install matching PHP-FPM and cron images. Updating the CLI alone does not change the PHP runtime.
 
+#### Media processing security
+
+The PHP-FPM and cron images rebuild Debian's FFmpeg packages with the
+MagicYUV and TDSC decoders disabled in `libavcodec`. This also protects
+`ffprobe` and direct calls to `/usr/bin/ffmpeg`; changing command-line
+options cannot re-enable those decoders. H.264, HEVC and AV1 remain
+supported. ImageMagick additionally rejects PostScript, EPS, PDF and XPS,
+including documents renamed as ordinary images, while preserving the
+distribution's resource limits and JPEG, PNG, WebP and AVIF support.
+
+Install a stack release containing these protections with `kvsctl upgrade`,
+or rebuild **both** `php-fpm` and `cron` and recreate them on a source
+installation. Updating only the host packages or the CLI does not update
+these containers. From the site's Compose directory, verify each image:
+
+```sh
+docker compose exec -T -u www-data php-fpm kvs-media-security-check
+docker compose exec -T -u www-data cron kvs-media-security-check
+```
+
+The check uses synthetic media and runs during every image build as well.
+Apply the [official KVS media security patch](https://kernel-scripts.com/updates/media-security-6.3.0-7.0.3_patch.zip)
+to the CMS separately; this image update does not overwrite site files.
+Standalone installations and remote conversion servers need their own
+updates or mitigations. See the [release procedure](docs/releasing.md#media-security-builds)
+for how the media packages and policies are built and checked.
+
 #### yt-dlp
 
 KVS runs yt-dlp in the PHP-FPM container (the Grabbers plugin page) and in the cron container (the imports). Both images carry the yt-dlp release their Dockerfiles pin, checked against the sha256 the release publishes: the build yt-dlp makes for Linux on the server's architecture, which brings its own Python and the optional libraries yt-dlp uses, browser impersonation (`curl_cffi`) included. Sites change what yt-dlp parses, and an old release stops downloading from them, so the cron container looks for a newer release when it starts and every Sunday at 04:00 UTC, and installs it in the `yt-dlp` volume once its sha256 is the one the release publishes in `SHA2-256SUMS` and it runs as `www-data`, the user PHP-FPM and the KVS task run it as (the update itself runs as root). Both containers mount that volume and run the newer of its release and the one of their image: they run the same yt-dlp, an update outlives a recreated container, and a newer image is never held back by an older release left in the volume. The cron container logs the updates in `/var/log/yt-dlp-update.log` (`docker compose exec cron cat /var/log/yt-dlp-update.log`).

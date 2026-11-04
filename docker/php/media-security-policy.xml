@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Loaded after the distribution policy so its resource limits remain. -->
+<policymap>
+  <!-- Block the Ghostscript-backed readers regardless of file extension. -->
+  <policy domain="coder" rights="none" pattern="{PS,PS2,PS3,EPS,EPS2,EPS3,EPSF,EPSI,PDF,XPS}" />
+  <policy domain="module" rights="none" pattern="{PS,PDF,XPS}" />
+  <policy domain="delegate" rights="none" pattern="gs*" />
+</policymap>

@@ -62,7 +62,7 @@ for spec in php:fpm cron:cli; do
         [ "$line" -lt "$from_line" ] ||
             fail "$dir/Dockerfile must declare $arg before PHP_FROM, whose default reads it: $header"
     done
-    [ "$(tail -n 1 <<< "$header")" = 'FROM ${PHP_FROM}' ] ||
+    grep -Eq '^FROM \$\{PHP_FROM\}( AS [A-Za-z0-9_-]+)?$' <<< "$(tail -n 1 <<< "$header")" ||
         fail "$dir/Dockerfile must build FROM \${PHP_FROM}: $header"
     awk '/^FROM / { stage = 1; next } stage && /^ARG PHP_VERSION$/ { found = 1; exit } END { exit !found }' "$dockerfile" ||
         fail "$dir/Dockerfile must bring PHP_VERSION into its stage"

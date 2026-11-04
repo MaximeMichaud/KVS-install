@@ -292,6 +292,38 @@ replaced. The applied source commit is recorded inside PHP 8.1 images at
 `/usr/local/share/php-security/php81.commit`. A plain `php -v` cannot
 distinguish these images from the unpatched upstream 8.1.34 images.
 
+## Media security builds
+
+The PHP-FPM and cron Dockerfiles each have an `ffmpeg-build` stage. Its
+`build-ffmpeg.sh` uses the Debian suite's signed source repositories and
+rebuilds the standard FFmpeg packages, including all eight runtime
+libraries, with `--disable-decoder=magicyuv --disable-decoder=tdsc`.
+Packages carry a `+kvs1` suffix. Their local `.deb` files are mounted only
+for the runtime installation step; the compiler, unpacked source tree and
+package archives do not become layers of the final image. The complete
+modified source is shipped as `ffmpeg-source.tar.xz` under
+`/usr/local/share/kvs-ffmpeg-source/`, with rebuild instructions and the
+original Debian source descriptor, alongside the GPL binaries.
+
+Keep the build helper, ImageMagick policy and `media-security-check.sh`
+identical in the two build contexts. The latter is installed as
+`kvs-media-security-check` and runs as `www-data` during every image build.
+A failure stops the build, including release builds, before the image can
+be published. Run it again on each built image in isolation:
+
+```sh
+docker run --rm --network none --read-only --user 1000:1000 \
+  --tmpfs /work:uid=1000,gid=1000,mode=700 --env TMPDIR=/work \
+  --entrypoint kvs-media-security-check IMAGE
+```
+
+The checks exercise decoder rejection, ordinary video/audio conversions,
+screenshots and image resizing. They require no KVS installation, no
+network access and no exploit payload. Keep the ordinary PHP security
+checks above as well. Do not remove the media restrictions just because
+an upstream version number increased; check the distribution's status for
+both CVEs and validate the replacement before changing the policy.
+
 ## Release notes
 
 The prepare job uses `.github/release-notes/<tag>.md` from the tagged commit
