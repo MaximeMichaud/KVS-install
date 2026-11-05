@@ -117,6 +117,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | M3 | medium | import | Decompression errors ignored; a corrupt dump is marked complete | repro | open |
 | M4 | medium | import | Absolute symlinks on the old server copied as root, readable by PHP | repro | open |
 | M5 | low | import | A resumed pass can run with no free-space check | code | open |
+| K1 | high | kvsctl | `backup --keep` deletes the archive a rollback would replay | repro | open |
+| K2 | medium | kvsctl | Relative restore path recorded; `recover` elsewhere replays the wrong file | repro | open |
+| K3 | medium | scripts | Scripts check the kvsctl lock but never hold it | code | open |
+| K4 | medium | kvsctl | A second `restore --latest` replays the safety backup | code | open |
+| K5 | low | kvsctl | `update-cli --version <older>` does nothing and exits 0 | repro | open |
+| K6 | low | kvsctl | `restore <archive> --latest` silently ignores `--latest` | code | open |
 | S1 | medium | release | Dispatch from a branch named like a version mixes tag and branch | repro | open |
 | S2 | medium | release | Actions pinned by mutable tag in privileged jobs | repro | open |
 | S3 | medium | release | Failed lock lookup swallowed; PHP image built from a floating tag | repro | open |
@@ -1190,6 +1196,108 @@ M3.
   and refuse instead of only warning.
 - **Test:** pre-create the count-timeout flag and a saved count, set free space
   below the remainder, assert `import_remote_files` refuses before rsync runs.
+
+## kvsctl commands
+
+### K1. `backup --keep` deletes the archive a rollback would replay
+
+- **Severity:** high (rollback impossible after routine backups)
+- **Confidence:** repro (temporary Go test). **Status:** open
+- **Where:** `runBackup`, `cli/cmd/kvsctl/main.go:1043` and `:1065` (only
+  `state.UpgradeBackup` is protected from `pruneBackups`); the fallback in
+  `cli/internal/upgrade/rollback.go:1046-1053` (`backup.Latest(dir, state.Previous)`);
+  `--skip-backup` allowed at `cli/internal/upgrade/plan.go:498`, recorded empty
+  at `run.go:515`.
+- **Defect:** after `upgrade --skip-backup` on a release that migrates the
+  database (allowed when it is not one-way), rollback replays the newest backup
+  of the previous version. Pruning does not know this rule, although the
+  `--keep` help says "the one a rollback would replay are never removed".
+- **Repro:** state `{Current: 1.1.0, Previous: 1.0.0, Database: migrates}` with
+  `backup-1.0.0-…` and `backup-1.1.0-…`; `kvsctl backup --keep 1` (or five daily
+  cron backups at the default `--keep 5`) deletes the 1.0.0 archive, and
+  `kvsctl rollback` refuses with "no backup of 1.0.0 is kept".
+- **Fix direction:** compute the rollback archive with the same rule as
+  `rollbackDump` and pass it to `pruneBackups`; same for the upgrade's own prune.
+- **Test:** the scenario through `runBackup` with the real `backup.Prune`; assert
+  `backup.Latest(dir, "1.0.0") != ""`.
+
+### K2. Relative restore path recorded; `recover` elsewhere replays the wrong file
+
+- **Severity:** medium (a half-replayed database and stopped services that
+  `recover` cannot finish)
+- **Confidence:** repro for the resolver; journal and recover by code.
+  **Status:** open
+- **Where:** `resolveBackup`, `cli/cmd/kvsctl/restore.go:243-256`; stored as
+  `Replay: archive` at `cli/internal/upgrade/replay.go:169`, read at `:404` and
+  `:324`.
+- **Defect:** an argument with a slash that does not match the list (whose
+  paths are absolute) is returned as given, relative to the current directory,
+  and the journal records it that way.
+- **Repro:** `cd /opt/kvs && kvsctl restore backups/backup-1.0.0-20261001-000000.tar`,
+  the replay is cut short, then `kvsctl recover` runs from `/root` or cron:
+  ENOENT, or a different file with that relative name. `--env` fails the same
+  way through `ArchivedEnv`.
+- **Fix direction:** `filepath.Abs` in `resolveBackup`, and in `Runner.Restore`.
+- **Test:** `t.Chdir(tmp)`; `resolveBackup(dir, "sub/b.tar", nil)` returns an
+  absolute path; `journal.Replay` is absolute after `Restore`.
+
+### K3. Scripts check the kvsctl lock but never hold it
+
+- **Severity:** medium (two writers on the same compose project and `.env`)
+- **Confidence:** code. **Status:** open
+- **Where:** `docker/setup.sh:288-309` (`flock --shared --nonblock "$lock" true`),
+  `docker/reconfigure.sh:122-146`, `kvs-install.sh` (around line 1975); kvsctl's
+  lock in `cli/internal/instance/lock.go`.
+- **Defect:** `flock … true` takes the lock and releases it at once. The scripts
+  refuse to start while kvsctl runs, but `kvsctl upgrade` or `restore` succeeds
+  while `setup.sh` is rebuilding images, writing `.env` or running
+  `compose up`. There is also a window between the check and the first change.
+- **Fix direction:** hold a shared lock for the whole run (`mkdir -p kvsctl;
+  exec 9<>"$root/kvsctl/lock"; flock -n -s 9`), so kvsctl's exclusive lock fails
+  with exit 6; have kvsctl's message say a script may hold it.
+- **Test:** a shell test holding the lock as the scripts would, then
+  `kvsctl backup` expecting exit 6.
+
+### K4. A second `restore --latest` replays the safety backup
+
+- **Severity:** medium (the retry undoes the first restore)
+- **Confidence:** code. **Status:** open
+- **Where:** `cli/cmd/kvsctl/restore.go:223-225` (`list[0]`), with
+  `cli/internal/upgrade/replay.go:189` (the safety backup goes to the same
+  `BackupDir` with the next sequence number, so it ranks newest).
+- **Defect:** when `restore --latest --yes` exits 1 because the stack is
+  unhealthy although the database was restored, retrying the same command
+  replays the pre-restore dump.
+- **Fix direction:** mark safety backups in `backup.json` (a kind field) and skip
+  them in `--latest`, or store them in a separate subdirectory; label them in
+  the picker.
+- **Test:** two archives, a restore with a fake replay that writes the safety
+  archive; a second `chooseBackup(latest=true)` does not return it.
+
+### K5. `update-cli --version <older>` does nothing and exits 0
+
+- **Severity:** low. **Confidence:** repro. **Status:** open
+- **Where:** `cli/cmd/kvsctl/updatecli.go:79-83`; `cliState` in
+  `cli/cmd/kvsctl/main.go`.
+- **Defect:** an explicitly named release goes through the "newer than" check of
+  the default target. Binary 1.3.0 with `--version 1.2.0` prints "nothing to
+  do" and exits 0, while the help says it installs the named release.
+- **Fix direction:** with `--version`, install unless equal; if downgrades are
+  refused on purpose, return an error (non-zero exit).
+- **Test:** `Version="1.3.0"`, target `1.2.0` with `--version`: the binary is
+  replaced, or an error is returned.
+
+### K6. `restore <archive> --latest` silently ignores `--latest`
+
+- **Severity:** low. **Confidence:** code. **Status:** open
+- **Where:** `cli/cmd/kvsctl/restore.go:217-219`.
+- **Defect:** the argument is checked first and the conflict is not reported, so
+  a script that passes a stale name with `--latest` replays the named archive.
+- **Fix direction:** a `usageError` (exit 2) when both are given.
+- **Test:** `runKvsctl("restore", "x", "--latest")` exits 2.
+
+Minor, not listed: `logs --tail -1` becomes `--tail 0` (nothing instead of
+everything), and `logs` exits 0 on SIGTERM.
 
 ## Release and supply chain
 
