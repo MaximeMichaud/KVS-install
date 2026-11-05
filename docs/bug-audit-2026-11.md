@@ -195,11 +195,11 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | V4 | low | setup | DNS check reads `/etc/hosts` and only the first A record | repro | confirmed (corrected) |
 | V5 | low | setup | Docker DNS check ignores AAAA records | code | confirmed (corrected) |
 | V6 | low | export | Export size walk starts one `du` per shallow file | repro | confirmed (corrected) |
-| Y1 | medium | import | Imported `setup_db.php` world-readable for the whole import | repro | open |
-| Y2 | medium | runtime | kvs-init and phpmyadmin-init put secrets in `sed`/`grep` argv | repro | open |
-| Y3 | low | native | Native install puts the DB password in `mariadb -e` argv | code | open |
-| Y4 | low | kvsctl | kvsctl errors print `.env` values verbatim | repro | open |
-| Y5 | low | import | `IMPORT_REMOTE_PASSWORD` sent to an unverified host key | code | open |
+| Y1 | low | import | Imported `setup_db.php` world-readable for the whole import | repro | confirmed (corrected) |
+| Y2 | low | runtime | kvs-init and phpmyadmin-init put secrets in `sed`/`grep` argv | repro | confirmed (corrected) |
+| Y3 | low | native | Native install puts the DB password in `mariadb -e` argv | code | confirmed (corrected) |
+| Y4 | low | kvsctl | kvsctl errors print `.env` values verbatim | repro | confirmed (corrected) |
+| Y5 | low | import | `IMPORT_REMOTE_PASSWORD` sent to an unverified host key | code | confirmed (corrected) |
 
 ## Verification pass
 
@@ -764,6 +764,50 @@ verdicts and corrections override the finding text below where they differ.
   interactive default in that branch is `3` (exit), and the headless jump needs
   `KEEP_VERSION=n`. `MARIADB_AUTO_UPGRADE` (`docker-compose.yml:166`) backs up only
   the system tables.
+- **Y1 — confirmed; severity low (was medium); fix improved.** Also the tar
+  fallback (`import.sh:3253`, GNU tar as root keeps source modes) and unzip/7z
+  extraction. `IMPORT_FILES_ONLY` needs a remote source (`docker/setup.sh:1444`),
+  so the multi-day window applies only to remote imports; otherwise it lasts until
+  kvs-init in the same run. The file holds the *old* server's credentials, which
+  for this repo's native install are `DOMAIN@localhost` (`kvs-install.sh:1142`),
+  unusable from the new host unless the password is reused. Better fix: create
+  `/var/www/<domain>` 0700 in `import_mark_destination` and `import_remote_files`
+  (`60-permissions.sh:54` reopens it to 755 at init; no test pins the mode); a
+  per-file chmod after each pass still leaves the pass itself exposed, and should
+  be conditional (`fix_file`, `60-permissions.sh:145`) to spare ctime.
+- **Y2 — confirmed; severity low (was medium); fix corrected.** 30 of 30 runs
+  caught from the host as uid 65534 (host `/proc` has no `hidepid`; no compose
+  `pid:` or `security_opt` would hide it). Each exposure lasts milliseconds and needs
+  a host account already polling; container users cannot see host `/proc`. The
+  blowfish part runs on BusyBox (2 of 20 `sed`, 1 of 20 `grep` caught) and only
+  decrypts the username cookie. Fix: a 0600 `sed -f` script keeps the pinned tests
+  passing; `awk` with `ENVIRON` does **not** (`sub`/`gsub` treat `&` and `\`
+  specially, breaking the `a&b\c'd|e#f` case at `tests/test_docker_hardening.sh:1880-1900`)
+  unless it uses an `index`/`substr` literal replacement; `php getenv()` works only
+  in kvs-init (the phpmyadmin-init image is alpine, without php).
+- **Y3 — confirmed.** `configure_kvs_database_file` runs once (only on the stock
+  placeholder), but `ALTER USER` runs on every re-run, while the live site's
+  php-fpm runs as www-data. Not covered: `tests/test_kvs_install.sh` stubs
+  `install_KVS` (`:58`), and its phpMyAdmin test (`:995-1015`) checks only the
+  directory mode, so `chmod 640 root:www-data` would not break it.
+- **Y4 — confirmed; wider, with a missed mitigation.** A third unredacted wrapper
+  at `instance.go:372` (`dotenv.Scan`), callers at `instance.go:190` (`Detect`,
+  every command), `backup.go:1414` and `upgrade/replay.go:334`. The journal path is
+  real: a failed env write during replay goes through `envError` then `noteFailure`
+  (`upgrade/rollback.go:59`), which stores `errLine(err)` in `journal.json`. But
+  docker compose v5.6.1 prints the same values verbatim ("failed to read …/.env:
+  line 3: unterminated quoted value …"), so redacting kvsctl narrows the leak
+  without closing it. Instance-layer redaction is safe (`env_test.go:44`, `:81`,
+  `:87` pin only prefixes).
+- **Y5 — confirmed; mitigations and impact.** `accept-new` still refuses a
+  *changed* key (only a first contact from this root account is exposed), and
+  interactive runs without `IMPORT_REMOTE_PASSWORD` get ssh's own question
+  (`import.sh:1514-1517`). Wider impact: whoever answers that first connection also
+  serves the site files and dump, i.e. PHP code that will run on the new server;
+  the key plus `IMPORT_SSH_ACCEPT_NEW` path shares that risk. Simplest fix: stop
+  forcing `accept-new` with a password and honour `IMPORT_SSH_ACCEPT_NEW` (sshpass
+  exits 6 on an unknown key); this breaks `tests/test_setup_import_sources.sh:828`,
+  which must change. Lines `import.sh:1557-1577` (`:1570`, `:1576`).
 
 ## kvs-export.sh
 
