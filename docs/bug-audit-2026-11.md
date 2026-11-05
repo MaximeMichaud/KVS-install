@@ -181,6 +181,10 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | X4 | low | multi-site | Several archives: setup refuses, site-manager and init pick one at random | repro | open |
 | X5 | low | kvsctl | KVS versions setup accepts (`7.0.3.1`, `7.0`) block kvsctl upgrades | repro | open |
 | X6 | low | setup | Bracketed endpoints compose rejects pass setup's parser | repro | open |
+| P1 | medium | multi-site | Full disk replaces the primary Caddy route with an empty file; exit 0 | repro | open |
+| P2 | medium | multi-site | Interrupted `add` leaves a half site that `add` refuses and `start` calls working | repro | open |
+| P3 | low | setup | Import receipt written before cleanup; re-run advises wiping a complete database | repro | open |
+| P4 | low | scripts | `.env` and export renames are never fsynced | code | open |
 
 ## Verification pass
 
@@ -2477,6 +2481,113 @@ same input. Not yet independently verified.
 - **Fix direction:** validate the bracketed host as an IPv6 address in both
   copies. Related to D2.
 - **Test:** both values are refused before `.env` changes.
+
+## Interrupt and disk-full paths
+
+Tested with small tmpfs mounts and `timeout -s INT`/`kill -HUP` on stubbed runs.
+Not yet independently verified. Sound, so skip: bash runs EXIT traps on INT,
+TERM, HUP and PIPE, subshells included, and no top-level EXIT trap is overwritten
+in `setup.sh`; gum kills the step's children on Ctrl-C; every kvsctl write
+(journal, state, `.env`, backup, binary) goes through temp file, fsync and
+rename; `set_env_value` and `remove_env_value` fail on ENOSPC; the resume token,
+staged dump identity, `kvs_publish_export`, the retirement phases, `00-extract`
+and `50-nginx-rewrites` hold against interrupts.
+
+### P1. Full disk replaces the primary Caddy route with an empty file; exit 0
+
+- **Severity:** medium (the primary site goes offline and no rollback runs)
+- **Confidence:** repro (1 MiB tmpfs; real `caddy:2-alpine` validates the empty
+  import). **Status:** open
+- **Where:** `configure_primary_site`, `docker/multi-site/site-manager.sh:391`
+  (`if ! write_caddy_site_config …`); the write at `:307-348`.
+- **Defect:** inside `if !`, `set -e` is off for the whole called function. A failed
+  `{ cat <<EOF …; } > "$temp_file"` is ignored, `mv -f` installs the empty or
+  partial file, and `log_success` returns 0. If `mktemp` fails, the old route stays
+  but success is still reported. `reconfigure.sh` (`configure_multi_route`,
+  `:1308-1326`) then reloads and reaches its commit point
+  (`MULTI_TRANSACTION_COMMITTED=true`); `setup.sh:4483` (`prepare_multi_site_proxy`)
+  carries on the same way.
+- **Repro:** full tmpfs with an existing route: "cat: write error: No space left on
+  device", then "[OK] Generated Caddy config", exit 0, a 0-byte route file.
+- **Fix direction:** check each step (`{ … } > "$temp_file" || { rm -f --
+  "$temp_file"; return 1; }`, `mktemp`, `mv`), and before `mv` check the file is not
+  empty and holds `# KVS Site: $domain`. Audit other functions called under
+  `if !`/`||` for the same `set -e` blind spot. The existing `primary-config`
+  assertions (`tests/test_multisite_manager_hardening.sh` around `:359-370`) still
+  pass.
+- **Test:** a PATH stub `cat` that prints an ENOSPC error and exits 1:
+  `primary-config` exits non-zero and the old route is byte-identical (the stub
+  reproduces the bug today).
+
+### P2. Interrupted `add` leaves a half site that `add` refuses and `start` calls working
+
+- **Severity:** medium. **Confidence:** repro for `add`; `start` by code.
+  **Status:** open
+- **Where:** `add_site`, `docker/multi-site/site-manager.sh:504-566`; `start_site`,
+  `:585-667`.
+- **Defect:** the site directory, webroot, `.env`, `docker-compose.yml` and route are
+  created one after another with no cleanup on failure or interrupt, and `start`
+  never checks that the route exists.
+- **Repro:** with 5 free pages, `add newsite.example.com` wrote `.env` and
+  `docker-compose.yml`, then failed on the route (only
+  `.newsite.example.com.caddy.XXXXXX` left). A second `add` says "already exists";
+  `start` runs compose, kvs-init and `reload_caddy`, then prints "Site started!
+  Access your site at https://…" while Caddy has no route. Ctrl-C anywhere after
+  `mkdir site_dir` gives the same state.
+- **Fix direction:** build the site in a temporary sibling directory and rename it
+  into `sites/<domain>` last (or remove it on failure with a trap); have `start`
+  refuse when `caddy/sites/<domain>.caddy` is missing or empty.
+- **Test:** the `cat` stub failing only for the route write: `add` exits non-zero
+  and leaves no `sites/<domain>`, or `start` refuses.
+
+### P3. Import receipt written before cleanup; re-run advises wiping a complete database
+
+- **Severity:** low (the advice destroys a complete database if followed)
+- **Confidence:** repro of the refusal; the window by code. **Status:** open
+- **Where:** `import_finish`, `docker/setup.sh:5603` (`set_env_value
+  KVS_IMPORT_COMPLETED`), then `:5613` (DELETE of `KVS_INSTALL_IMPORT`), then
+  `:5615-5616` (removal of the staged dump or native stage);
+  `import_check_leftover_dump`, `:1553-1563`.
+- **Defect:** an interrupt after `:5603`, or a failed DELETE, leaves a finished
+  import with its staged dump. Every re-run then stops with "an earlier import did
+  not complete … the database may be partial. Run the import again with
+  VOLUME_CHOICE=1 to replace the database". If the DELETE already ran,
+  `--resume-import` also refuses. The `rm -rf` of a large native stage makes the
+  window last seconds.
+- **Fix direction:** when `KVS_IMPORT_COMPLETED` is set and the stage is still
+  there, say the cleanup was interrupted and finish it (remove the stage, delete
+  the marker if present). Check against `tests/test_setup_resume*.sh` and
+  `tests/test_import_resume.sh`, which rely on the stage surviving until finish.
+- **Test:** `.env` with `KVS_IMPORT_COMPLETED` plus
+  `mariadb/init/10-kvs-import.sql.zst` present: no "VOLUME_CHOICE=1 to replace"
+  advice.
+
+### P4. `.env` and export renames are never fsynced
+
+- **Severity:** low (after a power cut on XFS, `.env` can come back empty or with
+  the placeholders while the volume holds the generated passwords)
+- **Confidence:** code (power loss not reproducible here). **Status:** open
+- **Where:** `set_env_value` (`docker/setup.sh:814`) and `remove_env_value`
+  (`:773`), the same pattern in `docker/reconfigure.sh:200`; `kvs_publish_export`
+  (`kvs-export.sh:2303-2321`). No `sync` anywhere in the shell scripts, while
+  kvsctl flushes the same `.env` on purpose (`release.WriteFile`).
+- **Defect:** `docker/setup.sh:5040-5048` writes the new `MARIADB_ROOT_PASSWORD` and
+  `MARIADB_PASSWORD` this way; MariaDB then initialises the volume with them. A
+  crash soon after can lose the `.env` (ext4's `auto_da_alloc` mostly hides it), and
+  the next run generates passwords that do not match. For an export, a good
+  archive can be replaced by an unflushed, truncated one.
+- **Fix direction:** `sync -- "$temporary"` before `mv`, and `sync -- .` (the
+  directory) after, in these three helpers.
+- **Test:** a PATH stub `sync` that logs its arguments, called on the temp file
+  before `mv`.
+
+Lower-value notes, not ranked: `import_take_over_site`
+(`docker/lib/import.sh:434-438`) moves the directory first and its source marker
+second, so an interrupt between the two leaves a destination no later run
+accepts; `retirement_prepare_identity`'s no-containers branch (`docker/setup.sh`
+around `:1000`) writes `DOMAIN` and `SITE_PREFIX` separately, so an interrupt in
+between makes the next import reuse the old prefix, and `VOLUME_CHOICE=1` would
+then delete the old site's database volume.
 
 ## Checked and found sound
 
