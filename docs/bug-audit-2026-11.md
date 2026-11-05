@@ -206,6 +206,10 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | Q4 | low | runtime | Multi-line storage `urls`: only the first URL is rewritten | repro | open |
 | Q5 | low | native | Native re-run overwrites KVS settings Docker deliberately keeps | repro | open |
 | Q6 | low | native | Native `project_url` edit is a no-op for `http://` or spaced lines | repro | open |
+| B1 | medium | build | php and cron images no longer build with the legacy builder | repro | open |
+| B2 | low | build | FFmpeg compiled once per image; php and cron cannot share it | repro | open |
+| B3 | low | build | `FLAVORS = standard` override in `build-ffmpeg.sh` only half works | repro | open |
+| B4 | low | tests | Nothing keeps the php and cron copies of the media files in sync | repro | open |
 
 ## Verification pass
 
@@ -3223,6 +3227,81 @@ memcache loopback relay exists in both images.
   writer `set_setup_php_value` does).
 - **Fix direction:** a quote- and spacing-tolerant setter with a read-back.
 - **Test:** both forms become `https://$URL`.
+
+## Regressions of the 26.11.0 media security release
+
+The published 26.11.0 and 26.10.5 php and cron images were run side by side
+(100+ operations as uid 1000). No runtime regression in what KVS does with
+media: on PHP 8.3 the images differ only by the intended blocks (package sets
+identical; FFmpeg configure identical apart from the two `--disable-decoder`
+flags, 547 to 545 decoders, only magicyuv and tdsc gone; ImageMagick lost exactly
+AI, EPDF, EPI, EPS, EPSF, EPSI, PDF, PDFA, POCKETMOD, PS and XPS). Still working:
+`identify`/`convert` and PHP imagick on JPEG, PNG, GIF (animated), WebP (animated),
+AVIF, BMP, TIFF, ICO, HEIC decode; PNG watermarks, text, auto-orient, wrong or
+missing extensions, first-frame reads through the ffmpeg delegate; FFmpeg
+screenshots and probes on H.264, H.265 (8 and 10-bit), VP8, VP9, AV1, MPEG-4,
+WMV2, H.263, MPEG-2, ProRes, MJPEG, Theora; H.264/AAC conversion, HLS, thumbnail
+and scene filters, sprites, GIF/WebP/WebM previews, overlays, MP3/AAC/FLAC/Opus/WAV;
+speed within noise. The policy loads, and a logging `gs` wrapper was never run for
+PostScript or PDF disguised as `.jpg`, explicit `eps:`/`pdf:`/`ps:`… prefixes, an
+EPT file, SVG `<image href=p.ps>`, MVG, MSL or an imagick blob; the `gs*` delegate
+rule also blocks on its own. Not yet independently verified.
+
+### B1. php and cron images no longer build with the legacy builder
+
+- **Severity:** medium (a host with `DOCKER_BUILDKIT=0`, a common workaround for
+  BuildKit snapshot errors, worked on 26.10.5 and now fails after compiling FFmpeg
+  for about 15 minutes)
+- **Confidence:** repro with a minimal two-stage Dockerfile through `docker build`
+  and `docker compose build` ("the --mount option requires BuildKit"); the full
+  Dockerfiles were not run under the legacy builder, and whether a host without
+  buildx falls back to it is not verified. **Status:** open
+- **Where:** ed16872, `docker/php/Dockerfile:142` and `docker/cron/Dockerfile:132`
+  (`RUN --mount=type=bind,from=ffmpeg-build,…`); before it, `docker/` used no
+  `--mount`. The Dockerfiles still mention the legacy builder
+  (`docker/php/Dockerfile:36`, `docker/cron/Dockerfile:27`); setup.sh sets no
+  `DOCKER_BUILDKIT` and does not explain this failure.
+- **Fix direction:** `COPY --from=ffmpeg-build /packages /tmp/packages` plus `rm` in
+  the same `RUN` (works on both builders), or make BuildKit an explicit requirement
+  that setup checks early.
+- **Test:** grep the Dockerfiles for `--mount`, or a `DOCKER_BUILDKIT=0` build in CI.
+
+### B2. FFmpeg compiled once per image; php and cron cannot share it
+
+- **Severity:** low (about 30 extra minutes for a fresh source install on 4 vCPU,
+  and about 3.1 GB of retained build cache on top of the images, against a 10 GB
+  pre-flight minimum)
+- **Confidence:** repro for one compile (849 s plus 62 s export, 1.558 GB cache, a
+  2.25 GB stage image); the cron cache miss is reasoned (Docker Hub rate limits
+  prevented showing it). **Status:** open
+- **Where:** ed16872, `FROM ${PHP_FROM} AS ffmpeg-build` in both Dockerfiles; cron
+  starts from `php:*-cli`, php from `php:*-fpm`; setup builds them one after the
+  other (`docker/setup.sh:5323`, `:5335`); pre-flight at `:3059-3065`.
+- **Fix direction:** build the packages in a stage from the pinned
+  `debian:trixie-slim` of `images.lock`, so both images share one cache entry;
+  optionally prune the stage after the build.
+- **Test:** build php then cron; the cron `build-ffmpeg` step is `CACHED`.
+
+### B3. `FLAVORS = standard` override in `build-ffmpeg.sh` only half works
+
+- **Severity:** low (about 25 s of wasted configure; packaging is fine)
+- **Confidence:** repro (build log shows `debian/rules configure_static` and
+  `cd debian/static && ../../configure …`, but no `build_static`). **Status:** open
+- **Where:** `build-ffmpeg.sh:33-37` (appended after Debian's rules; make expands the
+  prerequisite lists before the appended line takes effect).
+- **Fix direction:** pass `FLAVORS=standard` on the `dpkg-buildpackage`/make command
+  line, or patch the assignment instead of appending.
+- **Test:** `debian/static` does not exist after the build.
+
+### B4. Nothing keeps the php and cron copies of the media files in sync
+
+- **Severity:** low (one image could silently lose the blocks or the build checks)
+- **Confidence:** repro (no file under `tests/`, `.github/` or `cli/` refers to them;
+  the copies are identical today). **Status:** open
+- **Where:** `docs/releasing.md` requires the php and cron copies of
+  `build-ffmpeg.sh`, `media-security-policy.xml` and `media-security-check.sh` to
+  stay identical.
+- **Fix direction:** a `cmp` check for each pair in `tests/test_compose_files.sh`.
 
 ## Checked and found sound
 
