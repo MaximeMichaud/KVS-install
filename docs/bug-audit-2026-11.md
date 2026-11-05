@@ -190,12 +190,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | U3 | medium | setup | Re-run overwrites `PROJECT_HTTPS_PORT` with the published port | repro | open |
 | U4 | medium | setup | Re-run discards the saved `PHP_VERSION` for the default series | repro | open |
 | U5 | medium | setup | Volume check allows multi-series MariaDB jumps in place, no backup | repro | open |
-| V1 | medium | import | tar archive with a non-ASCII site directory or dump name cannot be imported | repro | open |
-| V2 | medium | import | A resumed directory import is refused for lack of space | repro | open |
-| V3 | low | scripts | Under a UTF-8 locale, domain and prefix checks accept Unicode | repro (see note) | open |
-| V4 | low | setup | DNS check reads `/etc/hosts` and only the first A record | repro | open |
-| V5 | low | setup | Docker DNS check ignores AAAA records | code | open |
-| V6 | low | export | Export size walk starts one `du` per shallow file | repro | open |
+| V1 | medium | import | tar archive with a non-ASCII site directory or dump name cannot be imported | repro | confirmed |
+| V2 | medium | import | A resumed directory import is refused for lack of space | repro | confirmed (corrected) |
+| V3 | low | scripts | Under a UTF-8 locale, domain and prefix checks accept Unicode | repro | confirmed (corrected) |
+| V4 | low | setup | DNS check reads `/etc/hosts` and only the first A record | repro | confirmed (corrected) |
+| V5 | low | setup | Docker DNS check ignores AAAA records | code | confirmed (corrected) |
+| V6 | low | export | Export size walk starts one `du` per shallow file | repro | confirmed (corrected) |
 
 ## Verification pass
 
@@ -647,6 +647,49 @@ verdicts and corrections override the finding text below where they differ.
   `test_init_resume_hardening` checks a port against its own stub
   `get_project_url` (`:85`).
 - **T6 — confirmed.**
+- **V1 — confirmed** with GNU tar 1.35 (list, analyze, peek, extract and settle).
+  `--quoting-style=literal` keeps `LC_ALL=C`, gives raw bytes, and the peek still
+  matches. `tests/test_setup_import_sources.sh:211` uses ASCII names only.
+- **V2 — confirmed, broader.** A re-run after a *complete* copy is refused too
+  (any later failure, the dump import for example). There is no "reserve":
+  `import_free_space_mb_ok` (`import.sh:578-590`) asks for the full `du -sLm` size
+  plus 10%. Fix: as the remote branch does, skip the full-size check when the
+  marker matches (`docker/setup.sh:2045-2056`), then subtract what the destination
+  holds. Leave the archive path (`setup.sh:1916`) alone: re-extracting into the
+  stage needs the full size while the old copy is in place.
+- **V3 — confirmed** in Debian 13 (glibc 2.41, bash 5.2.37, generated
+  `en_US.UTF-8` and `de_DE.UTF-8`; `globasciiranges` does not affect `=~`):
+  `münchen.de` and `café.example.com` pass all four domain validators;
+  `kvs-münchen`, `kvs-é`, `kvs-ß` pass both prefix validators; C.UTF-8 refuses
+  them. Correction: capital `München.de` is refused by reconfigure and
+  site-manager, but setup lowercases first. Same flaw in the `TABLES_PREFIX`
+  check (`docker/setup.sh:1240`) and in `kvs-export.sh:1620`, `:1690`. Fix:
+  `LC_ALL=C [[ … ]]` is not valid bash; `local LC_ALL=C` inside the function works
+  and is restored on return, or explicit `[abcdefghijklmnopqrstuvwxyz]` lists;
+  `[[:lower:]]` also matches `ü`. Nginx entrypoint call at `:155-159`.
+- **V4 — confirmed; fix corrected.** `getent -s dns ahostsv4` skips `/etc/hosts` and
+  needs no dnsutils (tested). "Accept a match on any A record" is wrong: with old
+  and new A records mid-migration, Let's Encrypt can validate against the old IP.
+  Require every distinct A record to equal the server IP, and name the foreign
+  ones; the existing stub still passes with that rule.
+- **V5 — confirmed (code plus documented behaviour, about 85% sure).** Boulder tries
+  IPv6 first and falls back to IPv4 only on connection errors, never on an HTTP
+  answer: a stale AAAA to a still-running old server that answers 404 fails
+  issuance; one to a dead address mostly falls back. Ports are published on all
+  addresses, so a correct AAAA works. Natively, nginx without `listen [::]` gives
+  connection-refused and falls back, so native issuance is not broken. Fix
+  corrected: on an IPv4-only host `api64.ipify.org` returns IPv4 (there, any AAAA
+  is foreign); compare AAAA against locally assigned addresses (`ip -6 addr`)
+  rather than one api64 answer (several or privacy addresses); warn, do not fail,
+  so headless `DNS_CHOICE=3` does not abort.
+- **V6 — real; framing and fix corrected.** Every entry at depth 3 is also one `du`
+  (`kvs-export.sh:751-752`), so any flat directory at depth 2 or 3 costs the same.
+  The exporter's own default timeout is 0, no limit (`kvs-export.sh:55`); 300 s
+  applies only when setup drives it (`setup.sh:1378`). Batching breaks
+  `tests/test_kvs_export.sh:480` ("one du per entry"), the du stub (`:296-308`)
+  and the asserts at `:472-476` and around `:630-656`; it also changes semantics
+  (hard links and `-L` targets counted once per batch, coarser progress, a
+  timeout kill loses up to a batch). Rewrite those tests on purpose.
 
 ## kvs-export.sh
 
