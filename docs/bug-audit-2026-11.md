@@ -200,16 +200,16 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | Y3 | low | native | Native install puts the DB password in `mariadb -e` argv | code | confirmed (corrected) |
 | Y4 | low | kvsctl | kvsctl errors print `.env` values verbatim | repro | confirmed (corrected) |
 | Y5 | low | import | `IMPORT_REMOTE_PASSWORD` sent to an unverified host key | code | confirmed (corrected) |
-| Q1 | high | import | Old paths in `.user.ini` survive before `:` or CRLF; every PHP request fails | repro | open |
-| Q2 | medium | import | `project_path` with a trailing slash: storage and conversion paths never moved | repro | open |
-| Q3 | medium | runtime | PHP and cron cannot reach the site's own URL (multi mode, non-443 port) | repro | open |
-| Q4 | low | runtime | Multi-line storage `urls`: only the first URL is rewritten | repro | open |
-| Q5 | low | native | Native re-run overwrites KVS settings Docker deliberately keeps | repro | open |
-| Q6 | low | native | Native `project_url` edit is a no-op for `http://` or spaced lines | repro | open |
-| B1 | medium | build | php and cron images no longer build with the legacy builder | repro | open |
-| B2 | low | build | FFmpeg compiled once per image; php and cron cannot share it | repro | open |
-| B3 | low | build | `FLAVORS = standard` override in `build-ffmpeg.sh` only half works | repro | open |
-| B4 | low | tests | Nothing keeps the php and cron copies of the media files in sync | repro | open |
+| Q1 | medium | import | Old paths in `.user.ini` survive before `:` or CRLF; every PHP request fails | repro | confirmed (corrected) |
+| Q2 | medium | import | `project_path` with a trailing slash: storage and conversion paths never moved | repro | confirmed (corrected) |
+| Q3 | medium | runtime | PHP and cron cannot reach the site's own URL (multi mode, non-443 port) | repro | confirmed (corrected) |
+| Q4 | low | runtime | Multi-line storage `urls`: only the first URL is rewritten | repro | confirmed |
+| Q5 | low | native | Native re-run overwrites KVS settings Docker deliberately keeps | repro | confirmed (corrected) |
+| Q6 | low | native | Native `project_url` edit is a no-op for `http://` or spaced lines | repro | confirmed (corrected) |
+| B1 | medium | build | php and cron images no longer build with the legacy builder | repro | confirmed (corrected) |
+| B2 | low | build | FFmpeg compiled once per image; php and cron cannot share it | repro | confirmed |
+| B3 | low | build | `FLAVORS = standard` override in `build-ffmpeg.sh` only half works | repro | confirmed (corrected) |
+| B4 | low | tests | Nothing keeps the php and cron copies of the media files in sync | repro | confirmed (corrected) |
 
 ## Verification pass
 
@@ -818,6 +818,62 @@ verdicts and corrections override the finding text below where they differ.
   forcing `accept-new` with a password and honour `IMPORT_SSH_ACCEPT_NEW` (sshpass
   exits 6 on an unknown key); this breaks `tests/test_setup_import_sources.sh:828`,
   which must change. Lines `import.sh:1557-1577` (`:1570`, `:1576`).
+- **Q1 — confirmed; severity medium (was high).** A quoted `"/home/old/www:/tmp"`
+  stays too. When the only occurrence is the one before `:`, the grep gate at `:88`
+  fails and nothing is logged; the misleading line appears only if another path
+  in the file is rewritten. aaPanel, the most common panel writing an
+  `open_basedir` `.user.ini`, uses `/www/wwwroot/site/:/tmp/` (trailing slash),
+  which *is* rewritten: the bug needs the no-slash form or CRLF. Docker nginx's
+  `globals/php_fastcgi.conf` is mounted but never included. Fix: add `:` and `\r` to
+  the boundary class in both the grep and the sed, rather than stripping `\r`.
+- **Q2 — confirmed; missed caller.** `native_import_prepare`
+  (`docker/lib/native-import.sh:310-311`) calls the same function. Strip the trailing
+  `/` inside `import_path_rewrite_sql` (`import.sh:269-281`) so all three callers
+  are covered; a `project_path` of `/` must still be refused. Medium to low: KVS's
+  own installer writes the path without a slash.
+- **Q3 — confirmed; scope narrowed.** The multi override forces
+  `PROJECT_HTTPS_PORT=443` (`docker-compose.multi.yml:8`, `:32`), so the multi case
+  is the alias problem only, and only for the primary site (additional sites alias
+  only `n.DOMAIN`, `docker-compose.site.yml.template:61-62`). The non-443 case is
+  single mode; `reconfigure.sh:1535-1536` already says `PROJECT_HTTPS_PORT`
+  describes the host mapping. Dropping the aliases needs `!override` (multi already
+  requires Compose 2.24.4, `setup.sh:4317-4323`); `test_setup_multisite_hardening.sh:854`
+  checks only the kvs-proxy alias.
+- **Q4 — confirmed** (`@@default_regex_flags` is empty, so no implicit multiline).
+  Native stale check at `kvs-install.sh:1590`. Multiple URLs per server in KVS is
+  still unverified.
+- **Q5 — confirmed; fix incomplete.** The mismatch check at `kvs-install.sh:1591`
+  also counts every row: adding a WHERE to the UPDATE alone would fail the step on
+  any remote row. Restrict `:1591` the same way, as `40-configure-database.sh:93-94`
+  does. `tests/test_kvs_install.sh:619`, `:626` still pass with a WHERE.
+- **Q6 — confirmed; one more form.** Single-quoted `'https://…'` is also left
+  unchanged, and several repo fixtures use single quotes
+  (`tests/integration_native_import.sh:165`).
+- **B1 — confirmed, wider; fix corrected.** With the buildx plugin missing,
+  `docker compose build` falls back to the classic builder automatically, even
+  with `DOCKER_BUILDKIT=1` (only a warning says so), and fails the same way; plain
+  `docker build` without buildx too. setup never checks buildx, and its build
+  failure hint (`setup.sh:5325-5328`, `docker builder prune -af`) does not help.
+  get.docker.com installs buildx, so the exposed hosts are distro Docker packages
+  without it, plus `DOCKER_BUILDKIT=0` users; kvsctl-installed releases build
+  nothing (`setup.sh:5286-5292`). `COPY --from … /packages` then `rm` in the next
+  `RUN` cannot remove the COPY layer, against `docs/releasing.md:301-303`: prefer an
+  early `docker buildx version` pre-flight check when something will be built. The
+  suggested "grep for `--mount`" test would forbid the intended design.
+- **B2 — confirmed.** `images.lock:31` (`debian:trixie-slim`) is a workable shared
+  base; BuildKit COPY cache is content-based, so identical `build-ffmpeg.sh` copies
+  would share one entry, across PHP series too. No effect under `--dev`
+  (`--no-cache`, `setup.sh:1330`) or the legacy builder.
+- **B3 — mechanism right, effect wrong.** Debian's trixie `debian/rules` has
+  `override_dh_auto_build-arch: build_standard build_static`; a toy package with the
+  same structure ran `configure_static` **and** `build_static`. The whole static
+  flavor is compiled and thrown away (minutes per image, not 25 s); the missing
+  `build_static` in the log is likely BuildKit's 2 MiB per-step clip. Fix: patch the
+  assignment with sed plus a grep check.
+- **B4 — confirmed; better home.** A precedent exists:
+  `cmp -s docker/php/yt-dlp.sh docker/cron/yt-dlp.sh` in
+  `tests/test_php_images_hardening.sh:240` (and `test_yt_dlp_updates.sh:204`); put the
+  new checks there. Requirement at `docs/releasing.md:308-309`.
 
 ## kvs-export.sh
 
