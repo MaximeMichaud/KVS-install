@@ -75,14 +75,14 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | E5 | medium | export | `setup_db.php` parsing reads commented lines, misses valid forms | repro | open |
 | I7 | medium | install | IonCube lines appended on every run and on failure | code | open |
 | G1 | low | kvsctl | `dotenv.Set`/`MergeEnv` append CRLF lines the shell misreads | repro | confirmed (corrected) |
-| G2 | medium | kvsctl | `${PWD}` in `.env` expands differently from compose | code | open |
+| G2 | low | kvsctl | `${PWD}` in `.env` expands differently from compose | code | confirmed (corrected) |
 | I8 | low | install | "Update the Script" corrupts the log and drops arguments | repro | open |
 | I9 | low | install | `www.conf.bak` overwritten on re-run | code | open |
 | E6 | low | export | Storage server columns shift when one is empty | repro (mechanism) | open |
 | E7 | low | export | IPv6 `DB_HOST` misparsed | repro | open |
-| G3 | low | kvsctl | doctor fails on distro/Desktop compose version strings | code | open |
-| G4 | low | kvsctl | `semver.Compare` treats `RC1`/`rc1` and `rc01`/`rc1` as equal | repro | open |
-| G5 | low | kvsctl | Bare word on the last line changes meaning after `Set` | repro | open |
+| G3 | low | kvsctl | doctor fails on distro/Desktop compose version strings | code | confirmed (corrected) |
+| G4 | low | kvsctl | `semver.Compare` treats `RC1`/`rc1` and `rc01`/`rc1` as equal | repro | confirmed (corrected) |
+| G5 | low | kvsctl | Bare word on the last line changes meaning after `Set` | repro | confirmed (corrected) |
 | D1 | high | setup | Headless re-run replaces saved prefix, SSL and cache choices | repro | confirmed (corrected) |
 | D2 | medium | setup | Port overrides written raw to `.env`, then sourced as code | repro | confirmed |
 | D3 | medium | setup | Staged import dump is world-readable | code | confirmed (corrected) |
@@ -111,21 +111,21 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | C8 | low | runtime | Init re-runs rewrite the title; Manticore cron failure hidden | code | open |
 | R1 | high | multi-site | `remove` of a new site deletes a single-mode primary's data | repro | confirmed |
 | R2 | high | multi-site | Two sites can claim the same `www` host, breaking Caddy for all | repro | confirmed |
-| R3 | medium | reconfigure | Multi-mode rollback leaves the recreated containers changed | repro (stub) | open |
-| R4 | medium | reconfigure | Edited `DOMAIN` half-applies and takes the site down | code | open |
-| R5 | medium | multi-site | `remove` hides a failed `down -v`, then deletes the config | repro | open |
-| R6 | low | multi-site | Manual `caddy-start` sets the ACME email to `admin@example.com` | repro | open |
+| R3 | medium | reconfigure | Multi-mode rollback leaves the recreated containers changed | repro (stub) | confirmed (corrected) |
+| R4 | medium | reconfigure | Edited `DOMAIN` half-applies and takes the site down | code | confirmed (corrected) |
+| R5 | medium | multi-site | `remove` hides a failed `down -v`, then deletes the config | repro | confirmed |
+| R6 | low | multi-site | Manual `caddy-start` sets the ACME email to `admin@example.com` | repro | confirmed (corrected) |
 | M1 | high | import | Shell injection on the old server in the tar fallback | repro | confirmed |
 | M2 | medium | import | Untrusted dump runs shell commands in the MariaDB container | repro | confirmed |
 | M3 | medium | import | Decompression errors ignored; a corrupt dump is marked complete | repro | confirmed |
 | M4 | medium | import | Absolute symlinks on the old server copied as root, readable by PHP | repro | open |
 | M5 | low | import | A resumed pass can run with no free-space check | code | open |
 | K1 | medium | kvsctl | `backup --keep` deletes the archive a rollback would replay | repro | confirmed |
-| K2 | medium | kvsctl | Relative restore path recorded; `recover` elsewhere replays the wrong file | repro | open |
-| K3 | medium | scripts | Scripts check the kvsctl lock but never hold it | code | open |
-| K4 | medium | kvsctl | A second `restore --latest` replays the safety backup | code | open |
-| K5 | low | kvsctl | `update-cli --version <older>` does nothing and exits 0 | repro | open |
-| K6 | low | kvsctl | `restore <archive> --latest` silently ignores `--latest` | code | open |
+| K2 | medium | kvsctl | Relative restore path recorded; `recover` elsewhere replays the wrong file | repro | confirmed |
+| K3 | medium | scripts | Scripts check the kvsctl lock but never hold it | code | confirmed (corrected) |
+| K4 | medium | kvsctl | A second `restore --latest` replays the safety backup | code | confirmed |
+| K5 | low | kvsctl | `update-cli --version <older>` does nothing and exits 0 | repro | confirmed (corrected) |
+| K6 | low | kvsctl | `restore <archive> --latest` silently ignores `--latest` | code | confirmed |
 | N1 | high | native | `setup_db.php` (DB password) left world-readable by `chmod -R 755` | code | open |
 | N2 | medium | native | www redirect server always answers 444 in the default mode | repro | open |
 | N3 | medium | native | `php.ini` timeout edits are no-ops; no `fastcgi_read_timeout` | repro | open |
@@ -134,14 +134,14 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | N6 | medium | native | No KVS rewrites file for an existing site on a new host | repro | open |
 | N7 | low | native | yt-dlp can be replaced by an HTTP error page, as root, nightly | repro | open |
 | N8 | low | native | Printed phpMyAdmin URL unreachable; its install cannot fail | repro | open |
-| S1 | medium | release | Dispatch from a branch named like a version mixes tag and branch | repro | open |
-| S2 | medium | release | Actions pinned by mutable tag in privileged jobs | repro | open |
+| S1 | low | release | Dispatch from a branch named like a version mixes tag and branch | repro | confirmed (corrected) |
+| S2 | medium | release | Actions pinned by mutable tag in privileged jobs | repro | confirmed |
 | S3 | low | release | Failed lock lookup swallowed; PHP image built from a floating tag | repro | confirmed (corrected) |
 | S4 | medium | release | Lock check reads only the first `ARG` line and never `FROM` | repro | confirmed |
-| S5 | medium | runtime | Manticore PHP plugin installed unverified by default | code | open |
-| S6 | low | release | Registry digest header trusted without hashing the body | repro | open |
-| S7 | low | ci | `push.yml` and `markdown-lint.yml` have no `permissions:` | repro | open |
-| S8 | low | multi-site | Multi-site images are outside the lock | repro | open |
+| S5 | low | runtime | Manticore PHP plugin installed unverified by default | code | confirmed (corrected) |
+| S6 | low | release | Registry digest header trusted without hashing the body | repro | confirmed (corrected) |
+| S7 | low | ci | `push.yml` and `markdown-lint.yml` have no `permissions:` | repro | confirmed |
+| S8 | low | multi-site | Caddy outside the lock; site template references not checked | repro | confirmed (corrected) |
 
 ## Verification pass
 
@@ -270,6 +270,98 @@ verdicts and corrections override the finding text below where they differ.
   current directory, so a run from `/root` (0700) is safe; a 0755 home or `/tmp`
   exposes it. Prefer `chmod 600` on the staged file before `mv` to a global
   `umask 077`.
+- **G2 — confirmed; severity low (was medium).** kvsctl never reads `DATA_DIR`,
+  so the example is wrong; no shipped file (`.env.example`, compose files) uses
+  `${PWD}`, and the scripts `cd` into `docker/` before sourcing. Only a
+  hand-edited `.env` with `${PWD}` in a key kvsctl reads (for example
+  `COMPOSE_FILE`) is affected.
+- **G3 — confirmed; citation corrected.** `cli/internal/upgrade/plan.go` (around
+  `:527`) does not parse the leading `MAJOR.MINOR.PATCH`: it skips the minimum
+  check when the version does not parse. Either behaviour is a fine fix.
+- **G4 — real in the library, not reachable through the release pipeline.**
+  `.github/scripts/release-version.sh:50` refuses uppercase labels and leading
+  zeros in the tag, which is the signed version; only a hand-run
+  `kvsctl-release` with the signing key could produce such a manifest.
+  Informational. Fixing `Parse` breaks no test.
+- **G5 — confirmed, narrower.** Plain compose and the scripts see no change
+  (compose prefers the process environment either way; the stack has no
+  `env_file:`). The change goes through kvsctl, in `ReadEnv` and `Isolate`:
+  with `DOMAIN=a.com\nDOMAIN` and `DOMAIN=old` exported, compose renders `a.com`
+  before the `Set` and `old` after it.
+- **K2 — confirmed.** `resolveBackup` is at `cli/cmd/kvsctl/restore.go:277-291`.
+  `filepath.Abs` breaks no test (`TestResolveBackup` already uses absolute
+  paths).
+- **K3 — confirmed; fix caveat.** Holding a shared lock for the whole script run
+  cannot deadlock (kvsctl never runs the scripts). But `Instance.Lock`
+  (`cli/internal/instance/lock.go:117-131`) treats a blocked lock whose
+  recorded PID is gone as "a docker command it started still runs": a script's
+  shared lock would hit that path with the wrong message, so change it too.
+  `kvs-install.sh:1968-1990`.
+- **K4 — confirmed, medium-low.** `list[0]` is at `restore.go:253-255`. The case
+  only arises after `verifyRestore` fails, after `dropJournal` (a failed replay
+  leaves a journal and `noJournal` refuses a second restore). The error says the
+  database is restored and "the restore is over": the risk is scripted retries.
+- **K5 — confirmed; fix caveat.** `cliState`'s newer-than rule is pinned for the
+  default target by `TestCLIState` (`updatecli_test.go:157`): branch on
+  `--version` in `updatecli.go:78-82`, do not change `cliState`. Prefer an error
+  to a downgrade: an older kvsctl may not read state or a journal written by a
+  newer one.
+- **K6 — confirmed.** `chooseBackup` at `restore.go:247-249`.
+- **R3 — confirmed (code); fix corrected.** Multi mode recreates nginx at
+  `reconfigure.sh:1474` and the runtime services at `:1520`. "Recreate with the
+  previous environment" is impossible as is: the operator edits `.env` before
+  running the script and nothing keeps the old one. Snapshot the running
+  containers' environment or the old `.env` first, or validate before
+  recreating. Seven assertions in `tests/test_reconfigure_hardening.sh` (1265,
+  1329, 1354, 1468, 1519, 1607, 1712) pin "Application state restored": update
+  them on purpose if the message changes.
+- **R4 — confirmed (code); line corrected.** `:505` is the definition of
+  `run_mariadb_query`; the first query call is `:1518`. README documents domain
+  changes through `setup.sh` only, so refusing here breaks nothing.
+- **R5 — confirmed** with a stub `docker` (the site directory and `.caddy` file
+  were removed and success printed; EOF on the webroot prompt then exits before
+  the Caddy reload).
+- **R6 — confirmed; context corrected.** `add` prints `caddy-start` only when
+  Caddy is not running (`site-manager.sh:572-573`); the likelier trigger is
+  `README.md:73`, which tells users to run `caddy-start` to apply the log cap.
+  `docker/setup.sh:5661,5665` itself falls back to `admin@example.com` when
+  `EMAIL` is empty. Let's Encrypt stopped sending expiry emails in 2025, so the
+  real risk is a refused account registration at renewal (not reproduced).
+- **S1 — confirmed; severity low (was medium).** Missed mitigations: a manual
+  dispatch needs write access; the keys and publish jobs wait for a required
+  reviewer in the `release` environment (`docs/releasing.md:126-135`);
+  `release-version.sh` refuses a tag that already has a release. Line refs
+  `release.yml:447`, `:452`. The fix is compatible with
+  `tests/test_release_workflow.sh`.
+- **S2 — confirmed.** `renovate.json` softens automerge only with a 3-day
+  `minimumReleaseAge`. The key is deleted before the softprops step
+  (`release.yml:500-502`, `if: always()`, then `:570`), so "cannot sign" holds.
+  SHA pins keep the workflow suite's `startswith(...)` checks passing.
+- **S5 — real; severity low (was medium); fix corrected.** The URL is the KVS
+  vendor's own HTTPS site, the same party that supplies KVS. A pinned default
+  sha256 plus refusing an empty value would make every Manticore-enabled init
+  fail the day the vendor updates its unversioned file (and a failed
+  `80-manticore` already triggers D13). Instead: mirror the file as a release
+  asset pinned per release, or pin it per release with a refresh process.
+- **S6 — locations and scope corrected.** `checkImage` is
+  `cli/internal/manifest/manifest.go:688`; `readImage` is `registry.go:124-197`;
+  the `localhost` prefix check is `registry.go:80`. The digest header *is*
+  cross-checked against the build or lock digest for every image
+  (`main.go:953-962`, `release-images.sh`); only the body (layers, sizes, diff
+  IDs) is unverified, and pulls by digest verify content anyway. Fix caveat: fake
+  digests appear in 6 test files and `stubDigest` hashes the URL path
+  (`main_test.go:1049`), so validate in `kvsctl-release` and update those
+  fixtures on purpose.
+- **S7 — confirmed.** Pull requests from forks get a read-only token anyway;
+  only pushes are exposed.
+- **S8 — corrected.** `mariadb`, `memcached` and `dragonfly` *are* in
+  `images.lock` and `RUNTIME_IMAGES` (`resolve-bases.sh:84-92`); only
+  `caddy:2-alpine` is missing from the lock. What is missing is that the site
+  template's references are not in `COMPOSE_IMAGES`. The proposed test is wrong:
+  the main `docker/docker-compose.yml` also has tag references, pinned by the
+  release override, and `COMPOSE_IMAGES` cannot express the per-series
+  `${MARIADB_VERSION}` image. Instead: add caddy to the lock, and give multi-site
+  sites a pinned override, or limit the check to the multi-site files.
 
 ## kvs-export.sh
 
