@@ -101,6 +101,11 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | R4 | medium | reconfigure | Edited `DOMAIN` half-applies and takes the site down | code | open |
 | R5 | medium | multi-site | `remove` hides a failed `down -v`, then deletes the config | repro | open |
 | R6 | low | multi-site | Manual `caddy-start` sets the ACME email to `admin@example.com` | repro | open |
+| M1 | high | import | Shell injection on the old server in the tar fallback | repro | open |
+| M2 | high | import | Untrusted dump runs shell commands in the MariaDB container | repro | open |
+| M3 | medium | import | Decompression errors ignored; a corrupt dump is marked complete | repro | open |
+| M4 | medium | import | Absolute symlinks on the old server copied as root, readable by PHP | repro | open |
+| M5 | low | import | A resumed pass can run with no free-space check | code | open |
 
 ## kvs-export.sh
 
@@ -858,7 +863,7 @@ local php image (8.1.34).
 - **Severity:** high (every later reload fails; a Caddy restart takes all sites
   down)
 - **Confidence:** repro (`caddy validate` on `caddy:2-alpine`: "ambiguous site
-  definition: www.a.com"). **Status:** open
+  definition: `www.a.com`"). **Status:** open
 - **Where:** `docker/multi-site/site-manager.sh:479-484` and `:276-296`
   (`add_site`, `write_caddy_site_config`, `configure_primary_site`).
 - **Defect:** the collision check only looks for `<domain>.caddy`, not for the
@@ -949,6 +954,118 @@ local php image (8.1.34).
 - **Test:** `caddy-start` with a stub docker and no `ACME_EMAIL` exported;
   assert the real email is passed.
 
+## Site import (docker/lib/import*.sh, native-import*.sh)
+
+`docker/setup.sh` runs with `set -e` only, never `pipefail`, which matters for
+M3.
+
+### M1. Shell injection on the old server in the tar fallback
+
+- **Severity:** high (commands run on the old server as the SSH user, often
+  root, outside `sudo`)
+- **Confidence:** repro (through a simulated remote `bash -c`).
+  **Status:** open
+- **Where:** `import_remote_files`, `docker/lib/import.sh:2951`
+  (`tar_excludes+=("'--exclude=.$pattern'")`), used at `:3250` in
+  `import_ssh … tar -C "$dir" "${tar_excludes[@]}" -chf - .`.
+- **Defect:** the exclude patterns are wrapped in single quotes without
+  escaping, and the remote shell parses the command line again. The patterns
+  come from the old server's `exclude_N` lines, which `kvs-export.sh:1173-1175`
+  writes as `/<name>` for every hidden top-level directory, with the raw name.
+- **Repro:** a directory named `.a';touch PWNED;'` in the old site root and no
+  rsync on the old server: `touch PWNED` ran, then the transfer failed with 127.
+  A harmless name such as `.bob's` also breaks the fallback.
+- **Fix direction:** quote each argument with `printf %q` before it goes into the
+  ssh command line, or refuse patterns outside a safe character set. Never
+  hand-wrap arguments in `'…'`. Check the other `import_ssh` call sites for the
+  same pattern.
+- **Test:** stub `import_ssh` to run `bash -c "$*"`, call
+  `import_remote_files <dir> <dest> no "/.a';touch X;'"`, assert `X` is absent.
+
+### M2. Untrusted dump runs shell commands in the MariaDB container
+
+- **Severity:** high (an imported dump is code, not data)
+- **Confidence:** repro (mariadb image 12.3.3: the init log printed the
+  injected text). **Status:** open
+- **Where:** `import_prepare_dump`, `docker/lib/import.sh:302-382`;
+  `native_import_run`, `docker/lib/native-import-runtime.sh:228-238` (it
+  concatenates `data/*.sql` into `docker_process_sql`).
+  `native_import_validate_schema` does not reject client commands either.
+- **Defect:** mariadb client commands (`\!`, `system`, `source`) pass through,
+  and the entrypoint replays the file with the mariadb client. Older mysqldump
+  output carries no sandbox header.
+- **Repro:** a `10-kvs-import.sql` containing the line `\! echo PWNED-FROM-DUMP`
+  printed `PWNED-FROM-DUMP` during init.
+- **Fix direction:** make the first line of the prepared dump, and of the native
+  schema stream, `/*M!999999\- enable the sandbox mode */`. With it, the same file
+  failed with "ERROR at line 3: Not allowed in the sandbox mode" (verified).
+- **Test:** `import_prepare_dump` output starts with the sandbox line; same for
+  the native schema stream.
+
+### M3. Decompression errors ignored; a corrupt dump is marked complete
+
+- **Severity:** medium (corrupt rows imported and later verified as complete)
+- **Confidence:** repro. **Status:** open
+- **Where:** `import_prepare_dump`, `docker/lib/import.sh:354-358`
+  (`import_dump_cat | sed | import_innodb_row_format - || return 1`), and
+  `import_inspect_dump`, `docker/lib/import.sh:206` (same pattern).
+- **Defect:** without pipefail only the last stage's status counts, so the
+  comment "Stop on read/filter failures before appending a completion marker"
+  does not hold. A gzip or zstd checksum failure shows only after the data was
+  written.
+- **Repro:** a valid `d.sql.gz` with its CRC trailer flipped (`gzip -t` fails):
+  inspect returned "complete" with status 0, and prepare returned 0 and
+  appended the `KVS_INSTALL_IMPORT` marker.
+- **Related:** for archive and directory sources, a dump without the "Dump
+  completed" line (truncated) only gets a yellow warning, then the import goes
+  on and is marked complete.
+- **Fix direction:** run these pipelines with `set -o pipefail` in a subshell, or
+  check `PIPESTATUS`; in `import_inspect_dump`, report "not complete" when the
+  decompressor fails. Consider refusing a dump without "Dump completed" unless
+  the operator confirms.
+- **Test:** a CRC-corrupted `.gz` and a truncated `.zst` make both functions
+  fail, and prepare leaves no output file.
+
+### M4. Absolute symlinks on the old server copied as root, readable by PHP
+
+- **Severity:** medium (root-only files of the old server end up readable by
+  PHP on the new one)
+- **Confidence:** repro (local rsync with the import's flags). **Status:** open
+- **Where:** `rsync_args`, `docker/lib/import.sh:3002`
+  (`--copy-unsafe-links … --no-perms --chown=1000:1000`, run under umask 0),
+  with `--rsync-path="sudo -n rsync"` or a root SSH user.
+- **Defect:** every absolute or escaping symlink is followed with root
+  privileges on the old server, and its target lands in `/var/www/<domain>`
+  owned by 1000:1000. Nothing reports or limits these links before the
+  transfer: `import_check_site_links` runs after, when they are plain files.
+- **Repro:** `site/innocent.txt -> /etc/shadow` arrives as
+  `-rw------- 1000 1000 innocent.txt`. `ln -s / x` would copy the whole old
+  server.
+- **Fix direction:** have the exporter list the external links in its detect
+  report and require confirmation or an allowlist (for example, only targets
+  under the reported storage-server paths). Or use `--munge-links` or
+  `--safe-links` by default and make dereferencing opt-in.
+- **Test:** a stubbed transfer whose source links to a 0600 file outside the
+  site must refuse or warn before copying.
+
+### M5. A resumed pass can run with no free-space check
+
+- **Severity:** low (can fill the filesystem holding `/var/www` and the Docker
+  volumes)
+- **Confidence:** code (not run). **Status:** open
+- **Where:** `import_remote_files`, `docker/lib/import.sh:3013-3019` and
+  `:3075-3096` (the `skip_count=yes` branch); `import_remote_free_space_check`,
+  `docker/setup.sh:2045-2056` (the same-source branch checks only the dump).
+- **Defect:** when the previous count timed out (`.count-timeout` exists), the
+  next pass skips the count and takes the `count_status=124` branch, which
+  never reaches `import_free_space_mb_ok`. The second copy of the dump in
+  `mariadb/init` and the loaded database size are not counted on any path.
+- **Fix direction:** when the count is skipped or times out, check against the
+  saved count minus what the destination already holds (or `site_fs_used_mb`),
+  and refuse instead of only warning.
+- **Test:** pre-create the count-timeout flag and a saved count, set free space
+  below the remainder, assert `import_remote_files` refuses before rsync runs.
+
 ## Checked and found sound
 
 So that a follow-up does not redo them:
@@ -974,6 +1091,13 @@ So that a follow-up does not redo them:
 - Multi-site: two managed sites cannot collide on names or volumes
   (`domain_to_safe` is reversible); no template injection (domains are
   validated); certificate SAN sets and key modes are correct.
+- Import: GNU tar 1.35, unzip and 7-Zip 23.01 refuse symlink-then-file escapes
+  and `../` or absolute hard-link targets (the p7zip 16.02 fallback was not
+  tested); the native bundle's layout, checksums and duplicate members; the
+  resume token and markers; `import_ssh_rsh` quoting; validation of remote
+  paths, port and user, and IPv6 bracketing for rsync.
+- Cosmetic: `import_remote_show_entries` (`docker/setup.sh`) prints the old
+  server's entry names with `echo -e` without stripping control characters.
 - Not a bug today, but worth knowing: `backup.RestoreEnv` (`backup.go`, around
   line 1290) writes through a fixed `.kvsctl.tmp` path with `O_TRUNC` and
   follows symlinks. Nothing calls it yet.
