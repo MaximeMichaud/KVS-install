@@ -3034,8 +3034,8 @@ root-equivalent.
   `journal.json`, which `status`/`history` print; the file is 0600)
 - **Confidence:** repro for the message (temporary Go test); the journal path is
   plausible. **Status:** open
-- **Where:** `cli/internal/dotenv/dotenv.go:211` ("unterminated quoted value <rest
-  of line>"), `:365`, `:378` ("invalid template …") and `:121`, wrapped unredacted by
+- **Where:** `cli/internal/dotenv/dotenv.go:211` ("unterminated quoted value" plus the rest
+  of the line), `:365`, `:378` ("invalid template …") and `:121`, wrapped unredacted by
   `cli/internal/instance/instance.go:217` (`ReadEnv`, every command) and `:318`
   (`ReplaceEnv`/`CheckEnv`, including `restore --with-env`). `doctor/config.go:38`
   strips everything but the line number on purpose.
