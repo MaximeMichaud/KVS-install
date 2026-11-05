@@ -220,6 +220,11 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | O4 | low | export | Re-export over an existing output fails on coreutils older than 8.6 | repro | open |
 | O5 | low | import | A csh/tcsh login shell breaks the parallel transfer | repro | open |
 | O6 | low | export | Without procps, `--size-timeout` does not bound the walk | repro | open |
+| L1 | medium | kvsctl | A frozen manifest is accepted forever; first contact trusts any old one | repro | open |
+| L2 | low | kvsctl | `update-cli` treats any `Detect` error as "no installation" and skips its checks | repro | open |
+| L3 | low | kvsctl | No client-side rules on what a signed bundle may overwrite | repro | open |
+| L4 | low | kvsctl | `version --check` and `releases` skip the stale-manifest floor | repro | open |
+| L5 | low | docs | The first kvsctl binary is installed without a signature check | code | open |
 
 ## Verification pass
 
@@ -3581,6 +3586,99 @@ issue).
 - **Fix direction:** break out and close fd 3 as soon as the timeout fires, kill the
   `du` processes by process group, and do not depend on `pgrep` in cleanup.
 - **Test:** the existing budget test with `pkill` removed from `PATH`.
+
+## kvsctl release trust, client side
+
+Crafted manifests and bundles against a copy of the CLI. Not yet independently
+verified. Sound, so skip: the signature is checked over the exact bytes before
+any parsing, against embedded keys only (a key announced in the manifest is never
+trusted; `KVSCTL_RELEASE_KEY` always prints a notice); downgrades are blocked; an
+older list is refused per URL; a candidate list at the default URL is refused; a
+damaged `updates.json` fails closed; the bundle is checked by size and sha256 on
+both downloads, extraction refuses `..`, absolute paths, symlinks, hard links,
+devices and fifos and strips setuid, with `O_NOFOLLOW`; images are pulled only by
+`repo@digest` and checked after; `update-cli` checks size, sha256 and the new
+binary's `version`, renames in place and keeps `<path>.previous`.
+
+### L1. A frozen manifest is accepted forever; first contact trusts any old one
+
+- **Severity:** medium (a man in the middle, a stale mirror, or whoever controls
+  which release GitHub marks "latest" can keep an install on old releases while
+  `check` and `status` say "up to date")
+- **Confidence:** repro (a list dated 2024-01-01 accepted three times on
+  2026-11-05). **Status:** open
+- **Where:** `CheckManifest`, `cli/internal/upgrade/upgrade.go:445-489`;
+  `cli/internal/manifest/manifest.go:456-460` (no expiry field).
+- **Defect:** `Updated` is compared only with the newest list already seen at the
+  same URL, never with the clock; on a fresh or just-adopted instance the record
+  is empty, so any old list is trusted. `docs/releasing.md:668` says this protects
+  from "a frozen or replayed copy"; it only protects from an *older* one.
+- **Fix direction:** a maximum age, or an expiry that a scheduled pipeline job
+  re-signs (monthly releases alone cannot keep a hard limit): warn first in
+  `check` and `status` ("list is N days old"), then refuse unless
+  `--allow-stale-manifest`. `manifest_check_test.go` uses fixed 2026-10 dates, so
+  inject the clock before adding a refusal; a new field needs no schema bump.
+- **Test:** with an injected clock, an old `Updated` warns or refuses, and a
+  re-signed list passes.
+
+### L2. `update-cli` treats any `Detect` error as "no installation" and skips its checks
+
+- **Severity:** low (installs an older, though newer-than-current, kvsctl, or runs
+  during an interrupted upgrade)
+- **Confidence:** repro. **Status:** open
+- **Where:** `cli/cmd/kvsctl/updatecli.go:46-68` (`inst = nil` on any error).
+- **Defect:** `Detect` also fails on a real installation when `.env` has a line
+  compose refuses, `DOMAIN` is missing, or the mode is multi. The refusal while a
+  run waits for `recover`, and the stale-manifest floor, are then skipped: with
+  the same journal and `updates.json`, a healthy `.env` is refused, one with an
+  unterminated quote goes straight to the download.
+- **Fix direction:** treat only "no `docker/docker-compose.yml`" as no installation;
+  otherwise build an `Instance{Root}` (`LoadJournal`, `LoadUpdates` and
+  `CheckManifest` need only `StateDir`), or fail.
+- **Test:** the same state with a broken `.env` is refused.
+
+### L3. No client-side rules on what a signed bundle may overwrite
+
+- **Severity:** low (defence in depth; needs a signed bundle)
+- **Confidence:** repro. **Status:** open
+- **Where:** `Extract` and `entryName`, `cli/internal/release/release.go:315-420`;
+  `lay`, `cli/internal/release/beneath.go:266-310` (`Chmod(info.Mode().Perm())`);
+  `Conflicts` (a file standing where a release file goes is replaced).
+- **Defect:** the comment on `release.Paths` says instance data stays out of a
+  release, but the client does not enforce it. A bundle with `docker/.env`,
+  `kvsctl/state.json` and `.git/hooks/post-checkout` at 04777 overwrites all three
+  with no conflict reported, at mode 0777 (setuid is stripped).
+- **Fix direction:** limit entries to `release.Paths` plus `docker/RELEASE` and
+  `docker/docker-compose.release.yml`, refuse the instance paths (`docker/.env`,
+  `docker/docker-compose.override.yml`, `docker/kvs-archive/`, `docker/nginx/ssl/`,
+  `docker/data/`…), and mask modes with `& 0o755` (keeps
+  `TestExtractSyncAndSnapshotKeepModes` passing). The bundle-size tests use entries
+  named `a` and `b`, and `beneath_test` uses `a.txt`: enforce the list in `upgrade`
+  (`stage` after `Extract`, `planBundle` after `ReadBundle`), or update those
+  fixtures on purpose.
+- **Test:** that bundle is refused before `Sync`, and modes come out masked.
+
+### L4. `version --check` and `releases` skip the stale-manifest floor
+
+- **Severity:** low. **Confidence:** repro. **Status:** open
+- **Where:** `cli/cmd/kvsctl/main.go:640-670` (`cliManifest` without
+  `CheckManifest`); `cli/cmd/kvsctl/releases.go:30-50`.
+- **Defect:** with 2.0.0 already seen, a list whose newest release is 1.1.0 makes
+  `version --check` print "kvsctl 1.1.0 is the build of release 1.1.0" and
+  `releases` mark 1.1.0 "latest", while `update-cli` refuses the same list.
+- **Fix direction:** with an installation present, run `CheckManifest` (or a
+  read-only variant that does not save the record) and say the list is stale.
+- **Test:** a stale error, or exit 7.
+
+### L5. The first kvsctl binary is installed without a signature check
+
+- **Severity:** low (documentation; every later trust step starts from it)
+- **Confidence:** code. **Status:** open
+- **Where:** `cli/README.md:62-72`; `SHA256SUMS` is not signed (`release.yml:349`).
+- **Defect:** the binary and its checksum come from the same place, so the check
+  catches transfer errors, not a tampered release.
+- **Fix direction:** publish a signature for `SHA256SUMS`, or have the install steps
+  check the binary against the signed manifest.
 
 ## Checked and found sound
 
