@@ -190,6 +190,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | U3 | medium | setup | Re-run overwrites `PROJECT_HTTPS_PORT` with the published port | repro | open |
 | U4 | medium | setup | Re-run discards the saved `PHP_VERSION` for the default series | repro | open |
 | U5 | medium | setup | Volume check allows multi-series MariaDB jumps in place, no backup | repro | open |
+| V1 | medium | import | tar archive with a non-ASCII site directory or dump name cannot be imported | repro | open |
+| V2 | medium | import | A resumed directory import is refused for lack of space | repro | open |
+| V3 | low | scripts | Under a UTF-8 locale, domain and prefix checks accept Unicode | repro (see note) | open |
+| V4 | low | setup | DNS check reads `/etc/hosts` and only the first A record | repro | open |
+| V5 | low | setup | Docker DNS check ignores AAAA records | code | open |
+| V6 | low | export | Export size walk starts one `du` per shallow file | repro | open |
 
 ## Verification pass
 
@@ -2711,6 +2717,120 @@ replace duplicates left by old `>> .env` appends; `kvsctl_min` exists from
   make headless `2` exit in every branch, as its comment says.
 - **Test:** volume 11.4, `MARIADB_VERSION=12.3`, `VOLUME_CHOICE=2`: exits; 11.8 to
   12.3 needs explicit consent.
+
+## Environment and scale
+
+Run under the real interpreters and images. Not yet independently verified.
+Sound, so skip: every `#!/bin/sh` script passes `shellcheck -s sh`, and the
+phpMyAdmin init runs in the pinned alpine/busybox image; `kvs-export.sh` passes
+its 33 tests under bash 4.2.53 and 5.3.20; `patsub_replacement` escaping is the
+same on bash 4.2, 5.2 and 5.3; byte counts are 64-bit or double throughout; the
+rsync stats and progress parsers survive locale thousands separators; no glob is
+passed over an unbounded list; IPv6 publish parsing is handled.
+
+### V1. tar archive with a non-ASCII site directory or dump name cannot be imported
+
+- **Severity:** medium (an empty site reported as copied, or hours of extraction
+  before a refusal)
+- **Confidence:** repro (`tar.gz` against the same tree as `.zip`). **Status:** open
+- **Where:** `import_archive_list`, `docker/lib/import.sh:805-821` (tar branch); the
+  names are used in `import_archive_settle` (`:990`, `:998`, `:1004`), called from
+  `docker/setup.sh:2589`.
+- **Defect:** `LC_ALL=C tar -tvf` prints names in GNU tar's escape quoting
+  (`vid\303\251o`); those become the site root and dump path, which do not exist on
+  disk. The peek (`tar -xOf`) still works because tar unquotes its arguments, so
+  the analysis passes.
+- **Repro:** site directory `site-vidéos/`: settle finds nothing, moves nothing,
+  returns 0 and deletes the extracted stage; setup prints "✓ Site files in
+  /var/www/…" with an empty destination, then fails on the missing `setup.php`.
+  Dump `données.sql`: "archive member is not a regular file" after the full
+  extraction. zip and 7z listings show raw UTF-8 and work.
+- **Fix direction:** decode tar's escapes in the awk (as `import_rsync_plan` does for
+  rsync's `\#ooo`), or list with `--quoting-style=literal` and refuse names with a
+  newline; make settle fail when the site root is missing.
+- **Test:** a `tar.gz` with root `site-vidéos/` and dump `données.sql` imports.
+
+### V2. A resumed directory import is refused for lack of space
+
+- **Severity:** medium (a 1 TB site on 1.2 TB free can never be resumed after a
+  halfway interruption)
+- **Confidence:** repro (75 MB tmpfs, 60 MB source, interrupted at 40 MB:
+  "REFUSED"). **Status:** open
+- **Where:** `import_free_space_ok`, `docker/lib/import.sh:593-601`, called from
+  `docker/setup.sh:1862`.
+- **Defect:** it asks for the source's full size (`du -sLm`) plus the reserve on top
+  of what the interrupted copy already wrote, while the same flow resumes
+  ("Resuming the copy…", rsync copies only the rest).
+- **Fix direction:** subtract the destination's current usage, or size the rest
+  with `rsync --dry-run --stats`, as the remote path does (`import.sh:3060-3075`).
+- **Test:** the tmpfs scenario passes the check.
+
+### V3. Under a UTF-8 locale, domain and prefix checks accept Unicode
+
+- **Severity:** low (compose rejects the project name after `.env` is written, or
+  nginx crash-loops)
+- **Confidence:** reproduced by the reviewer with glibc 2.39 and generated
+  `en_US.UTF-8`/`de_DE.UTF-8` locales; not reproduced in the audit's own shell,
+  which lacks those locales (`C.UTF-8` does not match). Verify first.
+  **Status:** open
+- **Where:** `[[ =~ ]]` checks with `[a-z]` ranges: `docker/setup.sh:636`
+  (`validate_domain`) and `:3336` (`validate_site_prefix`),
+  `docker/reconfigure.sh:272`, `kvs-install.sh:727`,
+  `docker/multi-site/site-manager.sh:63`, `:74`.
+- **Defect:** bash's regex ranges follow the locale's collation, so `[a-z]` matched
+  `ü` and `é`. `DOMAIN=München.de` passed all four domain checks and the prefix
+  `kvs-münchen` passed; then compose refused the project name, or, with an ASCII
+  prefix, `tls/internal-trust.sh:15-16` rejected the domain under dash and the nginx
+  entrypoint (`set -e`, `:160`) exited in a loop ("invalid internal TLS domain").
+- **Fix direction:** `LC_ALL=C` around these checks, or explicit ASCII lists; convert
+  IDNs to punycode or refuse them with a clear message. The same may hold for the
+  table and database name checks of `kvs-export.sh` (`:1620`, `:1690`) on a UTF-8
+  old server (not reproduced).
+- **Test:** each validator under `LC_ALL=en_US.UTF-8` refuses `münchen.de` and
+  `kvs-münchen`.
+
+### V4. DNS check reads `/etc/hosts` and only the first A record
+
+- **Severity:** low (headless with `DNS_CHOICE=3` aborts the install on a correct
+  DNS)
+- **Confidence:** repro (`--hostname example.com --add-host
+  example.com:127.0.1.1`: "MISMATCH -> 127.0.1.1"). **Status:** open
+- **Where:** `docker/setup.sh:5179`, `:5182` (`getent ahostsv4 … | awk 'NR == 1'`).
+- **Defect:** `getent` consults files before DNS, and VPS images and cloud-init write
+  `127.0.1.1 <fqdn>` when the hostname is the domain; only the first A record is
+  compared. `kvs-install.sh` uses `dig` and is not affected.
+- **Fix direction:** query DNS directly, or skip loopback and `/etc/hosts` answers;
+  accept a match on any A record.
+- **Test:** extend `tests/test_setup_dns_check.sh` with a `getent` stub answering
+  `127.0.1.1` first, and one with the server's IP as the second of two records.
+
+### V5. Docker DNS check ignores AAAA records
+
+- **Severity:** low (mid-migration, a stale AAAA makes the ACME issuance fail,
+  which aborts setup, see D14)
+- **Confidence:** code, plus Let's Encrypt's documented preference for IPv6; no
+  issuance was run. **Status:** open
+- **Where:** `docker/setup.sh:5170-5213` (nothing under `docker/` checks AAAA).
+  Native: `kvs-install.sh:837` reports a matching AAAA as OK although
+  `conf/nginx/*` has no `listen [::]:` (a documented IPv4-only limitation).
+- **Fix direction:** compare AAAA records against `api64.ipify.org` and warn on a
+  mismatch.
+- **Test:** an AAAA stub with a foreign address gives a warning.
+
+### V6. Export size walk starts one `du` per shallow file
+
+- **Severity:** low (the size comes back "incomplete" under the default 300 s
+  `IMPORT_SIZE_TIMEOUT` on a flat site, and the live old server burns about four
+  cores meanwhile)
+- **Confidence:** repro for the cost (50k files at depth 2: 25.9 s against 0.13 s for
+  one `du`); whether real KVS layouts are that flat is not checked.
+  **Status:** open
+- **Where:** `kvs_list_measure_units` and `xargs -0 -n 1 -P 4 du`, `kvs-export.sh:741-756`
+  and `:768-771`; the comment assumes "three levels down is thousands of entries at
+  most".
+- **Fix direction:** batch the arguments (`xargs -0 -n 256 du -sLk`), or one `du -s` per
+  depth-1 or depth-2 directory.
+- **Test:** a 20k-file `tmp/` fixture; assert at most N `du` calls, or a time bound.
 
 ## Checked and found sound
 
