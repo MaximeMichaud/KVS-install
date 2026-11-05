@@ -225,6 +225,11 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | L3 | low | kvsctl | No client-side rules on what a signed bundle may overwrite | repro | confirmed (corrected) |
 | L4 | low | kvsctl | `version --check` and `releases` skip the stale-manifest floor | repro | confirmed (corrected) |
 | L5 | low | docs | The first kvsctl binary is installed without a signature check | code | confirmed (corrected) |
+| H1 | medium | kvsctl | Upgrade and restore verification accept 403 on `/` and any redirect | repro | open |
+| H2 | medium | runtime | Cron container healthy and doctor "ok" while `cron.php` fails every minute | repro | open |
+| H3 | medium | kvsctl | Doctor database probe runs as root and only runs `SELECT 1` | repro | open |
+| H4 | low | kvsctl | Doctor cache probe tests `cache:11211`, not the address KVS uses | repro | open |
+| H5 | medium | setup | "KVS Docker Setup Complete!" printed without checking anything is up | repro | open |
 
 ## Verification pass
 
@@ -3760,6 +3765,99 @@ binary's `version`, renames in place and keeps `<path>.previous`.
   catches transfer errors, not a tampered release.
 - **Fix direction:** publish a signature for `SHA256SUMS`, or have the install steps
   check the binary against the signed manifest.
+
+## Health checks that report healthy while the site is broken
+
+Broken states built in the real 26.11.0 containers, and the verification code run
+against httptest servers. Not independently verified (added last). Meaningful, so
+skip: the upgrade HTTP probe dials the published port with the site's SNI and
+Host, and fails on a 444, a closed connection, a 5xx or a PHP fatal (500 with
+`display_errors=Off`); crash loops, restarts and "still starting after the
+window" are reported; doctor TLS checks expiry, hostname and chain; the Manticore
+healthcheck and doctor `search` use failure markers; doctor `tools` runs ffmpeg,
+ffprobe and convert.
+
+### H1. Upgrade and restore verification accept 403 on `/` and any redirect
+
+- **Severity:** medium (`kvsctl upgrade` marks a broken site healthy, records the new
+  version and drops the journal: no automatic rollback)
+- **Confidence:** repro (real php image plus nginx answering PHP-FPM's 403 "Access
+  denied." on `/` and `/admin/`; `httpCheck` returned nil for that, for a 302 to
+  another host, a 302 to itself and a blank 200). **Status:** open
+- **Where:** `httpCheck`, `cli/internal/upgrade/verify.go:394-427` (`protected :=` at
+  `:417`), gated at `:119`; doctor does the same at `cli/internal/doctor/http.go:103`
+  (403 only a warning, exit 0 without `--strict`).
+- **Defect:** 401 and 403 count as up on every path, any 3xx passes, and the body is
+  never read. An nginx deny-regex regression that 403s `/admin/` (see T1) passes the
+  same way.
+- **Fix direction:** accept 401/403 only on `/admin/`; require `/` to be 2xx, or a 3xx
+  whose Location is the same site (www included); optionally reject the FPM
+  "Access denied." / "File not found." bodies. `TestHTTPCheck`
+  (`verify_test.go:451`) pins 401/403 as up and must change on purpose.
+- **Test:** both paths 403 with "Access denied." fails; a 302 to another host fails.
+
+### H2. Cron container healthy and doctor "ok" while `cron.php` fails every minute
+
+- **Severity:** medium (KVS background jobs, conversions included, stop with nothing
+  reporting it; an upgrade that breaks cron passes, see U2)
+- **Confidence:** repro (real `cron:26.11.0-php8.1`, `cron.php` fatal every minute in
+  `/var/log/cron.log`: healthy on every probe, doctor "Cron daemon and KVS schedule
+  are present"). **Status:** open
+- **Where:** `docker/docker-compose.yml:343` and
+  `docker/multi-site/docker-compose.site.yml.template:250` (`pgrep -x cron`);
+  `cronProbe`, `cli/internal/doctor/runtime.go:248`. Upgrade verification only reads
+  the Docker health state.
+- **Fix direction:** a heartbeat file touched only when `cron.php` succeeds (or a log
+  check); doctor, and the healthcheck after a grace period, fail when the last
+  success is older than about five minutes; doctor shows the tail of `cron.log`.
+- **Test:** a `cron.php` that exits non-zero makes doctor `cron` fail.
+
+### H3. Doctor database probe runs as root and only runs `SELECT 1`
+
+- **Severity:** medium (doctor says the site's credentials work and steers the
+  operator away from `setup_db.php` and the schema)
+- **Confidence:** repro (MariaDB 12.3.3 plus the php image: "ok" with 0 tables, and
+  "ok" as root with a root-only `setup_db.php` that www-data cannot read).
+  **Status:** open
+- **Where:** `cli/internal/doctor/runtime.go:167-198`; `dockerx.Probe` runs
+  `docker exec -i` with no `-u` (`cli/internal/dockerx/diagnose.go:93`), and the php
+  and cron images have no `USER`, so probes run as uid 0 while FPM runs as
+  www-data. The same applies to `test -r cron.php` in `cronProbe`.
+- **Fix direction:** exec the probes with `-u www-data`; check that
+  `${TABLES_PREFIX}admin_users` (or a few core tables) exists.
+- **Test:** an empty database, and a root-owned `setup_db.php`: doctor `database`
+  fails.
+
+### H4. Doctor cache probe tests `cache:11211`, not the address KVS uses
+
+- **Severity:** low (KVS runs without a cache while doctor reports it fine)
+- **Confidence:** repro (socat relay killed: `127.0.0.1:11211` fails, doctor "ok", FPM
+  healthcheck still passes). **Status:** open
+- **Where:** `cacheProbe`, `cli/internal/doctor/runtime.go:201`; the unsupervised socat
+  relay in `docker/php/docker-entrypoint.sh:33` and `docker/cron/docker-entrypoint.sh:33`,
+  used by sites whose `setup.php` has `memcache_server=127.0.0.1` (kept on re-runs,
+  `10-config-php.sh:183-191`).
+- **Fix direction:** read host and port from `setup.php` (`cache_config.php` already
+  parses them), probe that, and report the relay; supervise the relay.
+- **Test:** `memcache_server=127.0.0.1` without a relay makes doctor `cache` fail.
+
+### H5. "KVS Docker Setup Complete!" printed without checking anything is up
+
+- **Severity:** medium (every PHP-FPM crash loop, 444 vhost or broken TLS ends with
+  "Complete" and the site URL)
+- **Confidence:** repro for compose (`up -d --no-deps` returned 0 while php-fpm was
+  restarting with exit 78); the full `setup.sh` was not run. **Status:** open
+- **Where:** `docker/setup.sh:5958`, after `setup_start_runtime_services` (`compose up
+  -d` without `--wait`); before it only an `nginx -s reload` and `import_finish`'s
+  database query.
+- **Fix direction:** `docker compose up --wait` (or poll health), then curl
+  `https://SITE/` and `/admin/` with `--resolve` to 127.0.0.1, failing on 5xx or
+  connection errors.
+- **Test:** a stub php-fpm that exits: setup exits non-zero without "Complete".
+
+Not listed (code only): Manticore turns healthy about 30 s after start while its
+background reindex still runs; a later failure turns it unhealthy only after the
+upgrade verification has passed (search keeps the old files).
 
 ## Checked and found sound
 
