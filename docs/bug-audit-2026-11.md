@@ -210,6 +210,10 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | B2 | low | build | FFmpeg compiled once per image; php and cron cannot share it | repro | confirmed |
 | B3 | low | build | `FLAVORS = standard` override in `build-ffmpeg.sh` only half works | repro | confirmed (corrected) |
 | B4 | low | tests | Nothing keeps the php and cron copies of the media files in sync | repro | confirmed (corrected) |
+| F1 | medium | scripts | setup.sh and reconfigure.sh do not exclude each other; `.env` loses updates | repro | open |
+| F2 | medium | runtime | Two kvs-init runs on one site: password lost, or admin login locked | repro | open |
+| F3 | medium | runtime | kvs-init clears KVS cron locks while the cron container keeps running | code | open |
+| F4 | low | multi-site | Proxy network inspect-then-create: one of two first runs aborts | repro | open |
 
 ## Verification pass
 
@@ -3358,6 +3362,108 @@ rule also blocks on its own. Not yet independently verified.
   `build-ffmpeg.sh`, `media-security-policy.xml` and `media-security-check.sh` to
   stay identical.
 - **Fix direction:** a `cmp` check for each pair in `tests/test_compose_files.sh`.
+
+## Concurrent operations
+
+Interleavings forced with FIFO barriers on stubbed or real runs. Not yet
+independently verified. Sound, so skip: kvsctl backup, upgrade, restore and
+rollback all take the exclusive lock and their children inherit it; dumps are
+`--single-transaction` (or `--lock-tables` with non-transactional tables, retried
+on error 1412); restore stops the writers first; the Manticore hourly cron and
+background rebuild share the indexer flock; yt-dlp updates are flocked and swap
+`current` atomically; nginx and cron log rotation; Caddy route writes and reloads;
+a second import refuses through the staged-file identity and token checks.
+
+### F1. setup.sh and reconfigure.sh do not exclude each other; `.env` loses updates
+
+- **Severity:** medium (acme or Manticore silently dropped from
+  `COMPOSE_PROFILES`; certificates stop renewing or search breaks at the next
+  `down`/`up -d`, until a re-run repairs it)
+- **Confidence:** repro (the verbatim functions in two processes, a FIFO standing in
+  for `manticore_wait_ready`; two concurrent `set_env_value` calls lost a key in 20
+  of 20 runs). **Status:** open
+- **Where:** `docker/reconfigure.sh:173-205` (`set_env_value`), `:207-261`
+  (`add/remove_compose_profile`, computed from the in-memory `COMPOSE_PROFILES`
+  read by `source .env` at `:158`), `:1114-1120` (`sync_direct_tls_profile`);
+  `docker/setup.sh:779-819` (`set_env_value`, `cat .env > tmp` then `mv`);
+  `docker/lib/manticore.sh:193-196` (`manticore_wait_ready`, up to 3600 s, then
+  `add_compose_profile manticore`).
+- **Defect:** the only lock is the kvsctl probe (and K3's fix, a shared lock, would
+  still let two scripts run side by side). `reconfigure.sh --manticore enable`
+  snapshots `.env`, waits for the index; a second `reconfigure.sh` writes
+  `COMPOSE_PROFILES=dragonfly,direct-tls`; the first then writes its snapshot plus
+  manticore, dropping `direct-tls` while `SSL_PROVIDER=letsencrypt`. At byte level,
+  one `set_env_value` takes about 0.44 s (mostly `remove_env_value`'s
+  character-by-character parse), and setup makes dozens.
+- **Fix direction:** one exclusive lock (for example `docker/.kvs-scripts.lock`) held
+  for the whole run by `setup.sh`, `reconfigure.sh` (not its status options) and
+  `kvs-install.sh`'s Docker path, refused with a message; write profile changes from
+  a re-read of `.env` under that lock. No test covers concurrency today.
+- **Test:** `manticore_wait_ready` blocked on a FIFO during `--manticore enable`, then a
+  second `reconfigure.sh`: it refuses, or `direct-tls` survives; and two parallel
+  `set_env_value` calls keep both keys.
+
+### F2. Two kvs-init runs on one site: password lost, or admin login locked
+
+- **Severity:** medium (the printed one-time password never works, or both are
+  rejected while both inits exit 0)
+- **Confidence:** repro for compose-run naming (Docker 29.9, Compose 5.6: two
+  `*-init-run-<id>` containers) and for the ap.dat/database split (the real
+  35-harden twice with a FIFO barrier: the database needs fingerprint `94bbcfd2…`,
+  `ap.dat` holds `58d4a14e…`); a concurrent `install_db.sql` import on a fresh site
+  is plausible. **Status:** open
+- **Where:** `start_site`, `docker/multi-site/site-manager.sh:608-662` (checks the
+  default admin, generates a password at `:655`, `compose run kvs-init` at `:659`,
+  prints it at `:662`); `docker/setup.sh:5635`;
+  `docker/init/docker-entrypoint.d/35-harden-admin-users.sh:92` (ap.dat
+  fingerprint) and `:94` (`UPDATE pass`); `30-import-database.sh:93-177`
+  (check-then-import). `container_name: ${SITE_PREFIX}-init`
+  (`docker/docker-compose.yml:355`) gives no exclusion: `compose run` ignores it.
+- **Defect:** two `site-manager.sh start X` (a retry in a second terminal) both see the
+  default admin and each generate a password; the later one wins, or the
+  fingerprint of one and the hash of the other end up together.
+- **Fix direction:** an flock inside kvs-init on a file in the bind-mounted web root
+  (flock works across containers on one host filesystem), covering setup,
+  site-manager and the `--manticore` runs; plus a per-site lock in site-manager
+  around start, stop and remove. Related: `tests/test_admin_hardening.sh`,
+  `test_multisite_manager_hardening.sh`.
+- **Test:** 35-harden twice in parallel against a stub database with a barrier:
+  ap.dat's fingerprint equals `substr(md5(login.dbhash),0,20)`, or the second run
+  refuses.
+
+### F3. kvs-init clears KVS cron locks while the cron container keeps running
+
+- **Severity:** medium (KVS's single-cron exclusion breaks: conversion and cron
+  tasks can be processed twice; MariaDB is also restarted under an in-flight
+  `cron.php`)
+- **Confidence:** code for the path (cron keeps running while the locks are
+  deleted); the effect inside KVS is plausible (no KVS source here, but unlinking
+  a lock held by a live process defeats either kind of lock). **Status:** open
+- **Where:** `docker/init/docker-entrypoint.d/40-configure-database.sh:11`
+  (`find admin/data -name '*.lock' -delete`) and `:16` (deletes `CRON_UID` and
+  `CRON_TIME`). In multi mode, `docker/setup.sh:5104-5108` skips stopping the stack
+  when Caddy holds the ports, `:5449` force-recreates MariaDB under live php-fpm and
+  cron, `:5635` runs kvs-init; cron is stopped only when `IMPORT_MODE=true`
+  (`:1166-1169`). `site-manager.sh start` on a running site runs kvs-init with no
+  stop (`:608-659`).
+- **Fix direction:** on re-runs and `start`, stop cron (ideally php-fpm too) before
+  recreating MariaDB and running kvs-init, as import mode does; or skip the lock
+  and `CRON_UID` cleanup while a cron container of the project runs. Related:
+  `tests/test_init_resume_hardening.sh`, `test_setup_multisite_hardening.sh`.
+- **Test:** with a logging docker stub, a multi-mode re-run (Caddy on 80/443) and
+  `site-manager.sh start` on a running site log `compose stop cron` before
+  `run … kvs-init`.
+
+### F4. Proxy network inspect-then-create: one of two first runs aborts
+
+- **Severity:** low. **Confidence:** repro (two parallel `docker network create`: one
+  exits 0, the other 1). **Status:** open
+- **Where:** `ensure_proxy_network`, `docker/multi-site/site-manager.sh:236-243`
+  (`set -e` at `:24`), reached from `caddy-start` (`:835`), `proxy-network` (`:930`),
+  `docker/setup.sh:4485` and `:5666`.
+- **Fix direction:** `docker network create kvs-proxy || docker network inspect kvs-proxy`.
+- **Test:** stub `create` failing with "already exists" and `inspect` then
+  succeeding: `ensure_proxy_network` returns 0.
 
 ## Checked and found sound
 
