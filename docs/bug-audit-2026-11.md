@@ -1,15 +1,20 @@
 # Bug audit, November 2026
 
-Audit of `kvs-install.sh`, `kvs-export.sh` and the Go CLI (`cli/`, kvsctl) at
-commit `edd35eb` (release 26.11.0). Every test suite of the repository passes at
-that commit, so none of the findings below is covered by an existing test.
+Audit of `kvs-install.sh`, `kvs-export.sh`, the Go CLI (`cli/`, kvsctl) and the
+Docker stack (`docker/`: `setup.sh`, the import libraries, `reconfigure.sh`,
+multi-site, the init and service entrypoints, the nginx templates) at commit
+`edd35eb` (release 26.11.0). Every test suite of the repository passes at that
+commit, so none of the findings below is covered by an existing test.
+
+Suggested order, by risk on a production host: C1, C2, M1, M2, C3, R1, D1,
+D2, D3, E1, then the other high findings, then medium, then low.
 
 This file is a work list for a follow-up agent: validate each finding, then fix
 it with a regression test, or reject it with the reason.
 
 ## How to work through this list
 
-1. Take the findings in order (most severe first). For each one:
+1. Take the findings in the suggested order above. For each one:
    - **Validate** it: reproduce the failure with the steps given, against the
      current code. Line numbers are those of `edd35eb` and may have drifted:
      search for the function name.
