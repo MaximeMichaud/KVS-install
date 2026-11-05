@@ -6,22 +6,21 @@ multi-site, the init and service entrypoints, the nginx templates) at commit
 `edd35eb` (release 26.11.0). Every test suite of the repository passes at that
 commit, so none of the findings below is covered by an existing test.
 
-Suggested order, by risk on a production host: C1, C2, C3, M1, R1, D1, E1,
-N1, D13, R2, then the other high findings, then medium (M2, D2, D3 among the
-first), then low.
+Suggested order: first T1 and T2 (so the suites can catch a regression in the
+nginx and runtime fixes), then by risk on a production host: C1, C2, C3, M1,
+R1, D1, E1, N1, W1, D13, R2, then the other high findings, then medium (M2,
+D2, D3, C9 among the first), then low.
 
 This file is a work list for a follow-up agent: fix each finding with a
 regression test, or reject it with the reason.
 
-Every finding from E1 to S8 (except C9 to C11) has been through an independent, adversarial
+Every finding has been through an independent, adversarial
 verification pass (reviewers who did not write it tried to disprove it, most
 of them by reproduction). None was rejected. Many write-ups were corrected:
 for a finding marked `confirmed (corrected)`, the note under
 [Verification pass](#verification-pass) overrides the finding's own text,
 including its severity, line numbers and fix direction. Several original fix
 directions would have broken existing behaviour or tests; the notes say which.
-C9 to C11, the W findings (documentation against code) and the T findings
-(test suites) came later; they were checked once and are still `open`.
 
 ## How to work through this list
 
@@ -125,9 +124,9 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | C6 | low | runtime | PHP-FPM can rewrite phpMyAdmin's `config.inc.php` | code | confirmed (corrected) |
 | C7 | low | nginx | `_INSTALL/` (`install_db.sql`) served as static files | repro | confirmed (corrected) |
 | C8 | low | runtime | Init re-runs rewrite the title; Manticore cron failure hidden | code | confirmed (corrected) |
-| C9 | medium | runtime | PHP-FPM workers exceed MariaDB's 151 connections on 38 GiB+ hosts | repro | open |
-| C10 | low | runtime | Internal TLS trust installs a CA:TRUE self-signed cert as a root | repro | open |
-| C11 | low | runtime | Buffer pool of 5M is accepted, but MariaDB refuses to start | repro | open |
+| C9 | medium | runtime | PHP-FPM workers exceed MariaDB's 151 connections on 38 GiB+ hosts | repro | confirmed |
+| C10 | low | runtime | Internal TLS trust installs a CA:TRUE self-signed cert as a root | repro | confirmed (corrected) |
+| C11 | low | runtime | Buffer pool of 5M is accepted, but MariaDB refuses to start | repro | confirmed |
 | R1 | high | multi-site | `remove` of a new site deletes a single-mode primary's data | repro | confirmed |
 | R2 | high | multi-site | Two sites can claim the same `www` host, breaking Caddy for all | repro | confirmed |
 | R3 | medium | reconfigure | Multi-mode rollback leaves the recreated containers changed | repro (stub) | confirmed (corrected) |
@@ -161,20 +160,20 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | S6 | low | release | Registry digest header trusted without hashing the body | repro | confirmed (corrected) |
 | S7 | low | ci | `push.yml` and `markdown-lint.yml` have no `permissions:` | repro | confirmed |
 | S8 | low | multi-site | Caddy outside the lock; site template references not checked | repro | confirmed (corrected) |
-| W1 | high | docs | `MENU_OPTION=2` "Add site" runs a broken native install, even on Docker | code | open |
-| W2 | medium | install | `kvs-install.sh --help` (any unknown argument) starts an install | repro | open |
-| W3 | medium | multi-site | `site-manager.sh add` always uses PHP 8.1 and `IONCUBE=YES` | code | open |
-| W4 | medium | docs | Standalone headless ignores `SSL_CHOICE` and `KVS_EMAIL` | code | open |
-| W5 | low | docs | `.env.example` gives the wrong default container prefix | code | open |
-| W6 | low | docs | Standalone PHP-FPM is never set to "static" | code | open |
-| W7 | low | docs | The "monitoring tools" (ncdu, vnstat, nload) are not installed | repro | open |
-| W8 | low | docs | Supported KVS versions disagree across docs, Docker and kvsctl | code | open |
-| T1 | high | tests | nginx deny rules checked as text only, never by request | repro | open |
-| T2 | high | tests | 15 of the 16 integration suites never run in CI | repro | open |
-| T3 | medium | tests | `site-manager.sh remove` traversal check passes for the wrong reason | repro | open |
-| T4 | medium | tests | Manticore runtime privilege check can never run in CI | repro | open |
-| T5 | low | tests | Project URL assertions in a subshell cannot fail | repro | open |
-| T6 | low | tests | A stub's `fail` does not stop the `install_gum` test | repro | open |
+| W1 | high | docs | `MENU_OPTION=2` "Add site" runs a broken native install, even on Docker | code | confirmed (corrected) |
+| W2 | low | install | `kvs-install.sh --help` (any unknown argument) starts an install | repro | confirmed (corrected) |
+| W3 | medium | multi-site | `site-manager.sh add` always uses PHP 8.1 and `IONCUBE=YES` | code | confirmed (corrected) |
+| W4 | low | docs | Standalone headless ignores `SSL_CHOICE` and `KVS_EMAIL` | code | confirmed (corrected) |
+| W5 | low | docs | `.env.example` gives the wrong default container prefix | code | confirmed |
+| W6 | low | docs | Standalone PHP-FPM is never set to "static" | code | confirmed (corrected) |
+| W7 | low | docs | The "monitoring tools" (ncdu, vnstat, nload) are not installed | repro | confirmed |
+| W8 | low | docs | Supported KVS versions disagree across docs, Docker and kvsctl | code | confirmed (corrected) |
+| T1 | high | tests | nginx deny rules checked as text only, never by request | repro | confirmed (corrected) |
+| T2 | high | tests | 15 of the 16 integration suites never run in CI | repro | confirmed (corrected) |
+| T3 | medium | tests | `site-manager.sh remove` traversal check passes for the wrong reason | repro | confirmed (corrected) |
+| T4 | medium | tests | Manticore runtime privilege check can never run in CI | repro | confirmed |
+| T5 | low | tests | Project URL assertions in a subshell cannot fail | repro | confirmed (corrected) |
+| T6 | low | tests | A stub's `fail` does not stop the `install_gum` test | repro | confirmed |
 
 ## Verification pass
 
@@ -559,6 +558,73 @@ verdicts and corrections override the finding text below where they differ.
   refuse only in the saved-count-minus-present case.
   `tests/test_import_transfer_progress.sh:562-611` pins the no-recount behaviour
   of `skip_count`; do not reintroduce the scan.
+- **C9 — confirmed.** 38 GiB already gives 152 children; the php service has no
+  memory limit that would lower it. A cap of 128 keeps every
+  `tests/test_php_fpm_resources.sh` case passing and leaves about 23 connections
+  of headroom.
+- **C10 — confirmed; fix corrected.** "basicConstraints absent" is not safe: a
+  certificate without it but with keyUsage `keyCertSign` also passes
+  `self_signed` and signs a verifying leaf (`openssl x509 -purpose` reports "SSL
+  server CA : Yes"). Require `-purpose` to say "SSL server CA : No", or require an
+  explicit `CA:FALSE`. Adding the check to nginx's `certificate_pair_is_valid`
+  breaks `tests/test_nginx_hardening.sh` ("a valid certificate was replaced"):
+  its fixtures at `:123-128` and `:191` are default `req -x509` (CA:TRUE) and need
+  `CA:FALSE` as part of the fix.
+- **C11 — confirmed.** 6M and 7M start and read back exactly, so
+  `database_verify_running_resources` still passes with a 6M minimum.
+- **W1 — confirmed, worse.** Docker sites live at `/var/www/$DOMAIN`, so a Docker
+  host always takes `manageMenu`; `dockerInstall` copies the archive
+  (`kvs-install.sh:2195`), so `whatisdomain` finds the live site's domain.
+  `extract_kvs_archive` returns 0 on an existing site, then `install_KVS` makes
+  `setup_db.php` world-readable (as N1) and its `sed` rewrites `/usr/local/bin/` to
+  `/usr/bin/` in the Docker site's `setup.php`. No `set -e`, so it carries on past
+  failures.
+- **W2 — confirmed; scope corrected, severity low.** "Straight to
+  `dockerInstall`" holds only on non-Debian hosts such as Ubuntu
+  (`:1666-1670`); on Debian the install-type prompt comes first, and with
+  `/var/www` `manageMenu` prompts first. On Ubuntu as root it installs Docker and
+  clones `/opt/kvs` without a prompt, then waits for an archive or the import
+  question.
+- **W3 — confirmed; fix note.** `kvs_documented_php_version` (`setup.sh:1585`) and
+  `detect_ioncube` (`setup.sh:3835`) live in `setup.sh`, which cannot be sourced:
+  move them into a lib to reuse them. `add` also never refuses KVS 6.2.0 and
+  older.
+- **W4 — confirmed; scope corrected, severity low.** The variable table sits under
+  "Docker Headless (Recommended)" (`README.md:230`), and the standalone section
+  (`:275-284`) documents its own variables. Standalone headless already honours
+  `SSL_PROVIDER` (`:257`) and an exported `EMAIL`: the fix is mostly to document
+  those two. An empty `-m` matters for ZeroSSL, much less for Let's Encrypt.
+- **W5 — confirmed.**
+- **W6 — confirmed; wider.** Docker is dynamic-only as well
+  (`docker/php/fpm-config.sh:133`), so the README line is wrong for both paths.
+- **W7 — confirmed.** The `aptinstall` list is at `:680-705`.
+- **W8 — confirmed; minor.** The refusal is `refuse_unbuildable_kvs_php`, about
+  `docker/setup.sh:1634-1658`; `KVS_MIN=7.0.0` is at `.github/release.env:42`.
+  `cli/README.md:588` documents the `kvs_min` blocker, but not its value. The
+  refusal can be bypassed for unencoded sites with `KVS_PHP_VERSION`.
+- **T1 — confirmed, sharper.** The mutations (template `:70`, `:90`, `:137`) pass
+  every `run.sh` suite reading the template. `integration_origin_security.sh`
+  catches only the dotfile mutation: no suite at all, integration included,
+  requests `/admin/include/*.php` or `/tmp/*.php`, so new request tests are
+  needed for those, not only running the existing integration suite.
+- **T2 — confirmed; practical note.** `integration_origin_security.sh` passes on
+  clean code with the locked nginx digest (`NGINX_TEST_IMAGE`). But
+  `as-uid-1000.sh` strips `NGINX_TEST_IMAGE`, so a CI job needs the image tagged
+  or the default changed.
+- **T3 — confirmed; fix corrected.** `sites/../../escape.example` resolves only when
+  `sites/` exists, and the invalid fixture asserts `sites/` is never created
+  (`:172`): the sentinel test needs its own fixture with `sites/` pre-created.
+  Mitigation: `remove` needs a typed "yes" (`:724`); `stop` has none but runs
+  `down` without `-v`. `validate_domain` calls are at `:687` (`stop_site`) and
+  `:709` (`remove_site`).
+- **T4 — confirmed.** `integration_manticore_startup.sh` does not check the uids
+  or modes either.
+- **T5 — confirmed; wider.** The suites sourcing `common.sh`
+  (`test_admin_hardening`, `test_mariadb_password_argv_hardening`,
+  `test_tables_prefix`) also pass the mutation (`common.sh:90`);
+  `test_init_resume_hardening` checks a port against its own stub
+  `get_project_url` (`:85`).
+- **T6 — confirmed.**
 
 ## kvs-export.sh
 
