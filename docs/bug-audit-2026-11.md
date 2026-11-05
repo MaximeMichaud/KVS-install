@@ -75,6 +75,18 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | G3 | low | kvsctl | doctor fails on distro/Desktop compose version strings | code | open |
 | G4 | low | kvsctl | `semver.Compare` treats `RC1`/`rc1` and `rc01`/`rc1` as equal | repro | open |
 | G5 | low | kvsctl | Bare word on the last line changes meaning after `Set` | repro | open |
+| D1 | high | setup | Headless re-run replaces saved prefix, SSL and cache choices | repro | open |
+| D2 | high | setup | Port overrides written raw to `.env`, then sourced as code | repro | open |
+| D3 | high | setup | Staged import dump is world-readable | code | open |
+| D4 | medium | setup | Empty `dhparam.pem` from an interrupted run is kept | repro | open |
+| D5 | medium | setup | Truncated `gum` download is installed and never replaced | repro | open |
+| D6 | medium | setup | Headless pre-flight still prompts and exits silently at EOF | repro | open |
+| D7 | medium | setup | `DNS_CHOICE` unknown or `1` loops forever in headless mode | repro | open |
+| D8 | medium | setup | `DB_CHOICE` ignored when endoflife.date does not answer | repro | open |
+| D9 | medium | setup | `--dev` fails unless `DOMAIN` is given, ignores the saved domain | repro | open |
+| D10 | medium | setup | Multi-site Caddy exception also skips loopback port conflicts | repro | open |
+| D11 | low | setup | Partial GeoIP database kept as "already configured" | repro | open |
+| D12 | low | setup | Started from another project's directory, it uses that `.env` | repro | open |
 
 ## kvs-export.sh
 
@@ -436,6 +448,212 @@ and came out clean.
   no `=` and no trailing newline, or comment it out with a note. Do not change
   its meaning silently.
 - **Test:** the repro as a `write_test.go` case.
+
+## docker/setup.sh
+
+The repros below ran a sed-patched copy of `setup.sh` with `docker`, `curl`,
+`gum` and `ss` stubbed on `PATH`, the way
+`tests/test_setup_existing_project_detection.sh` does.
+
+### D1. Headless re-run replaces saved prefix, SSL and cache choices
+
+- **Severity:** high (new compose project name: the stack comes up on new,
+  empty volumes and the old database is orphaned)
+- **Confidence:** repro. **Status:** open
+- **Where:** `docker/setup.sh:1335-1347`, used at `docker/setup.sh:3632-3672` and
+  `3698-3723`; same pattern in `select_cache` (`docker/setup.sh:4264`).
+- **Defect:** `PREFIX_CHOICE`, `SSL_CHOICE` and `CACHE_CHOICE` default to `1` in
+  headless mode and override what `.env` holds. `SITE_PREFIX=kvs` (the legacy
+  option 2) is read as "never chosen", so `select_site_prefix` runs again on
+  every run; interactively, the prefix question comes back every time and
+  Enter switches it.
+- **Repro:** `.env` with `SITE_PREFIX=kvs`, `COMPOSE_PROJECT_NAME=kvs`,
+  `SSL_PROVIDER=selfsigned`, then `HEADLESS=y ./setup.sh` (the README example).
+  `.env` now has `SITE_PREFIX=kvs-mysite`, `COMPOSE_PROJECT_NAME=kvs-mysite` and
+  `SSL_PROVIDER=letsencrypt`, saved before the run fails on `EMAIL`. A ZeroSSL
+  setup is switched to Let's Encrypt and reissued with `--force`; Memcached is
+  replaced by Dragonfly.
+- **Fix direction:** when `.env` already holds a domain and these keys, keep
+  them unless the matching `*_CHOICE` is given explicitly. Record the legacy
+  prefix choice as a value distinct from "unset".
+- **Test:** an existing legacy, self-signed, Memcached `.env`; a headless run
+  without any `*_CHOICE`; assert the keys are unchanged.
+
+### D2. Port overrides written raw to `.env`, then sourced as code
+
+- **Severity:** high (shell code from a port value runs as root on every later
+  run; the value comes from the operator's environment, so the realistic
+  failure is a typo or a templated deployment that breaks `.env` for good)
+- **Confidence:** repro (the injected command ran). **Status:** open
+- **Where:** `docker/setup.sh:3497-3503` (top level); values captured at
+  `docker/setup.sh:3291-3307`; `set_env_value` at `docker/setup.sh:779`.
+- **Defect:** `HTTP_PORT`, `HTTPS_PORT`, `MARIADB_HOST_PORT`, `CACHE_HOST_PORT` and
+  the two `MANTICORE_*` ports are saved to `.env` before any check.
+  `set_env_value` refuses newlines but does not quote. HTTP and HTTPS are only
+  validated later (`docker/setup.sh:5070`); the four loopback ports never are.
+  The next `source .env` (`docker/setup.sh:3672`), and every later run of
+  `setup.sh`, `reconfigure.sh` or kvsctl, executes the value.
+- **Repro:** `HTTP_PORT='8080$(id -u>/tmp/pwned)'`: `.env` holds that line and
+  `/tmp/pwned` is created. `HTTP_PORT='80 443'` leaves a `.env` that breaks every
+  later run.
+- **Fix direction:** validate before saving (`parse_publish_endpoint` for HTTP
+  and HTTPS, `1-65535` for the loopback ports) and refuse anything else before
+  writing. Consider making `set_env_value` refuse `$`, backticks, quotes and
+  spaces for keys that hold no free text.
+- **Test:** headless runs with `HTTP_PORT='80;touch X'` and
+  `MARIADB_HOST_PORT=abc`: non-zero exit, `.env` unchanged, `X` absent.
+
+### D3. Staged import dump is world-readable
+
+- **Severity:** high (the whole imported database, including admin password
+  hashes and user emails, readable by any local user, possibly for days)
+- **Confidence:** code (the modes come straight from the umask and an explicit
+  `chmod`). **Status:** open
+- **Where:** `import_stage_dump`, `docker/setup.sh:5362-5402`; the native payload
+  in `docker/lib/native-import.sh:330` does the same.
+- **Defect:** `mkdir -p mariadb/init` under umask 022 gives 0755, then
+  `chmod 644 "$target"`. The dump stays in
+  `mariadb/init/10-kvs-import.sql*` until `import_finish`, so indefinitely when
+  the import fails or waits for `--resume-import`. The raw dump in `import/` is
+  kept 0700/0600; this copy is not.
+- **Fix direction:** `mariadb/init` 0700 (or 0750 with group 999), the file 0600
+  or 0640, owned by 999 (mysql in the image).
+- **Test:** stage a dump; assert neither the file nor the directory has any
+  "other" permission bit.
+
+### D4. Empty `dhparam.pem` from an interrupted run is kept
+
+- **Severity:** medium (nginx cannot start with the TLS config)
+- **Confidence:** repro for the empty file (`timeout 1 openssl dhparam -out f
+  2048`); the nginx failure is known nginx behaviour, not run. **Status:** open
+- **Where:** `docker/setup.sh:5275-5280`; used by `ssl_dhparam` in `nginx.conf:48`.
+- **Defect:** openssl creates the output file before generating anything, and
+  the guard is `[ ! -f ]`. After Ctrl-C, an OOM kill or a failed step, the next
+  run prints "DH parameters already exist" and keeps a 0-byte file.
+- **Fix direction:** generate into a temp file and `mv` it into place; check
+  existing files with `[ -s ]` and `openssl dhparam -check -noout -in`.
+- **Test:** pre-create an empty `nginx/dhparam.pem`; assert it is regenerated.
+
+### D5. Truncated `gum` download is installed and never replaced
+
+- **Severity:** medium (the setup is broken for good; an unverified binary runs
+  as root on every step)
+- **Confidence:** repro (tar exit 2, partial executable left, `command -v gum`
+  true). **Status:** open
+- **Where:** `install_gum`, `docker/setup.sh:3202-3232`.
+- **Defect:** the unpinned "latest" GitHub tarball is piped with
+  `curl | tar -x` straight into `/usr/local/bin`, with no checksum or
+  signature, then `chmod +x`. A truncated stream leaves a partial `gum`; the
+  next run finds it with `command -v gum` and does not reinstall. Every
+  `run_step` then fails, and `progress_bar` (`gum style`) exits under `set -e`.
+  `kvs-install.sh` uses a signed apt repository instead.
+- **Fix direction:** pin the version and its sha256, download into a temp dir,
+  verify, then `install`. Check that the installed binary runs
+  (`gum --version`) before trusting it.
+- **Test:** stub `curl` to serve a truncated tarball; assert no
+  `/usr/local/bin/gum` and that the fallback output is used.
+
+### D6. Headless pre-flight still prompts and exits silently at EOF
+
+- **Severity:** medium. **Confidence:** repro. **Status:** open
+- **Where:** `preflight_checks`, `docker/setup.sh:3182-3185`.
+- **Defect:** the "Continue anyway? [y/N]:" prompt is skipped only when
+  `PREFLIGHT_BYPASS` is set, not when `HEADLESS=y`. With stdin at EOF, `read`
+  returns 1 and `set -e` ends the script with status 1 and no message; with a
+  terminal attached, it blocks.
+- **Repro:** `HEADLESS=y` with no internet, or less than 10 GB free.
+- **Fix direction:** in headless mode without `PREFLIGHT_BYPASS`, print a clear
+  error and exit non-zero; use `prompt_read` for the interactive case.
+- **Test:** headless run with `curl` stubbed to fail; assert no prompt and an
+  explicit error.
+
+### D7. `DNS_CHOICE` unknown or `1` loops forever in headless mode
+
+- **Severity:** medium (endless busy loop hammering ipify/icanhazip)
+- **Confidence:** repro (51 iterations without a prompt before the test guard
+  stopped it). **Status:** open
+- **Where:** DNS retry loop, `docker/setup.sh:5220-5261`. Same family as I1.
+- **Defect:** `dns_answer=$DNS_CHOICE` is reused on every pass, and `*) continue`
+  (or `1) continue`) re-runs `check_dns` with no prompt and no sleep.
+- **Repro:** `DNS_CHOICE=yes` (or `1`) with a DNS mismatch.
+- **Fix direction:** validate `DNS_CHOICE` against `1-3`. In headless mode, make
+  `1` a bounded retry with a sleep, and an unknown value an error.
+- **Test:** extract the loop, stub `check_dns` to return 1, `DNS_CHOICE=yes`;
+  assert it exits within a bounded number of iterations.
+
+### D8. `DB_CHOICE` ignored when endoflife.date does not answer
+
+- **Severity:** medium (the data volume is initialised on a newer MariaDB
+  series that cannot be downgraded without deleting it)
+- **Confidence:** repro. **Status:** open
+- **Where:** `select_mariadb_version`, `docker/setup.sh:3768-3832`.
+- **Defect:** the function returns ("Using defaults") before looking at
+  `DB_CHOICE`, although the menu is built from the static
+  `MARIADB_LTS_VERSIONS` and needs no API. A non-numeric `DB_CHOICE` is also
+  dropped silently, because `[ -ge ]` fails inside the condition.
+- **Repro:** `HEADLESS=y DB_CHOICE=3` (11.4) with `curl` failing gives
+  `MARIADB_VERSION=12.3`.
+- **Fix direction:** apply `DB_CHOICE` from the static list whatever the API
+  does; reject values outside `1-N` with an error.
+- **Test:** `curl` stub failing plus `DB_CHOICE=3`; assert
+  `MARIADB_VERSION=11.4`.
+
+### D9. `--dev` fails unless `DOMAIN` is given, and ignores the saved domain
+
+- **Severity:** medium. **Confidence:** repro. **Status:** open
+- **Where:** `docker/setup.sh:1314-1328`, with `3293` and `3505`.
+- **Defect:** dev mode exports `DOMAIN=${DOMAIN:-example.com}` before
+  `KVS_DOMAIN_OVERRIDE` is captured. The override then replaces the `.env`
+  domain with `example.com`, which headless mode rejects.
+  `EMAIL=dev@localhost.local` overrides the saved email the same way.
+- **Repro:** `.env` with `DOMAIN=mysite.test`, `./setup.sh --dev`: "ERROR: Set
+  DOMAIN to a real domain in headless mode".
+- **Fix direction:** do not export the defaults, or apply them only while `.env`
+  still holds the placeholder.
+- **Test:** `--dev` with a saved domain gets past the domain check and keeps it.
+
+### D10. Multi-site Caddy exception also skips loopback port conflicts
+
+- **Severity:** medium (late failure after the images are built)
+- **Confidence:** repro (extracted function). **Status:** open
+- **Where:** `docker/setup.sh:5102-5104`.
+- **Defect:** when `caddy_publishes_required_multi_site_ports` is true, the
+  whole `PUBLIC_PORT_CONFLICTS` list is skipped, including `127.0.0.1:3306`,
+  11211, 9306 and 9308.
+- **Repro:** `MODE=multi`, Caddy running, a native MariaDB on `127.0.0.1:3306`:
+  "Caddy already publishes the required multi-site ports", then
+  `compose up mariadb` fails with "port is already allocated".
+- **Fix direction:** take only 80/tcp, 443/tcp and 443/udp out of the list for
+  Caddy; report the other conflicts as in single-site mode.
+- **Test:** the same scenario; assert the 3306 conflict is an error.
+
+### D11. Partial GeoIP database kept as "already configured"
+
+- **Severity:** low (GeoIP silently broken)
+- **Confidence:** repro (curl exit 18 left a 1000-byte file). **Status:** open
+- **Where:** `select_geoip`, `docker/setup.sh:4582-4595`.
+- **Defect:** `curl -fsSL … -o geoip/GeoLite2-Country.mmdb` leaves a partial file
+  when the transfer is cut; the next run sees the file and skips the download.
+  The file comes from an unpinned third-party mirror with no checksum.
+- **Fix direction:** download into a temp file, check it (size, or the MaxMind
+  metadata marker `\xab\xcd\xefMaxMind.com` near the end), then `mv`.
+- **Test:** stub `curl` to write half a file and exit 18; assert no `.mmdb` is
+  left and the next run downloads again.
+
+### D12. Started from another project's directory, it uses that `.env`
+
+- **Severity:** low. **Confidence:** repro (another `.env` went from 644 to 600
+  and was sourced before the run stopped at the prefix check).
+  **Status:** open
+- **Where:** `setup_enter_script_dir`, `docker/setup.sh:41`.
+- **Defect:** the script stays in the current directory whenever it holds any
+  `docker-compose.yml`. Started from another project's directory, it runs
+  `chmod 600`, `source` (as root) and `set_env_value DOMAIN` on that project's
+  `.env`.
+- **Fix direction:** stay only when `$PWD -ef "$script_dir"`; otherwise `cd` to
+  the script's directory as today.
+- **Test:** run from a directory holding an unrelated `docker-compose.yml` and
+  `.env`; assert that `.env` is untouched.
 
 ## Checked and found sound
 
