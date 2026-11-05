@@ -10,8 +10,16 @@ Suggested order, by risk on a production host: C1, C2, C3, M1, R1, D1, E1,
 N1, D13, R2, then the other high findings, then medium (M2, D2, D3 among the
 first), then low.
 
-This file is a work list for a follow-up agent: validate each finding, then fix
-it with a regression test, or reject it with the reason.
+This file is a work list for a follow-up agent: fix each finding with a
+regression test, or reject it with the reason.
+
+Every one of the findings has been through an independent, adversarial
+verification pass (reviewers who did not write it tried to disprove it, most
+of them by reproduction). None was rejected. Many write-ups were corrected:
+for a finding marked `confirmed (corrected)`, the note under
+[Verification pass](#verification-pass) overrides the finding's own text,
+including its severity, line numbers and fix direction. Several original fix
+directions would have broken existing behaviour or tests; the notes say which.
 
 ## How to work through this list
 
@@ -86,29 +94,29 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | D1 | high | setup | Headless re-run replaces saved prefix, SSL and cache choices | repro | confirmed (corrected) |
 | D2 | medium | setup | Port overrides written raw to `.env`, then sourced as code | repro | confirmed |
 | D3 | medium | setup | Staged import dump is world-readable | code | confirmed (corrected) |
-| D4 | medium | setup | Empty `dhparam.pem` from an interrupted run is kept | repro | open |
-| D5 | medium | setup | Truncated `gum` download is installed and never replaced | repro | open |
-| D6 | medium | setup | Headless pre-flight still prompts and exits silently at EOF | repro | open |
-| D7 | medium | setup | `DNS_CHOICE` unknown or `1` loops forever in headless mode | repro | open |
-| D8 | medium | setup | `DB_CHOICE` ignored when endoflife.date does not answer | repro | open |
-| D9 | medium | setup | `--dev` fails unless `DOMAIN` is given, ignores the saved domain | repro | open |
-| D10 | medium | setup | Multi-site Caddy exception also skips loopback port conflicts | repro | open |
-| D11 | low | setup | Partial GeoIP database kept as "already configured" | repro | open |
-| D12 | low | setup | Started from another project's directory, it uses that `.env` | repro | open |
+| D4 | medium | setup | Empty `dhparam.pem` from an interrupted run is kept | repro | confirmed (corrected) |
+| D5 | medium | setup | Truncated `gum` download is installed and never replaced | repro | confirmed |
+| D6 | medium | setup | Headless pre-flight still prompts and exits silently at EOF | repro | confirmed |
+| D7 | medium | setup | `DNS_CHOICE` unknown or `1` loops forever in headless mode | repro | confirmed |
+| D8 | medium | setup | `DB_CHOICE` ignored when endoflife.date does not answer | repro | confirmed (corrected) |
+| D9 | medium | setup | `--dev` fails unless `DOMAIN` is given, ignores the saved domain | repro | confirmed |
+| D10 | medium | setup | Multi-site Caddy exception also skips loopback port conflicts | repro | confirmed |
+| D11 | low | setup | Partial GeoIP database kept as "already configured" | repro | confirmed |
+| D12 | low | setup | Started from another project's directory, it uses that `.env` | repro | confirmed (corrected) |
 | D13 | high | setup | Admin password lost when kvs-init fails after setting it | code | confirmed |
-| D14 | medium | setup | A failed ACME issuance aborts before cache, Manticore, cron, import finish | code | open |
-| D15 | medium | setup | Default-admin checks of setup and 35-harden disagree | repro | open |
+| D14 | medium | setup | A failed ACME issuance aborts before cache, Manticore, cron, import finish | code | confirmed (corrected) |
+| D15 | medium | setup | Default-admin checks of setup and 35-harden disagree | repro | confirmed (corrected) |
 | D16 | low | setup | One-time admin password saved in the 0644 install log | repro | confirmed (corrected) |
-| D17 | low | setup | Switch to self-signed keeps a public cert nothing renews | repro | open |
-| D18 | low | setup | Step output goes to predictable `/tmp` files | repro (partial) | open |
+| D17 | low | setup | Switch to self-signed keeps a public cert nothing renews | repro | confirmed (corrected) |
+| D18 | low | setup | Step output goes to predictable `/tmp` files | repro (partial) | confirmed (corrected) |
 | C1 | high | runtime | PHP runs in upload directories, `.phar` included | repro | confirmed (corrected) |
 | C2 | high | runtime | Root init container runs a script PHP can write | repro | confirmed (corrected) |
 | C3 | high | nginx | Asset regexes win over the internal-directories deny | repro | confirmed (corrected) |
-| C4 | medium | nginx | TLS 1.3 0-RTT on, replayable, invisible to PHP | repro | open |
-| C5 | medium | nginx | SVG and font responses lose every security header | repro | open |
-| C6 | medium | runtime | PHP-FPM can rewrite phpMyAdmin's `config.inc.php` | code | open |
-| C7 | low | nginx | `_INSTALL/` (`install_db.sql`) served as static files | repro | open |
-| C8 | low | runtime | Init re-runs rewrite the title; Manticore cron failure hidden | code | open |
+| C4 | low | nginx | TLS 1.3 0-RTT on, replayable, invisible to PHP | repro | confirmed (corrected) |
+| C5 | low | nginx | SVG and font responses lose every security header | repro | confirmed (corrected) |
+| C6 | low | runtime | PHP-FPM can rewrite phpMyAdmin's `config.inc.php` | code | confirmed (corrected) |
+| C7 | low | nginx | `_INSTALL/` (`install_db.sql`) served as static files | repro | confirmed (corrected) |
+| C8 | low | runtime | Init re-runs rewrite the title; Manticore cron failure hidden | code | confirmed (corrected) |
 | R1 | high | multi-site | `remove` of a new site deletes a single-mode primary's data | repro | confirmed |
 | R2 | high | multi-site | Two sites can claim the same `www` host, breaking Caddy for all | repro | confirmed |
 | R3 | medium | reconfigure | Multi-mode rollback leaves the recreated containers changed | repro (stub) | confirmed (corrected) |
@@ -118,8 +126,8 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | M1 | high | import | Shell injection on the old server in the tar fallback | repro | confirmed |
 | M2 | medium | import | Untrusted dump runs shell commands in the MariaDB container | repro | confirmed |
 | M3 | medium | import | Decompression errors ignored; a corrupt dump is marked complete | repro | confirmed |
-| M4 | medium | import | Absolute symlinks on the old server copied as root, readable by PHP | repro | open |
-| M5 | low | import | A resumed pass can run with no free-space check | code | open |
+| M4 | medium | import | Absolute symlinks on the old server copied as root, readable by PHP | repro | confirmed (corrected) |
+| M5 | low | import | A resumed pass can run with no free-space check | code | confirmed (corrected) |
 | K1 | medium | kvsctl | `backup --keep` deletes the archive a rollback would replay | repro | confirmed |
 | K2 | medium | kvsctl | Relative restore path recorded; `recover` elsewhere replays the wrong file | repro | confirmed |
 | K3 | medium | scripts | Scripts check the kvsctl lock but never hold it | code | confirmed (corrected) |
@@ -440,6 +448,92 @@ verdicts and corrections override the finding text below where they differ.
   create the install log 0600 before the tee (which also covers the native DB
   password at `kvs-install.sh:1654`), and/or write a 0600 password file. The
   print block is in `setup.sh`, so test it there.
+- **D4 — confirmed** (the pinned nginx fails `nginx -t` with `PEM_read_bio_DHparams
+  … no start line`). Fix caveat: `tests/test_setup_directory_import.sh:72` creates
+  an empty `dhparam.pem` on purpose and its openssl stub exits 97 on `dhparam`
+  (`:39`): change that fixture with the fix.
+- **D5 — confirmed:** the partial binary segfaults (139) on `gum style` while
+  `command -v gum` still finds it. `install_gum` at `:3202-3223`, called at
+  `:3250`.
+- **D6 — confirmed.** Not fully silent: the warnings and the prompt are shown,
+  then the exit is 1 without an error. The comment at `:3181` says "Skip prompt
+  if headless mode", but the code checks only `PREFLIGHT_BYPASS`.
+- **D7 — confirmed:** about 565 curl calls in 3 s. Interactive runs with
+  `DNS_CHOICE` exported loop the same way. Loop now at `:5220-5262`;
+  `README.md:269` documents 1-3.
+- **D8 — confirmed; detail.** Interactive users are not asked either when the API
+  is down. A non-numeric `DB_CHOICE` prints "integer expression expected" on
+  stderr. Recoverable on a fresh install (empty volume, re-run with
+  `VOLUME_CHOICE=1`).
+- **D9 — confirmed;** also fails on a fresh install without `DOMAIN`, so `--dev`
+  never works without it. Capture at `:3294`.
+- **D10 — confirmed.** `docker-compose.multi.yml` resets only nginx's ports, so
+  MariaDB still publishes `127.0.0.1:3306` in multi mode.
+- **D11 — confirmed.** Simple extra fix: `rm -f` the file in the "Download
+  failed" branch (`:4590`); the "already configured" check is at `:4504`.
+- **D12 — confirmed; fix caveat.** Several harnesses
+  (`tests/test_setup_existing_project_detection.sh` and others) run a setup copy
+  from a directory without `docker-compose.yml` and rely on the stay branch
+  `[ ! -f "$script_dir/docker-compose.yml" ]`: keep it, and replace only the
+  `[ -f docker-compose.yml ]` stay with `$PWD -ef "$script_dir"`.
+- **D14 — real; impact corrected.** `--resume-import` re-runs ACME (`:5787-5788`),
+  then the runtime start, `import_finish` and cron, so an import can be resumed
+  after DNS is fixed, not only redone. The reboot claim is doubtful: the check
+  needs `RestartCount 0`, which `docker restart` and `stop`/`start` keep; only a
+  crash restart or a recreated container blocks resume. Medium for non-import
+  runs, lower for imports.
+- **D15 — confirmed; missed sites.** `site-manager.sh:641` uses the same
+  `login="admin"` predicate and `:661` hardcodes "Admin login: admin". The
+  35-harden check is at `:100`. `tests/test_setup_resume_flow.sh:52` matches the
+  setup query on the substring `login='admin'` (anything else exits 97): update
+  that stub on purpose.
+- **D17 — real; fix corrected.** `docker/nginx/docker-entrypoint.sh:223-224` says
+  by design that "a retained public/private-CA certificate remains the
+  operator/ACME's responsibility": replacing every certificate that is not
+  self-signed would destroy operator-supplied ones (private CA, Cloudflare Origin
+  CA). Limit the fix to ACME-issued certificates on a provider switch, in setup.
+  An expired pair fails `certificate_pair_is_valid` at the next nginx start, so
+  the exposure lasts until a restart.
+- **D18 — confirmed (code); missed sibling.** `detect_ioncube` uses
+  `TEMP_DIR=/tmp/kvs-detect-$$` (`:3887`) with `mkdir -p` and unzip; cover it too.
+- **C4 — confirmed; severity low (was medium).** Replay needs an on-path attacker.
+  The native `conf/nginx/nginx.conf:55-56` has the same lines.
+- **C5 — real; severity low (was medium); scope widened.** Same location in
+  `docker/multi-site/nginx/kvs-caddy.conf.template:70-74` and native
+  `conf/nginx/globals/general.conf:20-24`; Debian's nginx has no
+  `add_header_inherit`, so use the include approach there. For a correctly typed
+  `image/svg+xml`, nosniff does not stop SVG script, and HSTS is set by every other
+  response; only CSP would help. Whether KVS lets users upload SVG is
+  unverified.
+- **C6 — real; severity low (was medium); fix insufficient.** phpMyAdmin runs in
+  the same php-fpm pool as uid 1000 (template `:119-127`); its `tmp/` (the compiled
+  Twig cache) stays writable to that uid by design, and the sessions volume is
+  shared, so root-owning `config.inc.php` does not close the hole. Only a separate
+  FPM pool or container with another uid would. Also in the multi-site template
+  (`:93`). An attacker with KVS-level code execution already holds the KVS
+  database credentials.
+- **C7 — confirmed; lines and window corrected.** "preserving _INSTALL" is at
+  `30-import-database.sh:175` (the file has 191 lines). A setup re-run stops the
+  project's nginx through the port-conflict path before kvs-init, and nginx starts
+  only after it (`docker/setup.sh:5653-5655`). The real windows: multi mode (the
+  Caddy exception skips the stop), `site-manager.sh`'s kvs-init (`:659`), and a
+  manual `compose up` after a failed run.
+- **C8 — confirmed (code).** Title sed now at `10-config-php.sh:174`. The compose
+  healthcheck comment (around `:274`) says by design that a failed hourly rotation
+  is only logged: failing the start when cron does not start fits better than a
+  healthcheck on reindexes.
+- **M4 — confirmed; fix caveat.** Dereferencing is deliberate:
+  `kvs-export.sh:688-690` and `:2428-2429` rely on a `contents` symlink to another
+  disk being copied. `--safe-links` or `--munge-links` by default would break that
+  standard migration; use the allowlist or confirm-before-transfer option.
+- **M5 — real; corrected.** The loaded database size *is* counted (`db_size_mb`,
+  passed as `IMPORT_TRANSFER_RESERVE_MB`, `docker/setup.sh:2668-2669`,
+  `import.sh:3072`); only the extra dump copies (raw plus `mariadb/init`) are not.
+  "Refuse instead of only warning" contradicts the documented behaviour
+  (`README.md:320`, `docker/setup.sh:2023-2027`: an unknown size only warns):
+  refuse only in the saved-count-minus-present case.
+  `tests/test_import_transfer_progress.sh:562-611` pins the no-recount behaviour
+  of `skip_count`; do not reintroduce the scan.
 
 ## kvs-export.sh
 
