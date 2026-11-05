@@ -26,8 +26,10 @@ it with a regression test, or reject it with the reason.
    of the history (`fix(export): ...`, `fix(install): ...`, `fix(kvsctl): ...`).
 3. Before pushing, run the checks below. All of them must pass.
 
-Status legend: `open` (not yet validated), `confirmed` (reproduced, not fixed),
-`fixed`, `rejected`. "Confidence" is how the audit verified it: **repro** (a
+Status legend: `open` (not yet validated), `confirmed` (reproduced again by an
+independent verification pass, not fixed), `confirmed (corrected)` (real, but
+the verification pass corrected the write-up: read the note in
+[Verification pass](#verification-pass) before fixing), `fixed`, `rejected`. "Confidence" is how the audit verified it: **repro** (a
 reproduction failed as described) or **code** (exact code-path reading only,
 validate carefully).
 
@@ -60,18 +62,18 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | ID | Severity | Area | Title | Confidence | Status |
 | --- | --- | --- | --- | --- | --- |
 | E1 | high | export | Export archive is world-readable | repro | open |
-| E2 | high | export | Any file change during tar fails the whole export | repro | open |
-| I1 | high | install | DNS "wait and retry" loops forever | repro | open |
-| I2 | high | install | Archive copied while still being uploaded | repro | open |
-| E3 | high | export | Output under a symlinked site directory makes tar recurse | repro | open |
-| I3 | high | install | Standalone install deletes an existing `/root/tmp` | code | open |
+| E2 | medium | export | Any file change during tar fails the whole export | repro | confirmed |
+| I1 | medium | install | DNS "wait and retry" loops forever | repro | confirmed |
+| I2 | medium | install | Archive copied while still being uploaded | repro | confirmed (corrected) |
+| E3 | high | export | Output under a symlink inside the site: tar recurses, or the dump lands in the web root | repro | confirmed (corrected) |
+| I3 | medium | install | Standalone install deletes an existing `/root/tmp` | code | confirmed |
 | I4 | medium | install | Domain taken from the archive name blocks valid installs | repro | open |
 | I5 | medium | install | Failed SQL import is reported as success and never redone | code | open |
 | I6 | medium | install | `DOMAIN` rewritten in `.env` before `setup.sh` reads the old one | code | open |
 | E4 | medium | export | Non-canonical `--exclude` is reported excluded but archived | repro | open |
 | E5 | medium | export | `setup_db.php` parsing reads commented lines, misses valid forms | repro | open |
 | I7 | medium | install | IonCube lines appended on every run and on failure | code | open |
-| G1 | medium | kvsctl | `dotenv.Set`/`MergeEnv` append CRLF lines the shell misreads | repro | open |
+| G1 | low | kvsctl | `dotenv.Set`/`MergeEnv` append CRLF lines the shell misreads | repro | confirmed (corrected) |
 | G2 | medium | kvsctl | `${PWD}` in `.env` expands differently from compose | code | open |
 | I8 | low | install | "Update the Script" corrupts the log and drops arguments | repro | open |
 | I9 | low | install | `www.conf.bak` overwritten on re-run | code | open |
@@ -92,7 +94,7 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | D10 | medium | setup | Multi-site Caddy exception also skips loopback port conflicts | repro | open |
 | D11 | low | setup | Partial GeoIP database kept as "already configured" | repro | open |
 | D12 | low | setup | Started from another project's directory, it uses that `.env` | repro | open |
-| D13 | high | setup | Admin password lost when kvs-init fails after setting it | code | open |
+| D13 | high | setup | Admin password lost when kvs-init fails after setting it | code | confirmed |
 | D14 | medium | setup | A failed ACME issuance aborts before cache, Manticore, cron, import finish | code | open |
 | D15 | medium | setup | Default-admin checks of setup and 35-harden disagree | repro | open |
 | D16 | medium | setup | One-time admin password saved in the 0644 install log | repro | open |
@@ -107,17 +109,17 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | C7 | low | nginx | `_INSTALL/` (`install_db.sql`) served as static files | repro | open |
 | C8 | low | runtime | Init re-runs rewrite the title; Manticore cron failure hidden | code | open |
 | R1 | high | multi-site | `remove` of a new site deletes a single-mode primary's data | repro | open |
-| R2 | high | multi-site | Two sites can claim the same `www` host, breaking Caddy for all | repro | open |
+| R2 | high | multi-site | Two sites can claim the same `www` host, breaking Caddy for all | repro | confirmed |
 | R3 | medium | reconfigure | Multi-mode rollback leaves the recreated containers changed | repro (stub) | open |
 | R4 | medium | reconfigure | Edited `DOMAIN` half-applies and takes the site down | code | open |
 | R5 | medium | multi-site | `remove` hides a failed `down -v`, then deletes the config | repro | open |
 | R6 | low | multi-site | Manual `caddy-start` sets the ACME email to `admin@example.com` | repro | open |
 | M1 | high | import | Shell injection on the old server in the tar fallback | repro | open |
 | M2 | high | import | Untrusted dump runs shell commands in the MariaDB container | repro | open |
-| M3 | medium | import | Decompression errors ignored; a corrupt dump is marked complete | repro | open |
+| M3 | medium | import | Decompression errors ignored; a corrupt dump is marked complete | repro | confirmed |
 | M4 | medium | import | Absolute symlinks on the old server copied as root, readable by PHP | repro | open |
 | M5 | low | import | A resumed pass can run with no free-space check | code | open |
-| K1 | high | kvsctl | `backup --keep` deletes the archive a rollback would replay | repro | open |
+| K1 | medium | kvsctl | `backup --keep` deletes the archive a rollback would replay | repro | confirmed |
 | K2 | medium | kvsctl | Relative restore path recorded; `recover` elsewhere replays the wrong file | repro | open |
 | K3 | medium | scripts | Scripts check the kvsctl lock but never hold it | code | open |
 | K4 | medium | kvsctl | A second `restore --latest` replays the safety backup | code | open |
@@ -125,12 +127,80 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | K6 | low | kvsctl | `restore <archive> --latest` silently ignores `--latest` | code | open |
 | S1 | medium | release | Dispatch from a branch named like a version mixes tag and branch | repro | open |
 | S2 | medium | release | Actions pinned by mutable tag in privileged jobs | repro | open |
-| S3 | medium | release | Failed lock lookup swallowed; PHP image built from a floating tag | repro | open |
-| S4 | medium | release | Lock check reads only the first `ARG` line and never `FROM` | repro | open |
+| S3 | low | release | Failed lock lookup swallowed; PHP image built from a floating tag | repro | confirmed (corrected) |
+| S4 | medium | release | Lock check reads only the first `ARG` line and never `FROM` | repro | confirmed |
 | S5 | medium | runtime | Manticore PHP plugin installed unverified by default | code | open |
 | S6 | low | release | Registry digest header trusted without hashing the body | repro | open |
 | S7 | low | ci | `push.yml` and `markdown-lint.yml` have no `permissions:` | repro | open |
 | S8 | low | multi-site | Multi-site images are outside the lock | repro | open |
+
+## Verification pass
+
+A second set of reviewers, who did not write the findings, tried to disprove
+them from the code at `c7e0068`, reproducing them where possible. Their
+verdicts and corrections override the finding text below where they differ.
+
+- **E2 — confirmed.** A file that *shrinks* during the read also gives exit 1
+  ("File shrank by N bytes; padding with zeros") and is archived with zeros in
+  place of its data. So "treat 1 as success" must list the shrunk files, or
+  treat them as fatal. Severity lowered to medium: no data is lost and a re-run
+  works. Live `admin/logs` is archived, which makes exit 1 likely
+  (`tests/test_kvs_export.sh:717`).
+- **E3 — confirmed, and wider than written.** `kvs_path_inside_site` calls
+  `readlink -f`, so `--dump-only -o "$site/contents/dump.sql.gz"` (a path through
+  the in-site symlink) passes the check: the database dump is written into the
+  web-served contents directory, mode 0644, with exit 0. The fix must cover
+  `--dump-only` and compare the unresolved path too. Correction: the staging
+  directory is 0700 (`mktemp -d`), so "staging is web-served meanwhile" is
+  overstated.
+- **I1 — confirmed.** It re-checks every 60 s and continues once DNS matches,
+  so "forever" holds only while DNS stays wrong; nothing is damaged. Severity
+  lowered to medium.
+- **I2 — corrected.** The race is real, but
+  `docker/init/docker-entrypoint.d/00-extract.sh:105` runs `unzip -tq` and refuses
+  the truncated archive, so no truncated KVS is installed. The real impact: a
+  failed kvs-init that fails again on every re-run (the `kvs-archive/` copy is
+  preferred, `kvs-install.sh:2192`) until the user deletes it. The same
+  wait-then-use pattern is on the standalone path, `kvs-install.sh:615-620`.
+  Severity lowered to medium.
+- **I3 — confirmed (code).** There is no `set -e`, so the `rm -rf` runs even when
+  `cp KVS_*` fails. The function ignores `KVS_ARCHIVE_DIR`. Not covered:
+  `tests/test_kvs_install.sh` stubs `whatisdomain`. Severity lowered to medium (a
+  fresh host rarely has `/root/tmp`).
+- **G1 — corrected fix direction.** "Always LF" breaks behaviour the tests pin on
+  purpose: `cli/internal/dotenv/dotenv_test.go:420` ("a CRLF file" expects
+  `C=3\r\n`) and `cli/internal/instance/env_test.go:166-183` (MergeEnv on a CRLF
+  file expects CRLF). In an all-CRLF file the shell already misreads every line,
+  so LF only helps a mixed file. Fix instead: use the ending of the line the
+  text is appended after, not "any CRLF anywhere", and update those tests on
+  purpose. The MergeEnv variant comes from `instance.go:405` (`TrimRight` plus
+  the new ending). Severity lowered to low.
+- **D13 — confirmed (code).** 35-harden is around lines 70-95. Example trigger:
+  `80-manticore.sh:62-67` exits 1 when kernel-scripts.com is unreachable. The
+  interactive default for an existing database is 3 (Exit); only headless
+  defaults to Keep (`docker/setup.sh:1341`). An undocumented recovery exists:
+  re-run with a `KVS_ADMIN_PASSWORD` of 20 or more characters, which 35-harden
+  applies even on Keep. Prefer showing the password, or writing a 0600 file,
+  before kvs-init or on failure, over "run 35-harden last".
+- **R2 — confirmed** with the real `write_caddy_site_config` and `caddy validate`.
+  `add_site` always passes `use_www=false` (`site-manager.sh:566`), so the
+  `USE_WWW=true` variant applies only to `primary-config`.
+- **M3 — confirmed.** The inspect pipeline is at `docker/lib/import.sh:202` (not
+  206). The "Related" part holds: `docker/setup.sh:1800-1806` refuses a dump
+  without "Dump completed" only for remote sources.
+- **K1 — confirmed.** `run.go:203` passes the same empty `state.UpgradeBackup` to
+  the upgrade's prune; a state written before `UpgradeBackup` existed hits the
+  same fallback. Severity lowered to medium: rollback then refuses with a clear
+  message, and the case needs `--skip-backup` on a migrating release or a
+  legacy state.
+- **S3 — corrected severity.** The release images job `needs: [prepare, go,
+  suites, keys]` (`release.yml:189`), and `suites` runs the matrix-versus-lock
+  check (`tests/test_release_workflow.sh:335-350`); `--get` only reads the local
+  lock, so a missing series is the only realistic failure and it is caught.
+  `docker.yml` never pushes. Defence in depth: severity lowered to low.
+- **S4 — confirmed.** The fix must allow `${PHP_FROM}` and stage names (php and
+  cron use `FROM ${PHP_FROM} AS ffmpeg-build` and `COPY --from=ffmpeg-build`),
+  and also check the `ARG PHP_FROM=` line.
 
 ## kvs-export.sh
 
