@@ -185,6 +185,11 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | P2 | medium | multi-site | Interrupted `add` leaves a half site that `add` refuses and `start` calls working | repro | open |
 | P3 | low | setup | Import receipt written before cleanup; re-run advises wiping a complete database | repro | open |
 | P4 | low | scripts | `.env` and export renames are never fsynced | code | open |
+| U1 | high | kvsctl | Upgrading an adopted pre-26.10 stack removes acme; certificates stop renewing | repro | open |
+| U2 | medium | kvsctl | `kvsctl upgrade` never fixes files the old root cron created | code | open |
+| U3 | medium | setup | Re-run overwrites `PROJECT_HTTPS_PORT` with the published port | repro | open |
+| U4 | medium | setup | Re-run discards the saved `PHP_VERSION` for the default series | repro | open |
+| U5 | medium | setup | Volume check allows multi-series MariaDB jumps in place, no backup | repro | open |
 
 ## Verification pass
 
@@ -2588,6 +2593,124 @@ accepts; `retirement_prepare_identity`'s no-containers branch (`docker/setup.sh`
 around `:1000`) writes `DOMAIN` and `SITE_PREFIX` separately, so an interrupt in
 between makes the next import reuse the old prefix, and `VOLUME_CHOICE=1` would
 then delete the old site's database volume.
+
+## Upgrading from an older stack release
+
+Old states were rebuilt from git history (release tags 26.10.0 to 26.11.0, and
+`main` at 4448603, July 2026). Not yet independently verified. Stable across
+that range, so skip: volume and network names, the service uids, certificate
+paths, `DOMAIN_SAFE`, database name and user; `.env.example` values for keys an
+older `.env` lacks match the compose defaults; `dotenv.Set` and `set_env_value`
+replace duplicates left by old `>> .env` appends; `kvsctl_min` exists from
+26.10.0.
+
+### U1. Upgrading an adopted pre-26.10 stack removes acme; certificates stop renewing
+
+- **Severity:** high (silent: health checks pass until the certificate expires)
+- **Confidence:** repro (`docker compose config --services` with the same July
+  `.env` lists acme for the 4448603 compose file, not for 26.11.0); the removal
+  follows from `removeLeftovers`, exercised by `scenario_test.go:432`.
+  **Status:** open
+- **Where:** `docker/docker-compose.yml:293-294` (acme under the `direct-tls`
+  profile since 66e90fb); `COMPOSE_PROFILES` in `mergeKept`
+  (`cli/internal/instance/instance.go:342`), so a merge never adds it;
+  `targetServices` (`cli/internal/upgrade/plan.go:678-697`, "an upgrade never
+  changes" `COMPOSE_PROFILES`); `removeLeftovers`
+  (`cli/internal/upgrade/run.go:835-873`); only `configure_direct_tls_profile`
+  (`docker/setup.sh:4412`) adds the profile; `.github/release.env:27`
+  (`MIN_FROM=` empty).
+- **Defect:** a July checkout with `COMPOSE_PROFILES=dragonfly` and
+  `SSL_PROVIDER=letsencrypt` is adopted as 0.0.0 and upgraded to 26.11.0 (allowed:
+  `MIN_FROM` is empty). The run logs "removing the containers of acme: the files
+  laid no longer run them", and acme never starts again.
+- **Fix direction:** add `direct-tls` during the upgrade when `MODE=single` and
+  `SSL_PROVIDER` is letsencrypt or zerossl; make the plan block or warn when an
+  active service would become inactive; or set `MIN_FROM`, or refuse 0.0.0
+  checkouts older than 26.10.0 until `setup.sh` has been re-run.
+- **Test:** an upgrade scenario where the old compose runs acme without a profile
+  and the new one gates it behind `direct-tls`: acme still runs after, or the plan
+  has a blocker.
+
+### U2. `kvsctl upgrade` never fixes files the old root cron created
+
+- **Severity:** medium (background tasks and conversions can fail on files uid 1000
+  cannot rewrite)
+- **Confidence:** code for the missing step; which KVS files break is plausible.
+  **Status:** open
+- **Where:** e3a1dd3 moved the KVS cron task from root to www-data
+  (`docker/cron/crontab:6`); the only ownership fix is
+  `docker/init/docker-entrypoint.d/60-permissions.sh:113`, in kvs-init (the `setup`
+  profile), which kvsctl never runs. kvsctl has no chown.
+- **Defect:** on a July install, `cron.php` ran as root and created root-owned
+  0644/0755 files and directories in the web root; after adopt and upgrade, cron
+  runs as uid 1000 and cannot rewrite or delete them or create files in them.
+- **Fix direction:** a one-time `find ! -uid 1000 -exec chown -h 1000:1000` step, or a
+  blocker, for adopted stacks older than e3a1dd3 (alongside U1).
+- **Test:** an adopted 0.0.0 fixture with a root-owned file in the web root: the
+  upgrade fixes the owner or blocks.
+
+### U3. Re-run overwrites `PROJECT_HTTPS_PORT` with the published port
+
+- **Severity:** medium (every redirect and storage URL points at a port the proxy
+  does not expose)
+- **Confidence:** repro (extracted functions: `PROJECT_HTTPS_PORT=8443`,
+  `project_url=https://mysite.com:8443`). **Status:** open
+- **Where:** `docker/setup.sh:5072` (unconditional
+  `set_env_value PROJECT_HTTPS_PORT "$PUBLIC_HTTPS_PORT"`), feeding
+  `get_project_url` (`docker/init/lib/common.sh`), `10-config-php` (project_url),
+  `40-configure-database` (storage server URLs) and the nginx redirects.
+- **Defect:** an explicit saved value is never kept. The July `.env.example`
+  suggested other ports when 80/443 are in use and `selfsigned` behind a reverse
+  proxy, so a typical old install has `HTTP_PORT=8080`, `HTTPS_PORT=8443`,
+  `SSL_PROVIDER=selfsigned` behind HAProxy on 443, with port-less URLs. After a
+  re-run they all carry `:8443`; a hand-set `PROJECT_HTTPS_PORT=443` is overwritten
+  on the next run. kvsctl merges `443` for the same `.env`, so the two paths
+  disagree.
+- **Fix direction:** derive it only when the key is missing or `HTTPS_PORT` changed
+  in this run; keep an explicit value; ask when `SSL_PROVIDER=selfsigned`.
+- **Test:** `HTTPS_PORT=8443` and `PROJECT_HTTPS_PORT=443`: still 443 after a run.
+
+### U4. Re-run discards the saved `PHP_VERSION` for the default series
+
+- **Severity:** medium (the site is silently rebuilt on another PHP series)
+- **Confidence:** repro (extracted function). **Status:** open
+- **Where:** `select_php_version`, `docker/setup.sh:4006`
+  (`choice=${choice:-$documented}`, also the prompt default) and `:3989`;
+  `KVS_PHP_VERSION` is never persisted; `refuse_unbuildable_kvs_php` (`:1637`)
+  ignores the saved value. Distinct from X2.
+- **Defect:**
+  - Unencoded KVS 7.0.2 installed on PHP 8.4: a headless re-run, or Enter at the
+    prompt, writes `PHP_VERSION=8.1` and rebuilds.
+  - An encoded site installed with `KVS_PHP_VERSION=8.2` is reset the same way.
+  - Unencoded KVS 6.1.x installed with `KVS_PHP_VERSION=8.2` (the documented way):
+    every later re-run, `kvs-install.sh` updates included, refuses with "needs PHP
+    7.4" unless the variable is exported again.
+  kvsctl-managed stacks are protected by `kvsctl_note_php_change`; others are not.
+- **Fix direction:** use the saved `PHP_VERSION` as the default, and keep it when the
+  site is unencoded or the series is compatible; only an explicit
+  `KVS_PHP_VERSION` or a prompt answer changes it.
+- **Test:** `PHP_VERSION=8.4`, `IONCUBE=NO`, a 7.0.2 archive, `HEADLESS=y`: 8.4 kept.
+
+### U5. Volume check allows multi-series MariaDB jumps in place, no backup
+
+- **Severity:** medium (an in-place 10.6 to 12.3 or 11.4 to 12.3 upgrade with nothing
+  taken first)
+- **Confidence:** repro (function extracted, docker stubbed; `mariadb_upgrade_info`
+  confirmed written at init on a real 12.3 volume). **Status:** open
+- **Where:** `ask_existing_volume`, `docker/setup.sh:4848-4886`; the headless
+  default `VOLUME_CHOICE=2` is commented "2=exit (safe default)" at `:1341`, but
+  in this branch 2 means "Keep existing database and upgrade". The version menu
+  (`:2765`) offers only 12.3, 11.8 and 11.4.
+- **Defect:** kvsctl refuses these jumps (one series at a time, 10.x only through
+  a dump: `seriesRefusal`, `unpublishedSeries` in `plan.go`); setup offers them in
+  place. A July install on 10.6 that answers "Keep this version? n" gets 12.3 as
+  the default and "MariaDB will auto-upgrade from 10.6 to 12.3". Headless,
+  `MARIADB_VERSION=12.3` on an 11.4 volume with `KEEP_VERSION=n` skips 11.8.
+- **Fix direction:** refuse a jump of more than one series, and from 10.x, as kvsctl
+  does; require a backup or an explicit choice before an in-place series change;
+  make headless `2` exit in every branch, as its comment says.
+- **Test:** volume 11.4, `MARIADB_VERSION=12.3`, `VOLUME_CHOICE=2`: exits; 11.8 to
+  12.3 needs explicit consent.
 
 ## Checked and found sound
 
