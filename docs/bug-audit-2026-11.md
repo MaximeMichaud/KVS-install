@@ -200,6 +200,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | Y3 | low | native | Native install puts the DB password in `mariadb -e` argv | code | confirmed (corrected) |
 | Y4 | low | kvsctl | kvsctl errors print `.env` values verbatim | repro | confirmed (corrected) |
 | Y5 | low | import | `IMPORT_REMOTE_PASSWORD` sent to an unverified host key | code | confirmed (corrected) |
+| Q1 | high | import | Old paths in `.user.ini` survive before `:` or CRLF; every PHP request fails | repro | open |
+| Q2 | medium | import | `project_path` with a trailing slash: storage and conversion paths never moved | repro | open |
+| Q3 | medium | runtime | PHP and cron cannot reach the site's own URL (multi mode, non-443 port) | repro | open |
+| Q4 | low | runtime | Multi-line storage `urls`: only the first URL is rewritten | repro | open |
+| Q5 | low | native | Native re-run overwrites KVS settings Docker deliberately keeps | repro | open |
+| Q6 | low | native | Native `project_url` edit is a no-op for `http://` or spaced lines | repro | open |
 
 ## Verification pass
 
@@ -3102,6 +3108,121 @@ root-equivalent.
 - **Fix direction:** refuse a password without a known host key, or add an
   `IMPORT_SSH_HOST_KEY` fingerprint pin. Mind `tests/test_setup_import_sources.sh:807-841`,
   which pins the env-only sshpass flow.
+
+## Values written into KVS's configuration
+
+Not yet independently verified. Sound, so skip: every binary path the stack
+writes exists and runs in the 26.11.0 php and cron images (ffmpeg, convert, php,
+mysqldump, yt-dlp, youtube-dl); mysqldump from cron to MariaDB 11.4 works with
+default certificate verification; CRLF `setup.php` and `setup_db.php` are handled
+by `10-config-php.sh`; the current Manticore vendor zip still matches every sed
+in `80-manticore.sh`; root-written plugin `data.dat` files are chowned back; the
+memcache loopback relay exists in both images.
+
+### Q1. Old paths in `.user.ini` survive before `:` or CRLF; every PHP request fails
+
+- **Severity:** high (an imported site answers 404 to every PHP request)
+- **Confidence:** repro (fixture, then php-fpm with nginx: "Unable to open primary
+  script … (Operation not permitted)"; 200 once corrected). **Status:** open
+- **Where:** `adopt_user_ini_paths`,
+  `docker/init/docker-entrypoint.d/10-config-php.sh:88-89` (boundary set
+  `([/"' ;]|$)`).
+- **Defect:** an old project path followed by `:` (the separator of `open_basedir`
+  and `include_path`) is not rewritten, so `open_basedir = /home/old/www:/tmp`
+  stays; a path at the end of a CRLF line is missed too. The log still says
+  "paths under /home/old/www now under /var/www/kvs". The Docker nginx sets no
+  `PHP_ADMIN_VALUE`, so the site's `.user.ini` `open_basedir` applies.
+- **Fix direction:** add `:` (and `,`) to the boundary set and strip `\r` before
+  matching; keep `tests/test_init_binary_paths_hardening.sh:286-306` passing (the
+  `www2` boundary and `contents/` left alone).
+- **Test:** a `.user.ini` with `open_basedir=/home/old/www:/tmp` and a CRLF line:
+  both moved.
+
+### Q2. `project_path` with a trailing slash: storage and conversion paths never moved
+
+- **Severity:** medium (KVS cannot store new uploads or run conversions on its
+  local servers)
+- **Confidence:** repro (MariaDB 11.4, generated SQL and a real
+  `40-configure-database.sh` run). **Status:** open
+- **Where:** `import_path_rewrite_sql`, `docker/lib/import.sh:270-281`, fed raw from
+  `import_validate_site` (`:90`) and `docker/setup.sh:2185` (the remote report,
+  `kvs-export.sh:2207`, not stripped either).
+- **Defect:** with `project_path="/home/old/www/"` the SQL is `WHERE
+  path='/home/old/www/' OR path LIKE '/home/old/www//%'`, which matches nothing.
+  `10-config-php.sh:164` strips the slash, so `setup.php` is fixed but
+  `admin_servers.path` and `admin_conversion_servers.path` keep the old paths;
+  `40-configure-database.sh:22` only replaces `%PROJECT_PATH%`, logs "Server paths
+  configured" and exits 0.
+- **Fix direction:** strip trailing `/` in `import_validate_site` and from the
+  remote report value; optionally have 40 count local server paths outside
+  `KVS_PATH`. `tests/test_setup_import.sh:85` (path without a slash) keeps passing.
+- **Test:** `import_prepare_dump` with old path `/home/old/www/` rewrites to
+  `/var/www/kvs/contents/videos`.
+
+### Q3. PHP and cron cannot reach the site's own URL (multi mode, non-443 port)
+
+- **Severity:** medium (KVS's server-side fetches of its own URLs, including the
+  storage-server checks, fail with "connection refused")
+- **Confidence:** repro of the mechanism (alias resolves to nginx; `:443` answers,
+  `:8443` gives curl error 7); the multi case from the rendered config.
+  **Status:** open
+- **Where:** nginx network aliases for `DOMAIN` and `www.DOMAIN`
+  (`docker/docker-compose.yml:64-67`), kept by `docker-compose.multi.yml`;
+  `docker/multi-site/nginx/kvs-caddy.conf.template` listens on 80 and 8080 only
+  (`:19`, `:25`, `:164`); `get_project_url` (`docker/init/lib/common.sh:89-91`)
+  writes `:<PROJECT_HTTPS_PORT>` into `project_url` and storage URLs, while nginx
+  listens on 443 inside the network (`conf/nginx/templates/kvs.conf.tpl:24`, `:32`).
+- **Defect:** the internal trust design relies on PHP and cron reaching
+  `https://DOMAIN` directly. In multi mode the alias points at an nginx without
+  443; with `HTTPS_PORT=8443` the URL carries a port nginx does not listen on
+  internally.
+- **Fix direction:** drop the `DOMAIN`/`www` aliases in the multi override so the
+  names resolve to Caddy; for a non-443 port, also `listen ${PROJECT_HTTPS_PORT} ssl`
+  inside nginx, or map the name to the published port.
+- **Test:** the compose suite asserts no `DOMAIN` alias in multi; an integration
+  test curls `project_url` from php-fpm with `PROJECT_HTTPS_PORT=8443`.
+
+### Q4. Multi-line storage `urls`: only the first URL is rewritten
+
+- **Severity:** low. **Confidence:** repro (MariaDB 11.4); that KVS stores several
+  URLs per server is inferred from `kvs-export.sh:1210`
+  (`SUBSTRING_INDEX(urls,'\n',1)`), not checked against KVS. **Status:** open
+- **Where:** `docker/init/docker-entrypoint.d/40-configure-database.sh:43-56`; same
+  SQL natively at `kvs-install.sh:1584-1590`.
+- **Defect:** `REGEXP_REPLACE(urls,'^https?://…/contents/',…)` and the stale check
+  are anchored with `^` without multiline, so line 2 onward keeps the old domain
+  while 40 logs success.
+- **Fix direction:** `(?m)` or split per line; make the stale check look at every
+  line.
+- **Test:** a two-line `urls` row with `IMPORT_SOURCE_DOMAIN`: both lines rewritten.
+
+### Q5. Native re-run overwrites KVS settings Docker deliberately keeps
+
+- **Severity:** low. **Confidence:** repro (extracted function against MariaDB)
+  for the first two; code for the third. **Status:** open
+- **Where:** `kvs-install.sh:1587`, `:1592-1594`, `:1550-1556` (reached on an
+  existing site, the N6 and W1 paths).
+- **Defect:**
+  - `SET streaming_skip_ssl_check = ${ssl_skip}` has no WHERE, so remote and CDN
+    servers are reset too (Docker's 40 limits it to local hosts).
+  - `matching -lt 1` fails the step when all storage is external (Docker warns).
+  - `ON DUPLICATE KEY` resets `memory_limit_default` to 256 and
+    `file_upload_max_size` to 2048 on every run (Docker's 70 stopped doing that).
+- **Fix direction:** mirror 40 and 70. `tests/test_kvs_install.sh:493-503` and
+  `:597-630` (mocked mariadb) need cases for a remote row and an existing setting.
+
+### Q6. Native `project_url` edit is a no-op for `http://` or spaced lines
+
+- **Severity:** low. **Confidence:** repro of the sed; whether stock archives use
+  `http://` is not confirmed (30-import's reader accepts `https?://`).
+  **Status:** open
+- **Where:** `kvs-install.sh:1119`
+  (`/^\$config\['project_url'\]=/s|"https://[^"]*"|…|`).
+- **Defect:** `$config['project_url']="http://…"` and `$config['project_url'] =
+  "https://…"` are left unchanged, and nothing reads the value back (the Docker
+  writer `set_setup_php_value` does).
+- **Fix direction:** a quote- and spacing-tolerant setter with a read-back.
+- **Test:** both forms become `https://$URL`.
 
 ## Checked and found sound
 
