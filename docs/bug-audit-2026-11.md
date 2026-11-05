@@ -21,6 +21,7 @@ for a finding marked `confirmed (corrected)`, the note under
 [Verification pass](#verification-pass) overrides the finding's own text,
 including its severity, line numbers and fix direction. Several original fix
 directions would have broken existing behaviour or tests; the notes say which.
+Findings added after that pass (X and later) are marked `open` until verified.
 
 ## How to work through this list
 
@@ -174,6 +175,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | T4 | medium | tests | Manticore runtime privilege check can never run in CI | repro | confirmed |
 | T5 | low | tests | Project URL assertions in a subshell cannot fail | repro | confirmed (corrected) |
 | T6 | low | tests | A stub's `fail` does not stop the `install_gum` test | repro | confirmed |
+| X1 | medium | setup | `DISABLE_KVS_SUPPORT_ACCESS=true` silently reversed by a second `.env` reader | repro | open |
+| X2 | medium | setup | PHP series taken from a stale archive name, not the site in place | repro | open |
+| X3 | low | kvsctl | kvsctl reads booleans case-insensitively; nginx and the scripts do not | repro | open |
+| X4 | low | multi-site | Several archives: setup refuses, site-manager and init pick one at random | repro | open |
+| X5 | low | kvsctl | KVS versions setup accepts (`7.0.3.1`, `7.0`) block kvsctl upgrades | repro | open |
+| X6 | low | setup | Bracketed endpoints compose rejects pass setup's parser | repro | open |
 
 ## Verification pass
 
@@ -2359,6 +2366,117 @@ Searched and found clean: no grep on a file that never exists (all 79 suites run
 with a logging grep wrapper), no test function defined but never called, no bare
 assertion between `set +e` and `set -e`, Docker and CI skips fail correctly
 under `CI=true`, no `t.Parallel` in Go and every table is iterated.
+
+## Same value, two readers
+
+Values computed or parsed in two places that disagree. Each pair was run on the
+same input. Not yet independently verified.
+
+### X1. `DISABLE_KVS_SUPPORT_ACCESS=true` silently reversed by a second `.env` reader
+
+- **Severity:** medium (the operator turns KVS support access off; setup leaves it
+  on and says how to turn it off)
+- **Confidence:** repro (extracted block against real compose). **Status:** open
+- **Where:** `docker/setup.sh:5053` reads `.env` with `source` (last line wins,
+  `export` and quotes accepted), then `:5060` re-reads it with
+  `sed -n 's/^DISABLE_KVS_SUPPORT_ACCESS=//p' .env | head -n 1` (first line wins,
+  `export` lines invisible, quotes kept) and exports the result at `:5069`; compose
+  prefers the process environment, so kvs-init gets it
+  (`docker/docker-compose.yml:372`, `35-harden-admin-users.sh:112`).
+- **Repro:**
+  - `.env.example`'s `DISABLE_KVS_SUPPORT_ACCESS=false` plus an appended `=true`:
+    compose alone reads `true`, setup runs compose with `false`.
+  - `export DISABLE_KVS_SUPPORT_ACCESS=true`: same (`set_env_value` keeps the
+    `export ` prefix, so it persists across runs).
+  - `DISABLE_KVS_SUPPORT_ACCESS="true"`: setup exits with "must be true or false".
+- **Fix direction:** drop the `sed` re-read and use the sourced value (or the
+  request just written). Look for other `sed`/`grep ^KEY=` re-readers of `.env`
+  in the scripts with the same pattern. No test pins the current behaviour.
+- **Test:** setup cases for the duplicate, `export` and quoted forms.
+
+### X2. PHP series taken from a stale archive name, not the site in place
+
+- **Severity:** medium (a re-run rebuilds PHP 8.1 under a site that needs 8.3)
+- **Confidence:** repro (extracted functions on a fixture). **Status:** open
+- **Where:** `kvs_documented_php_version`, `docker/setup.sh:1593-1603`: the
+  `kvs-archive/KVS_X.Y.Z*.zip` name first, then the import's version, then the
+  site's `version.php`. kvsctl reads `version.php`
+  (`cli/internal/instance/instance.go:541`, `KVSVersion`), and setup's own
+  `detect_ioncube` (`:3843-3876`) uses the opposite order.
+- **Repro:** `kvs-archive/KVS_7.0.2_[ex.com].zip` still present, site self-updated
+  from the admin panel to 7.0.3: setup picks `7.0.2` and PHP 8.1, while the site
+  and kvsctl say 7.0.3 (PHP 8.2-encoded files, `.env.example:46-47`). An old 6.2.0
+  archive with a site now on 6.2.1 makes `refuse_unbuildable_kvs_php` refuse the
+  run.
+- **Fix direction:** prefer the site in place and the imported version over the
+  archive name, or refuse when they disagree.
+  `tests/test_setup_php_version_selection.sh` cases 1b and 1c cover only the
+  no-archive case.
+- **Test:** archive 7.0.2 plus site 7.0.3 selects PHP 8.3 (or refuses).
+
+### X3. kvsctl reads booleans case-insensitively; nginx and the scripts do not
+
+- **Severity:** low (every `kvsctl upgrade` fails health and rolls back)
+- **Confidence:** repro (Go test plus the nginx entrypoint under `sh`).
+  **Status:** open
+- **Where:** `SiteHost`, `cli/internal/instance/instance.go:525`
+  (`EqualFold(USE_WWW, "true")`); `cli/internal/doctor/config.go:97-98` (lowercases
+  `USE_WWW`, `CLOUDFLARE_ENABLED`, `ENABLE_MANTICORE`,
+  `DISABLE_KVS_SUPPORT_ACCESS`). Against `docker/nginx/docker-entrypoint.sh:40`,
+  `:171` and `:11-17` (exact `true`/`false`), and `reconfigure.sh:382`, `:423`.
+  setup never validates `USE_WWW`.
+- **Repro:** `USE_WWW=True` with `DOMAIN=sub.example.com`: doctor says ok and
+  `SiteHost` is `www.sub.example.com`, nginx builds without the www name, and
+  `httpCheck` (`verify.go:396`) sends a www SNI that hits `ssl_reject_handshake`.
+  `CLOUDFLARE_ENABLED=TRUE`: doctor ok, nginx exits 1.
+- **Fix direction:** make kvsctl strict (exact `true`/`false`), or have setup
+  refuse other values; check `config_test.go` for pinned tolerance.
+- **Test:** `USE_WWW=True` is reported by doctor as invalid.
+
+### X4. Several archives: setup refuses, site-manager and init pick one at random
+
+- **Severity:** low (multi-site `add b.com` can install another domain's licensed
+  archive or version)
+- **Confidence:** repro for the selection; the licence impact from code.
+  **Status:** open
+- **Where:** `require_single_kvs_archive`, `docker/setup.sh:618-625` (refuses, and
+  says why); `docker/multi-site/site-manager.sh:487` (existence only) and `:158`
+  (`compgen -G … | head -n1`); `docker/init/lib/common.sh:37` (`find … | head -1`,
+  directory order, never matched against the `[domain]`; sites share
+  `../../../kvs-archive`).
+- **Repro:** five `KVS_7.0.3_[*].zip` on ext4: `compgen` picked `[zz.net]`, `find`
+  picked `[b.com]`.
+- **Fix direction:** site-manager selects the archive whose `[...]` matches the
+  domain (or refuses several) and passes the chosen file to the init.
+- **Test:** two archives; `add b.com` uses `[b.com]` or refuses.
+
+### X5. KVS versions setup accepts (`7.0.3.1`, `7.0`) block kvsctl upgrades
+
+- **Severity:** low. **Confidence:** repro for the divergence; whether KVS ever
+  ships four-part or suffixed versions is not confirmed. **Status:** open
+- **Where:** setup takes the leading `X.Y.Z` (`docker/setup.sh:1595`, `:1598`,
+  `:1602`), and `kvs-export.sh:1624` allows `X.Y.Z.W` and suffixes; kvsctl's
+  `semver.Less` sorts unparsable versions first
+  (`cli/internal/semver/semver.go:94-101`), used for `kvs_min` at
+  `cli/internal/upgrade/plan.go:120`.
+- **Repro:** `Less("7.0.3.1","7.0.0")`, `Less("7.0.3a","7.0.0")` and
+  `Less("7.0","7.0.0")` are all true: "update KVS from its admin panel first".
+- **Fix direction:** compare the leading `X.Y.Z` in kvsctl, or skip the blocker
+  when the version does not parse.
+- **Test:** `kvs_min=7.0.0` with KVS `7.0.3.1` is not blocked.
+
+### X6. Bracketed endpoints compose rejects pass setup's parser
+
+- **Severity:** low (every later compose command fails)
+- **Confidence:** repro (compose v5.6.1). **Status:** open
+- **Where:** `parse_publish_endpoint`, `docker/setup.sh:1061` (any bracketed run of
+  hex digits, `:`, `.`, `%`), and its copy at `docker/reconfigure.sh:293`; doctor
+  (`cli/internal/doctor/config.go:66-70`, `net.ParseIP`) refuses them.
+- **Repro:** `HTTPS_PORT='[:]:8443'` or `'[...]:8443'`: setup accepts, compose says
+  "invalid IP address".
+- **Fix direction:** validate the bracketed host as an IPv6 address in both
+  copies. Related to D2.
+- **Test:** both values are refused before `.env` changes.
 
 ## Checked and found sound
 
