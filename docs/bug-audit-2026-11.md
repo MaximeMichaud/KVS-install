@@ -20,8 +20,8 @@ for a finding marked `confirmed (corrected)`, the note under
 [Verification pass](#verification-pass) overrides the finding's own text,
 including its severity, line numbers and fix direction. Several original fix
 directions would have broken existing behaviour or tests; the notes say which.
-The later W findings (documentation against code) were checked against the
-code once and are still `open`.
+The later W findings (documentation against code) and T findings (test suites)
+were checked once and are still `open`.
 
 ## How to work through this list
 
@@ -36,6 +36,12 @@ code once and are still `open`.
 2. One commit per finding (or per tightly related group), message in the style
    of the history (`fix(export): ...`, `fix(install): ...`, `fix(kvsctl): ...`).
 3. Before pushing, run the checks below. All of them must pass.
+4. **The suites are a weaker safety net than they look** (see T1 to T6): the
+   nginx rules are checked as text only, and 15 of the 16 integration suites
+   never run in CI, including `integration_origin_security.sh`, which the C1 and
+   C3 tests should extend. Fix T1 and T2 first, or at least run the integration
+   suites by hand (`tests/integration_*`) for every nginx, import or runtime
+   change.
 
 Status legend: `open` (not yet validated), `confirmed` (reproduced again by an
 independent verification pass, not fixed), `confirmed (corrected)` (real, but
@@ -160,6 +166,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | W6 | low | docs | Standalone PHP-FPM is never set to "static" | code | open |
 | W7 | low | docs | The "monitoring tools" (ncdu, vnstat, nload) are not installed | repro | open |
 | W8 | low | docs | Supported KVS versions disagree across docs, Docker and kvsctl | code | open |
+| T1 | high | tests | nginx deny rules checked as text only, never by request | repro | open |
+| T2 | high | tests | 15 of the 16 integration suites never run in CI | repro | open |
+| T3 | medium | tests | `site-manager.sh remove` traversal check passes for the wrong reason | repro | open |
+| T4 | medium | tests | Manticore runtime privilege check can never run in CI | repro | open |
+| T5 | low | tests | Project URL assertions in a subshell cannot fail | repro | open |
+| T6 | low | tests | A stub's `fail` does not stop the `install_gum` test | repro | open |
 
 ## Verification pass
 
@@ -2113,6 +2125,110 @@ mode with `SSL_PROVIDER=selfsigned`, `docker/reconfigure.sh:1478-1480` sets
 `streaming_skip_ssl_check = 1` on every storage row, remote servers with valid
 certificates included (`.env.example:15-17` and `SECURITY.md` keep verification
 only for single-site).
+
+## Test suites that give false confidence
+
+Each one was proved by mutation: the production code it claims to cover was
+broken in a scratch copy, and the suite still passed (run with `CI=true` through
+`.github/scripts/as-uid-1000.sh`). Not yet independently verified.
+
+### T1. nginx deny rules checked as text only, never by request
+
+- **Severity:** high (guards C1, C3 and the `setup_db.php` exposure)
+- **Where:** `tests/test_nginx_hardening.sh:39-58`
+  (`assert_protected_locations_precede_php`) and `:68-104`
+  (`assert_kvs_internal_directories_denied_before_php`), called at `:512-524`.
+- **Defect:** they check that the `location` lines exist and come before
+  `location ~ \.php$`, and test the regex against their own copy of it; they
+  never look inside the blocks.
+- **Mutations that still passed every `run.sh` suite reading the template:** in
+  `conf/nginx/templates/kvs.conf.tpl`, the internal-directories `deny all;` to
+  `allow all;` (nginx then serves `admin/include/setup_db.php`, with the database
+  password, as plain source); the dotfile block `deny all;` to `allow all;`;
+  `location ~* /tmp/.*\.php$ { internal; }` to `{ }`.
+- **Fix direction:** render the template and send real requests (as
+  `tests/integration_origin_security.sh` does), asserting 403 or 404 for
+  `/admin/include/setup_db.php`, `/admin/data/x.php`, `/.private/x.css` and
+  `/tmp/x.php`; at minimum, check that each block's body is `deny all;` or
+  `internal;`.
+
+### T2. 15 of the 16 integration suites never run in CI
+
+- **Severity:** high
+- **Where:** `tests/run.sh:6-12` runs `test_*.sh` plus
+  `integration_cloudflare_realip.sh` only; `.github/workflows/tests.yml:71` runs
+  only `tests/run.sh`, and no other workflow runs the rest.
+- **Defect:** `integration_origin_security.sh`, `integration_nginx_healthcheck.sh`,
+  `integration_native_import.sh`, `integration_resume_*.sh`,
+  `integration_php_security.py` and the others are manual only.
+- **Evidence:** with T1's dotfile mutation, every `run.sh` suite passed while
+  `integration_origin_security.sh` failed ("hidden file …/.private/proof.css
+  returned HTTP 200"); on clean code it passes. (It pulls `nginx:alpine`; Docker
+  Hub rate limits may require pointing it at the locked nginx digest.)
+- **Fix direction:** run the integration suites in `run.sh` or a CI job, on the
+  locked images, failing (not skipping) under `CI=true` when Docker or an image
+  is missing.
+
+### T3. `site-manager.sh remove` traversal check passes for the wrong reason
+
+- **Severity:** medium (guards a `down -v` and `rm -rf` path; relates to R1 and
+  R5)
+- **Where:** `tests/test_multisite_manager_hardening.sh:125-133` and `:172-178`.
+- **Defect:** the traversal target does not exist, so the script exits on "Site …
+  does not exist" whether or not `validate_domain` runs.
+- **Mutation:** deleting `validate_domain "$domain" || return 1` from `remove_site`
+  and `stop_site` still passed this suite, `test_setup_multisite_hardening.sh`
+  and `test_reconfigure_hardening.sh`. Without validation, an existing target
+  gets `docker compose down -v` and `rm -rf "$site_dir"`. No suite tests `remove`
+  of a real site at all.
+- **Fix direction:** create the directory `sites/../../escape.example` resolves to,
+  with a sentinel file; assert it survives, that the output says "Invalid
+  domain", and that docker was not called. Add a `remove` test on a real site
+  fixture.
+
+### T4. Manticore runtime privilege check can never run in CI
+
+- **Severity:** medium (searchd not root, `manticore.conf` with the database
+  password mode 600)
+- **Where:** `tests/test_cron_hardening.sh:201-235`, gated on
+  `MANTICORE_RUNTIME_CONTAINER`, which nothing sets; `as-uid-1000.sh` also runs
+  suites with `env -i` (PATH, LANG and CI only).
+- **Evidence:** `MANTICORE_RUNTIME_CONTAINER=no-such-container CI=true
+  as-uid-1000.sh tests/test_cron_hardening.sh` passes; without the wrapper it
+  fails with "Manticore runtime container is not running".
+- **Fix direction:** start the container in the suite, or move the check into an
+  integration suite that runs in CI and fails under `CI=true` instead of
+  skipping.
+
+### T5. Project URL assertions in a subshell cannot fail
+
+- **Severity:** low
+- **Where:** `tests/test_docker_hardening.sh:723` and `:726`, inside
+  `( … ) || fail`, where `set -e` is off and only the last command counts.
+- **Mutation:** in `get_project_url` (`docker/init/lib/common.sh`),
+  `port_suffix=":${port}"` to `port_suffix=""` (non-443 ports dropped from the
+  URL written to `setup.php` and the database): all 40 tests passed.
+- **Fix direction:** `|| exit 1` on each line, or move the checks out of the
+  subshell.
+
+### T6. A stub's `fail` does not stop the `install_gum` test
+
+- **Severity:** low
+- **Where:** `tests/test_kvs_install.sh:1082`
+  (`curl() { fail "curl must not run without gpg"; }`): in this suite `fail` only
+  returns 1, and `install_gum` treats a failed curl as a failed key fetch.
+- **Mutation:** removing the `command -v gpg` guard in `install_gum`: the log
+  shows "FAIL: curl must not run without gpg", then "PASS", and the suite exits 0.
+- **Fix direction:** have the stub write a marker file and assert it is absent.
+
+Heads-up: `tests/test_phpmyadmin_init_hardening.sh:302` requires `config.inc.php`
+owned `1000:1000` with mode 600, which is exactly C6; a C6 fix must change that
+assertion on purpose.
+
+Searched and found clean: no grep on a file that never exists (all 79 suites run
+with a logging grep wrapper), no test function defined but never called, no bare
+assertion between `set +e` and `set -e`, Docker and CI skips fail correctly
+under `CI=true`, no `t.Parallel` in Go and every table is iterated.
 
 ## Checked and found sound
 
