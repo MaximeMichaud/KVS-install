@@ -195,6 +195,11 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | V4 | low | setup | DNS check reads `/etc/hosts` and only the first A record | repro | confirmed (corrected) |
 | V5 | low | setup | Docker DNS check ignores AAAA records | code | confirmed (corrected) |
 | V6 | low | export | Export size walk starts one `du` per shallow file | repro | confirmed (corrected) |
+| Y1 | medium | import | Imported `setup_db.php` world-readable for the whole import | repro | open |
+| Y2 | medium | runtime | kvs-init and phpmyadmin-init put secrets in `sed`/`grep` argv | repro | open |
+| Y3 | low | native | Native install puts the DB password in `mariadb -e` argv | code | open |
+| Y4 | low | kvsctl | kvsctl errors print `.env` values verbatim | repro | open |
+| Y5 | low | import | `IMPORT_REMOTE_PASSWORD` sent to an unverified host key | code | open |
 
 ## Verification pass
 
@@ -2944,6 +2949,116 @@ passed over an unbounded list; IPv6 publish parsing is handled.
   depth-1 or depth-2 directory.
 - **Test:** a 20k-file `tmp/` fixture; assert at most N `du` calls, or a time bound.
 
+## Secrets end to end
+
+Every secret was followed from where it is made to where it ends. Not yet
+independently verified. Sound, so skip: `.env` creation and `set_env_value`
+(0600); kvsctl backups (directory 0700, archive 0600, `.env` included), journal,
+state and runlog (0600), and temp files; the `kvs-install.sh` reclone backup;
+import staging and logs (0700); multi-site site `.env` (umask 077); the release
+workflow keys; `kvs-export.sh` (`MYSQL_PWD`, masked hint, mktemp directories);
+Manticore 29.9.0 `SHOW SETTINGS` does not expose `sql_pass`. Container
+environments (`docker inspect`) reach only the docker group, which is
+root-equivalent.
+
+### Y1. Imported `setup_db.php` world-readable for the whole import
+
+- **Severity:** medium (the old server's database user and password readable by
+  every local user, for days with a files-only first pass)
+- **Confidence:** repro (the exact rsync flags under `umask 0`: directories 755,
+  `setup_db.php` 644). **Status:** open
+- **Where:** `docker/lib/import.sh:3002` (`rsync -a --no-perms --chown=1000:1000`,
+  under `umask 0` at `:2318` and `:3203`); directory imports (`import_place_site`,
+  `:566`, `:568`, `rsync -a`/`cp -a`); archive imports (`import_archive_settle`,
+  archive modes kept); `/var/www/<domain>` created 0755
+  (`import_mark_destination`, `:474`).
+- **Defect:** nothing restricts `admin/include/setup_db.php` until kvs-init runs
+  `10-config-php.sh:241` (`chmod 600`). A files-only pass stops with no container
+  started (`README.md:340-346`), so the documented multi-day cutover leaves the
+  file at the old server's mode, which is 0755 when migrating from this repo's own
+  native install (N1).
+- **Fix direction:** right after every pass or extraction, `chmod 600` and chown 1000
+  `admin/include/setup_db.php` if present, as `60-permissions.sh` does. Do not
+  change `--no-perms` or `umask 0`: `tests/test_setup_import_sources.sh:1503-1531`
+  pins that new files keep 644 and that every rsync has `--no-perms`.
+- **Test:** in that fake-ssh harness, a 0644 source `setup_db.php` through
+  `import_remote_files`, `import_place_site` and the archive settle: 600 after each.
+
+### Y2. kvs-init and phpmyadmin-init put secrets in `sed`/`grep` argv
+
+- **Severity:** medium (any local host user reads the KVS database password on
+  every kvs-init run)
+- **Confidence:** repro (argv-recording wrappers logged the secret; a /proc poller
+  as uid 1000 caught 20 of 20 short `sed` calls inside a container fed by
+  `--env-file`). **Status:** open
+- **Where:** `docker/init/docker-entrypoint.d/10-config-php.sh:227-232`
+  (`'${DB_PASSWORD_SED}'` in the `sed -E -i` script); `docker/phpmyadmin/init.sh:225`
+  (`sed` with `${BLOWFISH}`) and `:229` (`grep -Fq "$BLOWFISH"`).
+- **Defect:** processes in a container are host processes, and `/proc/<pid>/cmdline`
+  is world-readable without `hidepid`. Every `setup.sh` run and `site-manager.sh
+  start` exposes it. Minor: `sed -i` keeps the old 0644 mode on the rewritten file
+  until the `chmod` ten lines later. This contradicts the "never argv" claim made
+  earlier for the runtime, now corrected below.
+- **Fix direction:** keep secrets out of argv: a 0600 `sed -f` script file, or `awk`
+  with `ENVIRON[...]`, or `php` with `getenv()`; replace the `grep` with
+  `grep -F -f` from a 0600 file or an in-shell comparison; `chmod 600` before
+  rewriting. The resulting values are pinned by
+  `tests/test_init_setup_db_hardening.sh`, `tests/test_docker_hardening.sh:1882-1900`
+  (escaping of `a&b\c'd|e#f`) and `tests/test_phpmyadmin_init_hardening.sh:313`;
+  changing only how the value is passed keeps them passing.
+- **Test:** argv-recording `sed`/`grep` wrappers in those suites, asserting the
+  secret is in no argument (reuse `assert_secret_is_not_an_argument` from
+  `tests/test_mariadb_password_argv_hardening.sh`).
+
+### Y3. Native install puts the DB password in `mariadb -e` argv
+
+- **Severity:** low (any local user, www-data included, can read it from `ps`
+  during the install; stays after N1 is fixed)
+- **Confidence:** code. **Status:** open
+- **Where:** `kvs-install.sh:1142`, `:1145` (`mariadb -e "CREATE/ALTER USER …
+  IDENTIFIED BY '${databasepassword}'"`; the client never scrubs `-e`); `:1154`
+  (`-p"$databasepassword"`, scrubbed only after the client starts); `:1096` (the
+  `configure_kvs_database_file` sed); `:1055` and `:2422` (the blowfish secret in
+  `sed` argv, and `config.inc.php` written 0644 under `umask 022` and never
+  chmodded, native path; the blowfish secret alone decrypts phpMyAdmin's username
+  cookie, not the password).
+- **Fix direction:** SQL on stdin (`mariadb <<SQL`), `MYSQL_PWD` for the import, a sed
+  script file or ENVIRON-based awk, `chmod 640 root:www-data` on `config.inc.php`.
+- **Test:** in `tests/test_kvs_install.sh`, record `mariadb`/`sed` arguments around
+  `install_KVS` and assert the password is absent; stat `config.inc.php` after
+  `aptinstall_phpmyadmin` and `updatephpMyAdmin`.
+
+### Y4. kvsctl errors print `.env` values verbatim
+
+- **Severity:** low (to the terminal, pasted bug reports, and possibly
+  `journal.json`, which `status`/`history` print; the file is 0600)
+- **Confidence:** repro for the message (temporary Go test); the journal path is
+  plausible. **Status:** open
+- **Where:** `cli/internal/dotenv/dotenv.go:211` ("unterminated quoted value <rest
+  of line>"), `:365`, `:378` ("invalid template …") and `:121`, wrapped unredacted by
+  `cli/internal/instance/instance.go:217` (`ReadEnv`, every command) and `:318`
+  (`ReplaceEnv`/`CheckEnv`, including `restore --with-env`). `doctor/config.go:38`
+  strips everything but the line number on purpose.
+- **Repro:** `MARIADB_ROOT_PASSWORD="Sekr3tValue` gives `line 1: unterminated quoted
+  value "Sekr3tValue`.
+- **Fix direction:** keep only the line number in the dotenv errors, or redact at the
+  instance layer as doctor does. No test pins these texts.
+- **Test:** `ReadEnv` and `CheckEnv` errors on such a file do not contain the value.
+
+### Y5. `IMPORT_REMOTE_PASSWORD` sent to an unverified host key
+
+- **Severity:** low (documented trade-off; the one network-reachable credential
+  path)
+- **Confidence:** code. **Status:** open
+- **Where:** `docker/lib/import.sh:1558-1571` forces
+  `StrictHostKeyChecking=accept-new` together with `sshpass`; `README.md:320`
+  documents that it implies `IMPORT_SSH_ACCEPT_NEW=y`.
+- **Defect:** on the first connection to an unknown host key, the password (often
+  root's) goes to whoever answers.
+- **Fix direction:** refuse a password without a known host key, or add an
+  `IMPORT_SSH_HOST_KEY` fingerprint pin. Mind `tests/test_setup_import_sources.sh:807-841`,
+  which pins the env-only sshpass flow.
+
 ## Checked and found sound
 
 So that a follow-up does not redo them:
@@ -2960,7 +3075,8 @@ So that a follow-up does not redo them:
   signature checks, upgrade journal and rollback.
 - Container runtime: no SQL injection (`TABLES_PREFIX` and
   `IMPORT_SOURCE_DOMAIN` are validated, `DOMAIN` is lowercased and validated);
-  passwords travel through `MYSQL_PWD` or the environment, never argv; `chown`
+  MariaDB client passwords travel through `MYSQL_PWD` or the environment (but
+  see Y2: `sed` and `grep` calls do put secrets in argv); `chown`
   uses `-h` and `find`/`chmod` do not follow symlinks; log rotation; the
   phpMyAdmin download is checksum-pinned; Cloudflare real IP is limited to
   Cloudflare ranges; the deny regex resists encoding and case tricks.
