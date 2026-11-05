@@ -7,7 +7,7 @@ multi-site, the init and service entrypoints, the nginx templates) at commit
 commit, so none of the findings below is covered by an existing test.
 
 Suggested order, by risk on a production host: C1, C2, C3, M1, R1, D1, E1,
-D13, R2, then the other high findings, then medium (M2, D2, D3 among the
+N1, D13, R2, then the other high findings, then medium (M2, D2, D3 among the
 first), then low.
 
 This file is a work list for a follow-up agent: validate each finding, then fix
@@ -126,6 +126,14 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | K4 | medium | kvsctl | A second `restore --latest` replays the safety backup | code | open |
 | K5 | low | kvsctl | `update-cli --version <older>` does nothing and exits 0 | repro | open |
 | K6 | low | kvsctl | `restore <archive> --latest` silently ignores `--latest` | code | open |
+| N1 | high | native | `setup_db.php` (DB password) left world-readable by `chmod -R 755` | code | open |
+| N2 | medium | native | www redirect server always answers 444 in the default mode | repro | open |
+| N3 | medium | native | `php.ini` timeout edits are no-ops; no `fastcgi_read_timeout` | repro | open |
+| N4 | medium | native | Failed ACME silently ships self-signed; storage TLS check left on | code | open |
+| N5 | medium | native | nginx configs always fetched from `main`, failures unchecked | code | open |
+| N6 | medium | native | No KVS rewrites file for an existing site on a new host | repro | open |
+| N7 | low | native | yt-dlp can be replaced by an HTTP error page, as root, nightly | repro | open |
+| N8 | low | native | Printed phpMyAdmin URL unreachable; its install cannot fail | repro | open |
 | S1 | medium | release | Dispatch from a branch named like a version mixes tag and branch | repro | open |
 | S2 | medium | release | Actions pinned by mutable tag in privileged jobs | repro | open |
 | S3 | low | release | Failed lock lookup swallowed; PHP image built from a floating tag | repro | confirmed (corrected) |
@@ -1430,6 +1438,153 @@ M3.
 Minor, not listed: `logs --tail -1` becomes `--tail 0` (nothing instead of
 everything), and `logs` exits 0 on SIGTERM.
 
+## Native (standalone) install
+
+Tested by rendering `conf/nginx/nginx.conf`, `conf/nginx/conf.d/domain.conf`
+and `conf/nginx/globals/*` as `aptinstall_nginx` does, in the nginx 1.31.8
+image against a real php-fpm, plus stock `php.ini-production` files (upstream
+PHP 8.1 and Debian trixie `php8.4-fpm`).
+
+**How the C findings apply to the native config:**
+
+- **C1 applies, partly:** `/contents/other/evil.php` returns 200 and runs. The
+  `.phar` PATH_INFO trick does not (404, thanks to `try_files
+  $fastcgi_script_name =404` in `php_fastcgi.conf`), but a bare
+  `/contents/other/up.phar` is served as raw source. `/tmp/x.php` gets 403
+  (`domain.conf:41` comes before the PHP handler at `:76`).
+- **C3 applies identically:** `general.conf` is included at `domain.conf:30`,
+  before the deny at `:41`; `/admin/data/system/x.js`, `/admin/logs/x.svg`,
+  `/tmp/upload.mp4` and a plain-prefix internal `contents/videos_sources/…mp4`
+  return 200.
+- **C4 applies:** `ssl_early_data on;` at `conf/nginx/nginx.conf:55`.
+- **C5 applies:** `/a.svg` carries only `access-control-allow-origin`.
+- **C7 does not apply:** `install_KVS` deletes `_INSTALL` before the site is
+  enabled.
+
+### N1. `setup_db.php` (DB password) left world-readable by `chmod -R 755`
+
+- **Severity:** high (any local account reads the database password)
+- **Confidence:** code. **Status:** open
+- **Where:** `install_KVS`, `kvs-install.sh:1104` (`chmod -R 755 "$KVS_PATH"`).
+- **Defect:** every file, `admin/include/setup_db.php` included (with `DB_PASS`
+  in clear), becomes 0755, and `sed -i` keeps the mode. All code is also owned
+  and writable by the FPM user (`chown -R www-data`). A re-run applies 755 to
+  the whole site again. The Docker path restricts `setup_db.php` (see
+  `60-permissions.sh`); the native path does not.
+- **Fix direction:** directories 0755, files 0644, `setup_db.php` 0640
+  `root:www-data`; do not give www-data ownership of the code.
+- **Test:** `stat -c %a` on `setup_db.php` after `install_KVS` with stubs: 640.
+
+### N2. www redirect server always answers 444 in the default mode
+
+- **Severity:** medium (`https://www.<domain>/` broken by default)
+- **Confidence:** repro (curl rc 56/92 instead of a 301). **Status:** open
+- **Where:** `conf/nginx/conf.d/domain.conf:97` (`if ($host != $server_name)`),
+  with `REDIRECT_SERVER_NAME="*.$DOMAIN"` from `whatisdomain`
+  (`kvs-install.sh:777`).
+- **Defect:** `$server_name` is the literal `*.example.com`, so the comparison
+  never matches a real host and every request is closed. The certificate covers
+  www whenever its DNS points at the server. With `USE_WWW=true`
+  (`.example.com`), apex to www does redirect (301).
+- **Fix direction:** drop that `if` from the redirect server (its `server_name`
+  already selects the hosts), or compare against `$URL`.
+- **Test:** render both modes; expect 301 for https www and apex.
+
+### N3. `php.ini` timeout edits are no-ops; no `fastcgi_read_timeout`
+
+- **Severity:** medium (long admin actions and uploads fail on native only)
+- **Confidence:** repro. **Status:** open
+- **Where:** `aptinstall_php`, `kvs-install.sh:1038-1039`;
+  `conf/nginx/globals/php_fastcgi.conf`.
+- **Defect:** the patterns are `;max_execution_time = 30` and
+  `;max_input_time = 30`, but stock `php.ini-production` has them uncommented,
+  and `max_input_time` is `60`. After the sed, 30 and 60 remain (Docker uses
+  300 and 360, `docker/php/php.ini:6-7`). The native `php_fastcgi.conf` has no
+  `fastcgi_read_timeout` (the Docker template sets 300), so nginx returns 504
+  after 60 s anyway.
+- **Fix direction:** anchor on `^;?\s*max_execution_time\s*=.*`, or better, drop a
+  `conf.d/99-kvs.ini` with the values; check the result; add
+  `fastcgi_read_timeout 300`.
+- **Test:** run the edit on a fixture `php.ini-production` and grep the
+  expected values.
+
+### N4. Failed ACME silently ships self-signed; storage TLS check left on
+
+- **Severity:** medium (install reported complete with a self-signed
+  certificate, and KVS storage checks fail TLS)
+- **Confidence:** code. **Status:** open
+- **Where:** `install_acme.sh`, `kvs-install.sh:1264-1267`;
+  `configure_kvs_servers` (`:1580`), run at step `:349`, before
+  `install_acme.sh` at `:352`.
+- **Defect:** `ssl_skip` comes from `SSL_PROVIDER`, not from the certificate
+  actually installed. After the fallback (DNS not propagated, or headless
+  ZeroSSL without `EMAIL`, which is never defaulted), the step prints "SSL
+  certificates configured", `streaming_skip_ssl_check=0` stays, and nothing
+  retries ACME before the 365-day self-signed certificate expires. Same family
+  as D14 on the Docker path.
+- **Fix direction:** warn loudly, or return non-zero, on fallback; set
+  `streaming_skip_ssl_check` from the outcome, after the certificate step.
+- **Test:** stub `acme.sh` to exit 1; assert a warning or failure and
+  `ssl_skip=1`.
+
+### N5. nginx configs always fetched from `main`, failures unchecked
+
+- **Severity:** medium (a tagged installer deploys whatever `main` holds; a
+  failed download leaves nginx down at the very end)
+- **Confidence:** code. **Status:** open
+- **Where:** `aptinstall_nginx`, `kvs-install.sh:982-998`.
+- **Defect:** hard-coded `raw.githubusercontent.com/.../main/conf/...`, ignoring
+  the local checkout, `SCRIPT_VERSION` and `KVS_INSTALL_BRANCH` (documented in
+  the header at `:12`, honoured by the Docker path). No `curl` has `|| return`;
+  a failed download only shows at the final `nginx restart` in `install_acme.sh`.
+- **Fix direction:** use the files next to the script when present, otherwise
+  the tag or branch; `curl -f … || return`; `nginx -t` before enabling.
+- **Test:** stub `curl` returning 22 for one file; expect the step to fail.
+
+### N6. No KVS rewrites file for an existing site on a new host
+
+- **Severity:** medium (`nginx: [emerg] open() "/etc/nginx/globals/kvs.conf"
+  failed`; the install ends with nginx down)
+- **Confidence:** repro (`nginx -t`) and code. **Status:** open
+- **Where:** `install_KVS`, `kvs-install.sh:1111-1112`, with
+  `extract_kvs_archive` skipping extraction; the fallback download is commented
+  out at `:989`.
+- **Defect:** `globals/kvs.conf` comes only from `_INSTALL/nginx_config.txt`.
+  When `/var/www/$DOMAIN/admin/include/setup_db.php` already exists, nothing is
+  extracted and there is no re-extraction from the archive (Docker's
+  `50-nginx-rewrites.sh` does that). On the same host, a re-run keeps stale
+  rewrites.
+- **Fix direction:** `unzip -p "$archive" _INSTALL/nginx_config.txt` when
+  `_INSTALL` is absent; refuse an empty file.
+- **Test:** existing-site fixture; assert `kvs.conf` is written and not empty.
+
+### N7. yt-dlp can be replaced by an HTTP error page, as root, nightly
+
+- **Severity:** low (video grabbing broken until a later good run)
+- **Confidence:** repro (curl exits 0 on a 404 without `-f`). **Status:** open
+- **Where:** `install_yt-dlp`, `kvs-install.sh:713`; root cron at `:1476`.
+- **Defect:** `curl -L … -o "$bin_dir/yt-dlp"` without `-f`, writing in place:
+  a 404 or 5xx body ("Not Found") overwrites the binary and the step passes.
+  The Docker path (`docker/cron/yt-dlp-update.sh`) checks the sha256.
+- **Fix direction:** `curl -fsSL -o tmp`, verify (sha256 from the release, and
+  that it runs), then `mv`.
+- **Test:** a stub server answering 404; assert the old binary is kept.
+
+### N8. Printed phpMyAdmin URL unreachable; its install cannot fail
+
+- **Severity:** low. **Confidence:** repro for the URL (Host=IP gets an empty
+  reply); code for the rest. **Status:** open
+- **Where:** `setupdone`, `kvs-install.sh:1651`; `aptinstall_phpmyadmin`,
+  `:1046-1055`.
+- **Defect:** it prints `http://$IPV4/phpmyadmin`, but the port-80
+  `default_server` returns 444. `aptinstall_phpmyadmin` checks none of its
+  curl, tar or sed calls (unlike `updatephpMyAdmin`): an empty `PHPMYADMIN_URL`
+  leaves an empty `config.inc.php` and prints "phpMyAdmin installed". A re-run
+  regenerates `config.inc.php` and the blowfish secret over local edits.
+- **Fix direction:** print `https://$URL/phpmyadmin/`; reuse `updatephpMyAdmin`
+  for the first install.
+- **Test:** assert the printed URL; an empty download page must fail the step.
+
 ## Release and supply chain
 
 ### S1. Dispatch from a branch named like a version mixes tag and branch
@@ -1603,6 +1758,11 @@ So that a follow-up does not redo them:
   `verify-manifest.sh` fails closed without keys and has no TOCTOU; key
   rotation checks; the bundle rejects symlinks and submodules; every
   Dockerfile download is checked against a sha256; no secret in a layer.
+- Native install: MariaDB root is unix_socket only; all three apt sources have
+  `signed-by`; `insert_cronjob` is idempotent across runs and PHP version
+  changes; ACME renewal webroot reachable for apex and www; IonCube extension
+  directories correct for PHP 7.4 to 8.4; phpMyAdmin's nested locations win and
+  alias traversal returns 400.
 - Not a bug today, but worth knowing: `backup.RestoreEnv` (`backup.go`, around
   line 1290) writes through a fixed `.kvsctl.tmp` path with `O_TRUNC` and
   follows symlinks. Nothing calls it yet.
