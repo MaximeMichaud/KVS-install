@@ -21,7 +21,6 @@ for a finding marked `confirmed (corrected)`, the note under
 [Verification pass](#verification-pass) overrides the finding's own text,
 including its severity, line numbers and fix direction. Several original fix
 directions would have broken existing behaviour or tests; the notes say which.
-Findings added after that pass (X and later) are marked `open` until verified.
 
 ## How to work through this list
 
@@ -175,21 +174,21 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | T4 | medium | tests | Manticore runtime privilege check can never run in CI | repro | confirmed |
 | T5 | low | tests | Project URL assertions in a subshell cannot fail | repro | confirmed (corrected) |
 | T6 | low | tests | A stub's `fail` does not stop the `install_gum` test | repro | confirmed |
-| X1 | medium | setup | `DISABLE_KVS_SUPPORT_ACCESS=true` silently reversed by a second `.env` reader | repro | open |
-| X2 | medium | setup | PHP series taken from a stale archive name, not the site in place | repro | open |
-| X3 | low | kvsctl | kvsctl reads booleans case-insensitively; nginx and the scripts do not | repro | open |
-| X4 | low | multi-site | Several archives: setup refuses, site-manager and init pick one at random | repro | open |
-| X5 | low | kvsctl | KVS versions setup accepts (`7.0.3.1`, `7.0`) block kvsctl upgrades | repro | open |
-| X6 | low | setup | Bracketed endpoints compose rejects pass setup's parser | repro | open |
-| P1 | medium | multi-site | Full disk replaces the primary Caddy route with an empty file; exit 0 | repro | open |
-| P2 | medium | multi-site | Interrupted `add` leaves a half site that `add` refuses and `start` calls working | repro | open |
-| P3 | low | setup | Import receipt written before cleanup; re-run advises wiping a complete database | repro | open |
-| P4 | low | scripts | `.env` and export renames are never fsynced | code | open |
-| U1 | high | kvsctl | Upgrading an adopted pre-26.10 stack removes acme; certificates stop renewing | repro | open |
-| U2 | medium | kvsctl | `kvsctl upgrade` never fixes files the old root cron created | code | open |
-| U3 | medium | setup | Re-run overwrites `PROJECT_HTTPS_PORT` with the published port | repro | open |
-| U4 | medium | setup | Re-run discards the saved `PHP_VERSION` for the default series | repro | open |
-| U5 | medium | setup | Volume check allows multi-series MariaDB jumps in place, no backup | repro | open |
+| X1 | medium | setup | `DISABLE_KVS_SUPPORT_ACCESS=true` silently reversed by a second `.env` reader | repro | confirmed (corrected) |
+| X2 | medium | setup | PHP series taken from a stale archive name, not the site in place | repro | confirmed |
+| X3 | low | kvsctl | kvsctl reads booleans case-insensitively; nginx and the scripts do not | repro | confirmed (corrected) |
+| X4 | low | multi-site | Several archives: setup refuses, site-manager and init pick one at random | repro | confirmed (corrected) |
+| X5 | low | kvsctl | KVS versions setup accepts (`7.0.3.1`, `7.0`) block kvsctl upgrades | repro | confirmed (corrected) |
+| X6 | low | setup | Bracketed endpoints compose rejects pass setup's parser | repro | confirmed (corrected) |
+| P1 | medium | multi-site | Full disk replaces the primary Caddy route with an empty file; exit 0 | repro | confirmed |
+| P2 | low | multi-site | Interrupted `add` leaves a half site that `add` refuses and `start` calls working | repro | confirmed (corrected) |
+| P3 | low | setup | Import receipt written before cleanup; re-run calls a complete database partial | repro | confirmed (corrected) |
+| P4 | low | scripts | `.env` and export renames are never fsynced | code | confirmed (corrected) |
+| U1 | high | kvsctl | Upgrading an adopted pre-26.10 stack removes acme; certificates stop renewing | repro | confirmed (corrected) |
+| U2 | medium | kvsctl | `kvsctl upgrade` never fixes files the old root cron created | code | confirmed (corrected) |
+| U3 | low | setup | Re-run overwrites `PROJECT_HTTPS_PORT` with the published port | repro | confirmed (corrected) |
+| U4 | medium | setup | Re-run discards the saved `PHP_VERSION` for the default series | repro | confirmed (corrected) |
+| U5 | medium | setup | Volume check allows multi-series MariaDB jumps in place, no backup | repro | confirmed (corrected) |
 | V1 | medium | import | tar archive with a non-ASCII site directory or dump name cannot be imported | repro | confirmed |
 | V2 | medium | import | A resumed directory import is refused for lack of space | repro | confirmed (corrected) |
 | V3 | low | scripts | Under a UTF-8 locale, domain and prefix checks accept Unicode | repro | confirmed (corrected) |
@@ -690,6 +689,76 @@ verdicts and corrections override the finding text below where they differ.
   and the asserts at `:472-476` and around `:630-656`; it also changes semantics
   (hard links and `-L` targets counted once per batch, coarser progress, a
   timeout kill loses up to a batch). Rewrite those tests on purpose.
+- **X1 — confirmed, worse.** Also an explicit request is reversed: with
+  `DISABLE_KVS_SUPPORT_ACCESS=true ./setup.sh` and an `export …` line already in
+  `.env`, `set_env_value` keeps the prefix, the `sed` matches nothing and the run
+  exports `false`. The same `sed … | head -n1` pattern reads `TABLES_PREFIX` in
+  `site-manager.sh:148`.
+- **X2 — confirmed.** Imports are not affected (`import_check_kvs_archive_version`,
+  `docker/setup.sh:2344`, refuses a mismatching archive); it applies to re-runs with
+  the site in place.
+- **X3 — corrected.** Doctor's HTTP probe (`cli/internal/doctor/http.go:82-91`) uses
+  the same www SNI, so doctor fails (blaming nginx); only its config check says ok.
+  The tolerance is pinned in `cli/internal/instance/instance_test.go:120`
+  (`{"TRUE","www.example.com"}`), not `config_test.go`: a strict `SiteHost` must
+  update that test. `CLOUDFLARE_ENABLED=TRUE` is already refused by setup (`:1200`)
+  and reconfigure (`:382`): hand-edited `.env` only.
+- **X4 — corrected.** The `site-manager.sh:158` pick only feeds the table prefix
+  (`ktvs_` in every archive): nearly harmless. The real impact is `find_kvs_archive`
+  (`docker/init/lib/common.sh:37`), used by `00-extract`, `30-import-database` and
+  `50-nginx-rewrites`. Multi-site needs several licensed archives in one shared
+  directory, yet `require_single_kvs_archive` makes a primary `setup.sh` re-run
+  refuse them: match by `[domain]` in setup too.
+- **X5 — confirmed; fix scoped.** Apply the leading-`X.Y.Z` comparison only at
+  `plan.go:120`; do not loosen `semver.Parse` or `Less`, which order stack releases
+  in about 20 places (`semver_test.go` pins rejecting two-component versions).
+- **X6 — corrected.** Compose also rejects zone IDs (`[fe80::1%1]:8443`) and
+  out-of-range addresses, so drop `%` too. The regex is at `docker/setup.sh:1062`;
+  the reconfigure copy is `parse_publish_endpoint_port` (`reconfigure.sh:284`,
+  `:293`). Keep the `[::1]` tests passing
+  (`test_setup_multisite_hardening.sh:673`, `:730`; `test_docker_hardening.sh:218`).
+- **P1 — confirmed** (the real Caddyfile validates with the empty import, rc 0).
+- **P2 — confirmed; severity low (was medium).** Recovery exists:
+  `site-manager.sh remove <domain>` cleans the half site (leaving the stray temp
+  file) and `proxy-config <domain>` rewrites the route. `add_site` at `:451`,
+  `start_site` at `:585`.
+- **P3 — corrected headline.** The message also offers "or remove the staged dump
+  to keep the database as it is"; the misleading part is "may be partial". The
+  leftover check is called at `:3553`. Another route to receipt-plus-stage: a
+  re-import stages the new dump before `import_replace_database_volume` removes
+  the receipt (`:5407`); the proposed fix is still safe there.
+- **P4 — corrected.** `docker/cron/yt-dlp-update.sh:135` does call `sync`, and
+  `tests/test_yt_dlp_updates.sh:499-542` has a logging `mv`/`sync` stub to reuse.
+- **U1 — confirmed, worse.** `cli/README.md` says setup refuses a kvsctl-managed
+  stack after its first upgrade, so re-running `setup.sh` is no remedy: the fix must
+  be a plan blocker or an automatic profile change. Nothing in the plan warns about
+  a dropped service.
+- **U2 — confirmed (code); context.** In July, PHP-FPM already ran as uid 1000
+  against root-owned cron files, masked by setup re-runs: a pre-existing problem
+  the upgrade makes permanent and extends to cron. kvsctl's only chown is
+  `keepOwner` for `.env`.
+- **U3 — corrected; severity low (was medium).** The overwrite is intended and
+  documented (`docker/.env.example:110-111`: derived from `HTTPS_PORT`); what is
+  missing is an override for reverse proxies. It hits only installs from before
+  36f59d0 (2026-09-22) behind a port-translating proxy (in practice self-signed
+  single mode). `reconfigure.sh:1561` writes it unconditionally too. The
+  setup/kvsctl divergence is real.
+- **U4 — corrected fix.** The prompt shows "(default: 8.1)", so Enter is a visible
+  choice; the headless case is the silent one. For encoded sites, the documented
+  series must still win when it goes up: keeping a saved 8.1 for a 7.0.3 archive
+  would bring back Issue #33 (tested in `test_setup_php_version_selection.sh`).
+  Do not guess "compatible" for ionCube files. `refuse_unbuildable_kvs_php` at
+  `:1634`.
+- **U5 — real; fix direction wrong.** In the same-version (around `:4950`) and
+  unknown-version (around `:4900`) branches, `2` means "keep the existing
+  database": headless `2` is how every headless re-run keeps its database
+  (`tests/test_mariadb_versions.sh:103-117` expects `KEEP_EXISTING_DB=true`;
+  `tests/test_import_later_passes.sh:394`, `:442`, `:507` depend on it). Do **not**
+  make `2` exit everywhere: make only the version-mismatch branch default to exit
+  or require an explicit opt-in, and fix the stale comment at `:1341`. Also, the
+  interactive default in that branch is `3` (exit), and the headless jump needs
+  `KEEP_VERSION=n`. `MARIADB_AUTO_UPGRADE` (`docker-compose.yml:166`) backs up only
+  the system tables.
 
 ## kvs-export.sh
 
