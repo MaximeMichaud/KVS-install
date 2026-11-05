@@ -13,15 +13,15 @@ first), then low.
 This file is a work list for a follow-up agent: fix each finding with a
 regression test, or reject it with the reason.
 
-Every finding from E1 to S8 has been through an independent, adversarial
+Every finding from E1 to S8 (except C9 to C11) has been through an independent, adversarial
 verification pass (reviewers who did not write it tried to disprove it, most
 of them by reproduction). None was rejected. Many write-ups were corrected:
 for a finding marked `confirmed (corrected)`, the note under
 [Verification pass](#verification-pass) overrides the finding's own text,
 including its severity, line numbers and fix direction. Several original fix
 directions would have broken existing behaviour or tests; the notes say which.
-The later W findings (documentation against code) and T findings (test suites)
-were checked once and are still `open`.
+C9 to C11, the W findings (documentation against code) and the T findings
+(test suites) came later; they were checked once and are still `open`.
 
 ## How to work through this list
 
@@ -125,6 +125,9 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | C6 | low | runtime | PHP-FPM can rewrite phpMyAdmin's `config.inc.php` | code | confirmed (corrected) |
 | C7 | low | nginx | `_INSTALL/` (`install_db.sql`) served as static files | repro | confirmed (corrected) |
 | C8 | low | runtime | Init re-runs rewrite the title; Manticore cron failure hidden | code | confirmed (corrected) |
+| C9 | medium | runtime | PHP-FPM workers exceed MariaDB's 151 connections on 38 GiB+ hosts | repro | open |
+| C10 | low | runtime | Internal TLS trust installs a CA:TRUE self-signed cert as a root | repro | open |
+| C11 | low | runtime | Buffer pool of 5M is accepted, but MariaDB refuses to start | repro | open |
 | R1 | high | multi-site | `remove` of a new site deletes a single-mode primary's data | repro | confirmed |
 | R2 | high | multi-site | Two sites can claim the same `www` host, breaking Caddy for all | repro | confirmed |
 | R3 | medium | reconfigure | Multi-mode rollback leaves the recreated containers changed | repro (stub) | confirmed (corrected) |
@@ -1386,6 +1389,67 @@ local php image (8.1.34).
   not start, or make the healthcheck look at the last reindex.
 - **Test:** run `10-config-php.sh` twice on an imported `setup.php`; assert the
   title is unchanged.
+
+### C9. PHP-FPM workers exceed MariaDB's 151 connections on 38 GiB+ hosts
+
+- **Severity:** medium (`ERROR 1040 Too many connections` under load)
+- **Confidence:** repro for the arithmetic and the server limit; the site
+  failure end to end is plausible (it assumes each busy worker holds one
+  connection). **Status:** open
+- **Where:** `configure_php_fpm`, `docker/php/fpm-config.sh:100-104`; the `mariadb`
+  command in `docker/docker-compose.yml:132-139` sets no `max_connections`
+  (nothing in the repo does).
+- **Defect:** automatic `max_children = MemTotal * 25% / 64 MiB` has no upper bound
+  and ignores MariaDB's default of 151 connections. 64 GiB gives 256 children,
+  128 GiB gives 512; `mariadb:12.3.3` reports `@@max_connections=151`, and 160
+  concurrent sessions got nine 1040 errors. Cron and the Manticore indexer also
+  hold connections.
+- **Fix direction:** cap automatic `max_children` (for example 128, or a
+  `PHP_FPM_MAX_CHILDREN_CAP` setting), and/or pass `--max-connections` to MariaDB
+  from the same budget plus headroom. `tests/test_php_fpm_resources.sh` cases are
+  all at or below 32 GiB (128 children), so a cap of 128 or more keeps them
+  passing.
+- **Test:** a 64 GiB `MemTotal` fixture gives `max_children` at most the configured
+  `max_connections` minus a reserve.
+
+### C10. Internal TLS trust installs a CA:TRUE self-signed cert as a root
+
+- **Severity:** low (whoever holds the nginx key, in the acme-certs volume, can
+  intercept every outbound TLS connection from PHP-FPM and cron)
+- **Confidence:** repro. **Status:** open
+- **Where:** `self_signed`, `docker/tls/internal-trust.sh:19-25`, used by `publish`
+  (`:33-44`) and `sync_trust` (`:73-87`); neither `certificate_pair_is_valid`
+  (`docker/nginx/docker-entrypoint.sh:60-122`) nor
+  `nginx_certificate_matches_provider` (`docker/reconfigure.sh:1146`) checks
+  basicConstraints.
+- **Defect:** only subject equals issuer and `openssl verify -purpose sslserver
+  -verify_hostname` are checked. The repo's own generator adds `CA:FALSE`, but an
+  operator-supplied `openssl req -x509 …` certificate gets `CA:TRUE` by default.
+- **Repro:** with such a certificate and `SSL_PROVIDER=selfsigned`, `publish` then
+  `sync` installed it; a leaf for `api.github.com` signed with the nginx key then
+  verified `OK` against `/etc/ssl/certs/ca-certificates.crt`, and PHP's
+  `openssl_x509_checkpurpose(…, X509_PURPOSE_SSL_SERVER)` trusted it.
+- **Fix direction:** in `self_signed`, refuse unless basicConstraints is absent or
+  `CA:FALSE` (`openssl x509 -noout -ext basicConstraints`); have nginx's
+  `certificate_pair_is_valid` regenerate such a pair. The repo's certificates
+  carry `CA:FALSE`, so `tests/test_internal_tls_retry.sh` and
+  `tests/integration_internal_tls.py` should be unaffected.
+- **Test:** publish a CA:TRUE self-signed certificate; `publish` and `sync`
+  refuse it, and the bundle does not verify a leaf for another hostname.
+
+### C11. Buffer pool of 5M is accepted, but MariaDB refuses to start
+
+- **Severity:** low. **Confidence:** repro (mariadb 11.4.13 and 12.3.3).
+  **Status:** open
+- **Where:** `database_configure_resources`, `docker/lib/database.sh:531`
+  (`[ "$pool_mb" -lt 5 ]`, "at least 5M").
+- **Defect:** `MARIADB_BUFFER_POOL_SIZE_REQUEST=5M` is saved to `.env`, then MariaDB
+  aborts with "innodb_page_size=16384 requires innodb_buffer_pool_size >= 6 MiB";
+  `database_wait_ready` reports a stopped container and every re-run reuses the
+  saved 5M.
+- **Fix direction:** minimum 6M (or 8M), with the message updated. No test covers
+  the boundary (`tests/test_database_resources.sh` uses 64M as its smallest).
+- **Test:** 5M refused before `.env` changes; 6M accepted.
 
 ## reconfigure.sh and multi-site
 
