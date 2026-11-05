@@ -220,11 +220,11 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | O4 | low | export | Re-export over an existing output fails on coreutils older than 8.6 | repro | confirmed |
 | O5 | low | import | A csh/tcsh login shell breaks the parallel transfer | repro | confirmed (corrected) |
 | O6 | low | export | Without procps, `--size-timeout` does not bound the walk | repro | confirmed (corrected) |
-| L1 | medium | kvsctl | A frozen manifest is accepted forever; first contact trusts any old one | repro | open |
-| L2 | low | kvsctl | `update-cli` treats any `Detect` error as "no installation" and skips its checks | repro | open |
-| L3 | low | kvsctl | No client-side rules on what a signed bundle may overwrite | repro | open |
-| L4 | low | kvsctl | `version --check` and `releases` skip the stale-manifest floor | repro | open |
-| L5 | low | docs | The first kvsctl binary is installed without a signature check | code | open |
+| L1 | low | kvsctl | A frozen manifest is accepted forever; first contact trusts any old one | repro | confirmed (corrected) |
+| L2 | low | kvsctl | `update-cli` treats any `Detect` error as "no installation" and skips its checks | repro | confirmed |
+| L3 | low | kvsctl | No client-side rules on what a signed bundle may overwrite | repro | confirmed (corrected) |
+| L4 | low | kvsctl | `version --check` and `releases` skip the stale-manifest floor | repro | confirmed (corrected) |
+| L5 | low | docs | The first kvsctl binary is installed without a signature check | code | confirmed (corrected) |
 
 ## Verification pass
 
@@ -937,6 +937,39 @@ verdicts and corrections override the finding text below where they differ.
   exporter's own group); walking `/proc/*/stat` for parent PIDs is the procps-free
   option. Only closing fd 3 would leave the `du` processes walking the live
   server's disk.
+- **L1 — confirmed; severity low (was medium).** No signature timestamp
+  (`manifest.go:197-201`), no expiry, no `time.Since` on `Updated`; `adopt` never
+  seeds `updates.json`; the installed version is no floor. But the default URL is
+  HTTPS to github.com (`manifest.go:48`), so a man in the middle needs a TLS break:
+  the realistic cases are a `--manifest` mirror or whoever controls "latest".
+  `cli/README.md:184-185` describes the flag correctly; `docs/releasing.md:667-669`
+  does not. `CheckManifest` is `upgrade.go:445-495`. A 30-day refusal without clock
+  injection fails 6 tests in `manifest_check_test.go`; the `status` warning also
+  needs `Updated` stored in `latestKnown`.
+- **L2 — confirmed.** In practice only a broken or missing `.env` on an adopted stack
+  matters (multi-site and no-`DOMAIN` installs normally have no journal). No test
+  runs update-cli's command path with an installation.
+- **L3 — confirmed, worse; fix corrected.** Those paths then join `state.Files`, so
+  the next release that drops them deletes them (`docker/.env` removed, reproduced),
+  and a rollback `Sync` (`rollback.go:379`) too. A correctly built bundle cannot
+  contain them (`kvsctl-release` `main.go:487-512` uses `git ls-tree` over
+  `release.Paths` and allows modes 0644 and 0755 only), so low stands. Fix:
+  `docker/RELEASE` and `docker/docker-compose.release.yml` already fall under the
+  `docker` entry, so an allowlist is not enough; the work is a denylist inside
+  `docker/` built from `docker/.gitignore`: the four override names
+  (`run.go:1061`, `overrideFiles`), `docker/nginx/dhparam.pem`,
+  `docker/nginx/conf.d/*.conf` (not the whole directory: git tracks its
+  `.gitignore`), `docker/multi-site/sites/`. Masking with `& 0o755` in both `Extract`
+  and `lay` passes the release, upgrade and kvsctl suites.
+- **L4 — confirmed.** `releases` triggers the reminder, which calls `CheckManifest`,
+  but `remind` drops the stale error silently (`main.go:220-226`). Cover `--json`;
+  do not rely on `Detect` succeeding (L2). `version --check` is `main.go:631-674`.
+- **L5 — confirmed; fix caveat.** The signed manifest carries each CLI asset's sha256
+  but no install doc uses it. A check against it needs a verifier from outside the
+  release (`kvsctl-release-linux-amd64` ships in the same release): build
+  kvsctl-release from the tag, or verify the Ed25519 signature with OpenSSL 3
+  against `ReleasePublicKey` from the source tree; a detached signature over
+  `SHA256SUMS` needs the same trust anchor.
 
 ## kvs-export.sh
 
