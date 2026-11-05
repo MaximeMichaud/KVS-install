@@ -92,6 +92,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | D10 | medium | setup | Multi-site Caddy exception also skips loopback port conflicts | repro | open |
 | D11 | low | setup | Partial GeoIP database kept as "already configured" | repro | open |
 | D12 | low | setup | Started from another project's directory, it uses that `.env` | repro | open |
+| D13 | high | setup | Admin password lost when kvs-init fails after setting it | code | open |
+| D14 | medium | setup | A failed ACME issuance aborts before cache, Manticore, cron, import finish | code | open |
+| D15 | medium | setup | Default-admin checks of setup and 35-harden disagree | repro | open |
+| D16 | medium | setup | One-time admin password saved in the 0644 install log | repro | open |
+| D17 | low | setup | Switch to self-signed keeps a public cert nothing renews | repro | open |
+| D18 | low | setup | Step output goes to predictable `/tmp` files | repro (partial) | open |
 | C1 | critical | runtime | PHP runs in upload directories, `.phar` included | repro | open |
 | C2 | critical | runtime | Root init container runs a script PHP can write | repro | open |
 | C3 | high | nginx | Asset regexes win over the internal-directories deny | repro | open |
@@ -686,6 +692,112 @@ The repros below ran a sed-patched copy of `setup.sh` with `docker`, `curl`,
   the script's directory as today.
 - **Test:** run from a directory holding an unrelated `docker-compose.yml` and
   `.env`; assert that `.env` is untouched.
+
+### D13. Admin password lost when kvs-init fails after setting it
+
+- **Severity:** high (nobody ever sees the admin password; a later run reports
+  it as "preserved and verified")
+- **Confidence:** code (the only gate is `run_step`'s exit status).
+  **Status:** open
+- **Where:** `docker/setup.sh:5030-5035` (generated), `:5634-5643` (printed only
+  after `run_step … kvs-init` succeeds), `:6008` (summary);
+  `docker/init/docker-entrypoint.d/35-harden-admin-users.sh:73-96`;
+  `docker/init/init-kvs.sh:36-49`.
+- **Defect:** 35-harden writes the new hash, then later init scripts run. If
+  one fails (40-configure-database, 50-nginx-rewrites, or 80-manticore when
+  kernel-scripts.com is unreachable), `init-kvs.sh` exits 1 and `set -e` ends
+  setup before the password is printed. On the re-run with "Keep" (headless
+  default `VOLUME_CHOICE=2`), no password is generated, the default-admin probe
+  returns 0, and the summary says "Existing non-default password preserved and
+  verified".
+- **Fix direction:** show the password (or write it to a 0600 file) before
+  kvs-init runs, or run 35-harden last; drop "verified" from the summary.
+- **Test:** stub `docker compose run kvs-init` to exit 1 on a fresh install;
+  assert the one-time password is in the output.
+
+### D14. A failed ACME issuance aborts before cache, Manticore, cron, import finish
+
+- **Severity:** medium (half-started stack; an import may need a full redo)
+- **Confidence:** code, with the service dependencies checked in
+  `docker/docker-compose.yml`. **Status:** open
+- **Where:** `docker/setup.sh:5883` (`configure_direct_acme_certificate || exit $?`),
+  before `setup_start_runtime_services` (`:5938`), `import_finish` (`:5954`) and
+  `setup_start_cron` (`:5955`). The DNS menu at `:5243` offers "Continue anyway
+  (SSL will fail)".
+- **Defect:** with DNS still on the old server (normal mid-migration) or Let's
+  Encrypt down, only mariadb, php-fpm, nginx (self-signed) and acme run. Cache,
+  Manticore and cron never start and the summary is not printed. On an import,
+  `KVS_INSTALL_IMPORT` and the staged dump stay; `--resume-import` refuses once
+  MariaDB has restarted (for example after a reboot while waiting for DNS), so
+  only a full re-import is left.
+- **Fix direction:** make an ACME failure a warning: keep the self-signed
+  certificate, finish the runtime start, cron and `import_finish`, print the
+  retry command, and exit non-zero at the end.
+- **Test:** stub the acme exec to fail; assert `setup_start_runtime_services` and
+  `import_finish` still run.
+
+### D15. Default-admin checks of setup and 35-harden disagree
+
+- **Severity:** medium (kvs-init stops on "still uses the archive default
+  credential"; one more run needed, or every run fails)
+- **Confidence:** repro (real MariaDB). **Status:** open
+- **Where:** `docker/setup.sh:5473-5484` versus
+  `docker/init/docker-entrypoint.d/35-harden-admin-users.sh:102`.
+- **Defect:** setup counts `user_id=1 AND login='admin' AND pass=default` and
+  treats a query error as 0; 35-harden checks `user_id=1 AND pass=default`.
+  - Interrupted first run (volume initialised, kvs-init not run): the re-run
+    keeps the database, the table is missing, setup reads 0 and generates no
+    password; 30-import-database seeds admin/123 and 35-harden fails.
+  - A kept or imported database whose user 1 was renamed but still has the
+    default password: setup reads 0 on every run, and every run fails.
+- **Fix direction:** decide inside kvs-init (generate there and report back),
+  or use the same predicate in setup; treat a missing table as "will be
+  seeded"; print the real login instead of a hardcoded `admin`.
+- **Test:** both queries against MariaDB with `(1,'boss',default)`, and with no
+  table.
+
+### D16. One-time admin password saved in the 0644 install log
+
+- **Severity:** medium (a credential kept in a file that goes into backups and
+  log shipping, while setup says it is not logged)
+- **Confidence:** repro (the log was 644 and held "One-time admin password:
+  SECRETabc"). **Status:** open
+- **Where:** `docker/setup.sh:5636-5639` ("It is not written to .env or the setup
+  log"); `kvs-install.sh:30` (`umask 022`), `:52` and `:71-76` (all output, setup
+  included, through `tee -i /root/kvs-install.log`).
+- **Fix direction:** print the password to `/dev/tty` or the saved fd 3 only, or
+  to a separate 0600 file; create the install log 0600.
+- **Test:** source `kvs-install.sh`, call `initialize_runtime_output <tmpfile>`,
+  run the print block; assert the password is absent and the mode is 600.
+
+### D17. Switch to self-signed keeps a public cert nothing renews
+
+- **Severity:** low (expired certificate after at most 90 days, while setup says
+  self-signed is in use)
+- **Confidence:** repro (real nginx image: the CA certificate's sha256 was
+  unchanged). **Status:** open
+- **Where:** `configure_direct_tls_profile`, `docker/setup.sh:4412-4442` (removes
+  the acme container), and `:5881`; `docker/nginx/docker-entrypoint.sh:143-149`
+  keeps any valid pair, and its monitor (`:217-232`) only regenerates
+  self-signed certificates.
+- **Repro:** re-run with `SSL_CHOICE=3` on a site with a Let's Encrypt
+  certificate (for example when moving behind Cloudflare, as the menu suggests).
+- **Fix direction:** with `SSL_PROVIDER=selfsigned`, replace a certificate that is
+  not self-signed, or have the monitor regenerate one near expiry.
+- **Test:** a CA-signed 2-day leaf in the volume, entrypoint with
+  `SSL_PROVIDER=selfsigned`; assert it is replaced.
+
+### D18. Step output goes to predictable `/tmp` files
+
+- **Severity:** low (step output readable by a local user; a symlink attack
+  where `fs.protected_symlinks=0`)
+- **Confidence:** a pre-created 666 file was written into on a host with
+  `protected_regular=0`; on distro defaults, a denial of service at most.
+  **Status:** open
+- **Where:** `log_command`, `docker/setup.sh:346` (`/tmp/log_cmd_$$.log`);
+  `run_step`, `:400` (`/tmp/run_step_$$.log`).
+- **Fix direction:** `mktemp` under the 0700 `$LOG_DIR`.
+- **Test:** pre-create the predictable name; assert setup does not write to it.
 
 ## Container runtime and nginx
 
