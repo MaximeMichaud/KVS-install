@@ -68,18 +68,18 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | I2 | medium | install | Archive copied while still being uploaded | repro | confirmed (corrected) |
 | E3 | high | export | Output under a symlink inside the site: tar recurses, or the dump lands in the web root | repro | confirmed (corrected) |
 | I3 | medium | install | Standalone install deletes an existing `/root/tmp` | code | confirmed |
-| I4 | medium | install | Domain taken from the archive name blocks valid installs | repro | open |
-| I5 | medium | install | Failed SQL import is reported as success and never redone | code | open |
-| I6 | medium | install | `DOMAIN` rewritten in `.env` before `setup.sh` reads the old one | code | open |
-| E4 | medium | export | Non-canonical `--exclude` is reported excluded but archived | repro | open |
-| E5 | medium | export | `setup_db.php` parsing reads commented lines, misses valid forms | repro | open |
-| I7 | medium | install | IonCube lines appended on every run and on failure | code | open |
+| I4 | medium | install | Domain taken from the archive name blocks valid installs | repro | confirmed (corrected) |
+| I5 | medium | install | Failed SQL import is reported as success and never redone | code | confirmed |
+| I6 | low | install | `DOMAIN` rewritten in `.env` before `setup.sh` reads the old one | code | confirmed (corrected) |
+| E4 | medium | export | Non-canonical `--exclude` is reported excluded but archived | repro | confirmed |
+| E5 | medium | export | `setup_db.php` parsing reads commented lines, misses valid forms | repro | confirmed (corrected) |
+| I7 | medium | install | IonCube lines appended on every run and on failure | code | confirmed |
 | G1 | low | kvsctl | `dotenv.Set`/`MergeEnv` append CRLF lines the shell misreads | repro | confirmed (corrected) |
 | G2 | low | kvsctl | `${PWD}` in `.env` expands differently from compose | code | confirmed (corrected) |
-| I8 | low | install | "Update the Script" corrupts the log and drops arguments | repro | open |
-| I9 | low | install | `www.conf.bak` overwritten on re-run | code | open |
-| E6 | low | export | Storage server columns shift when one is empty | repro (mechanism) | open |
-| E7 | low | export | IPv6 `DB_HOST` misparsed | repro | open |
+| I8 | low | install | "Update the Script" corrupts the log and drops arguments | repro | confirmed (corrected) |
+| I9 | low | install | `www.conf.bak` overwritten on re-run | code | confirmed |
+| E6 | low | export | Storage server columns shift when one is empty | repro (mechanism) | confirmed (corrected) |
+| E7 | low | export | IPv6 `DB_HOST` misparsed | repro | confirmed |
 | G3 | low | kvsctl | doctor fails on distro/Desktop compose version strings | code | confirmed (corrected) |
 | G4 | low | kvsctl | `semver.Compare` treats `RC1`/`rc1` and `rc01`/`rc1` as equal | repro | confirmed (corrected) |
 | G5 | low | kvsctl | Bare word on the last line changes meaning after `Set` | repro | confirmed (corrected) |
@@ -98,7 +98,7 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | D13 | high | setup | Admin password lost when kvs-init fails after setting it | code | confirmed |
 | D14 | medium | setup | A failed ACME issuance aborts before cache, Manticore, cron, import finish | code | open |
 | D15 | medium | setup | Default-admin checks of setup and 35-harden disagree | repro | open |
-| D16 | medium | setup | One-time admin password saved in the 0644 install log | repro | open |
+| D16 | low | setup | One-time admin password saved in the 0644 install log | repro | confirmed (corrected) |
 | D17 | low | setup | Switch to self-signed keeps a public cert nothing renews | repro | open |
 | D18 | low | setup | Step output goes to predictable `/tmp` files | repro (partial) | open |
 | C1 | high | runtime | PHP runs in upload directories, `.phar` included | repro | confirmed (corrected) |
@@ -126,14 +126,14 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | K4 | medium | kvsctl | A second `restore --latest` replays the safety backup | code | confirmed |
 | K5 | low | kvsctl | `update-cli --version <older>` does nothing and exits 0 | repro | confirmed (corrected) |
 | K6 | low | kvsctl | `restore <archive> --latest` silently ignores `--latest` | code | confirmed |
-| N1 | high | native | `setup_db.php` (DB password) left world-readable by `chmod -R 755` | code | open |
-| N2 | medium | native | www redirect server always answers 444 in the default mode | repro | open |
-| N3 | medium | native | `php.ini` timeout edits are no-ops; no `fastcgi_read_timeout` | repro | open |
-| N4 | medium | native | Failed ACME silently ships self-signed; storage TLS check left on | code | open |
-| N5 | medium | native | nginx configs always fetched from `main`, failures unchecked | code | open |
-| N6 | medium | native | No KVS rewrites file for an existing site on a new host | repro | open |
-| N7 | low | native | yt-dlp can be replaced by an HTTP error page, as root, nightly | repro | open |
-| N8 | low | native | Printed phpMyAdmin URL unreachable; its install cannot fail | repro | open |
+| N1 | high | native | `setup_db.php` (DB password) left world-readable by `chmod -R 755` | code | confirmed (corrected) |
+| N2 | medium | native | www redirect server always answers 444 in the default mode | repro | confirmed (corrected) |
+| N3 | medium | native | `php.ini` timeout edits are no-ops; no `fastcgi_read_timeout` | repro | confirmed (corrected) |
+| N4 | medium | native | Failed ACME silently ships self-signed; storage TLS check left on | code | confirmed |
+| N5 | medium | native | nginx configs always fetched from `main`, failures unchecked | code | confirmed (corrected) |
+| N6 | low | native | No KVS rewrites file for an existing site on a new host | repro | confirmed (corrected) |
+| N7 | low | native | yt-dlp can be replaced by an HTTP error page, as root, nightly | repro | confirmed |
+| N8 | low | native | Printed phpMyAdmin URL unreachable; its install cannot fail | repro | confirmed (corrected) |
 | S1 | low | release | Dispatch from a branch named like a version mixes tag and branch | repro | confirmed (corrected) |
 | S2 | medium | release | Actions pinned by mutable tag in privileged jobs | repro | confirmed |
 | S3 | low | release | Failed lock lookup swallowed; PHP image built from a floating tag | repro | confirmed (corrected) |
@@ -362,6 +362,84 @@ verdicts and corrections override the finding text below where they differ.
   release override, and `COMPOSE_IMAGES` cannot express the per-series
   `${MARIADB_VERSION}` image. Instead: add caddy to the lock, and give multi-site
   sites a pinned override, or limit the check to the multi-site files.
+- **E4 — confirmed** with the real script. Nuance: the summary prints the real
+  entry as "copied" and the typed path as "excluded", so it contradicts itself
+  rather than only claiming "excluded". `..` is already rejected at
+  `kvs-export.sh:2467`; only the normalising is new.
+- **E5 — confirmed; fix corrected.** In PHP the *first* `define()` wins (a later
+  one only warns): use the first uncommented definition, or fail on several,
+  not the last. Do **not** parse with `php -r include` as root: natively the file
+  is writable by www-data (N1), so that would be www-data-to-root code
+  execution; tokenise instead (for example `token_get_all`). Skipping `//` and
+  `#` lines does not cover multi-line `/* */` blocks.
+- **E6 — confirmed; missed consumer.** The same `server_N=` lines are displayed
+  on the Docker import side by `import_remote_show_servers`
+  (`docker/setup.sh:1993-2008`, split on `|`). With `mysql -B`, NULL prints as
+  `NULL`, so only empty strings collapse; whether KVS stores `''` in `path` is
+  still unverified.
+- **E7 — confirmed** with the mariadb image (a bare `-h ::1` is accepted).
+- **I4 — confirmed; fix scope widened.** The same TLD regex is in six places:
+  `kvs-install.sh:727` and `:589`, `docker/setup.sh:637` and `:3342` (email),
+  `docker/reconfigure.sh:272` (domain) and `:281` (email).
+- **I5 — confirmed** with stubs: run 1 returned 0 with `_INSTALL/` gone; run 2
+  saw "already exists" and never imported.
+- **I6 — confirmed (code); severity low (was medium).** It needs all of: a
+  `new.com` archive replacing the old one in `kvs-archive/`, no `DOMAIN` in the
+  environment (an environment `DOMAIN` wins through `KVS_DOMAIN_OVERRIDE`,
+  `docker/setup.sh:3294`/`3505`, and the change is then detected), and import
+  mode or `KVS_IMPORT_COMPLETED`. The `export DOMAIN=` mismatch is real; the fix
+  works (`setup.sh` persists `DOMAIN` itself at `:1001`).
+- **I7 — confirmed.** Also: after `cd ioncube`, the shell is left inside the
+  `/root/ioncube` the function then deletes.
+- **I8 — confirmed, worse; fix corrected.** Every line of the first run was lost,
+  the log held 8402 NUL bytes, and each second-run line appeared twice. `tee -a`
+  does **not** fix it: the new tee writes to fd 3, the old tee's pipe, so the old
+  tee logs every line again at its own offset. Only an environment marker that
+  makes the re-exec skip the log setup (keeping the inherited fds) works.
+  `"$@"` is empty inside `update()`: pass a saved copy of main's argv.
+- **I9 — confirmed, trivial.** Nothing reads the `.bak` and the `sed` edits are
+  idempotent; only the stock pm values are lost.
+- **N1 — confirmed; fix corrected.** Without the `chmod`, unzip under umask 022
+  still leaves the file 0644, so chmod `setup_db.php` explicitly after
+  `configure_kvs_database_file`, on every run. Do **not** take ownership of the
+  code away from www-data: it breaks KVS's self-update from the admin panel
+  (comment at `kvs-install.sh:1062-1063`) and diverges from Docker, which chowns
+  the tree to the PHP user and sets only `setup_db.php` to 600
+  (`60-permissions.sh:113`, `:141-145`). Scope the fix to file modes and
+  `setup_db.php` (0640 `root:www-data`, or 0600 www-data).
+- **N2 — confirmed; fix and test corrected.** Default mode: `https://www` gets an
+  empty reply, apex 200. `USE_WWW=true`: apex 301 to www, other subdomains 444.
+  Drop the `if`; "compare against `$URL`" would still 444 the www host. Test:
+  301 for https www in the default mode, and for apex in www mode.
+- **N3 — confirmed; impact narrowed.** "Uploads fail" is overstated: nginx
+  buffers request bodies, so transfer time does not count against these limits.
+  Long PHP actions do fail. The Docker `fastcgi_read_timeout 300` is at
+  `conf/nginx/templates/kvs.conf.tpl:153`.
+- **N4 — confirmed.** Even if acme.sh's cron later issues the certificate,
+  `--install-cert` never ran, so nginx keeps the self-signed one.
+- **N5 — confirmed; detail.** `aptinstall_nginx` ends with `service nginx
+  restart` (`:997`) and returns its status, so a bad `nginx.conf` can show there;
+  a missing globals file shows only when the vhost is enabled.
+- **N6 — confirmed; severity low (was medium).** The step is reported as failed
+  (`install_acme.sh` returns the restart status), and the native installer has no
+  import flow, so "existing site on a new host" needs a manual copy into
+  `/var/www`.
+- **N7 — confirmed.** A network failure partway through also truncates the binary
+  in place. Writing to a temp file then `mv` stays compatible with the
+  `tests/test_kvs_install.sh:266` stub.
+- **N8 — confirmed; fix corrected.** `updatephpMyAdmin` also regenerates
+  `config.inc.php` from the sample (around `:2420`), and lacks the PHP package
+  install and the nginx restart, so reusing it does not keep local edits. Also,
+  `setupdone` (`:1654`) writes the DB password into the install log (see D16).
+- **D16 — confirmed; severity low (was medium); fix corrected.** `/root` is 0700 by
+  default, so the 0644 mode does not reach other local users; the issues are
+  backups, log shipping, and the false message (which is true for setup.sh's
+  own 0600 debug log, `docker/setup.sh:14`, `:323`, when it runs alone).
+  `/dev/tty` is absent in detached or headless runs, and fd 3 exists only under
+  kvs-install.sh, so printing only there would lose the password. Instead,
+  create the install log 0600 before the tee (which also covers the native DB
+  password at `kvs-install.sh:1654`), and/or write a 0600 password file. The
+  print block is in `setup.sh`, so test it there.
 
 ## kvs-export.sh
 
