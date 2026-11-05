@@ -2387,7 +2387,7 @@ same input. Not yet independently verified.
   - `.env.example`'s `DISABLE_KVS_SUPPORT_ACCESS=false` plus an appended `=true`:
     compose alone reads `true`, setup runs compose with `false`.
   - `export DISABLE_KVS_SUPPORT_ACCESS=true`: same (`set_env_value` keeps the
-    `export ` prefix, so it persists across runs).
+    "export" prefix, so it persists across runs).
   - `DISABLE_KVS_SUPPORT_ACCESS="true"`: setup exits with "must be true or false".
 - **Fix direction:** drop the `sed` re-read and use the sourced value (or the
   request just written). Look for other `sed`/`grep ^KEY=` re-readers of `.env`
