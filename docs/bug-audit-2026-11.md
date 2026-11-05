@@ -111,6 +111,14 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | M3 | medium | import | Decompression errors ignored; a corrupt dump is marked complete | repro | open |
 | M4 | medium | import | Absolute symlinks on the old server copied as root, readable by PHP | repro | open |
 | M5 | low | import | A resumed pass can run with no free-space check | code | open |
+| S1 | medium | release | Dispatch from a branch named like a version mixes tag and branch | repro | open |
+| S2 | medium | release | Actions pinned by mutable tag in privileged jobs | repro | open |
+| S3 | medium | release | Failed lock lookup swallowed; PHP image built from a floating tag | repro | open |
+| S4 | medium | release | Lock check reads only the first `ARG` line and never `FROM` | repro | open |
+| S5 | medium | runtime | Manticore PHP plugin installed unverified by default | code | open |
+| S6 | low | release | Registry digest header trusted without hashing the body | repro | open |
+| S7 | low | ci | `push.yml` and `markdown-lint.yml` have no `permissions:` | repro | open |
+| S8 | low | multi-site | Multi-site images are outside the lock | repro | open |
 
 ## kvs-export.sh
 
@@ -1071,6 +1079,142 @@ M3.
 - **Test:** pre-create the count-timeout flag and a saved count, set free space
   below the remainder, assert `import_remote_files` refuses before rsync runs.
 
+## Release and supply chain
+
+### S1. Dispatch from a branch named like a version mixes tag and branch
+
+- **Severity:** medium (a signed manifest pairs a commit and bundle with images
+  and binaries built from other code)
+- **Confidence:** repro for the git ambiguity (`warning: refname '26.12.0' is
+  ambiguous`, resolved to the tag); the softprops default is from its
+  documentation. **Status:** open
+- **Where:** `.github/workflows/release.yml:7` (`workflow_dispatch`);
+  `.github/scripts/release-version.sh` checks only `$GITHUB_REF_NAME`.
+- **Defect:** `github.ref_type` is never checked, so a dispatch from a branch
+  named `26.12.0` passes. Images and binaries are built from `GITHUB_SHA` (the
+  branch head), while `git rev-parse "${TAG}^{commit}"` and `bundle --ref "$TAG"`
+  resolve to a tag of the same name if one exists, because git prefers
+  `refs/tags`. Without such a tag, softprops gets no `target_commitish` and
+  GitHub creates the tag on the default branch head, not on the built commit.
+- **Fix direction:** `if: github.ref_type == 'tag'` on the prepare job (or fail
+  when `GITHUB_REF` is not `refs/tags/$tag`); use `refs/tags/$TAG` in every
+  `rev-parse` and in `--ref`; pass `target_commitish: ${{ github.sha }}`.
+- **Test:** `tests/test_release_workflow.sh` asserts the ref-type guard and the
+  `refs/tags/` prefix.
+
+### S2. Actions pinned by mutable tag in privileged jobs
+
+- **Severity:** medium (a moved tag runs code with write access to the repo,
+  its releases and the GHCR images; it cannot sign a manifest)
+- **Confidence:** repro (YAML parse of every `uses:`). **Status:** open
+- **Where:** every workflow. For example `softprops/action-gh-release@v3` in
+  the publish job (`contents: write`, environment `release`, token persisted
+  in `.git/config`); `docker/login-action@v4` and `docker/build-push-action@v7`
+  with `packages: write`; `orhun/git-cliff-action@v4`, which writes the release
+  body. `docker.yml:39` runs `hadolint/hadolint:v2.14.0` with no digest.
+  `renovate.json` automerges every update, majors included, without
+  `helpers:pinGitHubActionDigests`.
+- **Fix direction:** pin every `uses:` to a 40-hex SHA with a version comment;
+  add `helpers:pinGitHubActionDigests`; set `persist-credentials: false` where
+  nothing pushes; stop automerging majors.
+- **Test:** the workflow suite fails on any `uses:` not matching
+  `@[0-9a-f]{40}`.
+
+### S3. Failed lock lookup swallowed; PHP image built from a floating tag
+
+- **Severity:** medium (an unpinned base signed into a release)
+- **Confidence:** repro (series 8.5: "no entry for php-fpm 8.5", exit 0,
+  `PHP_BASE=` written). Today the matrix-versus-lock check in
+  `tests/test_release_workflow.sh` catches this case before the images job;
+  the build step itself has no guard. **Status:** open
+- **Where:** `.github/workflows/release.yml:229`; same pattern in
+  `.github/workflows/docker.yml:89`.
+- **Defect:** `echo "PHP_BASE=$(resolve-bases.sh --get …)"` hides the status of
+  the command substitution, even under `bash -e`. The empty value then hits
+  `ARG PHP_FROM=${PHP_BASE:-php:${PHP_VERSION}-fpm}` in the php and cron
+  Dockerfiles, which falls back to the floating tag.
+- **Fix direction:** `base=$(…)` on its own line, then `[ -n "$base" ]`; in the
+  release, refuse an empty or digest-less `PHP_BASE`, or drop the fallback for
+  CI builds.
+- **Test:** run the step body with a stub lock lacking the series; expect a
+  non-zero exit.
+
+### S4. Lock check reads only the first `ARG` line and never `FROM`
+
+- **Severity:** medium (the CI check passes while a Dockerfile builds on an
+  unpinned base)
+- **Confidence:** repro (scratch copy of `docker/`, plus a build showing
+  Docker uses the second global `ARG` default). **Status:** open
+- **Where:** `dockerfile_bases`, `docker/bin/resolve-bases.sh:190`.
+- **Defect:** only the first `ARG <BASE>=` line is read, and `FROM` lines are
+  never checked. Adding `ARG NGINX_BASE=nginx:latest` just before
+  `FROM ${NGINX_BASE}`, or changing `docker/init/Dockerfile` to
+  `FROM debian:latest`, still prints "the Dockerfiles build on the lock".
+- **Fix direction:** require exactly one `ARG <BASE>=` line, every `FROM` to be
+  `${ARG}`, `${PHP_FROM}` or a stage name, and reject unpinned
+  `COPY --from=<external image>`.
+- **Test:** both mutations above, through `RESOLVE_BASES_DOCKER_DIR`, must
+  fail.
+
+### S5. Manticore PHP plugin installed unverified by default
+
+- **Severity:** medium (any modified zip at the URL becomes PHP code run by
+  PHP-FPM)
+- **Confidence:** code (the branch is explicit). **Status:** open
+- **Where:** `docker/init/docker-entrypoint.d/80-manticore.sh:53-87`; defaults
+  `docker/.env.example:128` and `docker/docker-compose.yml:380`.
+- **Defect:** the init downloads `https://kernel-scripts.com/files/manticore.zip`;
+  `MANTICORE_PLUGIN_SHA256` defaults to empty, and empty means "accept anything
+  and log the sha256". It is documented, but no shipped default pins it.
+- **Fix direction:** ship a pinned sha256 (release manifest or `.env.example`)
+  and refuse an empty value unless an explicit opt-out is set.
+- **Test:** with the variable empty and a stub URL, the script exits non-zero.
+
+### S6. Registry digest header trusted without hashing the body
+
+- **Severity:** low (the "two independent sources agree" claim is weaker than
+  stated)
+- **Confidence:** repro (httptest case). **Status:** open
+- **Where:** `cli/cmd/kvsctl-release/registry.go:130-179`; `checkImage`,
+  `cli/cmd/kvsctl-release/manifest.go:695`.
+- **Defect:** `Docker-Content-Digest` is never compared with `sha256(body)`, nor
+  are an index's sub-manifest and the config blob checked against their
+  digests. `checkImage` accepts any string starting with `sha256:`. Also,
+  `imageLocation` switches to plain `http` for any host starting with
+  `localhost` or `127.0.0.1`, such as `localhost.example.com`.
+- **Repro:** header `sha256:aaaa…` with a body hashing to `sha256:89f8…` (layer
+  size 999999999) is accepted, and its layers, sizes and diff IDs are signed.
+- **Fix direction:** verify each body against the requested or claimed digest,
+  validate digests with `^sha256:[0-9a-f]{64}$`, match the http hosts exactly.
+- **Test:** the httptest case must return an error.
+
+### S7. `push.yml` and `markdown-lint.yml` have no `permissions:`
+
+- **Severity:** low (depends on the repository's default token setting)
+- **Confidence:** repro (YAML). **Status:** open
+- **Where:** `.github/workflows/push.yml`, `.github/workflows/markdown-lint.yml`.
+- **Defect:** they run on every push with the default token scope, and run
+  `ludeeus/action-shellcheck@2.0.0` and `DavidAnson/markdownlint-cli2-action@v25`
+  by tag. With a read/write default, those actions get a write token.
+- **Fix direction:** `permissions: contents: read` at the top of each.
+- **Test:** the workflow suite requires a `permissions` block in every
+  workflow.
+
+### S8. Multi-site images are outside the lock
+
+- **Severity:** low. **Confidence:** repro (grep). **Status:** open
+- **Where:** `docker/multi-site/docker-compose.caddy.yml:30` (`caddy:2-alpine`,
+  the TLS front end); `docker/multi-site/docker-compose.site.yml.template:134`
+  (`mariadb:${MARIADB_VERSION}`), `:185` (`dragonfly:latest`) and `:203`
+  (`memcached:alpine`).
+- **Defect:** none of them is in `images.lock` or `COMPOSE_IMAGES`, and the
+  release override does not cover them, so "the lock pins every runtime image"
+  does not hold for multi-site.
+- **Fix direction:** add them to `RUNTIME_IMAGES` and `COMPOSE_IMAGES`, with
+  digests.
+- **Test:** `--check-dockerfiles` fails on any compose `image:` without
+  `@sha256:`.
+
 ## Checked and found sound
 
 So that a follow-up does not redo them:
@@ -1103,6 +1247,11 @@ So that a follow-up does not redo them:
   paths, port and user, and IPv6 bracketing for rsync.
 - Cosmetic: `import_remote_show_entries` (`docker/setup.sh`) prints the old
   server's entry names with `echo -e` without stripping control characters.
+- Release: no untrusted `${{ github.event.* }}` expression in any `run:`, no
+  `pull_request_target` or `workflow_run`; tag runs cannot read PR caches;
+  `verify-manifest.sh` fails closed without keys and has no TOCTOU; key
+  rotation checks; the bundle rejects symlinks and submodules; every
+  Dockerfile download is checked against a sha256; no secret in a layer.
 - Not a bug today, but worth knowing: `backup.RestoreEnv` (`backup.go`, around
   line 1290) writes through a fixed `.kvsctl.tmp` path with `O_TRUNC` and
   follows symlinks. Nothing calls it yet.
