@@ -210,16 +210,16 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | B2 | low | build | FFmpeg compiled once per image; php and cron cannot share it | repro | confirmed |
 | B3 | low | build | `FLAVORS = standard` override in `build-ffmpeg.sh` only half works | repro | confirmed (corrected) |
 | B4 | low | tests | Nothing keeps the php and cron copies of the media files in sync | repro | confirmed (corrected) |
-| F1 | medium | scripts | setup.sh and reconfigure.sh do not exclude each other; `.env` loses updates | repro | open |
-| F2 | medium | runtime | Two kvs-init runs on one site: password lost, or admin login locked | repro | open |
-| F3 | medium | runtime | kvs-init clears KVS cron locks while the cron container keeps running | code | open |
-| F4 | low | multi-site | Proxy network inspect-then-create: one of two first runs aborts | repro | open |
-| O1 | medium | export | Tools in `/usr/local` invisible under `sudo -n` on the RHEL family | repro | open |
-| O2 | low | tests | `test_kvs_export.sh` cannot pass under bash 4.2 | repro | open |
-| O3 | low | import | Old SSH servers unreachable with today's client defaults, unexplained | repro | open |
-| O4 | low | export | Re-export over an existing output fails on coreutils older than 8.6 | repro | open |
-| O5 | low | import | A csh/tcsh login shell breaks the parallel transfer | repro | open |
-| O6 | low | export | Without procps, `--size-timeout` does not bound the walk | repro | open |
+| F1 | medium | scripts | setup.sh and reconfigure.sh do not exclude each other; `.env` loses updates | repro | confirmed (corrected) |
+| F2 | low | runtime | Two kvs-init runs on one site: password lost, or admin login locked | repro | confirmed (corrected) |
+| F3 | medium | runtime | kvs-init clears KVS cron locks while the cron container keeps running | code | confirmed (corrected) |
+| F4 | low | multi-site | Proxy network inspect-then-create: one of two first runs aborts | repro | confirmed |
+| O1 | low | export | Tools in `/usr/local` invisible under `sudo -n` on the RHEL family | repro | confirmed (corrected) |
+| O2 | low | tests | `test_kvs_export.sh` cannot pass under bash 4.2 | repro | confirmed (corrected) |
+| O3 | low | import | Old SSH servers unreachable with today's client defaults, unexplained | repro | confirmed (corrected) |
+| O4 | low | export | Re-export over an existing output fails on coreutils older than 8.6 | repro | confirmed |
+| O5 | low | import | A csh/tcsh login shell breaks the parallel transfer | repro | confirmed (corrected) |
+| O6 | low | export | Without procps, `--size-timeout` does not bound the walk | repro | confirmed (corrected) |
 | L1 | medium | kvsctl | A frozen manifest is accepted forever; first contact trusts any old one | repro | open |
 | L2 | low | kvsctl | `update-cli` treats any `Detect` error as "no installation" and skips its checks | repro | open |
 | L3 | low | kvsctl | No client-side rules on what a signed bundle may overwrite | repro | open |
@@ -889,6 +889,54 @@ verdicts and corrections override the finding text below where they differ.
   `cmp -s docker/php/yt-dlp.sh docker/cron/yt-dlp.sh` in
   `tests/test_php_images_hardening.sh:240` (and `test_yt_dlp_updates.sh:204`); put the
   new checks there. Requirement at `docs/releasing.md:308-309`.
+- **F1 — confirmed; fix corrected.** 5 of 5 runs lost `direct-tls`; a concurrent
+  setup-versus-reconfigure `set_env_value` lost a key 10 of 10. Reconfigure's
+  `set_env_value` uses `sed`; the 0.44 s figure is setup's version only and depends
+  on the `.env` size (0.12 s with 30 lines). `remove_compose_profile` ends at
+  `:264`; `manticore_wait_ready` is defined at `manticore.sh:64`. Fix:
+  `kvs-install.sh:2245` runs `./setup.sh` as a child, so an exclusive lock taken by
+  both and refused when held would make setup refuse under its own installer: the
+  lock must be inherited (an fd or environment marker) or taken by only one.
+- **F2 — confirmed; severity low (was medium).** Repro with the real 35-harden in a
+  php:8.1 container. It needs two starts of the same site at once. After a lockout,
+  `start` no longer generates a password (the admin is no longer the default), so
+  recovery needs `KVS_ADMIN_PASSWORD` set by hand.
+- **F3 — confirmed; citation corrected.** The `IMPORT_MODE` cron stop at
+  `docker/setup.sh:1166-1169` is inside `setup_start_runtime_services`, which runs
+  at `:5938`, after kvs-init: it never protects kvs-init. What stops cron before
+  kvs-init in import mode (and on a fresh volume) is `delete_database_volume`'s
+  `docker compose down` (`:5448`); "Keep the existing database" stops nothing. Fix:
+  stop cron (and php-fpm) explicitly before `:5449` and `site-manager.sh:659`.
+- **F4 — confirmed.**
+- **O1 — confirmed; severity low (was medium); fix incomplete.** Not silent:
+  `docker/setup.sh:2222` prints that exact `db_error` before the stop at `:2311`, and
+  `:2227` prints "tar over ssh (install rsync…)". Extending `PATH` in the exporter
+  does not fix `--rsync-path="sudo -n rsync"` (`import.sh:2981`), where sudo resolves
+  rsync through `secure_path` itself: detect must report the absolute rsync path,
+  used as `sudo -n /abs/rsync` (or `sudo -n env PATH=… rsync`). `secure_path`
+  confirmed on CentOS 7 (sudo 1.8.23) and Alma 9 (sudo 1.9.17).
+- **O2 — confirmed; more lines.** Four bare `"${options[@]}"` lines: `:1508`,
+  `:1657`, `:1700` and `:1714` (the last only when not root). The Alpine `bash:4.2`
+  image fails at test 1 for environment reasons, so the CI job should use centos:7.
+- **O3 — confirmed; addition.** An ed25519 key (the `ssh-keygen` default since
+  OpenSSH 9.5) is refused by servers older than 6.5 whatever the options, so the
+  user also needs an RSA key; with password login only `HostKeyAlgorithms` matters.
+  Ubuntu 16.04 (OpenSSH 7.2, rsa-sha2) is not affected; Debian 8 (6.7) is.
+- **O4 — confirmed.** Only manual exporter runs reusing an output path or starting
+  twice in the same minute (the stamp is `%Y%m%d-%H%M`, `:2340`); `getfacl`/`setfacl`,
+  when present, would keep the ACL in the fallback.
+- **O5 — confirmed; nuance.** Under tcsh the `df` probe and the plan-directory
+  `mktemp` (`:2082`, `:2094`) fail with "Bad : modifier", and
+  `IMPORT_DISKSTATS_COMMAND` (`:2381`) with "Missing }"; those only degrade to
+  relaying the chunk lists (`:3133-3160`). The hard failure is the serial-auth wait
+  (`:2332-2347`), only with `IMPORT_TRANSFER_JOBS>1` (default 1, `setup.sh:1379`).
+- **O6 — confirmed; fix caveat.** Without `pkill`, in-flight `du` processes outlive
+  xargs and keep fd 3 open; the single-`du` fallback is unaffected. `make_min_bin`
+  (`tests/test_kvs_export.sh:353-362`) silently skips missing `pkill`/`pgrep`.
+  Killing by process group needs `setsid` (otherwise the walk shares the
+  exporter's own group); walking `/proc/*/stat` for parent PIDs is the procps-free
+  option. Only closing fd 3 would leave the `du` processes walking the live
+  server's disk.
 
 ## kvs-export.sh
 
