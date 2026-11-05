@@ -6,21 +6,64 @@ multi-site, the init and service entrypoints, the nginx templates) at commit
 `edd35eb` (release 26.11.0). Every test suite of the repository passes at that
 commit, so none of the findings below is covered by an existing test.
 
-Suggested order: first T1 and T2 (so the suites can catch a regression in the
-nginx and runtime fixes), then by risk on a production host: C1, C2, C3, M1,
-R1, D1, E1, N1, W1, D13, R2, then the other high findings, then medium (M2,
-D2, D3, C9 among the first), then low.
+## Conclusion
+
+**What was done.** A read-and-reproduce audit of the whole repository, run from
+a cloud container with no access to a live install: every script and the Go CLI
+were read, and each finding was reproduced where possible (stubbed script runs,
+real Docker images of the stack, real MariaDB and MySQL servers, real old source
+servers, temporary Go tests). Beyond the file-by-file reviews, cross-cutting
+angles were covered: interrupts and full disks, upgrades from older stack
+releases, values computed twice, environment and scale, secrets end to end,
+concurrent operations, old source servers, the 26.11.0 media release, release
+trust on the client, health checks, and database round trips.
+
+**Result.** 159 findings: 16 high, 61 medium, 82 low. 148 were then checked
+again by reviewers who did not write them, most by reproduction: none was
+rejected, but about half were corrected (severity, lines or fix direction), and
+roughly twenty original fix directions would have broken existing behaviour or
+tests. The last 11 (H1 to H5, Z1 to Z6) were checked once and are still `open`.
+Every test suite of the repository passes at `edd35eb`, so none of these is
+caught by the current tests.
+
+**Main themes.**
+
+- **Web exposure and privilege:** PHP runs in upload directories (C1), the root
+  init runs a script PHP can write (C2), nginx serves files under denied
+  directories (C3), and database credentials end up readable or in argv (N1, E1,
+  D3, Y1 to Y3).
+- **Destructive paths that hit the wrong target:** `remove` of one site deleting
+  another's volumes (R1), a headless re-run moving the stack to new empty volumes
+  (D1), collation changes on import (Z1), the export recursing into itself (E3).
+- **Success reported while broken:** verification and doctor accept a 403 site or a
+  failing cron (H1 to H3), setup says "Complete" without a check (H5), an empty
+  Caddy route is installed with exit 0 (P1), corrupt dumps are marked complete
+  (M3).
+- **A weak safety net:** nginx rules checked as text only and 15 of 16 integration
+  suites never run in CI (T1, T2), and several assertions that cannot fail (T3 to
+  T6).
+- **Re-runs and upgrades that do not keep the operator's choices:** prefix, SSL,
+  cache, PHP series, ports (D1, U3, U4, X2), and acme lost on an upgrade from an
+  older release (U1).
+- **Migration from real old servers:** sudo `secure_path`, old OpenSSH, bash 4.2,
+  csh, non-ASCII archive names, old dumps (O1 to O6, V1, V2, Z1 to Z6).
+
+**Suggested order.** First T1 and T2, so the suites can catch a regression in
+the nginx and runtime fixes; and H1, so kvsctl's rollback actually triggers when a
+fix goes wrong. Then by risk on a production host: C1, C2, C3, M1, Z1, R1, D1,
+E1, N1, W1, U1, D13, R2, E3, then the other high findings, then medium (M2, D2,
+D3, C9, Z4 among the first), then low.
+
+**Limits.** Nothing was run on the operator's own install. The KVS source code was
+not available, so effects inside KVS itself are marked plausible where they are
+(F3, Q4, X4). No real ACME issuance and no power loss were run (V5, P4). Line
+numbers are those of `edd35eb`.
 
 This file is a work list for a follow-up agent: fix each finding with a
-regression test, or reject it with the reason.
-
-Every finding has been through an independent, adversarial
-verification pass (reviewers who did not write it tried to disprove it, most
-of them by reproduction). None was rejected. Many write-ups were corrected:
-for a finding marked `confirmed (corrected)`, the note under
-[Verification pass](#verification-pass) overrides the finding's own text,
-including its severity, line numbers and fix direction. Several original fix
-directions would have broken existing behaviour or tests; the notes say which.
+regression test, or reject it with the reason. For a finding marked
+`confirmed (corrected)`, the note under [Verification pass](#verification-pass)
+overrides the finding's own text, including its severity, line numbers and fix
+direction.
 
 ## How to work through this list
 
@@ -230,6 +273,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | H3 | medium | kvsctl | Doctor database probe runs as root and only runs `SELECT 1` | repro | open |
 | H4 | low | kvsctl | Doctor cache probe tests `cache:11211`, not the address KVS uses | repro | open |
 | H5 | medium | setup | "KVS Docker Setup Complete!" printed without checking anything is up | repro | open |
+| Z1 | high | import | Imported tables silently change collation; unique keys can abort the import | repro | open |
+| Z2 | medium | export | Stored routines and events are never exported; dependent objects break | repro | open |
+| Z3 | medium | export | Export aborts when MyISAM tables and a view with a missing DEFINER coexist | repro | open |
+| Z4 | medium | kvsctl | kvsctl backup fails on MariaDB 11.4 for any row over 24 MiB | repro | open |
+| Z5 | low | import | Invalid dates silently zeroed on import and on kvsctl restore | repro | open |
+| Z6 | low | import | A MySQL 5.7 ngram FULLTEXT index aborts the import | repro | open |
 
 ## Verification pass
 
@@ -3858,6 +3907,115 @@ ffprobe and convert.
 Not listed (code only): Manticore turns healthy about 30 s after start while its
 background reindex still runs; a later failure turns it unhealthy only after the
 upgrade verification has passed (search keeps the old files).
+
+## Database round-trip fidelity
+
+Real servers in Docker: sources mysql:5.7.44 (permissive `sql_mode`) and
+mariadb:10.6; targets mariadb 11.4.13, 11.8.9 and 12.3.3 started as compose starts
+them. The real `kvs-export.sh` dump went through the real `import_prepare_dump`;
+kvsctl's `dumpScript`, `lockedDumpScript`, `replayPreamble` and `restoreScript`
+were run as written. Compared by per-row fingerprints, `CHECKSUM TABLE`,
+collations, AUTO_INCREMENT values and definers. Not independently verified
+(added last).
+
+Round-tripped byte-exact (once Z1 is worked around): utf8mb4 emoji and 4-byte
+characters; utf8mb3; latin1 tables holding double-encoded UTF-8, all bytes 0x01
+to 0xFF; zero and partial-zero dates in NOT NULL columns; ENUM and SET with
+non-ASCII members; BLOBs with all 256 bytes, 20 MB and 100 MB rows; spatial types
+under a SPATIAL index; generated columns; JSON; MyISAM (FIXED) and InnoDB
+COMPRESSED; FULLTEXT; AUTO_INCREMENT; mixed-case table names; triggers and views
+with a missing DEFINER rewritten and working; kvsctl backup and restore of
+routines, events, triggers, nested views, a SEQUENCE and system-versioned history.
+
+### Z1. Imported tables silently change collation; unique keys can abort the import
+
+- **Severity:** high (silent change of equality, sorting and uniqueness for most KVS
+  tables, or an aborted import)
+- **Confidence:** repro (MySQL 5.7 source on 11.4.13, 11.8.9 and 12.3.3).
+  **Status:** open
+- **Where:** `import_prepare_dump`, `docker/lib/import.sh:354-357`, with
+  `docker/docker-compose.yml:133-139` setting no collation option.
+- **Defect:** the mariadb image ships `character-set-collations =
+  utf8mb4=uca1400_ai_ci`, and since 11.8 utf8mb3 maps to `utf8mb3_uca1400_ai_ci`.
+  MySQL 5.x and older MariaDB (before about 10.3.37 / 10.6.11) write `DEFAULT
+  CHARSET=utf8mb4` or `utf8` without COLLATE, so the target picks uca1400 instead of
+  `general_ci`. On 11.8 and 12.3 every `utf8` table changes. Afterwards
+  `WHERE tag='test'` returns `test,ｔｅｓｔ`, `'ひらがな'` matches `ヒラガナ`, `'strasse'`
+  matches `straße`. With both spellings in a UNIQUE column the import stops
+  (`ERROR 1180 … during COMMIT`) and the container exits; without them it succeeds
+  and later KVS inserts can fail. A current MariaDB 10.6 source writes COLLATE and
+  is not affected.
+- **Fix direction:** emit `SET SESSION character_set_collations='';` before the dump
+  body (verified: the import passes and every collation matches the source on all
+  three targets), or add an explicit COLLATE to each CREATE TABLE.
+- **Test:** a MySQL 5.7 dump with `UNIQUE(tag)` holding `test` and `ｔｅｓｔ` imports into
+  each series with the source's `table_collation`.
+
+### Z2. Stored routines and events are never exported; dependent objects break
+
+- **Severity:** medium (a view using a function stops the import at the end; a trigger
+  calling a procedure makes every later INSERT into that table fail; events
+  silently dropped)
+- **Confidence:** repro (MySQL 5.7 to 11.4.13). **Status:** open
+- **Where:** `kvs_build_dump_args`, `kvs-export.sh:1491` ("No --routines: KVS has
+  none and the site user rarely has the privilege"); the native-format check at
+  `:1652-1655` counts routines and events but nothing warns.
+- **Defect:** the privilege reason does not hold: the site user (ALL on the
+  database) dumped `--routines --events` fine on 5.7. Sites customised with routines
+  lose them.
+- **Fix direction:** pass `--routines --events` when the user can read them; otherwise
+  warn, or refuse when routines or events exist.
+- **Test:** a function, a view using it, a trigger calling a procedure and an event
+  all exist on the target.
+
+### Z3. Export aborts when MyISAM tables and a view with a missing DEFINER coexist
+
+- **Severity:** medium (the error looks like a wrong password)
+- **Confidence:** repro (MySQL 5.7 and MariaDB 10.6: "Access denied for user 'kvs'@…
+  when using LOCK TABLES"; root gets 1449). **Status:** open
+- **Where:** `kvs_build_dump_args`, `kvs-export.sh:1450-1452` (`--lock-tables` when
+  `DB_NON_TRANSACTIONAL > 0`; mysqldump locks views too). InnoDB-only databases
+  (`--single-transaction`) are not affected.
+- **Fix direction:** in the locked pass, `--ignore-table` the views and dump them
+  separately with `--no-data --skip-lock-tables`; at least detect views with a
+  missing definer and say so.
+- **Test:** a MyISAM table plus `CREATE DEFINER=ghost@'%' VIEW`: the export succeeds.
+
+### Z4. kvsctl backup fails on MariaDB 11.4 for any row over 24 MiB
+
+- **Severity:** medium (no backup, so no safety backup before restore or upgrade, on
+  11.4 sites with large rows)
+- **Confidence:** repro (11.4.13: "Lost connection to server during query when
+  dumping table … at row: 1", exit 3, with 26 MB and 100 MB rows; with
+  `--max-allowed-packet=1G` dump and replay were byte-identical). **Status:** open
+- **Where:** `dumpScript` and `lockedDumpScript`,
+  `cli/internal/backup/backup.go:40` and `:52` (no `--max-allowed-packet`).
+  11.4.13's mariadb-dump defaults to 24 MiB, while the server allows 1G and the
+  import path supports 512M; 11.8 and 12.3 default to 1G.
+- **Fix direction:** add `--max-allowed-packet=1G` to both scripts.
+- **Test:** a 30 MB longblob is backed up and restored on 11.4.
+
+### Z5. Invalid dates silently zeroed on import and on kvsctl restore
+
+- **Severity:** low. **Confidence:** repro (MySQL 5.7 and MariaDB 10.6 sources on
+  11.4.13 and 12.3.3; the kvsctl round trip too). **Status:** open
+- **Where:** the dump header's `SQL_MODE='NO_AUTO_VALUE_ON_ZERO'` (non-strict, without
+  `ALLOW_INVALID_DATES`), kept by `import_prepare_dump` (`import.sh:354`) and by
+  kvsctl's replay.
+- **Defect:** `2021-02-30 08:00:00`, `2021-02-31` and `2020-04-31` become
+  `0000-00-00…` with only warning 1265.
+- **Fix direction:** rewrite the header to `NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES`
+  (verified to keep the value).
+- **Test:** a row with `2021-02-30` survives export-import and backup-restore.
+
+### Z6. A MySQL 5.7 ngram FULLTEXT index aborts the import
+
+- **Severity:** low. **Confidence:** repro ("Function 'ngram' is not defined" on
+  11.4.13). **Status:** open
+- **Where:** `import_prepare_dump`; the dump writes `FULLTEXT KEY … /*!50100 WITH PARSER
+  ngram */`.
+- **Fix direction:** strip the clause and warn.
+- **Test:** a dump with an ngram index imports.
 
 ## Checked and found sound
 
