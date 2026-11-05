@@ -6,8 +6,9 @@ multi-site, the init and service entrypoints, the nginx templates) at commit
 `edd35eb` (release 26.11.0). Every test suite of the repository passes at that
 commit, so none of the findings below is covered by an existing test.
 
-Suggested order, by risk on a production host: C1, C2, M1, M2, C3, R1, D1,
-D2, D3, E1, then the other high findings, then medium, then low.
+Suggested order, by risk on a production host: C1, C2, C3, M1, R1, D1, E1,
+D13, R2, then the other high findings, then medium (M2, D2, D3 among the
+first), then low.
 
 This file is a work list for a follow-up agent: validate each finding, then fix
 it with a regression test, or reject it with the reason.
@@ -61,7 +62,7 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 
 | ID | Severity | Area | Title | Confidence | Status |
 | --- | --- | --- | --- | --- | --- |
-| E1 | high | export | Export archive is world-readable | repro | open |
+| E1 | high | export | Export archive is world-readable | repro | confirmed (corrected) |
 | E2 | medium | export | Any file change during tar fails the whole export | repro | confirmed |
 | I1 | medium | install | DNS "wait and retry" loops forever | repro | confirmed |
 | I2 | medium | install | Archive copied while still being uploaded | repro | confirmed (corrected) |
@@ -82,9 +83,9 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | G3 | low | kvsctl | doctor fails on distro/Desktop compose version strings | code | open |
 | G4 | low | kvsctl | `semver.Compare` treats `RC1`/`rc1` and `rc01`/`rc1` as equal | repro | open |
 | G5 | low | kvsctl | Bare word on the last line changes meaning after `Set` | repro | open |
-| D1 | high | setup | Headless re-run replaces saved prefix, SSL and cache choices | repro | open |
-| D2 | high | setup | Port overrides written raw to `.env`, then sourced as code | repro | open |
-| D3 | high | setup | Staged import dump is world-readable | code | open |
+| D1 | high | setup | Headless re-run replaces saved prefix, SSL and cache choices | repro | confirmed (corrected) |
+| D2 | medium | setup | Port overrides written raw to `.env`, then sourced as code | repro | confirmed |
+| D3 | medium | setup | Staged import dump is world-readable | code | confirmed (corrected) |
 | D4 | medium | setup | Empty `dhparam.pem` from an interrupted run is kept | repro | open |
 | D5 | medium | setup | Truncated `gum` download is installed and never replaced | repro | open |
 | D6 | medium | setup | Headless pre-flight still prompts and exits silently at EOF | repro | open |
@@ -100,22 +101,22 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | D16 | medium | setup | One-time admin password saved in the 0644 install log | repro | open |
 | D17 | low | setup | Switch to self-signed keeps a public cert nothing renews | repro | open |
 | D18 | low | setup | Step output goes to predictable `/tmp` files | repro (partial) | open |
-| C1 | critical | runtime | PHP runs in upload directories, `.phar` included | repro | open |
-| C2 | critical | runtime | Root init container runs a script PHP can write | repro | open |
-| C3 | high | nginx | Asset regexes win over the internal-directories deny | repro | open |
+| C1 | high | runtime | PHP runs in upload directories, `.phar` included | repro | confirmed (corrected) |
+| C2 | high | runtime | Root init container runs a script PHP can write | repro | confirmed (corrected) |
+| C3 | high | nginx | Asset regexes win over the internal-directories deny | repro | confirmed (corrected) |
 | C4 | medium | nginx | TLS 1.3 0-RTT on, replayable, invisible to PHP | repro | open |
 | C5 | medium | nginx | SVG and font responses lose every security header | repro | open |
 | C6 | medium | runtime | PHP-FPM can rewrite phpMyAdmin's `config.inc.php` | code | open |
 | C7 | low | nginx | `_INSTALL/` (`install_db.sql`) served as static files | repro | open |
 | C8 | low | runtime | Init re-runs rewrite the title; Manticore cron failure hidden | code | open |
-| R1 | high | multi-site | `remove` of a new site deletes a single-mode primary's data | repro | open |
+| R1 | high | multi-site | `remove` of a new site deletes a single-mode primary's data | repro | confirmed |
 | R2 | high | multi-site | Two sites can claim the same `www` host, breaking Caddy for all | repro | confirmed |
 | R3 | medium | reconfigure | Multi-mode rollback leaves the recreated containers changed | repro (stub) | open |
 | R4 | medium | reconfigure | Edited `DOMAIN` half-applies and takes the site down | code | open |
 | R5 | medium | multi-site | `remove` hides a failed `down -v`, then deletes the config | repro | open |
 | R6 | low | multi-site | Manual `caddy-start` sets the ACME email to `admin@example.com` | repro | open |
-| M1 | high | import | Shell injection on the old server in the tar fallback | repro | open |
-| M2 | high | import | Untrusted dump runs shell commands in the MariaDB container | repro | open |
+| M1 | high | import | Shell injection on the old server in the tar fallback | repro | confirmed |
+| M2 | medium | import | Untrusted dump runs shell commands in the MariaDB container | repro | confirmed |
 | M3 | medium | import | Decompression errors ignored; a corrupt dump is marked complete | repro | confirmed |
 | M4 | medium | import | Absolute symlinks on the old server copied as root, readable by PHP | repro | open |
 | M5 | low | import | A resumed pass can run with no free-space check | code | open |
@@ -201,6 +202,66 @@ verdicts and corrections override the finding text below where they differ.
 - **S4 — confirmed.** The fix must allow `${PHP_FROM}` and stage names (php and
   cron use `FROM ${PHP_FROM} AS ffmpeg-build` and `COPY --from=ffmpeg-build`),
   and also check the `ARG PHP_FROM=` line.
+- **C1 — confirmed; severity high (was critical).** It needs someone who can
+  already write a `.php` file under `contents/`: defence in depth. Fix scope:
+  `tmp/` and `langs/` are already covered (`/tmp/x.php` hits the internal
+  location and the deny at `:136`; `:88` covers langs), so only `contents/`
+  needs the new rule. The native `conf/nginx/globals/php_fastcgi.conf:2` already
+  has `try_files $fastcgi_script_name =404`, so the `.phar` PATH_INFO trick does
+  not apply to the native install; a direct `.php` does. The `10-config-php.sh`
+  prune is at `:91` (comment at `:80-81`).
+- **C2 — confirmed; severity high (was critical); fix corrected.** It is a
+  privilege escalation from uid 1000. `60-permissions.sh:113` chowns the whole
+  tree, the marker included, to 1000 before `:127`, so uid 1000 can also forge
+  or delete the marker. No `USER`, `security_opt`, `read_only` or `cap_drop`
+  anywhere in `docker/`. Do **not** move `.kvs-extraction-complete` out of the
+  site: `00-extract.sh:42-60` relies on it across `run --rm` containers (skip,
+  refusal and resume, `tests/test_init_resume_hardening.sh`). Instead add a
+  separate per-run flag in the container's `/tmp`, shared by the
+  `entrypoint.d` scripts of one run, and trust only that. The staging directory
+  cannot be the script's source (the `00-extract` EXIT trap deletes it before
+  `60` runs): copy the script to `/tmp` during extraction.
+- **C3 — confirmed; fix caveat.** Moving the `^/tmp/` deny above the asset
+  regexes 403s every static file under `/tmp/`: check first that KVS serves no
+  upload preview or temporary file from `/tmp/` by direct URL. Line references
+  are right in all three files (`domain.conf` includes `general.conf` at `:30`,
+  before `:41`).
+- **M1 — confirmed** with the real `import_remote_files`. The call is at
+  `import.sh:3253`. The rsync path is not affected (its excludes travel in the
+  protocol); `$dir` is protected by `import_remote_path_check`.
+- **M2 — confirmed; severity medium (was high).** Whoever controls the dump
+  already controls the whole imported database, admin accounts included; the
+  extra gain is a shell as mysql in the MariaDB container. `import_prepare_dump`
+  starts at `import.sh:320`; native at `native-import-runtime.sh:228-237`. The
+  entrypoint passes no `--binary-mode`.
+- **R1 — confirmed** with real Docker (`down -v` from another directory under the
+  same project name removed the other project's container and volume).
+  Current lines: `add_site` `:451`, `ensure_site_prefix_available` `:168`
+  (called at `:484`), `remove_site` `:707` (`down -v` near `:736`). It needs
+  `site-manager add/remove` on a single-mode install and typing `yes`;
+  medium-to-high. The working_dir label check is the right guard.
+- **D1 — confirmed; fix caveat.** `retirement_prepare_identity`
+  (`docker/setup.sh:997`, `:1002`) writes `SITE_PREFIX=kvs` on purpose as a
+  "choose again" signal when the domain changes, and `.env.example` ships
+  `SITE_PREFIX=kvs`. A new "legacy" marker must keep both working.
+- **D2 — confirmed; severity medium (was high).** The value comes from root's own
+  environment: no privilege boundary. Also: the loopback ports reach
+  `parse_publish_endpoint` only inside `publish_endpoint_is_listening`, within an
+  `if`, so an invalid value is read as "not listening" and never rejected.
+  `parse_publish_endpoint` is at `:1083`; the capture at about `:3298-3308`.
+- **D3 — confirmed; severity medium (was high); fix corrected.** Worse than
+  written: `docker/setup.sh:8` sets `umask 022` explicitly, and the default
+  install directory `/opt/kvs` is a 0755 clone. But a root-owned 0700
+  `mariadb/init` breaks the import: the image entrypoint drops to mysql (uid 999)
+  before reading `/docker-entrypoint-initdb.d`. Own or group the directory and
+  files to 999. `tests/test_native_import.sh:88` asserts 644 on the native
+  payload and must change with the fix. Mind userns-remap and rootless Docker,
+  where 999 maps differently. Needs an unprivileged local user on the host.
+- **E1 — confirmed (code); fix detail.** Tar is at about `:2449`, the
+  `--dump-only` path at `:2404-2408`. The default output is `./<domain>-…` in the
+  current directory, so a run from `/root` (0700) is safe; a 0755 home or `/tmp`
+  exposes it. Prefer `chmod 600` on the staged file before `mv` to a global
+  `umask 077`.
 
 ## kvs-export.sh
 
