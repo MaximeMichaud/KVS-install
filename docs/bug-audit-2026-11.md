@@ -214,6 +214,12 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | F2 | medium | runtime | Two kvs-init runs on one site: password lost, or admin login locked | repro | open |
 | F3 | medium | runtime | kvs-init clears KVS cron locks while the cron container keeps running | code | open |
 | F4 | low | multi-site | Proxy network inspect-then-create: one of two first runs aborts | repro | open |
+| O1 | medium | export | Tools in `/usr/local` invisible under `sudo -n` on the RHEL family | repro | open |
+| O2 | low | tests | `test_kvs_export.sh` cannot pass under bash 4.2 | repro | open |
+| O3 | low | import | Old SSH servers unreachable with today's client defaults, unexplained | repro | open |
+| O4 | low | export | Re-export over an existing output fails on coreutils older than 8.6 | repro | open |
+| O5 | low | import | A csh/tcsh login shell breaks the parallel transfer | repro | open |
+| O6 | low | export | Without procps, `--size-timeout` does not bound the walk | repro | open |
 
 ## Verification pass
 
@@ -2953,8 +2959,8 @@ replace duplicates left by old `>> .env` appends; `kvsctl_min` exists from
 
 Run under the real interpreters and images. Not yet independently verified.
 Sound, so skip: every `#!/bin/sh` script passes `shellcheck -s sh`, and the
-phpMyAdmin init runs in the pinned alpine/busybox image; `kvs-export.sh` passes
-its 33 tests under bash 4.2.53 and 5.3.20; `patsub_replacement` escaping is the
+phpMyAdmin init runs in the pinned alpine/busybox image; `kvs-export.sh` itself
+runs under bash 4.2 (see O2: its test suite does not); `patsub_replacement` escaping is the
 same on bash 4.2, 5.2 and 5.3; byte counts are 64-bit or double throughout; the
 rsync stats and progress parsers survive locale thousands separators; no glob is
 passed over an unbounded list; IPv6 publish parsing is handled.
@@ -3464,6 +3470,117 @@ a second import refuses through the staged-file identity and token checks.
 - **Fix direction:** `docker network create kvs-proxy || docker network inspect kvs-proxy`.
 - **Test:** stub `create` failing with "already exists" and `inspect` then
   succeeding: `ensure_proxy_network` returns 0.
+
+## Old source servers
+
+Real old servers built in Docker and reached over SSH from a Debian 13 client
+(OpenSSH 10.0, rsync 3.5.0), running the real `import.sh` functions as root, as a
+passwordless-sudo user and without sudo: CentOS 7.9 (bash 4.2.46, coreutils 8.22,
+tar 1.26, rsync 3.1.2, MariaDB 5.5, OpenSSH 7.4), Ubuntu 16.04 (MySQL 5.7, mawk,
+OpenSSH 7.2), CentOS 6.10 (bash 4.1, coreutils 8.4, OpenSSH 5.3), MySQL 5.7 with
+GTID, a MySQL 8 client against 5.7 and MariaDB 10.3, MariaDB 10.1 with MyISAM,
+zstd 1.1.2, tcsh as root's shell. Not yet independently verified.
+
+Sound on CentOS 7 / bash 4.2, so skip: the exporter's detect, dump, archive and
+size timeout (process substitution, `read -t`/`-N`, associative arrays, the
+empty-array guards, `mv -fT`, `cp --attributes-only`, `findmnt -T`, `xargs -r -0
+-n1 -P`, tar 1.26 excludes, gzip, zstd 1.1.2); mysqldump flags
+(`--single-transaction` or `--lock-tables` for MyISAM, utf8mb4 with a utf8
+fallback on MySQL 5.1, `--set-gtid-purged=OFF` with GTID, `--column-statistics=0`
+with a MySQL 8 client); root and NOPASSWD sudo detection, password sudo
+reported; rsync 3.1.1 and 3.1.2 accept every option used, parallel workers
+included; the tar fallback quoting with tar 1.26 and 1.28; ssh options are
+interpreted by the new server's client only (`accept-new` is not an old-server
+issue).
+
+### O1. Tools in `/usr/local` invisible under `sudo -n` on the RHEL family
+
+- **Severity:** medium (a misleading "the database of the old server does not
+  answer" stop; rsync silently drops to the tar fallback, zstd to gzip)
+- **Confidence:** repro on CentOS 7 (binaries in `/usr/local/bin`, NOPASSWD user:
+  `db_client=`, `db_ok=no`, `rsync=no`); that DirectAdmin custombuild puts them
+  there is an assumption. **Status:** open
+- **Where:** `kvs_detect_tools`, `kvs-export.sh:539-556` (`command -v`), reached
+  through `IMPORT_REMOTE_PREFIX=(sudo -n)` (`docker/lib/import.sh:1618`) and
+  `--rsync-path="sudo -n rsync"` (`:2981`).
+- **Defect:** the stock RHEL-family `secure_path` is `/sbin:/bin:/usr/sbin:/usr/bin`,
+  without `/usr/local/bin` (Ubuntu's includes it). Root over SSH misses anything only
+  `/etc/profile.d` adds, such as `/usr/local/mysql/bin`.
+- **Fix direction:** at the top of the exporter, append the missing standard
+  directories to `PATH` (`/usr/local/sbin:/usr/local/bin:/usr/local/mysql/bin`,
+  overridable); name the `PATH` in the "no client" error.
+- **Test:** stub mysql, mysqldump and rsync in a directory reached only through the
+  new setting; detect with `PATH=/usr/bin:/bin` gives `db_ok=yes` and `rsync=yes`.
+
+### O2. `test_kvs_export.sh` cannot pass under bash 4.2
+
+- **Severity:** low (false confidence about the oldest supported bash; this audit
+  itself repeated the claim, now corrected)
+- **Confidence:** repro (bash 4.2.46 and 4.2.53: "options[@]: unbound variable" after
+  test 22 of 33; patched, it stops at `:1554` on a missing `python3`).
+  **Status:** open
+- **Where:** `tests/test_kvs_export.sh:1508` and `:1657` (a bare `"${options[@]}"` with
+  an empty array under `set -u`; bash before 4.4 treats it as unbound).
+- **Fix direction:** `${options[@]+"${options[@]}"}`; skip the python-based tests when
+  `python3` is absent; a CI job running the suite in a `bash:4.2` or `centos:7` image.
+
+### O3. Old SSH servers unreachable with today's client defaults, unexplained
+
+- **Severity:** low (a loud failure at connect)
+- **Confidence:** repro against CentOS 6 (OpenSSH 5.3: "no matching host key type
+  found. Their offer: ssh-rsa,ssh-dss"); older Debian and Ubuntu servers with RSA
+  user keys may hit it too (not run). **Status:** open
+- **Where:** `IMPORT_SSH_OPTS`, `docker/lib/import.sh:1549-1577`.
+- **Defect:** OpenSSH 8.8 and later disable `ssh-rsa`; `HostKeyAlgorithms=+ssh-rsa`
+  alone still refuses an RSA user key (`PubkeyAcceptedAlgorithms=+ssh-rsa` is also
+  needed). README and setup never mention it. With both in `/root/.ssh/config`,
+  detect, dump, rsync 3.0.6 and the tar 1.23 fallback all work.
+- **Fix direction:** an opt-in `IMPORT_SSH_LEGACY_ALGORITHMS=yes`, or document the
+  ssh_config entry; detect "Unable to negotiate" and point to it.
+- **Test:** the opt-in adds both options.
+
+### O4. Re-export over an existing output fails on coreutils older than 8.6
+
+- **Severity:** low (the new export is discarded; only with `-o` reused, or two runs
+  in the same minute)
+- **Confidence:** repro on CentOS 6 ("cp: unrecognized option '--attributes-only'").
+  **Status:** open
+- **Where:** `kvs_publish_export`, `kvs-export.sh:2313`.
+- **Fix direction:** fall back to `chmod --reference` plus `chown --reference` when
+  `cp --attributes-only` is unsupported (that path loses the ACL the comment cares
+  about, so prefer it only as a fallback).
+- **Test:** a stub `cp` rejecting `--attributes-only`; the second export is published
+  with the old mode.
+
+### O5. A csh/tcsh login shell breaks the parallel transfer
+
+- **Severity:** low (only with the opt-in `IMPORT_TRANSFER_JOBS>1`)
+- **Confidence:** repro with CentOS 7 plus tcsh ("transfer worker 1 ended before SSH
+  was ready"; a stray `/root/2` holding `KVS_IMPORT_SSH_READY` left on the old
+  server). **Status:** open
+- **Where:** sh-only remote strings: `docker/lib/import.sh:2225`
+  (`--rsync-path="printf '%s\n' KVS_IMPORT_SSH_READY >&2; exec …"`), `:2082`
+  (`df -Pk "${TMPDIR:-/var/tmp}"`), `:2094` and `IMPORT_DISKSTATS_COMMAND`; the wait
+  loop at `:2333-2347`.
+- **Defect:** under csh, `>&2` writes to a file named `2`; the free-space probe and
+  disk statistics fail too. FreeBSD 13 and earlier default root to csh. Detect,
+  dump, the single stream and the tar fallback still work.
+- **Fix direction:** wrap every remote string as `sh -c '…'`, the rsync-path included
+  (`sh -c 'printf …>&2; exec rsync "$@"' sh`).
+- **Test:** a unit test that every remote command starts with `sh -c`, or an
+  integration test with a tcsh login shell and two jobs.
+
+### O6. Without procps, `--size-timeout` does not bound the walk
+
+- **Severity:** low (silent overrun on minimal or container-based old servers)
+- **Confidence:** repro (debian:9 and debian:10 images: the repo's own budget test
+  fails with "the run took 20 s", and cleanup prints "exec: pgrep: not found").
+  **Status:** open
+- **Where:** `kvs-export.sh:781-788` (`pkill -TERM -P`), the read loop at `:885` (keeps
+  reading to EOF after the timeout), `:221` (`exec pgrep -P`).
+- **Fix direction:** break out and close fd 3 as soon as the timeout fires, kill the
+  `du` processes by process group, and do not depend on `pgrep` in cleanup.
+- **Test:** the existing budget test with `pkill` removed from `PATH`.
 
 ## Checked and found sound
 
