@@ -13,13 +13,15 @@ first), then low.
 This file is a work list for a follow-up agent: fix each finding with a
 regression test, or reject it with the reason.
 
-Every one of the findings has been through an independent, adversarial
+Every finding from E1 to S8 has been through an independent, adversarial
 verification pass (reviewers who did not write it tried to disprove it, most
 of them by reproduction). None was rejected. Many write-ups were corrected:
 for a finding marked `confirmed (corrected)`, the note under
 [Verification pass](#verification-pass) overrides the finding's own text,
 including its severity, line numbers and fix direction. Several original fix
 directions would have broken existing behaviour or tests; the notes say which.
+The later W findings (documentation against code) were checked against the
+code once and are still `open`.
 
 ## How to work through this list
 
@@ -150,6 +152,14 @@ each `tests/test_*.sh` on its own through `as-uid-1000.sh`.
 | S6 | low | release | Registry digest header trusted without hashing the body | repro | confirmed (corrected) |
 | S7 | low | ci | `push.yml` and `markdown-lint.yml` have no `permissions:` | repro | confirmed |
 | S8 | low | multi-site | Caddy outside the lock; site template references not checked | repro | confirmed (corrected) |
+| W1 | high | docs | `MENU_OPTION=2` "Add site" runs a broken native install, even on Docker | code | open |
+| W2 | medium | install | `kvs-install.sh --help` (any unknown argument) starts an install | repro | open |
+| W3 | medium | multi-site | `site-manager.sh add` always uses PHP 8.1 and `IONCUBE=YES` | code | open |
+| W4 | medium | docs | Standalone headless ignores `SSL_CHOICE` and `KVS_EMAIL` | code | open |
+| W5 | low | docs | `.env.example` gives the wrong default container prefix | code | open |
+| W6 | low | docs | Standalone PHP-FPM is never set to "static" | code | open |
+| W7 | low | docs | The "monitoring tools" (ncdu, vnstat, nload) are not installed | repro | open |
+| W8 | low | docs | Supported KVS versions disagree across docs, Docker and kvsctl | code | open |
 
 ## Verification pass
 
@@ -1984,6 +1994,125 @@ PHP 8.1 and Debian trixie `php8.4-fpm`).
   digests.
 - **Test:** `--check-dockerfiles` fails on any compose `image:` without
   `@sha256:`.
+
+## Documentation against code
+
+Places where the README, `.env.example` or the scripts' own menus promise
+behaviour the code does not deliver. Each one was checked against the code once
+and is not yet independently verified.
+
+### W1. `MENU_OPTION=2` "Add site" runs a broken native install, even on Docker
+
+- **Severity:** high (on a Docker host it can re-own a Docker site's files away
+  from uid 1000)
+- **Confidence:** code. **Status:** open
+- **Doc:** `README.md:259` (headless table: `MENU_OPTION` `1-5`, "2=Add site").
+- **Code:** `kvs-install.sh:2259` labels it "Add another KVS website (work in
+  progress, not working)"; `:2270-2272` runs `whatisdomain` then `install_KVS`,
+  the standalone path, whatever the install type. `install_KVS` (`:1100-1104`)
+  runs `chown -R www-data` and `chmod -R 755 /var/www/$DOMAIN`, calls `mariadb` on
+  the host and writes `/etc/nginx/globals/kvs.conf`; `$PHP` is never set on this
+  path.
+- **Consequence:** no usable second site; if the domain is an existing Docker
+  site, its files lose uid 1000 ownership and PHP loses write access. Docker
+  sites are added with `docker/multi-site/site-manager.sh add`.
+- **Fix direction:** doc now (drop or flag the value, point to
+  `site-manager.sh`); code: refuse option 2 on Docker hosts, or route it to
+  `site-manager.sh`.
+- **Test:** `MENU_OPTION=2` on a Docker-mode fixture refuses without touching
+  `/var/www`.
+
+### W2. `kvs-install.sh --help` (any unknown argument) starts an install
+
+- **Severity:** medium. **Confidence:** repro (`parse_arguments --help -h`
+  returned without exiting). **Status:** open
+- **Code:** `kvs-install.sh:41-44` ("Unknown args are ignored"); `main`
+  (`:2467-2479`) then reaches `manageMenu` or `chooseInstallationType`, and on a
+  host without `/var/www` goes straight to `dockerInstall` (`:1666-1670`), which
+  pipes get.docker.com into `sh`, clones `/opt/kvs` and runs `setup.sh`.
+  `setup.sh` and `reconfigure.sh` do have `--help`.
+- **Fix direction:** handle `-h`/`--help`; refuse unknown options (keep
+  backward compatibility for any documented legacy one).
+- **Test:** `kvs-install.sh --help` prints usage and exits 0 without side
+  effects; `--bogus` exits 2.
+
+### W3. `site-manager.sh add` always uses PHP 8.1 and `IONCUBE=YES`
+
+- **Severity:** medium (a KVS 7.0.3+ site's encoded files fail on PHP 8.1)
+- **Confidence:** code. **Status:** open
+- **Doc:** `README.md:179` and `docker/.env.example:42-47` (PHP 8.3 for KVS 7.0.3
+  and newer).
+- **Code:** `docker/multi-site/site-manager.sh:461` (`local php_version=8.1`),
+  `:541` and `:544` write `PHP_VERSION=${php_version}` and `IONCUBE=YES`; the
+  archive version and its encoding are never read.
+- **Fix direction:** reuse `setup.sh`'s `kvs_documented_php_version` and
+  `detect_ioncube`.
+- **Test:** `add` with a 7.0.3 archive fixture writes `PHP_VERSION=8.3`; an
+  unencoded archive writes `IONCUBE=NO`.
+
+### W4. Standalone headless ignores `SSL_CHOICE` and `KVS_EMAIL`
+
+- **Severity:** medium (`SSL_CHOICE=3` still tries Let's Encrypt and opens UFW
+  80/443; `SSL_CHOICE=2` is silently ignored; the ACME account has no email)
+- **Confidence:** code. **Status:** open
+- **Doc:** `README.md:260` and `:262` (`KVS_EMAIL` "required for Let's
+  Encrypt/ZeroSSL", `SSL_CHOICE` 1-3, in the table shared with `INSTALL_TYPE`);
+  the standalone headless example at `:275-284` sets neither.
+- **Code:** `kvs-install.sh:251-258` defaults `SSL_PROVIDER=letsencrypt` in
+  headless mode; `KVS_EMAIL` appears nowhere in `kvs-install.sh`; the SSL and
+  email questions exist only in the interactive branch (`:483-611`); `:1246` runs
+  `acme.sh --install -m "$EMAIL"` with an empty email. Related to N4.
+- **Fix direction:** map `SSL_CHOICE` and `KVS_EMAIL` in the standalone headless
+  path, or document `SSL_PROVIDER` and `EMAIL` for it.
+- **Test:** headless standalone with `SSL_CHOICE=3` never calls `acme.sh`.
+
+### W5. `.env.example` gives the wrong default container prefix
+
+- **Severity:** low (scripts or backup jobs using `kvs-php` or
+  `kvs_mariadb-data` miss the real containers and volumes)
+- **Confidence:** code. **Status:** open
+- **Doc:** `docker/.env.example:8` ("Default: kvs (containers: kvs-php,
+  kvs-mariadb, volumes: kvs_mariadb-data…)").
+- **Code:** `docker/setup.sh:3620-3661` and `:3675-3677`: with `SITE_PREFIX=kvs`,
+  the default choice (also the headless default) replaces it with
+  `kvs-<domain minus TLD>` and sets `COMPOSE_PROJECT_NAME` to match. See D1.
+- **Fix direction:** doc.
+
+### W6. Standalone PHP-FPM is never set to "static"
+
+- **Severity:** low. **Confidence:** code. **Status:** open
+- **Doc:** `README.md:526` (dynamic below 4 GB of RAM, static above).
+- **Code:** `configure_dynamic_php_fpm`, `kvs-install.sh:1274-1306`, only rewrites
+  the four dynamic values from half of RAM at 64 MB per worker; it never sets
+  `pm` and has no 4 GB threshold.
+- **Fix direction:** doc, or implement the threshold.
+
+### W7. The "monitoring tools" (ncdu, vnstat, nload) are not installed
+
+- **Severity:** low. **Confidence:** repro (grep: they appear only in the
+  README). **Status:** open
+- **Doc:** `README.md:532`. **Code:** the `aptinstall` package list,
+  `kvs-install.sh:680-706`.
+- **Fix direction:** doc or code.
+
+### W8. Supported KVS versions disagree across docs, Docker and kvsctl
+
+- **Severity:** low (loud failures; nothing is changed)
+- **Confidence:** code. **Status:** open
+- **Doc:** `README.md:1` ("Tested with 5.5.1, 6.1.2, …"); the kvsctl section
+  (`README.md:440-447`) gives no KVS minimum.
+- **Code:** Docker, the default, refuses KVS 6.2.0 and older
+  (`docker/setup.sh:1633-1655`; `README.md:552` does say PHP 7.4 is
+  standalone-only); `.github/release.env` has `KVS_MIN=7.0.0`, and
+  `cli/internal/upgrade/plan.go:119-122` blocks kvsctl upgrades for 6.2.1 to 6.x
+  Docker sites.
+- **Fix direction:** doc: say which versions each path supports.
+
+Not a clear mismatch, but wider than an operator would expect: in multi-site
+mode with `SSL_PROVIDER=selfsigned`, `docker/reconfigure.sh:1478-1480` sets
+`streaming_skip_ssl_check = 1` on every storage row, remote servers with valid
+certificates included (`.env.example:15-17` and `SECURITY.md` keep verification
+only for single-site).
 
 ## Checked and found sound
 
