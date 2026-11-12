@@ -83,6 +83,14 @@ sed -e "s/^DOMAIN=.*/DOMAIN=${DOMAIN}/" \
 mkdir -p "$TEST_DIR/site"
 cp "$ROOT_DIR/docker/multi-site/docker-compose.site.yml.template" "$TEST_DIR/site/docker-compose.yml"
 
+# A site root with the front controller the KVS rewrites send every request
+# to. The nginx image ships no webroot; the PHP handler now serves only a
+# script that exists (try_files ... =404), so a .php request reaches PHP-FPM,
+# and answers 502 while it is down, only when the file is there, as it is on
+# a real site.
+mkdir -p "$TEST_DIR/webroot"
+printf '<?php\n' > "$TEST_DIR/webroot/index.php"
+
 # probe_of <layout>: the health check test of the nginx service, as Compose
 # renders it for the layout, one argument per line. "CMD" is dropped: Docker
 # runs the rest as the command, like docker exec does.
@@ -110,6 +118,7 @@ start_layout() {
         -e "DOMAIN=$DOMAIN" -e USE_WWW=false -e PROJECT_HTTPS_PORT=443
         -v "$TEST_DIR/custom-entrypoint.sh:/custom-entrypoint.sh:ro"
         -v "$TEST_DIR/rotate-site-logs:/usr/local/bin/rotate-site-logs:ro"
+        -v "$TEST_DIR/webroot:/var/www/kvs:ro"
         -v "$ROOT_DIR/docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro"
         -v "$ROOT_DIR/conf/nginx/globals:/etc/nginx/globals:ro"
         -v "$TEST_DIR/includes:/etc/nginx/includes:ro"

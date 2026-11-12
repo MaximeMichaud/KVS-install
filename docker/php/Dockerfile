@@ -307,6 +307,11 @@ RUN chmod 0755 /usr/local/bin/yt-dlp \
 # Size PHP-FPM on the running host, where container memory limits are known.
 COPY fpm-config.sh /usr/local/lib/kvs/fpm-config.sh
 
+# PHP-FPM runs .php files only: an uploaded .phar never runs, whatever path
+# leads to it.
+RUN printf '%s\n' '[www]' 'security.limit_extensions = .php' \
+        > /usr/local/etc/php-fpm.d/zz-kvs-security.conf
+
 # Symlink PHP to /usr/bin (KVS scripts expect it there), and give www-data
 # the UID and GID 1000 that own the KVS files on the host. The php-sessions
 # volume mounts on /var/lib/php/sessions, and Docker gives a new volume the

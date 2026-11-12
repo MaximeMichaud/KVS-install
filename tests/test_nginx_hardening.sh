@@ -25,6 +25,10 @@ fail() {
 
 KVS_INTERNAL_DIRECTORIES_REGEX='^/(admin/(include(?!/(uploader|get_upload_status)\.php$)|data|logs|plugins|smarty|stamp|template|tools)|tmp)/'
 KVS_INTERNAL_DIRECTORIES_RULE="location ~ ${KVS_INTERNAL_DIRECTORIES_REGEX} {"
+# Uploads land under contents/: no PHP may run there, a .phar or a PATH_INFO
+# path through one (up.phar/x.php) included.
+KVS_CONTENTS_PHP_REGEX='^/contents/.*\.(?:php|phar)(?:/|$)'
+KVS_CONTENTS_PHP_RULE="location ~* ${KVS_CONTENTS_PHP_REGEX} {"
 
 line_number() {
     local file="$1"
@@ -101,6 +105,29 @@ assert_kvs_internal_directories_denied_before_php() {
     done
     grep -q 'location ^~ /admin/include/' "$file" &&
         fail "a ^~ prefix location hides the admin uploader scripts from the PHP handler in ${file}"
+    return 0
+}
+
+assert_contents_php_denied_before_php() {
+    local file="$1"
+    local contents_line
+    local php_line
+    local path
+
+    contents_line=$(line_number "$file" "$KVS_CONTENTS_PHP_RULE")
+    php_line=$(line_number "$file" 'location ~ \.php$ {')
+    [ "$contents_line" -lt "$php_line" ] ||
+        fail "PHP under /contents/ is denied after the PHP handler in ${file}"
+    for path in /contents/other/evil.php /contents/other/up.phar /contents/other/up.phar/x.php \
+        /contents/videos_sources/1/EVIL.PHP; do
+        printf '%s\n' "$path" | grep -Piq "$KVS_CONTENTS_PHP_REGEX" ||
+            fail "the contents rule of ${file} leaves ${path} to the PHP handler"
+    done
+    for path in /contents/videos_screenshots/1/1.jpg /contents/albums/sources/1/photo.php.jpg \
+        /contents/other/pharmacy.mp4 /index.php /admin/index.php; do
+        printf '%s\n' "$path" | grep -Piq "$KVS_CONTENTS_PHP_REGEX" &&
+            fail "the contents rule of ${file} denies ${path}"
+    done
     return 0
 }
 
@@ -583,18 +610,31 @@ do
     assert_kvs_internal_directories_denied_before_php "${ROOT_DIR}/${site_config}"
     assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_INTERNAL_DIRECTORIES_RULE" 'deny all;'
     assert_location_body_has "${ROOT_DIR}/${site_config}" 'location ^~ /contents/videos/ {' 'internal;'
+    assert_contents_php_denied_before_php "${ROOT_DIR}/${site_config}"
+    assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_CONTENTS_PHP_RULE" 'deny all;'
 done
 for site_config in \
     conf/nginx/templates/kvs.conf.tpl \
     docker/multi-site/nginx/kvs-caddy.conf.template
 do
     assert_location_body "${ROOT_DIR}/${site_config}" 'location ~ /\. {' 'deny all;'
+    # PHP-FPM gets only a script that exists, never one it would find by
+    # cutting a PATH_INFO path short.
+    # shellcheck disable=SC2016  # An nginx variable, not a shell one.
+    assert_location_body_has "${ROOT_DIR}/${site_config}" 'location ~ \.php$ {' \
+        'try_files $fastcgi_script_name =404;'
     for directory in blocks langs template tmp; do
         assert_location_body "${ROOT_DIR}/${site_config}" "location ~* /${directory}/.*\.php\$ {" 'internal;'
     done
 done
-# The standalone site config takes its dotfile and KVS internal locations
-# from the globals it includes.
+# The standalone site config takes its dotfile and KVS internal locations,
+# and the existing-script check of its PHP handler, from the globals it
+# includes.
+assert_location_body_has "${ROOT_DIR}/conf/nginx/conf.d/domain.conf" 'location ~ \.php$ {' \
+    'include globals/php_fastcgi.conf;'
+# shellcheck disable=SC2016  # An nginx variable, not a shell one.
+grep -Eq '^try_files +\$fastcgi_script_name =404;$' "${ROOT_DIR}/conf/nginx/globals/php_fastcgi.conf" ||
+    fail "the PHP handler of the standalone site config runs scripts that do not exist"
 assert_location_body "${ROOT_DIR}/conf/nginx/globals/security.conf" \
     'location ~ /\.(?!well-known(?:/|$)) {' 'deny all;'
 for directory in blocks langs template tmp; do

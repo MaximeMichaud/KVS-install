@@ -3,6 +3,7 @@
 
 Run with python3 tests/integration_php_security.py IMAGE
 VERSION [--fpm]. Uses only temporary containers and synthetic PHP scripts.
+FPM runs with the php.ini of the stack, mounted where Compose mounts it.
 """
 
 import argparse
@@ -14,6 +15,8 @@ import subprocess
 import tempfile
 import time
 import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def docker(*args, check=True):
@@ -36,13 +39,13 @@ def read_exact(connection, size):
     return data
 
 
-def request(port, query=""):
+def request(port, query="", script="/probe.php"):
     params = {
-        "SCRIPT_FILENAME": "/security-test/probe.php",
-        "SCRIPT_NAME": "/probe.php",
+        "SCRIPT_FILENAME": "/security-test" + script,
+        "SCRIPT_NAME": script,
         "REQUEST_METHOD": "GET",
         "QUERY_STRING": query,
-        "REQUEST_URI": "/probe.php" + ("?" + query if query else ""),
+        "REQUEST_URI": script + ("?" + query if query else ""),
         "SERVER_PROTOCOL": "HTTP/1.1",
         "GATEWAY_INTERFACE": "CGI/1.1",
         "SERVER_NAME": "localhost",
@@ -94,10 +97,14 @@ echo json_encode([
 ]);
 """)
         script.chmod(0o644)
+        archive = root / "probe.phar"
+        archive.write_text(script.read_text())
+        archive.chmod(0o644)
         try:
             docker(
                 "run", "-d", "--name", name, "--memory", "1g",
                 "-p", "127.0.0.1::9000", "-v", directory + ":/security-test:ro",
+                "-v", str(ROOT / "docker/php/php.ini") + ":/usr/local/etc/php/conf.d/kvs.ini:ro",
                 "-e", "KVS_MEMCACHE_LOOPBACK=false", "-e", "YT_DLP_AUTO_UPDATE=no",
                 "-e", "IONCUBE=" + ioncube, "-e", "PHP_MEMORY_LIMIT=8M",
                 "-e", "PHP_FPM_MAX_CHILDREN=1", "-e", "PHP_FPM_START_SERVERS=1",
@@ -123,6 +130,12 @@ echo json_encode([
             first = healthy()
             second = healthy()
             assert second["pid"] == first["pid"], "Requests must reuse the single worker"
+            # Only .php files run, and only the script asked for: an uploaded
+            # probe.phar does not, nor does probe.php for probe.php/x.php.
+            refused = request(port, script="/probe.phar")
+            assert b"Status: 403" in refused and b'"version"' not in refused, refused
+            missing = request(port, script="/probe.php/x.php")
+            assert b"Status: 404" in missing and b'"version"' not in missing, missing
             if version.startswith("8.1."):
                 try:
                     request(port, "oom=1")
@@ -135,7 +148,7 @@ echo json_encode([
                     "/var/www/kvs/security-unsafe-shutdown", check=False,
                 )
                 assert sentinel.returncode == 0, "Unsafe shutdown callback ran after OOM"
-            checks = "consecutive requests"
+            checks = "consecutive requests, no .phar or PATH_INFO script"
             if version.startswith("8.1."):
                 checks += " and worker recovery"
             print(f"PASS: FPM {version}, ionCube={ioncube}, {checks}")

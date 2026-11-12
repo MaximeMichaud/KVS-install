@@ -105,6 +105,15 @@ fix_file "$KVS_PATH/favicon.ico" "666"
 fix_dir "$KVS_PATH/admin/data/tmp" "777" "true"
 fix_dir "$KVS_PATH/admin/data/engine" "777" "true"
 
+# --- Every directory: nginx enters it on the way to a script ---
+# The PHP location checks the script with try_files, so nginx, which runs
+# as its own user, stats it and needs the search bit on every directory
+# above it, as the KVS archive's own 755 gives. An imported site keeps the
+# old server's modes: admin/include at 750 turned the admin upload scripts
+# into 404s. The search bits only, where one is missing: nothing becomes
+# listable or readable, and a directory that has them is not written.
+find "$KVS_PATH" -type d ! -perm -0011 -exec chmod go+x {} + 2>/dev/null || true
+
 # Final ownership, as chown -R gives it (-h: a link itself, never what
 # it points to), on the entries owned by anyone else only. A mount that
 # refuses the change (NFS with root_squash, CIFS, FUSE) or an entry

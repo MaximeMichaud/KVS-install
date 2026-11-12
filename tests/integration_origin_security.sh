@@ -54,6 +54,7 @@ protected_paths=(
     admin/template/proof.php admin/tools/proof.php
     tmp/proof.php blocks/proof.php langs/proof.php template/proof.php
     contents/videos/proof.mp4
+    contents/other/evil.php contents/other/up.phar
 )
 # Scripts the PHP handler must still receive, the two admin upload scripts of
 # admin/include among them. No PHP-FPM listens behind these containers, so a
@@ -63,6 +64,11 @@ for path in "${protected_paths[@]}" "${handled_php_paths[@]}"; do
     mkdir -p "$TEST_DIR/site/$(dirname "$path")"
     printf 'kvs-source-sentinel\n' > "$TEST_DIR/site/$path"
 done
+# PATH_INFO paths through an existing file, which PHP-FPM would run in place
+# of the script named: an uploaded up.phar, or any script. They must not reach
+# the PHP handler either.
+pathinfo_paths=(contents/other/up.phar/x.php proof.php/x.php)
+protected_paths+=("${pathinfo_paths[@]}")
 : > "$TEST_DIR/includes/kvs-rewrites.conf"
 openssl genpkey -genparam -algorithm DH -pkeyopt group:ffdhe2048 \
     -out "$TEST_DIR/dhparam.pem" 2>/dev/null

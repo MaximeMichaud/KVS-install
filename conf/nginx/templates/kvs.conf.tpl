@@ -88,6 +88,9 @@ server {
     location ~* /langs/.*\.php$ { internal; }
     location ~* /template/.*\.php$ { internal; }
     location ~* /tmp/.*\.php$ { internal; }
+    # Uploads land under contents/, where no PHP runs under any name: a .phar,
+    # or up.phar/x.php, which PHP-FPM would run as up.phar.
+    location ~* ^/contents/.*\.(?:php|phar)(?:/|$) { deny all; }
 
     # Protect videos from direct access
     location ^~ /contents/videos/ {
@@ -140,6 +143,8 @@ server {
     # Handle PHP after all protected regular expression locations
     location ~ \.php$ {
         ${RESOLVER_LINE}
+        # Only a script that exists: PHP-FPM runs nothing in its place.
+        try_files $fastcgi_script_name =404;
         fastcgi_pass ${PHP_FPM_UPSTREAM};
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
         include fastcgi_params;

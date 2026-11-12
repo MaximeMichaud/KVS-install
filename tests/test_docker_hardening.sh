@@ -1312,6 +1312,51 @@ test_permission_pass_opens_the_root_and_survives_a_refused_chown() {
     pass "the permission pass opens the root and survives a refused chown"
 }
 
+# The PHP location checks the script with try_files, so nginx, which runs as
+# its own user, stats it and needs to enter every directory above it. An
+# imported site keeps the old server's modes: with admin/include at 750 the
+# admin upload scripts answered 404. Every directory gets the search bits it
+# lacks, and only those: nothing becomes listable or readable, and a
+# directory that already has them is not written.
+test_permission_pass_lets_nginx_reach_every_script() {
+    local case_dir="$TMP_ROOT/permissions-traversal"
+    local site_dir="$case_dir/site"
+    local common_mock="$case_dir/common.sh"
+    local script_copy="$case_dir/60-permissions.sh"
+    local owner kept before after
+
+    mkdir -p "$site_dir/admin/include" "$site_dir/admin/billings/provider" \
+        "$site_dir/admin/feeds" "$site_dir/admin/api"
+    printf '<?php\n' > "$site_dir/admin/include/uploader.php"
+    chmod 640 "$site_dir/admin/include/uploader.php"
+    chmod 750 "$site_dir/admin/include"
+    chmod 700 "$site_dir/admin/billings/provider"
+    chmod 770 "$site_dir/admin/feeds"
+    chmod 755 "$site_dir/admin/api"
+    make_init_common_mock "$common_mock"
+    owner="$(id -u):$(id -g)"
+    sed -e "s|source /init/lib/common.sh|source ${common_mock}|" \
+        -e "s/1000:1000/${owner}/g" -e "s/-uid 1000/-uid $(id -u)/" -e "s/-gid 1000/-gid $(id -g)/" \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/60-permissions.sh" > "$script_copy"
+
+    kept=$(stat -c '%Z.%z %a' "$site_dir/admin/api")
+    TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/first.log" 2>&1 ||
+        fail "the permission pass failed: $(cat "$case_dir/first.log")"
+    [ "$(stat -c %a "$site_dir/admin/include")" = 751 ] &&
+        [ "$(stat -c %a "$site_dir/admin/billings/provider")" = 711 ] &&
+        [ "$(stat -c %a "$site_dir/admin/feeds")" = 771 ] &&
+        [ "$(stat -c %a "$site_dir/admin/include/uploader.php")" = 640 ] ||
+        fail "every directory must gain only the search bits nginx needs, got include $(stat -c %a "$site_dir/admin/include"), provider $(stat -c %a "$site_dir/admin/billings/provider"), feeds $(stat -c %a "$site_dir/admin/feeds"), uploader.php $(stat -c %a "$site_dir/admin/include/uploader.php")"
+    [ "$kept" = "$(stat -c '%Z.%z %a' "$site_dir/admin/api")" ] ||
+        fail "a directory nginx could already enter was written"
+    before=$(find "$site_dir" -printf '%C@ %m %p\n' | sort -k3)
+    TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/second.log" 2>&1 ||
+        fail "the second permission pass failed: $(cat "$case_dir/second.log")"
+    after=$(find "$site_dir" -printf '%C@ %m %p\n' | sort -k3)
+    [ "$before" = "$after" ] || fail "a second pass rewrote the search bits the first had added"
+    pass "the permission pass lets nginx reach every script and adds nothing else"
+}
+
 # The MariaDB client of the trixie images (11.8) requires TLS with a verified
 # certificate by default and refused a server without TLS, a 10.x volume
 # kept from an earlier install, with "SSL is required": every client call
@@ -2228,6 +2273,7 @@ test_a_question_with_no_answer_left_stops_the_setup
 test_two_kvs_archives_stop_the_setup
 test_init_archive_lookup_reads_the_top_level_only
 test_permission_pass_opens_the_root_and_survives_a_refused_chown
+test_permission_pass_lets_nginx_reach_every_script
 test_container_mariadb_clients_accept_a_server_without_tls
 test_system_settings_keep_the_limits_an_admin_raised
 test_manticore_scripts_survive_a_failed_download_once_installed
