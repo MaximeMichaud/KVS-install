@@ -1,10 +1,11 @@
 #!/bin/bash
-# Optional real-database coverage; no image pulls or remote Docker connections.
+# Real-database coverage on the MariaDB 12.3 docker/images.lock pins; no image
+# pulls or remote Docker connections.
 # shellcheck disable=SC2016  # PHP and SQL fixtures contain literal dollar signs.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-image=${DATABASE_TEST_IMAGE:-mariadb:12.3.3}
+image=${DATABASE_TEST_IMAGE:-$("$root/docker/bin/resolve-bases.sh" --get mariadb 12.3)}
 source_image=${DATABASE_TEST_SOURCE_IMAGE:-$image}
 source_database=source-site.example
 target_database=dev.example.test

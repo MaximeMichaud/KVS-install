@@ -1,9 +1,10 @@
 #!/bin/bash
-# Optional local proof that resume init commands use valid Compose run options.
+# Local proof that resume init commands use valid Compose run options, on the
+# Alpine docker/images.lock pins.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-source_image=${COMPOSE_TEST_IMAGE:-alpine:3.24}
+source_image=${COMPOSE_TEST_IMAGE:-$("$root/docker/bin/resolve-bases.sh" --get alpine)}
 if [ -n "${DOCKER_CONTEXT:-}" ]; then
     endpoint=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}')
 else
@@ -62,6 +63,9 @@ with pathlib.Path(sys.argv[2]).open('w') as output:
     for command, name in commands:
         output.write('run_' + name.replace('-', '_') + '() {\n    ' + command + '\n}\n')
 PY
+# The extracted helpers call the Docker query wrapper setup.sh sources.
+# shellcheck source=docker/lib/database.sh
+source "$root/docker/lib/database.sh"
 # shellcheck source=/dev/null
 source "$fixture/commands.sh"
 mkdir "$fixture/output" "$fixture/build"

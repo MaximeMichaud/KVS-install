@@ -1,11 +1,12 @@
 #!/bin/bash
-# Optional real-nginx routing proof with synthetic data and a local image.
-# Source mode also requires a local PHP-FPM image (PHP_TEST_IMAGE).
+# Real-nginx routing proof with synthetic data, on the nginx docker/images.lock
+# pins (NGINX_TEST_IMAGE). Source mode also runs its PHP-FPM 8.1
+# (PHP_TEST_IMAGE). Both must be pulled already.
 # shellcheck disable=SC2034
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-nginx:alpine}
-PHP_TEST_IMAGE=${PHP_TEST_IMAGE:-php:8.3-fpm-alpine}
+NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get nginx)}
+PHP_TEST_IMAGE=${PHP_TEST_IMAGE:-$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get php-fpm 8.1)}
 NGINX_IMPORT_TEST_MODE=${NGINX_IMPORT_TEST_MODE:-file}
 case "$NGINX_IMPORT_TEST_MODE" in
     file|source) ;;

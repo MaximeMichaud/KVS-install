@@ -145,10 +145,11 @@ bash tests/test_origin_security.sh
 bash tests/integration_origin_security.sh
 ```
 
-The integration test requires local `nginx:alpine` and `caddy:2-alpine` images.
-It checks real HTTP/TLS behavior, configured domains, ACME, configuration
-regeneration, container restart and Caddy health checks. It does not alter a
-running deployment or its host firewall.
+The integration test runs the nginx `docker/images.lock` pins and the Caddy
+image of the multi-site front end; `tests/run-integration.sh` pulls them and
+runs it, as CI does. It checks real HTTP/TLS behavior, configured domains, ACME,
+configuration regeneration, container restart and Caddy health checks. It does
+not alter a running deployment or its host firewall.
 
 ## Internal HTTPS with self-signed certificates
 

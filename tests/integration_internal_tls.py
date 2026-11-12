@@ -3,6 +3,8 @@
 
 Uses only synthetic files and an isolated, internal Docker network. The three
 images must already exist locally; no application data or external URL is used.
+tests/run-integration.sh builds the NGINX image from docker/nginx and runs the
+PHP-FPM and PHP CLI 8.1 bases docker/images.lock pins.
 """
 import json
 import os
@@ -186,6 +188,11 @@ server {
             service["entrypoint"] = ["bash", "/fixture-entrypoint.sh"]
             service["volumes"].append({"type": "bind", "source": str(ROOT / "docker" / source / "docker-entrypoint.sh"),
                                        "target": "/fixture-entrypoint.sh", "read_only": True})
+            if name == "php-fpm":
+                # The PHP entrypoint sizes the FPM pool with the helper its
+                # image installs there.
+                service["volumes"].append({"type": "bind", "source": str(ROOT / "docker/php/fpm-config.sh"),
+                                           "target": "/usr/local/lib/kvs/fpm-config.sh", "read_only": True})
             service["volumes"].append({"type": "bind", "source": str(WORK / "ca.crt"),
                                        "target": "/usr/local/share/ca-certificates/fixture-ca.crt", "read_only": True})
             service["command"] = ["php-fpm"] if name == "php-fpm" else ["sleep", "infinity"]

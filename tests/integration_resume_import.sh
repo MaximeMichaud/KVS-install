@@ -1,10 +1,12 @@
 #!/bin/bash
-# Optional local MariaDB proof that a timed-out wait can resume the same import.
+# Local MariaDB proof that a timed-out wait can resume the same import, on the
+# MariaDB 12.3 docker/images.lock pins.
 # shellcheck disable=SC2034  # Monitoring and recovery helpers read these globals.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-export DATABASE_TEST_IMAGE=${DATABASE_TEST_IMAGE:-mariadb:12.3.3}
+DATABASE_TEST_IMAGE=${DATABASE_TEST_IMAGE:-$("$root/docker/bin/resolve-bases.sh" --get mariadb 12.3)}
+export DATABASE_TEST_IMAGE
 if [ -n "${DOCKER_CONTEXT:-}" ]; then
     endpoint=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}')
 else

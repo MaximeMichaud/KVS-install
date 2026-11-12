@@ -1,11 +1,12 @@
 #!/bin/bash
-# Optional real-Nginx proof of the site log rotation: requests keep arriving
-# while the site logs rotate, and each one is found exactly once in the
-# generations, before and after a container restart. It needs a local Nginx
-# image with curl (NGINX_TEST_IMAGE), never pulls one and runs without network.
+# Real-Nginx proof of the site log rotation: requests keep arriving while the
+# site logs rotate, and each one is found exactly once in the generations,
+# before and after a container restart. It runs the nginx docker/images.lock
+# pins, or NGINX_TEST_IMAGE, an image with curl; it never pulls one and runs
+# without network.
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-nginx:alpine}
+NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get nginx)}
 docker image inspect "$NGINX_TEST_IMAGE" >/dev/null
 TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kvs-nginx-log-rotation.XXXXXX")
 container="kvs-nginx-log-rotation-$RANDOM-$$"

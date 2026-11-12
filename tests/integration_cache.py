@@ -130,11 +130,21 @@ http { server { listen 80; location = /cache-probe.php {
                     directory = "php" if name == "php-fpm" else "cron"
                     service["environment"].update(YT_DLP_AUTO_UPDATE="no", IONCUBE="YES")
                     service["entrypoint"] = ["bash", "/fixture-entrypoint.sh"]
-                    service["command"] = ["php-fpm"] if name == "php-fpm" else ["cron", "-f"]
+                    service["command"] = ["php-fpm"]
                     service["volumes"] = [mount(site, "/fixture", False), mount(site, "/var/www/kvs", False),
                         mount(ROOT / f"docker/{directory}/docker-entrypoint.sh", "/fixture-entrypoint.sh")]
                     if name == "cron":
                         service["volumes"].append(mount(WORK / "cron-job", "/fixture-cron-job"))
+                        # System crontabs must belong to root. A bind mount
+                        # retains the workstation user's uid, which cron
+                        # correctly refuses to run. The copy is made before
+                        # cron starts: cron rescans /etc/cron.d only when the
+                        # directory's mtime changed to a later second, so a
+                        # file added in the second of its first scan, which
+                        # the entrypoint's own changes there can share, would
+                        # never be read.
+                        service["command"] = ["sh", "-c", "install -o 0 -g 0 -m 644 /fixture-cron-job "
+                                              "/etc/cron.d/kvs-cache-fixture && exec cron -f"]
                 services[name] = service
             networks = {name: {"internal": True} for name in rendered["networks"]}
             services["nginx"] = dict(image=IMAGES["nginx"], pull_policy="never", restart="no",
@@ -155,10 +165,6 @@ http { server { listen 80; location = /cache-probe.php {
                 assert setup.read_bytes() == first, "initialization is not idempotent"
                 record(f"{label}: real init migrates localhost to cache and stays idempotent")
                 compose("up", "-d", "--no-build", backend, "php-fpm", "cron", "nginx")
-                # System crontabs must belong to root. A bind mount retains the
-                # workstation user's uid, which cron correctly refuses to run.
-                execute("cron", "install", "-o", "0", "-g", "0", "-m", "644",
-                        "/fixture-cron-job", "/etc/cron.d/kvs-cache-fixture")
                 eventually(lambda: http_probe()["ok"])
                 # Existing installations do not rerun init on upgrade. Exercise
                 # the real kvsctl migration command and its unavailable-backend

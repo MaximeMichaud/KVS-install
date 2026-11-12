@@ -1,8 +1,9 @@
 name: tests
 
-# The shell suites of tests/, on every push to a branch and every pull
-# request. The release workflow calls this workflow as well, so a tag builds
-# and pushes nothing before the suites of its commit pass.
+# The shell suites and the integration suites of tests/, on every push to a
+# branch and every pull request. The release workflow calls this workflow as
+# well, so a tag builds and pushes nothing before the suites of its commit
+# pass.
 on:
   push:
     branches:
@@ -69,6 +70,36 @@ jobs:
         env:
           CI: "true"
         run: .github/scripts/as-uid-1000.sh tests/run.sh
+
+  # The integration suites, on real containers: nginx, Caddy, MariaDB,
+  # Manticore and PHP-FPM on internal networks, with synthetic sites. They
+  # run on the images docker/images.lock pins, which tests/run-integration.sh
+  # pulls first, and build the images they check from this commit. The
+  # suites of the PHP-FPM and cron images run in the docker images workflow,
+  # on the images its build jobs make. As uid 1000 on GNU coreutils, the way
+  # the shell suites run.
+  integration:
+    name: integration suites
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: GNU coreutils
+        run: |
+          if sort --version | grep -q uutils; then
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              --allow-remove-essential coreutils-from-gnu coreutils-from-uutils-
+          fi
+          sort --version | sed -n 1p
+          sort --version | grep -q 'GNU coreutils'
+
+      - name: the suites
+        env:
+          CI: "true"
+        run: .github/scripts/as-uid-1000.sh tests/run-integration.sh
 
   # The jobs of the release workflow run the scripts of .github/scripts on
   # the runner as it comes, uutils coreutils included where its Ubuntu

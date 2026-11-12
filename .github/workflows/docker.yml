@@ -1,14 +1,27 @@
 name: docker images
 
+# The suites of the PHP-FPM and cron images run here, on the images the build
+# jobs make, so a change to one of them, or to the kvsctl cache command the
+# cache suite drives, runs this workflow as well.
 on:
   push:
     paths:
       - "docker/**"
       - ".github/workflows/docker.yml"
+      - "tests/integration_php_security.py"
+      - "tests/integration_php_sessions.py"
+      - "tests/integration_cache.py"
+      - "tests/fixtures/cache-probe.php"
+      - "cli/internal/upgrade/cache*"
   pull_request:
     paths:
       - "docker/**"
       - ".github/workflows/docker.yml"
+      - "tests/integration_php_security.py"
+      - "tests/integration_php_sessions.py"
+      - "tests/integration_cache.py"
+      - "tests/fixtures/cache-probe.php"
+      - "cli/internal/upgrade/cache*"
   # docker/images.lock pins every base and runtime image by digest, so an
   # upstream rebuild of a tag (a security fix, usually) reaches the stack only
   # when a maintainer refreshes the lock. The weekly lock job fails while the
@@ -96,13 +109,95 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch || 'amd64' }}
           push: false
-          load: false
+          # The PHP-FPM and cron images go to Docker for their suites.
+          load: ${{ matrix.service == 'php' || matrix.service == 'cron' }}
           provenance: false
           sbom: false
           build-args: ${{ steps.args.outputs.value }}
           tags: kvs-install/${{ matrix.service }}:ci
           cache-from: type=gha,scope=${{ matrix.service }}${{ matrix.php }}${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}${{ matrix.php }}${{ matrix.arch }}
+
+      # On the binaries of the image just built, on its own architecture: the
+      # PHP release of its base, the extensions the stack needs and the PHP
+      # 8.1 security backport; for PHP-FPM, consecutive requests with and
+      # without ionCube, and the sessions kept in their volume across a
+      # recreated container.
+      - name: the suites of the image
+        env:
+          SERVICE: ${{ matrix.service }}
+          IMAGE: kvs-install/${{ matrix.service }}:ci
+        run: |
+          case "$SERVICE" in
+            php|cron) ;;
+            *) echo "The ${SERVICE} image has no suite of its own here."; exit 0 ;;
+          esac
+          version=$(docker image inspect "$IMAGE" --format '{{range .Config.Env}}{{println .}}{{end}}' |
+            sed -n 's/^PHP_VERSION=//p')
+          if [ "$SERVICE" = php ]; then
+            python3 tests/integration_php_security.py "$IMAGE" "$version" --fpm
+            python3 tests/integration_php_sessions.py "$IMAGE"
+          else
+            python3 tests/integration_php_security.py "$IMAGE" "$version"
+          fi
+
+      # The cache suite runs the PHP-FPM and cron images of PHP 8.1 together,
+      # in the job below: their linux/amd64 entries hand it their image.
+      - name: the image for the cache suite
+        if: matrix.php == '8.1' && !matrix.arch
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -o pipefail
+          docker save "kvs-install/${SERVICE}:ci" | zstd -T0 -3 -q -o "${RUNNER_TEMP}/cache-suite-${SERVICE}.tar.zst"
+      - if: matrix.php == '8.1' && !matrix.arch
+        uses: actions/upload-artifact@v7
+        with:
+          name: cache-suite-${{ matrix.service }}
+          path: ${{ runner.temp }}/cache-suite-${{ matrix.service }}.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  # Direct cache access and the legacy loopback, through the PHP-FPM and cron
+  # images of PHP 8.1 the build jobs made, an nginx built from this commit
+  # and the Dragonfly and Memcached of docker/images.lock, with the cache
+  # command of kvsctl. It runs when the builds ran, on push and pull request.
+  cache:
+    name: cache suite
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      # The suite runs the real-Docker test of the kvsctl cache command.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cache-suite-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/images
+      - name: the images
+        run: |
+          set -o pipefail
+          for archive in "$RUNNER_TEMP"/images/cache-suite-*.tar.zst; do
+            zstd -d -q -c "$archive" | docker load
+          done
+          docker build --quiet --tag kvs-install/nginx:ci docker/nginx
+          for backend in dragonfly memcached; do
+            image=$(./docker/bin/resolve-bases.sh --get "$backend")
+            docker pull --quiet "$image"
+          done
+      - name: the cache suite
+        env:
+          KVS_CACHE_TEST_PHP_IMAGE: kvs-install/php:ci
+          KVS_CACHE_TEST_CRON_IMAGE: kvs-install/cron:ci
+          KVS_CACHE_TEST_NGINX_IMAGE: kvs-install/nginx:ci
+        run: python3 tests/integration_cache.py
 
   # Reads every pinned tag from its registry again (docker buildx imagetools,
   # which the runner has) and compares with the lock. A difference means an

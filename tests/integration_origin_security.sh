@@ -2,8 +2,10 @@
 # Exercise the generated configurations with real, isolated Nginx and Caddy.
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-nginx:alpine}
-CADDY_TEST_IMAGE=${CADDY_TEST_IMAGE:-caddy:2-alpine}
+# The nginx docker/images.lock pins, and the Caddy the multi-site front end
+# runs. tests/run-integration.sh pulls both; this suite never pulls.
+NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get nginx)}
+CADDY_TEST_IMAGE=${CADDY_TEST_IMAGE:-$(sed -n 's/^ *image: *//p' "$ROOT_DIR/docker/multi-site/docker-compose.caddy.yml")}
 endpoint=${DOCKER_HOST:-$(docker context inspect "${DOCKER_CONTEXT:-$(docker context show)}" --format '{{.Endpoints.docker.Host}}')}
 case "$endpoint" in unix://*) ;; *) echo 'ERROR: local Docker socket required' >&2; exit 1 ;; esac
 docker image inspect "$NGINX_TEST_IMAGE" "$CADDY_TEST_IMAGE" >/dev/null

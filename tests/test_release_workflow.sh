@@ -17,7 +17,8 @@
 # series, only linux/amd64 binaries are built, the Go toolchain is exactly
 # the one cli/go.mod names, and the lock of the base images is checked every
 # week. Every check main requires before a pull request merges starts on
-# every pull request, under the name the protection of main asks for.
+# every pull request, under the name the protection of main asks for, and
+# every integration suite of tests/ runs in one of the workflows.
 #
 # The jobs, steps and triggers are read as YAML, where GitHub reads them, so
 # a trigger left in a comment, a condition on a job or a step, or a test
@@ -125,6 +126,27 @@ holds "$tests" "the shell suites must run every suite as uid 1000, with CI set" 
         and (.env.CI | tostring) == "true")'
 holds "$tests" "the Dockerfiles must be checked against the lock" \
     'any(.jobs.suites.steps[]; .run == "./docker/bin/resolve-bases.sh --check-dockerfiles")'
+# The integration suites, in a job of their own, the same way.
+unconditional_job "$tests" tests.yml integration
+unconditional_steps "$tests" tests.yml integration
+holds "$tests" "the integration suites must run as uid 1000, with CI set" \
+    'any(.jobs.integration.steps[]; .run == ".github/scripts/as-uid-1000.sh tests/run-integration.sh"
+        and (.env.CI | tostring) == "true")'
+# Each one runs from tests/run.sh, from the list of tests/run-integration.sh,
+# or from a step of the docker images workflow, on the images it builds: a
+# suite added to tests/ and to none of them would never run.
+docker=$(workflow_json "$ROOT_DIR/.github/workflows/docker.yml")
+listed=$(sed -n '/^suites=($/,/^)$/s/^ *\(integration_[^ ]*\)$/\1/p' "$ROOT_DIR/tests/run-integration.sh")
+[ -n "$listed" ] || fail "tests/run-integration.sh lists no suite"
+for suite in "$ROOT_DIR"/tests/integration_*; do
+    name=${suite##*/}
+    grep -Fxq "$name" <<<"$listed" && continue
+    grep -Fxq "\"\$TEST_DIR/$name\"" "$ROOT_DIR/tests/run.sh" && continue
+    jq -e --arg run "tests/$name" 'any(.jobs[].steps[]?; (.run // "") | contains($run))' \
+        <<<"$docker" >/dev/null && continue
+    fail "no workflow runs tests/$name: list it in tests/run-integration.sh"
+done
+echo "PASS: every integration suite runs in CI"
 holds "$go" "the kvsctl tests must run, with the race detector" \
     'any(.jobs.build.steps[]; .run == "go test -race ./...")'
 holds "$go" "govulncheck must check kvsctl, in a version of its own" \

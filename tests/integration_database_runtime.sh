@@ -2,10 +2,11 @@
 # shellcheck disable=SC2034  # Consumed by the sourced monitoring functions.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# This optional integration test uses a cached image and an isolated network.
-# Run manually: tests/run.sh does not run it.
+# The MariaDB docker/images.lock pins for the default series, pulled already,
+# on an isolated network.
 default_version=$(sed -n 's/^MARIADB_VERSION=//p' "$root/docker/.env.example")
-export DATABASE_TEST_IMAGE="${DATABASE_TEST_IMAGE:-mariadb:$default_version}"
+DATABASE_TEST_IMAGE=${DATABASE_TEST_IMAGE:-$("$root/docker/bin/resolve-bases.sh" --get mariadb "$default_version")}
+export DATABASE_TEST_IMAGE
 export DATABASE_TEST_ROOT_PASSWORD
 DATABASE_TEST_ROOT_PASSWORD=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 export DATABASE_TEST_POOL="${DATABASE_TEST_POOL:-256M}"

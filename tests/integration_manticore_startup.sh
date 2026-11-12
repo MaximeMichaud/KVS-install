@@ -1,5 +1,5 @@
 #!/bin/bash
-# Optional proof, against the image built from docker/manticore, that
+# Proof, against the image built from docker/manticore, that
 # Manticore answers right after a restart and rebuilds its indexes behind
 # searchd:
 #   (a) the first start, on an empty volume, builds every index before
@@ -47,7 +47,7 @@
 # it. The test's own client never asks searchd for TLS either. Building the
 # image needs the network (base image and packages); the containers run on
 # an internal network, and the containers, network, volume and image are
-# removed at the end. Run by hand: tests/run.sh does not run it.
+# removed at the end. tests/run-integration.sh runs it.
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # searchd must answer this soon after a recreated or restarted container

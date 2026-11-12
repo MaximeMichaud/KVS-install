@@ -278,7 +278,8 @@ the patched source archive for subsequent extension builds. Do not remove
 that step when refreshing the image lock. This does not restore upstream
 support for PHP 8.1.
 
-After building each PHP or cron image, exercise the actual binaries:
+The docker images workflow exercises the actual binaries of each PHP and
+cron image it builds, on both architectures. To check an image built by hand:
 
 ```sh
 python3 tests/integration_php_security.py IMAGE VERSION --fpm

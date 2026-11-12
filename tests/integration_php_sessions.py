@@ -231,7 +231,10 @@ def main():
         webroot.mkdir(mode=0o755)
         (webroot / "session.php").write_text("""<?php
 header('Content-Type: application/json');
-session_start();
+// With the defaults of PHP, session_start() runs the collector once in a
+// hundred starts: the request that runs it below keeps it from running
+// first, which would leave that run nothing to remove.
+session_start(isset($_GET['gc']) ? ['gc_probability' => 0] : []);
 if (isset($_GET['set'])) {
     $_SESSION['token'] = $_GET['set'];
 }
