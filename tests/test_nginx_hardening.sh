@@ -104,6 +104,66 @@ assert_kvs_internal_directories_denied_before_php() {
     return 0
 }
 
+# The body of the first location block opened on the line that holds the
+# rule, its whitespace collapsed to single spaces. A protected rule that
+# exists and comes before the PHP handler still lets nginx serve the file as
+# plain text once its body says "allow all;" or loses "internal;".
+location_body() {
+    local file="$1"
+    local rule="$2"
+
+    RULE="$rule" awk '
+        !started {
+            start = index($0, ENVIRON["RULE"])
+            if (start == 0) next
+            started = 1
+            $0 = substr($0, start + length(ENVIRON["RULE"]))
+        }
+        {
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") depth++
+                else if (c == "}" && depth-- == 0) { closed = 1; exit }
+                body = body c
+            }
+            body = body " "
+        }
+        END {
+            if (!closed) exit 1
+            gsub(/[ \t]+/, " ", body)
+            sub(/^ /, "", body)
+            sub(/ $/, "", body)
+            print body
+        }
+    ' "$file"
+}
+
+assert_location_body() {
+    local file="$1"
+    local rule="$2"
+    local expected="$3"
+    local body
+
+    body=$(location_body "$file" "$rule") ||
+        fail "no complete location block for ${rule} in ${file}"
+    [ "$body" = "$expected" ] ||
+        fail "${rule} in ${file} holds '${body}', expected '${expected}'"
+}
+
+assert_location_body_has() {
+    local file="$1"
+    local rule="$2"
+    local directive="$3"
+    local body
+
+    body=$(location_body "$file" "$rule") ||
+        fail "no complete location block for ${rule} in ${file}"
+    case " ${body} " in
+        *" ${directive} "*) ;;
+        *) fail "${rule} in ${file} lacks ${directive}" ;;
+    esac
+}
+
 generate_fixture_pair() {
     local name="$1"
     local primary_domain="$2"
@@ -521,6 +581,24 @@ for site_config in \
     conf/nginx/conf.d/domain.conf
 do
     assert_kvs_internal_directories_denied_before_php "${ROOT_DIR}/${site_config}"
+    assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_INTERNAL_DIRECTORIES_RULE" 'deny all;'
+    assert_location_body_has "${ROOT_DIR}/${site_config}" 'location ^~ /contents/videos/ {' 'internal;'
+done
+for site_config in \
+    conf/nginx/templates/kvs.conf.tpl \
+    docker/multi-site/nginx/kvs-caddy.conf.template
+do
+    assert_location_body "${ROOT_DIR}/${site_config}" 'location ~ /\. {' 'deny all;'
+    for directory in blocks langs template tmp; do
+        assert_location_body "${ROOT_DIR}/${site_config}" "location ~* /${directory}/.*\.php\$ {" 'internal;'
+    done
+done
+# The standalone site config takes its dotfile and KVS internal locations
+# from the globals it includes.
+assert_location_body "${ROOT_DIR}/conf/nginx/globals/security.conf" \
+    'location ~ /\.(?!well-known(?:/|$)) {' 'deny all;'
+for directory in blocks langs template tmp; do
+    assert_location_body "${ROOT_DIR}/conf/nginx/globals/kvs.conf" "location ~* /${directory}/.*\.php\$ {" 'internal;'
 done
 
 run_certificate_case neither-present missing

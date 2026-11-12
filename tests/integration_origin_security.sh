@@ -40,6 +40,27 @@ for root in "$TEST_DIR/site" "$TEST_DIR/phpmyadmin"; do
 done
 mkdir -p "$TEST_DIR/site/.well-known"
 printf 'well-known-sentinel\n' > "$TEST_DIR/site/.well-known/proof.txt"
+# KVS keeps these out of a browser's reach: admin/include holds setup_db.php
+# with the database password, the other directories plugins, logs, compiled
+# templates and temporary files, and contents/videos the files KVS hands out
+# itself. nginx must answer 403 or 404 for them, never their source as a
+# static file and never through the PHP handler.
+protected_paths=(
+    admin/include/setup_db.php admin/include/cron.php
+    admin/data/proof.php admin/data/plugins/proof/proof.php admin/logs/proof.php
+    admin/plugins/proof.php admin/smarty/proof.php admin/stamp/proof.php
+    admin/template/proof.php admin/tools/proof.php
+    tmp/proof.php blocks/proof.php langs/proof.php template/proof.php
+    contents/videos/proof.mp4
+)
+# Scripts the PHP handler must still receive, the two admin upload scripts of
+# admin/include among them. No PHP-FPM listens behind these containers, so a
+# request the handler takes gets 502.
+handled_php_paths=(proof.php admin/index.php admin/include/uploader.php admin/include/get_upload_status.php)
+for path in "${protected_paths[@]}" "${handled_php_paths[@]}"; do
+    mkdir -p "$TEST_DIR/site/$(dirname "$path")"
+    printf 'kvs-source-sentinel\n' > "$TEST_DIR/site/$path"
+done
 : > "$TEST_DIR/includes/kvs-rewrites.conf"
 openssl genpkey -genparam -algorithm DH -pkeyopt group:ffdhe2048 \
     -out "$TEST_DIR/dhparam.pem" 2>/dev/null
@@ -150,6 +171,27 @@ assert_hidden_files_denied() {
     done
 }
 
+protected_path_failures=0
+assert_kvs_paths_protected() {
+    local base=$1 path
+    shift
+    for path in "${protected_paths[@]}"; do
+        request "$@" "$base/$path"
+        if { [ "$http_status" != 403 ] && [ "$http_status" != 404 ]; } ||
+            grep -q kvs-source-sentinel "$TEST_DIR/body"; then
+            printf 'FAIL: protected KVS path %s returned HTTP %s\n' "$base/$path" "$http_status" >&2
+            protected_path_failures=$((protected_path_failures + 1))
+        fi
+    done
+    for path in "${handled_php_paths[@]}"; do
+        request "$@" "$base/$path"
+        if [ "$http_status" != 502 ] || grep -q kvs-source-sentinel "$TEST_DIR/body"; then
+            printf 'FAIL: PHP script %s did not reach the PHP handler: HTTP %s\n' "$base/$path" "$http_status" >&2
+            protected_path_failures=$((protected_path_failures + 1))
+        fi
+    done
+}
+
 for variant in direct www subdomain; do
     domain=example.test
     www=false
@@ -175,6 +217,7 @@ for variant in direct www subdomain; do
         [ "$http_status" = 200 ] || fail "canonical site failed: HTTP $http_status, curl $curl_status"
         grep -qx 'origin-site-sentinel' "$TEST_DIR/body" || fail 'incorrect canonical site body'
         assert_hidden_files_denied "https://$canonical:$https_port" --resolve "$canonical:$https_port:127.0.0.1"
+        assert_kvs_paths_protected "https://$canonical:$https_port" --resolve "$canonical:$https_port:127.0.0.1"
         request -H "Host: $domain" "http://127.0.0.1:$http_port/path"
         [ "$http_status" = 301 ] || fail 'domain redirect failed'
         grep -Fq "Location: https://$canonical/path" "$TEST_DIR/headers" || fail 'incorrect canonical redirect'
@@ -200,6 +243,7 @@ assert_closed "http://127.0.0.1:$http_port/"
 request -H 'Host: example.test' "http://127.0.0.1:$http_port/health"
 [ "$http_status" = 200 ] || fail 'named health check failed'
 assert_hidden_files_denied "http://127.0.0.1:$http_port" -H 'Host: example.test'
+assert_kvs_paths_protected "http://127.0.0.1:$http_port" -H 'Host: example.test'
 # Run the actual additional-site Compose health check against this upstream.
 env DOMAIN=example.test SITE_PREFIX=origin-test MARIADB_ROOT_PASSWORD=test-root MARIADB_PASSWORD=test-user \
     docker compose --env-file "$ROOT_DIR/docker/.env.example" \
@@ -231,6 +275,7 @@ done
 [ "$http_status" = 200 ] || fail 'Caddy site failed'
 grep -qx origin-site-sentinel "$TEST_DIR/body" || fail 'incorrect Caddy site body'
 assert_hidden_files_denied "https://example.test:$caddy_https" --resolve "example.test:$caddy_https:127.0.0.1"
+assert_kvs_paths_protected "https://example.test:$caddy_https" --resolve "example.test:$caddy_https:127.0.0.1"
 # Let active health checks run before proving the route still serves the site.
 sleep 3
 request --resolve "example.test:$caddy_https:127.0.0.1" "https://example.test:$caddy_https/index.html"
@@ -275,6 +320,7 @@ request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$ht
 [ "$http_status" = 200 ] || fail 'standalone site failed'
 grep -qx origin-site-sentinel "$TEST_DIR/body" || fail 'incorrect standalone site body'
 assert_hidden_files_denied "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
+assert_kvs_paths_protected "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
 request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$https_port/.well-known/proof.txt"
 [ "$http_status" = 200 ] || fail 'standalone well-known directory failed'
 grep -qx well-known-sentinel "$TEST_DIR/body" || fail 'incorrect well-known body'
@@ -284,3 +330,5 @@ grep -Fq 'Location: https://example.test/path' "$TEST_DIR/headers" || fail 'inco
 printf 'PASS: standalone bootstrap ACME, host/SNI rejection, configured site and canonical redirect.\n'
 [ "$hidden_file_failures" -eq 0 ] || fail "$hidden_file_failures hidden-file requests bypassed access restrictions"
 printf 'PASS: hidden files are denied and public CSS/SVG assets remain available in every layout.\n'
+[ "$protected_path_failures" -eq 0 ] || fail "$protected_path_failures requests for KVS internal paths were served or misrouted"
+printf 'PASS: KVS internal directories are denied in every layout, and their allowed scripts reach PHP.\n'
