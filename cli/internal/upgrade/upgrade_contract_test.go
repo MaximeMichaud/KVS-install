@@ -111,3 +111,58 @@ func TestHTTPCheckAsksTheSiteHost(t *testing.T) {
 		}
 	}
 }
+
+// A site that forbids its home page, answers PHP-FPM's refusal, or sends
+// its visitors to another host does not serve its pages, whatever the
+// status says: an upgrade that ends like that must fail and roll back.
+// Basic auth, an allowlist in front of the admin and a redirect within the
+// site, www included, are a site that is up.
+func TestHTTPCheckJudgesWhatTheSiteAnswers(t *testing.T) {
+	type answer struct {
+		status   int
+		location string
+		body     string
+	}
+	ok := answer{status: http.StatusOK, body: "<html>KVS</html>"}
+	for _, c := range []struct {
+		name        string
+		home, admin answer
+		want        string
+	}{
+		{"php-fpm refuses both paths", answer{http.StatusForbidden, "", "Access denied.\n"}, answer{http.StatusForbidden, "", "Access denied.\n"},
+			`GET / answered 403 Forbidden with PHP-FPM's "Access denied."`},
+		{"forbidden home page", answer{http.StatusForbidden, "", "<html>403 Forbidden</html>"}, ok, "GET / answered 403 Forbidden"},
+		{"php-fpm refuses the admin", ok, answer{http.StatusForbidden, "", "Access denied."},
+			`GET /admin/ answered 403 Forbidden with PHP-FPM's "Access denied."`},
+		{"redirect to another host", answer{http.StatusFound, "https://parked.example.org/", ""}, ok,
+			"GET / answered 302 Found, a redirect to parked.example.org"},
+		{"redirect to itself", answer{http.StatusFound, "https://example.com/", ""}, ok,
+			"GET / answered 302 Found, a redirect to itself"},
+		{"allowlist in front of the admin", ok, answer{http.StatusForbidden, "", "<html>403 Forbidden</html>"}, ""},
+		{"basic auth in front of the site", answer{http.StatusUnauthorized, "", ""}, answer{http.StatusUnauthorized, "", ""}, ""},
+		{"www redirect", answer{http.StatusMovedPermanently, "https://www.example.com/", ""}, ok, ""},
+		{"relative redirect", answer{http.StatusFound, "/en/", ""}, answer{http.StatusFound, "/admin/index.php", ""}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, port := testServer(t, "tcp4", func(w http.ResponseWriter, req *http.Request) {
+				a := c.home
+				if req.URL.Path == "/admin/" {
+					a = c.admin
+				}
+				if a.location != "" {
+					w.Header().Set("Location", a.location)
+				}
+				w.WriteHeader(a.status)
+				_, _ = w.Write([]byte(a.body))
+			})
+			r := &Runner{Inst: testInstance(t, "DOMAIN=example.com\nHTTPS_PORT=127.0.0.1:"+port+"\n"), Reporter: &recorder{}}
+			err := r.httpCheck(context.Background())
+			switch {
+			case c.want == "" && err != nil:
+				t.Fatalf("a site that is up was refused: %v", err)
+			case c.want != "" && (err == nil || err.Error() != c.want):
+				t.Fatalf("got %v, want %q", err, c.want)
+			}
+		})
+	}
+}

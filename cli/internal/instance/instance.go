@@ -528,6 +528,15 @@ func (i *Instance) SiteHost() string {
 	return domain
 }
 
+// SameSite reports whether host names the site, DOMAIN or www.DOMAIN
+// whichever of the two USE_WWW makes canonical, in any case and with or
+// without the dot of a fully qualified name.
+func (i *Instance) SameSite(host string) bool {
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(i.Domain())), ".")
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return domain != "" && (host == domain || host == "www."+domain)
+}
+
 var versionRe = regexp.MustCompile(`\$config\[['"]project_version['"]\]\s*=\s*['"]([^'"]+)['"]`)
 
 // maxVersionFile bounds the version.php kvsctl reads: the file is a few

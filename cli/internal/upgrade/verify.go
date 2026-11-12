@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/dockerx"
+	"github.com/MaximeMichaud/KVS-install/cli/internal/instance"
 )
 
 // pollInterval is how often a wait looks at the containers again. The
@@ -386,11 +387,8 @@ func (r *Runner) noContainers() error {
 }
 
 // httpCheck asks the site for / and /admin/ once, on the published
-// endpoint and with the host name the site answers to (www included).
-// Anything below 400 counts: a site that answers a redirect is a site that
-// is up, and treating it as down used to roll back healthy upgrades. 401
-// and 403 count too: basic auth or an allowlist in front of the admin is a
-// server that answers, and the probe has no credentials to give.
+// endpoint and with the host name the site answers to (www included), and
+// fails on the first answer SiteAnswerDown calls down.
 func (r *Runner) httpCheck(ctx context.Context) error {
 	host, port := r.Inst.PublishedEndpoint()
 	site := r.Inst.SiteHost()
@@ -412,15 +410,64 @@ func (r *Runner) httpCheck(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("GET %s: %w", path, err)
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
-		protected := resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
-		if resp.StatusCode >= http.StatusBadRequest && !protected {
-			return fmt.Errorf("GET %s answered %s", path, resp.Status)
+		if down, why := SiteAnswerDown(r.Inst, resp, body); down {
+			return fmt.Errorf("GET %s answered %s%s", path, resp.Status, why)
 		}
 		r.log(fmt.Sprintf("GET %s answered %d%s", path, resp.StatusCode, statusNote(resp, site)))
 	}
 	return nil
+}
+
+// fpmRefusals are the bodies PHP-FPM answers for a script it does not run,
+// one that security.limit_extensions refuses or one that is not where nginx
+// said it is; nginx passes them on with status 403 and 404.
+var fpmRefusals = []string{"Access denied.", "File not found."}
+
+// SiteAnswerDown says whether resp, the answer of the site to a GET of /
+// or /admin/ that followed no redirect, is the answer of a site that is
+// down, and why beyond its status. A 2xx is up, and so is a redirect within
+// the site, www included: treating a redirect as down used to roll back
+// healthy upgrades. A redirect to another host, or to the very URL asked,
+// is a site that does not serve its pages. 401 is up on both paths: the
+// stack never answers it, so it is basic auth in front of the site or the
+// admin, and the probe has no credentials to give. 403 is up on /admin/
+// alone, for an allowlist in front of the admin: a forbidden home page is a
+// site that is down, and so is any answer that is PHP-FPM refusing the
+// script, which is what a site whose PHP routing broke answers.
+func SiteAnswerDown(inst *instance.Instance, resp *http.Response, body []byte) (bool, string) {
+	text := strings.TrimSpace(string(body))
+	for _, refusal := range fpmRefusals {
+		if text == refusal {
+			return true, fmt.Sprintf(" with PHP-FPM's %q", refusal)
+		}
+	}
+	path := ""
+	if resp.Request != nil {
+		path = resp.Request.URL.Path
+	}
+	switch code := resp.StatusCode; {
+	case code == http.StatusUnauthorized:
+		return false, ""
+	case code == http.StatusForbidden:
+		return path != "/admin/", ""
+	case code >= http.StatusBadRequest:
+		return true, ""
+	case code >= http.StatusMultipleChoices:
+		target, err := resp.Location()
+		if err != nil {
+			return false, ""
+		}
+		if target.Hostname() != "" && !inst.SameSite(target.Hostname()) {
+			return true, ", a redirect to " + target.Hostname()
+		}
+		if resp.Request != nil && strings.EqualFold(target.Hostname(), resp.Request.URL.Hostname()) &&
+			target.Path == resp.Request.URL.Path && target.RawQuery == resp.Request.URL.RawQuery {
+			return true, ", a redirect to itself"
+		}
+	}
+	return false, ""
 }
 
 // statusNote says why an answer is not a plain 200.

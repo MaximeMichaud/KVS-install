@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/MaximeMichaud/KVS-install/cli/internal/upgrade"
 )
 
 func (r *runner) localAddress() (string, error) {
@@ -96,18 +98,20 @@ func (r *runner) http(ctx context.Context) Result {
 			continue
 		}
 		r.response = response
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 		response.Body.Close()
 		line := fmt.Sprintf("%s answered HTTP %d", path, response.StatusCode)
+		// The answers an upgrade verification refuses are failures here too.
+		if down, why := upgrade.SiteAnswerDown(r.inst, response, body); down {
+			problems = append(problems, line+why)
+			continue
+		}
 		switch {
 		case response.StatusCode == 401 || response.StatusCode == 403:
 			warnings = append(warnings, line+" (protected; application response could not be checked)")
-		case response.StatusCode >= 400:
-			problems = append(problems, line)
 		case response.StatusCode >= 300:
-			location, err := response.Location()
-			if err != nil || location.Hostname() != r.inst.SiteHost() {
-				warnings = append(warnings, line+" (unexpected or missing redirect target)")
+			if _, err := response.Location(); err != nil {
+				warnings = append(warnings, line+" (redirect without a target)")
 			} else {
 				details = append(details, line+" (same-site redirect)")
 			}

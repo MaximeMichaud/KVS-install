@@ -127,6 +127,23 @@ func TestSiteHost(t *testing.T) {
 	}
 }
 
+// The site is its domain and the www name of it, whichever USE_WWW makes
+// canonical; any other host, a subdomain included, is not.
+func TestSameSite(t *testing.T) {
+	inst := &Instance{Env: map[string]string{"DOMAIN": "example.com"}}
+	for host, want := range map[string]bool{
+		"example.com": true, "WWW.Example.COM": true, "example.com.": true,
+		"cdn.example.com": false, "example.org": false, "": false, "notexample.com": false,
+	} {
+		if got := inst.SameSite(host); got != want {
+			t.Errorf("SameSite(%q) = %v, want %v", host, got, want)
+		}
+	}
+	if (&Instance{Env: map[string]string{}}).SameSite("") {
+		t.Error("an instance without DOMAIN has no site")
+	}
+}
+
 func TestDetectRefusesMultiSite(t *testing.T) {
 	dir := t.TempDir()
 	docker := filepath.Join(dir, "docker")

@@ -73,7 +73,7 @@ func TestHTTPFailuresProtectionAndRedirectIsolation(t *testing.T) {
 		name           string
 		status         int
 		location, want string
-	}{{"success", 200, "", OK}, {"protected", 401, "", Warn}, {"forbidden", 403, "", Warn}, {"server-error", 500, "", Fail}, {"missing", 404, "", Fail}, {"same-site-redirect", 302, "/login/", OK}, {"external-redirect", 302, "https://github.invalid/never-follow", Warn}, {"redirect-without-location", 301, "", Warn}} {
+	}{{"success", 200, "", OK}, {"protected", 401, "", Warn}, {"forbidden", 403, "", Fail}, {"server-error", 500, "", Fail}, {"missing", 404, "", Fail}, {"same-site-redirect", 302, "/login/", OK}, {"external-redirect", 302, "https://github.invalid/never-follow", Fail}, {"redirect-without-location", 301, "", Warn}} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, f := fixture(t)
 			r.opts.Only = []string{"http"}
@@ -95,6 +95,49 @@ func TestHTTPFailuresProtectionAndRedirectIsolation(t *testing.T) {
 			}
 			if resultByID(t, report, "tls").Status != OK {
 				t.Fatal("HTTP result hid the TLS check")
+			}
+		})
+	}
+}
+
+// The home page and the admin are judged apart: an allowlist may close the
+// admin, never the home page, and PHP-FPM refusing a script is a failure on
+// either path.
+func TestHTTPJudgesEachPath(t *testing.T) {
+	type answer struct {
+		status         int
+		location, body string
+	}
+	ok := answer{status: 200, body: "<html>KVS</html>"}
+	for _, tc := range []struct {
+		name        string
+		home, admin answer
+		want        string
+	}{
+		{"admin-allowlist", ok, answer{403, "", "<html>403 Forbidden</html>"}, Warn},
+		{"admin-fpm-refusal", ok, answer{403, "", "Access denied.\n"}, Fail},
+		{"home-fpm-refusal", answer{403, "", "Access denied."}, ok, Fail},
+		{"redirect-to-itself", answer{302, "https://example.test/", ""}, ok, Fail},
+		{"www-redirect", answer{301, "https://www.example.test/", ""}, ok, OK},
+		{"basic-auth", answer{401, "", ""}, answer{401, "", ""}, Warn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, f := fixture(t)
+			r.opts.Only = []string{"http"}
+			cert, pem := testCertificate(t, []string{"example.test"}, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+			setHTTPS(t, r, f, cert, pem, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				a := tc.home
+				if req.URL.Path == "/admin/" {
+					a = tc.admin
+				}
+				if a.location != "" {
+					w.Header().Set("Location", a.location)
+				}
+				w.WriteHeader(a.status)
+				fmt.Fprint(w, a.body)
+			}))
+			if got := resultByID(t, r.run(context.Background()), "http"); got.Status != tc.want {
+				t.Fatalf("%+v", got)
 			}
 		})
 	}

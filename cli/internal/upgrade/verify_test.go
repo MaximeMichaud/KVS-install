@@ -447,19 +447,22 @@ func TestWaitDatabase(t *testing.T) {
 	}
 }
 
-// 401 and 403 are a server that answers; a 5xx is not.
+// 401 is basic auth in front of a server that answers; a 403 on every path
+// and a 5xx are a site that is down.
 func TestHTTPCheck(t *testing.T) {
 	s := newStack(t, "", rel{version: "1.0.0"})
 	r := s.runner()
 	ctx := context.Background()
-	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		s.site.Store(int32(code))
-		if err := r.httpCheck(ctx); err != nil {
-			t.Errorf("%d: %v", code, err)
-		}
-		if !s.rep.said(fmt.Sprintf("GET /admin/ answered %d (protected)", code)) {
-			t.Errorf("%d was not logged as protected: %v", code, s.rep.logs())
-		}
+	s.site.Store(http.StatusUnauthorized)
+	if err := r.httpCheck(ctx); err != nil {
+		t.Errorf("401: %v", err)
+	}
+	if !s.rep.said("GET /admin/ answered 401 (protected)") {
+		t.Errorf("401 was not logged as protected: %v", s.rep.logs())
+	}
+	s.site.Store(http.StatusForbidden)
+	if err := r.httpCheck(ctx); err == nil || err.Error() != "GET / answered 403 Forbidden" {
+		t.Errorf("403 on every path: %v", err)
 	}
 	s.site.Store(http.StatusBadGateway)
 	if err := r.httpCheck(ctx); err == nil || err.Error() != "GET / answered 502 Bad Gateway" {

@@ -545,7 +545,11 @@ manifest, queries GitHub releases or writes the update reminder cache.
    keeps restarting fails it at once. While MariaDB alone is not ready, the
    wait goes on until the database wait ends. Then the site must answer
    `/` and `/admin/` on its published HTTPS port, under its own name, with
-   a status below 400; 401 and 403 pass too, as a protected admin. Last,
+   a 2xx or a redirect within the site, www included, that does not point
+   back at the page asked. 401 passes on both, as basic auth in front of
+   the site; 403 passes on `/admin/` alone, as an allowlist in front of the
+   admin. PHP-FPM refusing the script (`Access denied.`, `File not found.`)
+   fails on either, and `kvsctl doctor` fails on the same answers. Last,
    every container of an active service, the ones accepted with
    `--allow-unhealthy` aside, must run the image the release pins for it,
    compared by image ID: a container left on another image, by a compose run
