@@ -447,9 +447,15 @@ if [ -n "$GUM_BIN" ] && ! "$GUM_BIN" --version >/dev/null 2>&1; then
     GUM_BIN=
 fi
 
+# log_command and run_step keep a command's output in a file of its own,
+# made by mktemp in TMPDIR (/tmp by default): readable by root only, under
+# a name nobody can create or link beforehand, which a name made from the
+# PID in /tmp was not.
 log_command() {
-    local logfile="/tmp/log_cmd_$$.log"
+    local logfile
     local result=0
+
+    logfile=$(mktemp "${TMPDIR:-/tmp}/kvs-setup-step.XXXXXX") || return 1
 
     {
         echo ">>> [$(date '+%Y-%m-%d %H:%M:%S')] EXECUTING: $*"
@@ -502,8 +508,10 @@ report_step_failure() {
 run_step() {
     local title="$1"
     shift
-    local logfile="/tmp/run_step_$$.log"
+    local logfile
     local result=0
+
+    logfile=$(mktemp "${TMPDIR:-/tmp}/kvs-setup-step.XXXXXX") || return 1
 
     if [ -n "${GUM_BIN:-}" ]; then
         # With gum: show spinner, log output to file
@@ -4612,10 +4620,11 @@ detect_ioncube() {
         return
     fi
 
-    # Create temp directory for extraction
-    local TEMP_DIR="/tmp/kvs-detect-$$"
+    # Create temp directory for extraction, private to this run (a name
+    # made from the PID could be created beforehand by another user)
+    local TEMP_DIR
     local detected_ioncube=""
-    mkdir -p "$TEMP_DIR"
+    TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kvs-detect.XXXXXX") || return $?
 
     # Extract a key PHP file for inspection (functions_base.php loads early)
     if unzip -q -j "$KVS_FILE" "admin/include/functions_base.php" -d "$TEMP_DIR" 2>/dev/null; then
