@@ -207,6 +207,84 @@ compose_project_working_dirs() {
         sort -u
 }
 
+# The Compose projects of the containers created from <dir>, one per line and
+# de-duplicated. Compose records the directory it ran in as it was reached,
+# symlinks included, so both sides are compared resolved. Fails when Docker
+# cannot list the containers.
+dir_compose_projects() {
+    local dir_real listing project wd wd_real
+
+    dir_real=$(cd "$1" && pwd -P) || return 1
+    listing=$(docker ps -a --format \
+        '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}') ||
+        return 1
+    while IFS=$'\t' read -r project wd; do
+        [ -n "$project" ] && [ -n "$wd" ] || continue
+        wd_real=$(cd "$wd" 2>/dev/null && pwd -P) || wd_real=$wd
+        if [ "$wd_real" = "$dir_real" ]; then
+            printf '%s\n' "$project"
+        fi
+    done <<< "$listing" | sort -u
+}
+
+# The project name Compose gives a directory when nothing names one: the
+# directory's name, lowercased, keeping only a-z, 0-9, _ and -, without a
+# leading _ or -. sites/<domain> gets <domain> without its dots.
+compose_default_project() {
+    local name="${1,,}"
+
+    name=${name//[^a-z0-9_-]/}
+    while [[ "$name" == [_-]* ]]; do
+        name=${name#?}
+    done
+    printf '%s\n' "$name"
+}
+
+# The Compose project of a site whose .env names none. add has written
+# COMPOSE_PROJECT_NAME since the primary site joined the Caddy routes; a site
+# added before has only SITE_PREFIX, and start, a plain docker compose in its
+# directory, runs it under the name Compose derives from that directory. The
+# containers created from the directory tell the project; without them, the
+# volumes held under SITE_PREFIX or under the derived name do. Prints the
+# project, or the derived name when neither holds anything. Fails, with the
+# reason on stderr, when Docker cannot be asked or two projects claim the site.
+site_project_without_name() {
+    local domain="$1" site_dir="$2" site_prefix="$3"
+    local projects default candidate volumes owners=""
+
+    if ! projects=$(dir_compose_projects "$site_dir"); then
+        log_error "Could not list the containers created from ${site_dir}" >&2
+        return 1
+    fi
+    if [[ "$projects" == *$'\n'* ]]; then
+        log_error "Containers of several Compose projects were created from ${site_dir}: ${projects//$'\n'/, }" >&2
+        log_error "remove cannot tell which one is the site's: write it as COMPOSE_PROJECT_NAME in ${site_dir}/.env, then run remove again" >&2
+        return 1
+    fi
+    if [ -n "$projects" ]; then
+        printf '%s\n' "$projects"
+        return 0
+    fi
+
+    default=$(compose_default_project "$domain")
+    [ "$site_prefix" != "$default" ] || site_prefix=""
+    for candidate in "$site_prefix" "$default"; do
+        [ -n "$candidate" ] || continue
+        if ! volumes=$(docker volume ls --filter "label=com.docker.compose.project=${candidate}" \
+            --format '{{.Name}}'); then
+            log_error "Could not list the volumes of ${candidate}" >&2
+            return 1
+        fi
+        [ -z "$volumes" ] || owners="${owners:+${owners} and }${candidate}"
+    done
+    if [[ "$owners" == *' and '* ]]; then
+        log_error "No container of ${domain} exists, and both ${owners} hold volumes: remove cannot tell which project is the site's" >&2
+        log_error "Write it as COMPOSE_PROJECT_NAME in ${site_dir}/.env, then run remove again" >&2
+        return 1
+    fi
+    printf '%s\n' "${owners:-$default}"
+}
+
 ensure_site_prefix_available() {
     local requested_domain="$1"
     local requested_prefix="$2"
@@ -607,6 +685,9 @@ add_site() {
     # Check if site already exists
     if [ -d "$site_dir" ]; then
         log_error "Site ${domain} already exists at ${site_dir}"
+        if [ ! -f "${site_dir}/docker-compose.yml" ]; then
+            log_error "It has no docker-compose.yml: an earlier add stopped before it finished. Run './site-manager.sh remove ${domain}', which checks that nothing of it runs before it deletes it"
+        fi
         exit 1
     fi
 
@@ -856,6 +937,56 @@ stop_site() {
 # Remove Site
 # =============================================================================
 
+# remove of a site directory without docker-compose.yml, which an add that
+# stopped early leaves (without an .env too when it stopped at the webroot).
+# Compose cannot take such a site down, and run there it would look in the
+# parent directories and find the primary's docker-compose.yml. While a
+# container created from the directory, or a volume of a project the site's
+# .env or directory name gives, exists, nothing is deleted. Otherwise
+# nothing of the site runs: an empty directory is deleted, rmdir refusing
+# any other, and for a directory with files left the command that deletes
+# it is printed.
+remove_incomplete_site() {
+    local domain="$1" site_dir="$2"
+    local projects candidate volumes held="" seen=" "
+    local -a names=()
+
+    if ! projects=$(dir_compose_projects "$site_dir"); then
+        log_error "Could not list the containers created from ${site_dir}"
+        return 1
+    fi
+    [ -z "$projects" ] || held="containers of ${projects//$'\n'/, }"
+    if [ -f "${site_dir}/.env" ]; then
+        names+=("$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "${site_dir}/.env" | head -n 1)")
+        names+=("$(sed -n 's/^SITE_PREFIX=//p' "${site_dir}/.env" | head -n 1)")
+    fi
+    names+=("$(compose_default_project "$domain")")
+    for candidate in "${names[@]}"; do
+        [ -n "$candidate" ] && [[ "$seen" != *" ${candidate} "* ]] || continue
+        seen="${seen}${candidate} "
+        if ! volumes=$(docker volume ls --filter "label=com.docker.compose.project=${candidate}" \
+            --format '{{.Name}}'); then
+            log_error "Could not list the volumes of ${candidate}"
+            return 1
+        fi
+        [ -z "$volumes" ] || held="${held:+${held}; }volumes of ${candidate}: ${volumes//$'\n'/, }"
+    done
+    if [ -n "$held" ]; then
+        log_error "${site_dir} has no docker-compose.yml, but Docker still holds ${held}"
+        log_error "Copy the site's docker-compose.yml back, then run remove again: cp ${SCRIPT_DIR}/docker-compose.site.yml.template ${site_dir}/docker-compose.yml"
+        return 1
+    fi
+
+    log_info "Nothing of ${domain} runs: ${site_dir} has no docker-compose.yml, and no container or volume belongs to it (an add stopped before it finished)"
+    if rmdir "$site_dir" 2>/dev/null; then
+        log_success "Removed the empty site directory ${site_dir}"
+        return 0
+    fi
+    log_error "${site_dir} is not empty: check what it holds, then delete it with:"
+    printf '  rm -r -- %q\n' "$site_dir"
+    return 1
+}
+
 remove_site() {
     local domain="$1"
     validate_domain "$domain" || return 1
@@ -867,6 +998,14 @@ remove_site() {
     if [ ! -d "$site_dir" ]; then
         log_error "Site ${domain} does not exist"
         exit 1
+    fi
+
+    # Compose takes the site down from its docker-compose.yml, which an add
+    # that stopped early never wrote.
+    if [ ! -f "${site_dir}/docker-compose.yml" ]; then
+        local incomplete_status=0
+        remove_incomplete_site "$domain" "$site_dir" || incomplete_status=$?
+        exit "$incomplete_status"
     fi
 
     echo -e "${YELLOW}WARNING: This will remove all data for ${domain}!${NC}"
@@ -890,45 +1029,75 @@ remove_site() {
     # tells the two apart. Refuse too when the project has containers created
     # from another directory, comparing resolved paths because Compose records
     # the path it was started from, symlinks included.
-    local remove_project working_dirs primary_prefix site_real wd wd_real foreign_dir=""
+    local remove_project site_prefix working_dirs primary_prefix site_real wd wd_real foreign_dir=""
     remove_project=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$site_dir/.env" | head -n 1)
-    [ -n "$remove_project" ] ||
-        remove_project=$(sed -n 's/^SITE_PREFIX=//p' "$site_dir/.env" | head -n 1)
-    if [ -n "$remove_project" ]; then
-        for primary_prefix in "$(single_mode_primary_prefix)" "$(primary_site_value SITE_PREFIX)"; do
-            if [ -n "$primary_prefix" ] && [ "$primary_prefix" = "$remove_project" ]; then
-                log_error "Refusing 'docker compose down -v' for project ${remove_project}: the primary site uses that project name"
-                log_error "Remove aborted to protect the primary's containers and volumes"
-                exit 1
-            fi
-        done
-        working_dirs=$(compose_project_working_dirs "$remove_project")
-        if [ -n "$working_dirs" ]; then
-            site_real=$(cd "$site_dir" && pwd -P)
-            while IFS= read -r wd; do
-                if [ -z "$wd" ]; then
-                    foreign_dir="(a container with no working directory label)"
-                    continue
-                fi
-                wd_real=$(cd "$wd" 2>/dev/null && pwd -P) || wd_real=$wd
-                [ "$wd_real" = "$site_real" ] || foreign_dir=$wd
-            done <<< "$working_dirs"
-        fi
-        if [ -n "$foreign_dir" ]; then
-            log_error "Refusing 'docker compose down -v' for project ${remove_project}: it has containers from ${foreign_dir}, not ${site_dir}"
-            log_error "The primary site may share this project name; remove aborted to protect its data"
+    # A site added before add wrote COMPOSE_PROJECT_NAME runs under the
+    # project Compose derives from its directory, not under its SITE_PREFIX:
+    # down -v on SITE_PREFIX found nothing, and the site's containers and
+    # volumes stayed with no configuration left.
+    if [ -z "$remove_project" ]; then
+        site_prefix=$(sed -n 's/^SITE_PREFIX=//p' "$site_dir/.env" | head -n 1)
+        if ! remove_project=$(site_project_without_name "$domain" "$site_dir" "$site_prefix"); then
             exit 1
         fi
+        log_info "${site_dir}/.env names no COMPOSE_PROJECT_NAME; the site runs as project ${remove_project}"
+    fi
+    for primary_prefix in "$(single_mode_primary_prefix)" "$(primary_site_value SITE_PREFIX)"; do
+        if [ -n "$primary_prefix" ] && [ "$primary_prefix" = "$remove_project" ]; then
+            log_error "Refusing 'docker compose down -v' for project ${remove_project}: the primary site uses that project name"
+            log_error "Remove aborted to protect the primary's containers and volumes"
+            exit 1
+        fi
+    done
+    working_dirs=$(compose_project_working_dirs "$remove_project")
+    if [ -n "$working_dirs" ]; then
+        site_real=$(cd "$site_dir" && pwd -P)
+        while IFS= read -r wd; do
+            if [ -z "$wd" ]; then
+                foreign_dir="(a container with no working directory label)"
+                continue
+            fi
+            wd_real=$(cd "$wd" 2>/dev/null && pwd -P) || wd_real=$wd
+            [ "$wd_real" = "$site_real" ] || foreign_dir=$wd
+        done <<< "$working_dirs"
+    fi
+    if [ -n "$foreign_dir" ]; then
+        log_error "Refusing 'docker compose down -v' for project ${remove_project}: it has containers from ${foreign_dir}, not ${site_dir}"
+        log_error "The primary site may share this project name; remove aborted to protect its data"
+        exit 1
     fi
 
     # Stop containers and remove volumes. The project is named explicitly so
     # a COMPOSE_PROJECT_NAME exported in the operator's shell, which Compose
     # prefers over the site's .env, cannot point down -v at another stack.
+    # Compose finds the files itself, in the site directory, as it does for
+    # start and stop: the site's docker-compose.yml, checked above, so it
+    # never looks in the parent directories, and the override next to it
+    # (README.md recommends docker-compose.override.yml), whose services and
+    # volumes are the site's too. --remove-orphans takes the containers of
+    # services no longer in those files. The removal stops here, with the
+    # site directory and its route kept, when down -v fails, leaves volumes
+    # of the project behind or they cannot be listed: deleting the
+    # configuration anyway orphaned those volumes.
     cd "$site_dir"
-    if [ -n "$remove_project" ]; then
-        docker compose -p "$remove_project" down -v 2>/dev/null || true
-    else
-        (unset COMPOSE_PROJECT_NAME; docker compose down -v 2>/dev/null) || true
+    local down_status=0 left_volumes
+    docker compose -p "$remove_project" down -v --remove-orphans || down_status=$?
+    if [ "$down_status" -ne 0 ]; then
+        log_error "'docker compose down -v' failed (status ${down_status}); the site directory and its route are kept"
+        log_error "Fix the error above and run remove again"
+        exit 1
+    fi
+    if ! left_volumes=$(docker volume ls --filter "label=com.docker.compose.project=${remove_project}" \
+        --format '{{.Name}}'); then
+        log_error "Could not list the volumes of ${remove_project} after 'docker compose down -v'; the site directory and its route are kept"
+        log_error "Fix the error above and run remove again"
+        exit 1
+    fi
+    if [ -n "$left_volumes" ]; then
+        log_error "Volumes of project ${remove_project} are still present after 'docker compose down -v':"
+        printf '%s\n' "$left_volumes" | sed 's/^/  /' >&2
+        log_error "The site directory and its route are kept; remove those volumes, then run remove again"
+        exit 1
     fi
 
     # Remove Caddy config
@@ -941,7 +1110,8 @@ remove_site() {
 
     # Remove webroot (ask first)
     if [ -d "$webroot" ]; then
-        read -rp "Also remove webroot ${webroot}? [y/N]: " remove_webroot
+        # EOF answers no: the removal must still reach the Caddy reload.
+        read -rp "Also remove webroot ${webroot}? [y/N]: " remove_webroot || remove_webroot=""
         if [ "$remove_webroot" = "y" ] || [ "$remove_webroot" = "Y" ]; then
             rm -rf "$webroot"
             log_success "Removed webroot: ${webroot}"

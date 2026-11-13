@@ -53,6 +53,19 @@ docker() {
             # --filter. Plain name checks (Caddy, nginx) carry no --filter and
             # keep their historical answer below. Both label queries default to
             # empty, so an add in the other fixtures still sees no project.
+            # MOCK_CONTAINER_STATE names a file of "<project><TAB><working
+            # dir>" lines, the containers a case starts with: the label
+            # queries answer for the project they filter on, and a listing
+            # of every container's project and working directory prints it
+            # (MOCK_PS_STATUS makes that listing fail).
+            local mock_arg mock_filter="" mock_state_project mock_state_dir
+            for mock_arg in "$@"; do
+                case "$mock_arg" in
+                    label=com.docker.compose.project=*)
+                        mock_filter=${mock_arg#label=com.docker.compose.project=}
+                        ;;
+                esac
+            done
             if [[ " $* " == *' --filter '* ]]; then
                 case " $* " in
                     *project.working_dir*)
@@ -64,6 +77,20 @@ docker() {
                             printf '%s\n' "${MOCK_PROJECT_CONTAINERS}"
                         ;;
                 esac
+                if [ -n "${MOCK_CONTAINER_STATE:-}" ] && [ -n "$mock_filter" ]; then
+                    while IFS=$'\t' read -r mock_state_project mock_state_dir; do
+                        [ "$mock_state_project" = "$mock_filter" ] || continue
+                        case " $* " in
+                            *project.working_dir*) printf '%s\n' "$mock_state_dir" ;;
+                            *) printf 'id-%s\n' "$mock_state_project" ;;
+                        esac
+                    done < "$MOCK_CONTAINER_STATE"
+                fi
+                return 0
+            fi
+            if [[ " $* " == *'com.docker.compose.project.working_dir'* ]]; then
+                [ "${MOCK_PS_STATUS:-0}" -eq 0 ] || return "$MOCK_PS_STATUS"
+                [ -z "${MOCK_CONTAINER_STATE:-}" ] || cat "$MOCK_CONTAINER_STATE"
                 return 0
             fi
             if [ "${MOCK_CADDY_RUNNING:-true}" = true ]; then
@@ -71,9 +98,30 @@ docker() {
             fi
             ;;
         volume)
-            # volume ls --filter label=com.docker.compose.project=<prefix>
-            [ -z "${MOCK_PROJECT_VOLUMES:-}" ] ||
-                printf '%s\n' "${MOCK_PROJECT_VOLUMES}"
+            # volume ls --filter label=com.docker.compose.project=<project>
+            # lists the volumes of MOCK_PROJECT_VOLUMES that Compose would have
+            # named for that project, <project>_<volume>; without the filter,
+            # all of them. MOCK_VOLUME_LS_STATUS makes the listing fail.
+            [ "${MOCK_VOLUME_LS_STATUS:-0}" -eq 0 ] || return "$MOCK_VOLUME_LS_STATUS"
+            local mock_arg mock_project="" mock_volume
+            for mock_arg in "$@"; do
+                case "$mock_arg" in
+                    label=com.docker.compose.project=*)
+                        mock_project=${mock_arg#label=com.docker.compose.project=}
+                        ;;
+                esac
+            done
+            # MOCK_VOLUME_STATE names a file of volumes too, one per line,
+            # which a down -v of their project empties.
+            while IFS= read -r mock_volume; do
+                [ -n "$mock_volume" ] || continue
+                if [ -z "$mock_project" ] || [[ "$mock_volume" == "${mock_project}_"* ]]; then
+                    printf '%s\n' "$mock_volume"
+                fi
+            done < <(
+                [ -z "${MOCK_PROJECT_VOLUMES:-}" ] || printf '%s\n' "$MOCK_PROJECT_VOLUMES"
+                [ -z "${MOCK_VOLUME_STATE:-}" ] || cat "$MOCK_VOLUME_STATE"
+            )
             return 0
             ;;
         network)
@@ -93,6 +141,49 @@ docker() {
             return "${MOCK_CADDY_RELOAD_STATUS:-0}"
             ;;
         compose)
+            # The options before the subcommand, the ones that choose the
+            # project and its files.
+            local -a mock_global=()
+            local mock_arg mock_index=2 mock_project=""
+            while [ "$mock_index" -le "$#" ]; do
+                mock_arg=${!mock_index}
+                case "$mock_arg" in
+                    -p|-f|--profile|--project-directory|--env-file)
+                        mock_global+=("$mock_arg")
+                        mock_index=$((mock_index + 1))
+                        [ "$mock_arg" != -p ] || mock_project=${!mock_index}
+                        mock_global+=("${!mock_index}")
+                        ;;
+                    -*) mock_global+=("$mock_arg") ;;
+                    *) break ;;
+                esac
+                mock_index=$((mock_index + 1))
+            done
+            if [[ " $* " == *' down -v '* ]]; then
+                # MOCK_COMPOSE_RENDER=<prefix>: what the real Compose loads
+                # with those options in this directory, from the same
+                # environment, written to <prefix>.services and
+                # <prefix>.volumes (config needs no daemon and no network).
+                if [ -n "${MOCK_COMPOSE_RENDER:-}" ]; then
+                    "$REAL_DOCKER" compose "${mock_global[@]}" config --services \
+                        > "${MOCK_COMPOSE_RENDER}.services" 2>&1
+                    "$REAL_DOCKER" compose "${mock_global[@]}" config --volumes \
+                        > "${MOCK_COMPOSE_RENDER}.volumes" 2>&1
+                fi
+                [ "${MOCK_COMPOSE_DOWN_STATUS:-0}" -eq 0 ] || return "$MOCK_COMPOSE_DOWN_STATUS"
+                # down -v takes the containers and volumes of its project.
+                if [ -n "$mock_project" ] && [ -n "${MOCK_CONTAINER_STATE:-}" ]; then
+                    awk -F '\t' -v p="$mock_project" '$1 != p' "$MOCK_CONTAINER_STATE" \
+                        > "${MOCK_CONTAINER_STATE}.new"
+                    mv "${MOCK_CONTAINER_STATE}.new" "$MOCK_CONTAINER_STATE"
+                fi
+                if [ -n "$mock_project" ] && [ -n "${MOCK_VOLUME_STATE:-}" ]; then
+                    awk -v p="${mock_project}_" 'index($0, p) != 1' "$MOCK_VOLUME_STATE" \
+                        > "${MOCK_VOLUME_STATE}.new"
+                    mv "${MOCK_VOLUME_STATE}.new" "$MOCK_VOLUME_STATE"
+                fi
+                return 0
+            fi
             if [[ " $* " == *' exec -T mariadb healthcheck.sh --connect --innodb_initialized '* ]]; then
                 return "${MOCK_MARIADB_HEALTH_STATUS:-0}"
             fi
@@ -138,6 +229,8 @@ docker() {
     esac
 }
 export -f openssl chown docker
+# The mock's MOCK_COMPOSE_RENDER runs the real Compose.
+export REAL_DOCKER
 
 create_fixture invalid
 invalid_script="${TEST_DIR}/invalid/docker/multi-site/site-manager.sh"
@@ -752,6 +845,7 @@ r1_remove_site="${TEST_DIR}/r1_remove/docker/multi-site/sites/a.test"
 mkdir -p "$r1_remove_site"
 printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
     > "$r1_remove_site/.env"
+: > "$r1_remove_site/docker-compose.yml"
 r1_remove_log="${TEST_DIR}/r1_remove/docker.log"
 : > "$r1_remove_log"
 set +e
@@ -779,6 +873,7 @@ for r1_record in env reservation; do
     mkdir -p "$r1_shared_site"
     printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
         > "$r1_shared_site/.env"
+    : > "$r1_shared_site/docker-compose.yml"
     if [ "$r1_record" = env ]; then
         printf 'COMPOSE_PROJECT_NAME=kvs-a-test\nSITE_PREFIX=kvs-a-test\n' > "${r1_shared_root}/.env"  # pragma: allowlist secret
     else
@@ -815,6 +910,7 @@ mkdir -p "$r1_ok_site"
 ln -s "$r1_ok_site" "${TEST_DIR}/r1_remove_ok/site-link"
 printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
     > "$r1_ok_site/.env"
+: > "$r1_ok_site/docker-compose.yml"
 r1_ok_log="${TEST_DIR}/r1_remove_ok/docker.log"
 : > "$r1_ok_log"
 set +e
@@ -827,8 +923,8 @@ status=$?
 set -e
 [ "$status" -eq 0 ] ||
     fail "remove refused a legitimate site whose project matches its own directory"
-grep -Fxq 'compose -p kvs-a-test down -v' "$r1_ok_log" ||
-    fail "a legitimate remove did not run 'docker compose -p kvs-a-test down -v': $(cat "$r1_ok_log")"
+grep -Fxq "compose -p kvs-a-test down -v --remove-orphans" "$r1_ok_log" ||
+    fail "a legitimate remove did not run 'docker compose -p kvs-a-test down -v --remove-orphans': $(cat "$r1_ok_log")"
 [ ! -d "$r1_ok_site" ] ||
     fail "a legitimate remove kept the site directory"
 
@@ -989,5 +1085,371 @@ for multi_host in www.b.example c.example; do
         fail "R2: the ambiguous ${multi_host} route was written"
 done
 echo "PASS: add refuses every address of a hand-written multi-address route"
+
+# R5: remove used to hide a failed 'docker compose down -v' and delete the site
+# directory and its route anyway. The volumes stayed with no configuration left
+# to manage them, and add refuses the domain while its project owns volumes.
+# The fixture's project is kvs-r5-example, the one add gives r5.example.
+r5_site_fixture() {
+    local name=$1
+    create_fixture "$name"
+    r5_root="${TEST_DIR}/${name}/docker/multi-site"
+    r5_site="${r5_root}/sites/r5.example"
+    r5_route="${r5_root}/caddy/sites/r5.example.caddy"
+    r5_log="${TEST_DIR}/${name}/docker.log"
+    r5_webroot="${TEST_DIR}/${name}/webroots"
+    mkdir -p "$r5_site" "${r5_root}/caddy/sites"
+    printf 'DOMAIN=r5.example\nSITE_PREFIX=kvs-r5-example\nCOMPOSE_PROJECT_NAME=kvs-r5-example\n' > "$r5_site/.env"
+    : > "$r5_site/docker-compose.yml"
+    printf 'r5.example {\n    reverse_proxy n.r5.example:80\n}\n' > "$r5_route"
+    : > "$r5_log"
+}
+r5_remove() {
+    local name=$1
+    shift
+    set +e
+    printf 'yes\nn\n' | env "$@" MOCK_DOCKER_LOG="$r5_log" KVS_WEBROOT_BASE="$r5_webroot" \
+        bash "${r5_root}/site-manager.sh" remove r5.example > "${TEST_DIR}/${name}/out" 2>&1
+    r5_status=$?
+    set -e
+}
+
+# A failed down -v stops the removal and keeps the site directory and route.
+r5_site_fixture r5_down
+r5_remove r5_down MOCK_COMPOSE_DOWN_STATUS=1
+[ "$r5_status" -ne 0 ] || fail "R5: remove reported success although 'docker compose down -v' failed"
+[ -f "$r5_site/.env" ] || fail "R5: remove deleted the site directory after a failed 'down -v'"
+[ -f "$r5_route" ] || fail "R5: remove deleted the Caddy route after a failed 'down -v'"
+! grep -Fq 'removed completely' "${TEST_DIR}/r5_down/out" ||
+    fail "R5: a failed 'down -v' was reported as a complete removal"
+
+# Volumes of the project still there after down -v: the removal stops too.
+r5_site_fixture r5_left
+r5_remove r5_left MOCK_PROJECT_VOLUMES='kvs-r5-example_mariadb-data'
+[ "$r5_status" -ne 0 ] || fail "R5: remove reported success with the project's volumes still present"
+[ -f "$r5_site/.env" ] || fail "R5: remove deleted the site directory while its volumes remain"
+[ -f "$r5_route" ] || fail "R5: remove deleted the Caddy route while the site's volumes remain"
+grep -Fq 'kvs-r5-example_mariadb-data' "${TEST_DIR}/r5_left/out" ||
+    fail "R5: the leftover volume was not named: $(cat "${TEST_DIR}/r5_left/out")"
+
+# Those volumes, once the site directory and route are gone as an older remove
+# left them, stop a new add of the domain; another project's volume does not.
+rm -rf "$r5_site" "$r5_route"
+r5_add() {
+    set +e
+    env "$@" KVS_WEBROOT_BASE="$r5_webroot" \
+        bash "${r5_root}/site-manager.sh" add r5.example > "${TEST_DIR}/r5_left/add.out" 2>&1
+    r5_status=$?
+    set -e
+}
+r5_add MOCK_PROJECT_VOLUMES='kvs-r5-example_mariadb-data'
+[ "$r5_status" -ne 0 ] || fail "R5: add reused the volumes a failed remove left behind"
+grep -Fq 'A Docker Compose project named kvs-r5-example already exists' "${TEST_DIR}/r5_left/add.out" ||
+    fail "R5: add did not name the project that owns the volumes: $(cat "${TEST_DIR}/r5_left/add.out")"
+[ ! -e "$r5_site" ] || fail "R5: the refused add created the site directory"
+r5_add MOCK_PROJECT_VOLUMES='kvs-r5-other_mariadb-data'
+[ "$r5_status" -eq 0 ] ||
+    fail "R5: add refused r5.example over another project's volume: $(cat "${TEST_DIR}/r5_left/add.out")"
+
+# A volume listing that fails after down -v stops the removal as well: it
+# cannot show that nothing was left behind.
+r5_site_fixture r5_vols_fail
+r5_remove r5_vols_fail MOCK_VOLUME_LS_STATUS=1
+[ "$r5_status" -ne 0 ] || fail "R5: remove reported success although the volumes could not be listed"
+[ -f "$r5_site/.env" ] || fail "R5: remove deleted the site directory without listing its volumes"
+[ -f "$r5_route" ] || fail "R5: remove deleted the Caddy route without listing the site's volumes"
+grep -Fq 'Could not list the volumes of kvs-r5-example' "${TEST_DIR}/r5_vols_fail/out" ||
+    fail "R5: the failed volume listing was not reported: $(cat "${TEST_DIR}/r5_vols_fail/out")"
+
+# Another project's volume is no leftover of this site: remove completes.
+r5_site_fixture r5_other
+r5_remove r5_other MOCK_PROJECT_VOLUMES='kvs-r5-other_mariadb-data'
+[ "$r5_status" -eq 0 ] ||
+    fail "R5: remove took another project's volume for a leftover: $(cat "${TEST_DIR}/r5_other/out")"
+[ ! -e "$r5_site" ] || fail "R5: remove kept the site directory over another project's volume"
+
+# A removal that works ends with the Caddy reload even when its input ends at
+# the webroot prompt (EOF answers no): read used to stop the script under
+# set -e there, after the route was gone but before Caddy was told. down -v
+# names the site's project.
+r5_site_fixture r5_eof
+mkdir -p "${r5_webroot}/r5.example/contents"
+printf 'video\n' > "${r5_webroot}/r5.example/contents/1.mp4"
+set +e
+printf 'yes\n' | MOCK_DOCKER_LOG="$r5_log" KVS_WEBROOT_BASE="$r5_webroot" \
+    bash "${r5_root}/site-manager.sh" remove r5.example > "${TEST_DIR}/r5_eof/out" 2>&1
+r5_status=$?
+set -e
+[ "$r5_status" -eq 0 ] ||
+    fail "R5: remove stopped at the webroot prompt on EOF: $(cat "${TEST_DIR}/r5_eof/out")"
+[ ! -e "$r5_site" ] || fail "R5: a working remove kept the site directory"
+[ ! -e "$r5_route" ] || fail "R5: a working remove kept the Caddy route"
+[ -f "${r5_webroot}/r5.example/contents/1.mp4" ] || fail "R5: EOF at the webroot prompt removed the webroot"
+grep -Fxq "compose -p kvs-r5-example down -v --remove-orphans" "$r5_log" ||
+    fail "R5: down -v did not name the site's project: $(cat "$r5_log")"
+grep -q '^exec kvs-caddy caddy reload' "$r5_log" ||
+    fail "R5: Caddy was not reloaded after the removal: $(cat "$r5_log")"
+
+# down -v loads the files start and stop load, in the site directory: its
+# docker-compose.yml and the override Compose picks next to it. With -f
+# docker-compose.yml alone, a service and a volume only in the override
+# would outlive "removed completely". The real Compose renders what down -v and
+# a plain 'docker compose' (start, stop) load, for two of the override names
+# Compose looks for.
+for r5_override in docker-compose.override.yml compose.override.yaml; do
+    r5_case="r5_override_${r5_override%%.*}"
+    create_fixture "$r5_case"
+    r5_root="${TEST_DIR}/${r5_case}/docker/multi-site"
+    r5_site="${r5_root}/sites/r5.example"
+    r5_webroot="${TEST_DIR}/${r5_case}/webroots"
+    KVS_WEBROOT_BASE="$r5_webroot" bash "${r5_root}/site-manager.sh" add r5.example >/dev/null
+    printf 'services:\n  backup:\n    image: busybox\n    volumes:\n      - backup-data:/data\nvolumes:\n  backup-data:\n' \
+        > "${r5_site}/${r5_override}"
+    r5_services=$(cd "$r5_site" && "$REAL_DOCKER" compose config --services | sort)
+    r5_volumes=$(cd "$r5_site" && "$REAL_DOCKER" compose config --volumes | sort)
+    { grep -Fxq backup <<< "$r5_services" && grep -Fxq backup-data <<< "$r5_volumes"; } ||
+        fail "R5: the real Compose did not load ${r5_override}: ${r5_services}"
+    set +e
+    printf 'yes\nn\n' | MOCK_COMPOSE_RENDER="${TEST_DIR}/${r5_case}/render" \
+        KVS_WEBROOT_BASE="$r5_webroot" \
+        bash "${r5_root}/site-manager.sh" remove r5.example > "${TEST_DIR}/${r5_case}/out" 2>&1
+    r5_status=$?
+    set -e
+    [ "$r5_status" -eq 0 ] || fail "R5: remove with ${r5_override} failed: $(cat "${TEST_DIR}/${r5_case}/out")"
+    [ "$(sort "${TEST_DIR}/${r5_case}/render.services")" = "$r5_services" ] ||
+        fail "R5: down -v did not load the services start loads with ${r5_override}: $(cat "${TEST_DIR}/${r5_case}/render.services")"
+    [ "$(sort "${TEST_DIR}/${r5_case}/render.volumes")" = "$r5_volumes" ] ||
+        fail "R5: down -v did not load the volumes start loads with ${r5_override}: $(cat "${TEST_DIR}/${r5_case}/render.volumes")"
+done
+
+# An add that stops early leaves sites/<domain> without docker-compose.yml,
+# and without an .env when it stopped at the webroot. remove asked for a
+# project name, down -v had no compose file and add said the site exists.
+# remove now finds that nothing of the site runs and deletes the empty
+# directory, and add works again. The webroot base sits under a regular file,
+# which mkdir cannot create even as root.
+create_fixture r5_half
+r5_root="${TEST_DIR}/r5_half/docker/multi-site"
+r5_site="${r5_root}/sites/r5.example"
+r5_log="${TEST_DIR}/r5_half/docker.log"
+: > "${TEST_DIR}/r5_half/file"
+for r5_attempt in 1 2; do
+    set +e
+    KVS_WEBROOT_BASE="${TEST_DIR}/r5_half/file/www" \
+        bash "${r5_root}/site-manager.sh" add r5.example > "${TEST_DIR}/r5_half/add${r5_attempt}.out" 2>&1
+    r5_status=$?
+    set -e
+    [ "$r5_status" -ne 0 ] || fail "R5: add worked with a webroot it cannot create"
+done
+[ -d "$r5_site" ] && [ -z "$(ls -A "$r5_site")" ] ||
+    fail "R5: the add that stopped did not leave the empty site directory this case needs"
+grep -Fq "Run './site-manager.sh remove r5.example'" "${TEST_DIR}/r5_half/add2.out" ||
+    fail "R5: add of a half-created site did not point to remove: $(cat "${TEST_DIR}/r5_half/add2.out")"
+: > "$r5_log"
+set +e
+MOCK_DOCKER_LOG="$r5_log" KVS_WEBROOT_BASE="${TEST_DIR}/r5_half/webroots" \
+    bash "${r5_root}/site-manager.sh" remove r5.example < /dev/null > "${TEST_DIR}/r5_half/out" 2>&1
+r5_status=$?
+set -e
+[ "$r5_status" -eq 0 ] || fail "R5: remove of a half-created site failed: $(cat "${TEST_DIR}/r5_half/out")"
+grep -Fq 'Nothing of r5.example runs' "${TEST_DIR}/r5_half/out" ||
+    fail "R5: remove did not say that nothing of the half-created site runs: $(cat "${TEST_DIR}/r5_half/out")"
+[ ! -e "$r5_site" ] || fail "R5: remove kept the empty directory of a half-created site"
+! grep -q '^compose' "$r5_log" || fail "R5: remove ran Compose without the site's docker-compose.yml: $(cat "$r5_log")"
+KVS_WEBROOT_BASE="${TEST_DIR}/r5_half/webroots" \
+    bash "${r5_root}/site-manager.sh" add r5.example > "${TEST_DIR}/r5_half/add3.out" 2>&1 ||
+    fail "R5: add still refused the domain after remove: $(cat "${TEST_DIR}/r5_half/add3.out")"
+
+# A directory with files left, here an .env naming no project with the
+# primary's docker-compose.yml in the parent directory, is not deleted:
+# remove prints the command that deletes it, and runs no Compose there,
+# which would have taken the primary's file and project.
+r5_site_fixture r5_files_left
+printf 'DOMAIN=r5.example\n' > "$r5_site/.env"
+rm -f "$r5_site/docker-compose.yml"
+printf 'services:\n  mariadb:\n    image: mariadb\n' > "${TEST_DIR}/r5_files_left/docker/docker-compose.yml"
+printf 'COMPOSE_PROJECT_NAME=kvs-primary\n' > "${TEST_DIR}/r5_files_left/docker/.env"  # pragma: allowlist secret
+r5_remove r5_files_left
+[ "$r5_status" -ne 0 ] || fail "R5: remove reported success for a site directory it kept"
+! grep -q '^compose' "$r5_log" || fail "R5: remove ran Compose without the site's docker-compose.yml: $(cat "$r5_log")"
+[ -f "$r5_site/.env" ] || fail "R5: remove deleted a site directory that still holds files"
+r5_command=$(sed -n 's/^  \(rm -r -- .*\)$/\1/p' "${TEST_DIR}/r5_files_left/out")
+[ -n "$r5_command" ] || fail "R5: remove printed no command to delete the directory: $(cat "${TEST_DIR}/r5_files_left/out")"
+eval "$r5_command"
+[ ! -e "$r5_site" ] && [ -d "${r5_root}/sites" ] ||
+    fail "R5: the printed command '${r5_command}' did not delete exactly the site directory"
+
+# Without docker-compose.yml, what Docker still holds of the site keeps the
+# directory: volumes of the project its .env names, volumes of the project
+# its directory name gives, containers created from it, or a container
+# listing that fails. remove says to put docker-compose.yml back.
+r5_held() {
+    local name=$1
+    shift
+    r5_site_fixture "$name"
+    rm -f "$r5_site/docker-compose.yml"
+    : > "${TEST_DIR}/${name}/containers"
+    r5_remove "$name" MOCK_CONTAINER_STATE="${TEST_DIR}/${name}/containers" "$@"
+    [ "$r5_status" -ne 0 ] || fail "R5: ${name}: remove reported success with the site's resources left"
+    [ -f "$r5_site/.env" ] && [ -f "$r5_route" ] || fail "R5: ${name}: remove deleted the site's files"
+    ! grep -q '^compose' "$r5_log" || fail "R5: ${name}: remove ran Compose without docker-compose.yml"
+}
+r5_held r5_held_env MOCK_PROJECT_VOLUMES='kvs-r5-example_mariadb-data'
+{ grep -Fq 'volumes of kvs-r5-example: kvs-r5-example_mariadb-data' "${TEST_DIR}/r5_held_env/out" &&
+    grep -Fq "docker-compose.site.yml.template ${r5_site}/docker-compose.yml" "${TEST_DIR}/r5_held_env/out"; } ||
+    fail "R5: the volumes held without docker-compose.yml were not named: $(cat "${TEST_DIR}/r5_held_env/out")"
+r5_held r5_held_dir MOCK_PROJECT_VOLUMES='r5example_mariadb-data'
+grep -Fq 'volumes of r5example: r5example_mariadb-data' "${TEST_DIR}/r5_held_dir/out" ||
+    fail "R5: the volumes of the directory's project were not named: $(cat "${TEST_DIR}/r5_held_dir/out")"
+r5_site_fixture r5_held_containers
+rm -f "$r5_site/docker-compose.yml"
+printf 'kvs-r5-example\t%s\n' "$r5_site" > "${TEST_DIR}/r5_held_containers/containers"
+r5_remove r5_held_containers MOCK_CONTAINER_STATE="${TEST_DIR}/r5_held_containers/containers"
+{ [ "$r5_status" -ne 0 ] && [ -f "$r5_site/.env" ] &&
+    grep -Fq 'containers of kvs-r5-example' "${TEST_DIR}/r5_held_containers/out"; } ||
+    fail "R5: containers created from a site without docker-compose.yml did not stop remove: $(cat "${TEST_DIR}/r5_held_containers/out")"
+# Even an empty directory stays when the containers or the volumes cannot
+# be listed.
+for r5_listing in ps volume; do
+    r5_site_fixture "r5_held_${r5_listing}"
+    rm -f "$r5_site/.env" "$r5_site/docker-compose.yml"
+    if [ "$r5_listing" = ps ]; then
+        r5_remove "r5_held_${r5_listing}" MOCK_PS_STATUS=1
+        r5_message='Could not list the containers created from'
+    else
+        r5_remove "r5_held_${r5_listing}" MOCK_VOLUME_LS_STATUS=1
+        r5_message='Could not list the volumes of r5example'
+    fi
+    { [ "$r5_status" -ne 0 ] && [ -d "$r5_site" ] &&
+        grep -Fq "$r5_message" "${TEST_DIR}/r5_held_${r5_listing}/out"; } ||
+        fail "R5: a failed ${r5_listing} listing did not stop remove: $(cat "${TEST_DIR}/r5_held_${r5_listing}/out")"
+done
+echo "PASS: remove stops on a failed or incomplete 'down -v', loads the site's override and clears a half-created site"
+
+# A site added before add wrote COMPOSE_PROJECT_NAME has only SITE_PREFIX in
+# its .env, and start, a plain 'docker compose' in its directory, runs it
+# under the project Compose derives from the directory name. remove took
+# SITE_PREFIX: its down -v found nothing and succeeded, the working directory
+# and leftover checks asked about the wrong project, and the site's
+# containers and volumes outlived "removed completely". The real Compose
+# gives the name the cases expect.
+r5_legacy() {
+    local name=$1
+    create_fixture "$name"
+    r5_root="${TEST_DIR}/${name}/docker/multi-site"
+    r5_site="${r5_root}/sites/legacy-site.example"
+    r5_webroot="${TEST_DIR}/${name}/webroots"
+    r5_log="${TEST_DIR}/${name}/docker.log"
+    r5_containers="${TEST_DIR}/${name}/containers"
+    r5_volumes="${TEST_DIR}/${name}/volumes"
+    KVS_WEBROOT_BASE="$r5_webroot" bash "${r5_root}/site-manager.sh" add legacy-site.example >/dev/null
+    sed -i '/^COMPOSE_PROJECT_NAME=/d' "$r5_site/.env"
+    : > "$r5_log"
+    : > "$r5_containers"
+    : > "$r5_volumes"
+}
+r5_legacy_remove() {
+    local name=$1
+    shift
+    set +e
+    printf 'yes\nn\n' | env MOCK_CONTAINER_STATE="$r5_containers" MOCK_VOLUME_STATE="$r5_volumes" \
+        "$@" MOCK_DOCKER_LOG="$r5_log" KVS_WEBROOT_BASE="$r5_webroot" \
+        bash "${r5_root}/site-manager.sh" remove legacy-site.example > "${TEST_DIR}/${name}/out" 2>&1
+    r5_status=$?
+    set -e
+}
+r5_legacy_refused() {
+    [ "$r5_status" -ne 0 ] || fail "R5: $2: remove was accepted"
+    grep -Fq "$1" "${TEST_DIR}/$3/out" || fail "R5: $2: the refusal was not explained: $(cat "${TEST_DIR}/$3/out")"
+    ! grep -q 'compose.* down -v' "$r5_log" || fail "R5: $2: remove ran down -v: $(cat "$r5_log")"
+    [ -f "$r5_site/.env" ] || fail "R5: $2: remove deleted the site directory"
+}
+
+r5_legacy r5_legacy_containers
+r5_legacy_project=$(cd "$r5_site" && "$REAL_DOCKER" compose config --format json | jq -r .name)
+[ "$r5_legacy_project" = legacy-siteexample ] ||
+    fail "R5: the real Compose names the legacy site ${r5_legacy_project}, not legacy-siteexample"
+r5_legacy_prefix=$(sed -n 's/^SITE_PREFIX=//p' "$r5_site/.env")
+ln -s "$r5_site" "${TEST_DIR}/r5_legacy_containers/site-link"
+printf '%s\t%s\n' "$r5_legacy_project" "$r5_site" "$r5_legacy_project" \
+    "${TEST_DIR}/r5_legacy_containers/site-link" other "${TEST_DIR}/r5_legacy_containers" > "$r5_containers"
+printf '%s\n' "${r5_legacy_project}_mariadb-data" "${r5_legacy_project}_nginx-logs" \
+    other_mariadb-data > "$r5_volumes"
+r5_legacy_remove r5_legacy_containers
+[ "$r5_status" -eq 0 ] || fail "R5: remove of a legacy site failed: $(cat "${TEST_DIR}/r5_legacy_containers/out")"
+grep -Fxq "compose -p ${r5_legacy_project} down -v --remove-orphans" "$r5_log" ||
+    fail "R5: remove did not take the legacy site down as ${r5_legacy_project}: $(cat "$r5_log")"
+[ "$(cut -f1 "$r5_containers")" = other ] && [ "$(cat "$r5_volumes")" = other_mariadb-data ] ||
+    fail "R5: the legacy site's containers or volumes outlived its removal: $(cat "$r5_containers" "$r5_volumes")"
+[ ! -e "$r5_site" ] || fail "R5: remove kept the legacy site's directory"
+
+# The containers decide, compared through the directory they resolve to:
+# a site started with COMPOSE_PROJECT_NAME exported in the shell, through a
+# symlinked path, runs under that name and no other.
+r5_legacy r5_legacy_custom
+ln -s "$r5_site" "${TEST_DIR}/r5_legacy_custom/site-link"
+printf 'custom\t%s\n' "${TEST_DIR}/r5_legacy_custom/site-link" > "$r5_containers"
+printf '%s\n' custom_mariadb-data > "$r5_volumes"
+r5_legacy_remove r5_legacy_custom
+{ [ "$r5_status" -eq 0 ] && [ ! -s "$r5_volumes" ] && [ ! -s "$r5_containers" ] &&
+    grep -Fxq "compose -p custom down -v --remove-orphans" "$r5_log"; } ||
+    fail "R5: the project of a legacy site's containers was not used: $(cat "${TEST_DIR}/r5_legacy_custom/out" "$r5_log")"
+
+# With its containers gone (stopped by 'docker compose down'), the volumes
+# tell the project: those of the directory's project, or of SITE_PREFIX.
+r5_legacy r5_legacy_volumes
+printf '%s\n' "${r5_legacy_project}_mariadb-data" > "$r5_volumes"
+r5_legacy_remove r5_legacy_volumes
+{ [ "$r5_status" -eq 0 ] && [ ! -s "$r5_volumes" ] &&
+    grep -Fxq "compose -p ${r5_legacy_project} down -v --remove-orphans" "$r5_log"; } ||
+    fail "R5: a legacy site's volumes did not give its project: $(cat "${TEST_DIR}/r5_legacy_volumes/out" "$r5_log")"
+r5_legacy r5_legacy_prefix_volumes
+printf '%s\n' "${r5_legacy_prefix}_mariadb-data" > "$r5_volumes"
+r5_legacy_remove r5_legacy_prefix_volumes
+[ "$r5_status" -eq 0 ] && [ ! -s "$r5_volumes" ] ||
+    fail "R5: the volumes of a legacy site's SITE_PREFIX were left: $(cat "${TEST_DIR}/r5_legacy_prefix_volumes/out" "$r5_log")"
+
+# Nothing left anywhere: down -v runs as the project start would use.
+r5_legacy r5_legacy_nothing
+r5_legacy_remove r5_legacy_nothing
+{ [ "$r5_status" -eq 0 ] &&
+    grep -Fxq "compose -p ${r5_legacy_project} down -v --remove-orphans" "$r5_log"; } ||
+    fail "R5: a legacy site with nothing left was not taken down as ${r5_legacy_project}: $(cat "${TEST_DIR}/r5_legacy_nothing/out" "$r5_log")"
+
+# Two projects claim the site, through containers or through volumes: remove
+# cannot tell which one is the site's and stops.
+r5_legacy r5_legacy_two_containers
+printf '%s\t%s\n' "$r5_legacy_project" "$r5_site" second "$r5_site" > "$r5_containers"
+r5_legacy_remove r5_legacy_two_containers
+r5_legacy_refused 'Containers of several Compose projects were created from' "two projects' containers" \
+    r5_legacy_two_containers
+r5_legacy r5_legacy_two_volumes
+printf '%s\n' "${r5_legacy_prefix}_mariadb-data" "${r5_legacy_project}_mariadb-data" > "$r5_volumes"
+r5_legacy_remove r5_legacy_two_volumes
+r5_legacy_refused "both ${r5_legacy_prefix} and ${r5_legacy_project} hold volumes" "two projects' volumes" \
+    r5_legacy_two_volumes
+
+# The checks that protect the primary apply to the project found: a legacy
+# site whose SITE_PREFIX is the primary's project, the primary stopped with
+# only its volumes left, and the project of the site's containers when they
+# were also created from another directory.
+r5_legacy r5_legacy_primary
+printf 'COMPOSE_PROJECT_NAME=%s\n' "$r5_legacy_prefix" > "${TEST_DIR}/r5_legacy_primary/docker/.env"  # pragma: allowlist secret
+printf '%s\n' "${r5_legacy_prefix}_mariadb-data" > "$r5_volumes"
+r5_legacy_remove r5_legacy_primary
+r5_legacy_refused 'the primary site uses that project name' "a SITE_PREFIX the primary uses" r5_legacy_primary
+r5_legacy r5_legacy_foreign
+printf '%s\t%s\n' "$r5_legacy_project" "$r5_site" "$r5_legacy_project" "${TEST_DIR}/r5_legacy_foreign/docker" \
+    > "$r5_containers"
+r5_legacy_remove r5_legacy_foreign
+r5_legacy_refused "it has containers from ${TEST_DIR}/r5_legacy_foreign/docker" "a project from another directory too" \
+    r5_legacy_foreign
+r5_legacy r5_legacy_ps
+r5_legacy_remove r5_legacy_ps MOCK_PS_STATUS=1
+r5_legacy_refused 'Could not list the containers created from' "a failed container listing" r5_legacy_ps
+r5_legacy r5_legacy_volume_ls
+r5_legacy_remove r5_legacy_volume_ls MOCK_VOLUME_LS_STATUS=1
+r5_legacy_refused "Could not list the volumes of ${r5_legacy_prefix}" "a failed volume listing" r5_legacy_volume_ls
+echo "PASS: remove finds the Compose project of a site whose .env names none"
 
 echo "PASS: Multi-site manager hardening"
