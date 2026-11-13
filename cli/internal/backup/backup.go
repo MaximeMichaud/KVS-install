@@ -37,7 +37,7 @@ import (
 
 // dumpScript dumps the database of the site in one transaction: a snapshot
 // of every table at one point, which never holds the writes of the site.
-const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
+const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --max-allowed-packet=1G --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
 
 // lockedDumpScript dumps a database that holds tables no transaction
 // covers, MyISAM or Aria ones, which a site imported from an older server
@@ -49,7 +49,7 @@ const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-tra
 // the other databases of the server and wait for every running query
 // before it is granted, with the reads queued behind it; stopping the
 // writers would take the whole site down for the length of the dump.
-const lockedDumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
+const lockedDumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --max-allowed-packet=1G --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
 
 // The open input pipe ties the dump to its caller: disconnecting Docker
 // closes it, even while the dump waits for a server-side table lock.
