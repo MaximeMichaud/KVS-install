@@ -1237,11 +1237,112 @@ restrict_setup_db_file() {
   chmod 600 "$file"
 }
 
+# Print the INITIAL_VERSION row KVS writes last in install_db.sql, from the
+# options table of the given prefix (sys_options for old releases). Fails when
+# neither table holds a valid one: the import never completed.
+kvs_database_initial_version() {
+    local domain="$1" prefix="$2" table version
+
+    for table in "${prefix}options" sys_options; do
+        if version=$(mariadb -N -B -e "SELECT value FROM \`$domain\`.\`$table\` WHERE variable='INITIAL_VERSION' LIMIT 1;" 2>/dev/null); then
+            version=${version%$'\r'}
+            if [[ "$version" =~ ^[0-9]+([.][0-9]+)+([._+-][A-Za-z0-9]+)*$ ]]; then
+                printf '%s\n' "$version"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+# Create the database and user for an installed KVS, import the initial
+# structure into an empty database, and remove the _INSTALL payload only once
+# the database is known to be complete. Every mariadb step is checked, so a
+# failure stops the install and keeps _INSTALL/ for a retry. A database with
+# tables counts as complete only when it holds the INITIAL_VERSION row that
+# install_db.sql ends with, as in the Docker init (30-import-database.sh): an
+# import cut part way leaves some tables without it, and importing again over
+# them would collide, so the install stops and says so instead.
+provision_kvs_database() {
+    local kvs_path="$1" domain="$2" password="$3" table_count prefix version
+
+    if ! mariadb -e "USE \`$domain\`" 2>/dev/null; then
+        echo "Creating database $domain..."
+        if ! mariadb -e "CREATE DATABASE \`$domain\`;"; then
+            echo "${red}Could not create database $domain${normal}" >&2
+            return 1
+        fi
+    else
+        echo "Database $domain already exists..."
+    fi
+
+    if ! mariadb -e "SELECT User FROM mysql.user WHERE User='$domain' AND Host='localhost'" | grep -q "$domain"; then
+        echo "Creating user $domain..."
+        if ! mariadb -e "CREATE USER \`$domain\`@localhost IDENTIFIED BY '${password}';"; then
+            echo "${red}Could not create the database user${normal}" >&2
+            return 1
+        fi
+    else
+        echo "User $domain already exists, updating password..."
+        if ! mariadb -e "ALTER USER \`$domain\`@localhost IDENTIFIED BY '${password}';"; then
+            echo "${red}Could not update the database user${normal}" >&2
+            return 1
+        fi
+    fi
+
+    if ! mariadb -e "GRANT ALL PRIVILEGES ON \`$domain\`.* TO \`$domain\`@'localhost';" ||
+        ! mariadb -e "FLUSH PRIVILEGES;"; then
+        echo "${red}Could not grant privileges to the database user${normal}" >&2
+        return 1
+    fi
+
+    prefix=$(KVS_PATH="$kvs_path" kvs_tables_prefix)
+    if ! table_count=$(mariadb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$domain';") ||
+        [[ ! "$table_count" =~ ^[0-9]+$ ]]; then
+        echo "${red}Could not count the tables of database $domain; _INSTALL/ is kept${normal}" >&2
+        return 1
+    fi
+    if [[ "$table_count" -gt 0 ]]; then
+        if ! version=$(kvs_database_initial_version "$domain" "$prefix"); then
+            echo "${red}Database $domain has $table_count tables but no INITIAL_VERSION row in ${prefix}options:" \
+                "a previous import stopped part way. _INSTALL/ is kept; drop the database and run the install again${normal}" >&2
+            return 1
+        fi
+        echo "Database $domain is already imported (INITIAL_VERSION $version)"
+    else
+        if [[ ! -f "$kvs_path"/_INSTALL/install_db.sql ]]; then
+            echo "${red}Database $domain is empty and $kvs_path/_INSTALL/install_db.sql is missing${normal}" >&2
+            return 1
+        fi
+        echo "Importing initial database structure..."
+        if ! mariadb -u "$domain" -p"$password" "$domain" <"$kvs_path"/_INSTALL/install_db.sql; then
+            echo "${red}The database import failed; _INSTALL/ is kept so the install can be retried${normal}" >&2
+            return 1
+        fi
+        if ! version=$(kvs_database_initial_version "$domain" "$prefix"); then
+            echo "${red}The database import ended without the INITIAL_VERSION row of install_db.sql; _INSTALL/ is kept${normal}" >&2
+            return 1
+        fi
+    fi
+
+    # Remove the anonymous user, then the installation files now that the
+    # database is known to be complete.
+    mariadb -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
+    if [ -d "$kvs_path"/_INSTALL/ ] && ! rm -rf "$kvs_path"/_INSTALL/; then
+        echo "${red}Could not remove $kvs_path/_INSTALL/${normal}" >&2
+        return 1
+    fi
+    return 0
+}
+
 function install_KVS() {
-    KVS_PATH="/var/www/$DOMAIN"
+    KVS_PATH="${KVS_WWW_ROOT:-/var/www}/$DOMAIN"
     extract_kvs_archive "$KVS_PATH" || return $?
     chown -R www-data:www-data "$KVS_PATH"
     chmod -R 755 "$KVS_PATH"
+    # The blanket chmod opened setup_db.php, which holds the password on a
+    # re-run: close it again before any step can stop the install.
+    restrict_setup_db_file "$KVS_PATH/admin/include/setup_db.php"
 
     # The _INSTALL directory only exists right after the extraction.
     if [ -f "$KVS_PATH"/_INSTALL/install_permissions.sh ]; then
@@ -1266,39 +1367,7 @@ function install_KVS() {
         databasepassword="$(openssl rand -base64 12)"
     fi
 
-    # Check if database exists
-    if ! mariadb -e "USE \`$DOMAIN\`" 2>/dev/null; then
-        echo "Creating database $DOMAIN..."
-        mariadb -e "CREATE DATABASE \`$DOMAIN\`;"
-        db_created=true
-    else
-        echo "Database $DOMAIN already exists, skipping creation..."
-        db_created=false
-    fi
-
-    # Check if user exists
-    if ! mariadb -e "SELECT User FROM mysql.user WHERE User='$DOMAIN' AND Host='localhost'" | grep -q "$DOMAIN"; then
-        echo "Creating user $DOMAIN..."
-        mariadb -e "CREATE USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
-    else
-        echo "User $DOMAIN already exists, updating password..."
-        mariadb -e "ALTER USER \`$DOMAIN\`@localhost IDENTIFIED BY '${databasepassword}';"
-    fi
-
-    mariadb -e "GRANT ALL PRIVILEGES ON \`$DOMAIN\`.* TO \`$DOMAIN\`@'localhost';"
-    mariadb -e "FLUSH PRIVILEGES;"
-
-    # Only import install_db.sql if database was just created
-    if [[ "$db_created" = true ]] && [[ -f "$KVS_PATH"/_INSTALL/install_db.sql ]]; then
-        echo "Importing initial database structure..."
-        mariadb -u "$DOMAIN" -p"$databasepassword" "$DOMAIN" <"$KVS_PATH"/_INSTALL/install_db.sql
-    fi
-
-    # Remove anonymous user
-    mariadb -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
-
-    # Clean up installation files if they exist
-    [ -d "$KVS_PATH"/_INSTALL/ ] && rm -rf "$KVS_PATH"/_INSTALL/
+    provision_kvs_database "$KVS_PATH" "$DOMAIN" "$databasepassword" || return $?
 
     configure_kvs_database_file "$KVS_PATH/admin/include/setup_db.php" "$DOMAIN" "$databasepassword"
     restrict_setup_db_file "$KVS_PATH/admin/include/setup_db.php"

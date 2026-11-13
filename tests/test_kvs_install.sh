@@ -1214,6 +1214,190 @@ test_gum_repository_leaves_with_its_key() {
   assert_equal true "$PROGRESS_GUM_AVAILABLE" "gum must be reported available" || return 1
 }
 
+# A failed database import must stop provision_kvs_database, keep _INSTALL/ so
+# the import can be retried, and a re-run must import again instead of leaving a
+# site with no tables because the database happens to exist. A database that
+# holds tables without the INITIAL_VERSION row install_db.sql ends with was cut
+# part way: it must stop the install, not pass for a finished one. A re-run over
+# an installed site, whose _INSTALL/ the first run removed, must succeed.
+test_failed_db_import_keeps_install_files_and_retries() {
+  local temp_dir domain path state status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+
+  domain="imp.example.com"
+  path="$temp_dir/www"
+  mkdir -p "$path/admin/include"
+  printf "<?php\n\$config['tables_prefix']=\"kt2_\";\n" >"$path/admin/include/setup.php"
+  red=""; normal=""; green=""; yellow=""
+
+  state="$temp_dir/state"
+  mkdir -p "$state"
+  # A programmable mariadb: the import connects as the site user (-u ...), every
+  # other call carries -e. State files decide what the database looks like:
+  # table_count, count_fail, marker (the INITIAL_VERSION row of kt2_options),
+  # import_fail and import_cut (the import stops before the marker).
+  mariadb() {
+    local args="$*"
+    if [[ "$args" == "-u "* ]]; then
+      : >"$state/import_attempted"
+      [ -f "$state/import_fail" ] && return 1
+      if [ -f "$state/import_cut" ]; then
+        echo 3 >"$state/table_count"
+        return 0
+      fi
+      echo 5 >"$state/table_count"
+      echo 7.0.2 >"$state/marker"
+      return 0
+    fi
+    case "$args" in
+      *information_schema.tables*)
+        [ -f "$state/count_fail" ] && return 1
+        cat "$state/table_count" 2>/dev/null || echo 0
+        return 0 ;;
+      *"INITIAL_VERSION"*)
+        [[ "$args" == *"\`kt2_options\`"* ]] || return 1
+        cat "$state/marker" 2>/dev/null
+        return 0 ;;
+      *"USE "*)
+        [ -f "$state/db_exists" ] && return 0 || return 1 ;;
+      *"SELECT User FROM mysql.user"*)
+        [ -f "$state/user_exists" ] && echo "$domain"
+        return 0 ;;
+      *"CREATE DATABASE"*)
+        : >"$state/db_exists"; return 0 ;;
+    esac
+    return 0
+  }
+  reset_install() {
+    mkdir -p "$path/_INSTALL"
+    printf 'CREATE TABLE x(id INT);\n' >"$path/_INSTALL/install_db.sql"
+    rm -f "$state/import_attempted" "$state/import_fail" "$state/import_cut" "$state/count_fail"
+  }
+
+  # Run 1: a fresh database whose import fails.
+  reset_install
+  echo 0 >"$state/table_count"
+  : >"$state/import_fail"
+  status=0
+  provision_kvs_database "$path" "$domain" fixedpass || status=$?
+  [[ $status -ne 0 ]] || fail "a failed import must make provision_kvs_database fail" || return 1
+  [[ -f "$path/_INSTALL/install_db.sql" ]] ||
+    fail "_INSTALL/ must be kept after a failed import" || return 1
+  [[ -f "$state/import_attempted" ]] || fail "the import must have been attempted" || return 1
+
+  # Run 2: the database now exists but is still empty; the import succeeds.
+  rm -f "$state/import_fail" "$state/import_attempted"
+  status=0
+  provision_kvs_database "$path" "$domain" fixedpass || status=$?
+  [[ $status -eq 0 ]] || fail "a re-run must succeed once the import works (status $status)" || return 1
+  [[ -f "$state/import_attempted" ]] ||
+    fail "an existing but empty database must be imported on re-run" || return 1
+  [[ ! -d "$path/_INSTALL" ]] ||
+    fail "_INSTALL/ must be removed after a successful import" || return 1
+
+  # Run 3: an installed site re-run: complete database, _INSTALL/ already gone.
+  rm -f "$state/import_attempted"
+  status=0
+  provision_kvs_database "$path" "$domain" fixedpass || status=$?
+  [[ $status -eq 0 ]] ||
+    fail "a re-run over an installed site without _INSTALL/ must succeed (status $status)" || return 1
+  [[ ! -f "$state/import_attempted" ]] ||
+    fail "a complete database must not be imported again" || return 1
+
+  # Run 4: complete database, _INSTALL/ back (archive extracted again): no
+  # import, _INSTALL/ removed.
+  reset_install
+  status=0
+  provision_kvs_database "$path" "$domain" fixedpass || status=$?
+  [[ $status -eq 0 ]] || fail "a complete database must not fail (status $status)" || return 1
+  [[ ! -f "$state/import_attempted" ]] ||
+    fail "a complete database must not be imported again" || return 1
+  [[ ! -d "$path/_INSTALL" ]] || fail "_INSTALL/ must be removed over a complete database" || return 1
+
+  # Run 5: an import cut part way left 3 tables and no INITIAL_VERSION row.
+  reset_install
+  echo 3 >"$state/table_count"
+  rm -f "$state/marker"
+  status=0
+  provision_kvs_database "$path" "$domain" fixedpass >/dev/null 2>&1 || status=$?
+  [[ $status -ne 0 ]] || fail "tables without INITIAL_VERSION must stop the install" || return 1
+  [[ ! -f "$state/import_attempted" ]] ||
+    fail "a partly imported database must not be imported over" || return 1
+  [[ -f "$path/_INSTALL/install_db.sql" ]] ||
+    fail "_INSTALL/ must be kept over a partly imported database" || return 1
+
+  # Run 6: the table count cannot be read: an error, not an empty database.
+  reset_install
+  echo 0 >"$state/table_count"
+  : >"$state/count_fail"
+  status=0
+  provision_kvs_database "$path" "$domain" fixedpass >/dev/null 2>&1 || status=$?
+  [[ $status -ne 0 ]] || fail "an unreadable table count must stop the install" || return 1
+  [[ ! -f "$state/import_attempted" ]] || fail "an unreadable table count must not import" || return 1
+  [[ -d "$path/_INSTALL" ]] || fail "_INSTALL/ must be kept when the table count fails" || return 1
+
+  # Run 7: an empty database and no install_db.sql to import.
+  reset_install
+  rm -f "$path/_INSTALL/install_db.sql"
+  status=0
+  provision_kvs_database "$path" "$domain" fixedpass >/dev/null 2>&1 || status=$?
+  [[ $status -ne 0 ]] || fail "an empty database without install_db.sql must fail" || return 1
+
+  # Run 8: the import returns success but stopped before the INITIAL_VERSION row.
+  reset_install
+  : >"$state/import_cut"
+  status=0
+  provision_kvs_database "$path" "$domain" fixedpass >/dev/null 2>&1 || status=$?
+  [[ $status -ne 0 ]] || fail "an import without INITIAL_VERSION afterwards must fail" || return 1
+  [[ -f "$path/_INSTALL/install_db.sql" ]] ||
+    fail "_INSTALL/ must be kept when the import did not complete" || return 1
+}
+
+# A re-run of install_KVS over an installed site (the first run removed
+# _INSTALL/, setup_db.php holds the password at 0600) must succeed and keep
+# setup_db.php at 0600; a failed database step must not leave it at the 0755 of
+# the blanket chmod either.
+test_install_rerun_keeps_setup_db_restricted() {
+  local temp_dir site status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  red=""; normal=""; green=""; yellow=""
+  # Never run install_KVS against the real /var/www.
+  [[ "$(declare -f install_KVS)" == *KVS_WWW_ROOT* ]] ||
+    fail "install_KVS must take its web root from KVS_WWW_ROOT" || return 1
+  DOMAIN=site.example.com URL=site.example.com PHP=8.3 KVS_WWW_ROOT="$temp_dir/www"
+  site="$temp_dir/www/$DOMAIN"
+  mkdir -p "$site/admin/include"
+  printf "<?php\n\$config['project_url']=\"https://site.example.com\";\n" >"$site/admin/include/setup.php"
+  printf "<?php\ndefine('DB_LOGIN','site.example.com');\ndefine('DB_PASS','RealPass123');\ndefine('DB_DEVICE','site.example.com');\n" \
+    >"$site/admin/include/setup_db.php"
+  chmod 600 "$site/admin/include/setup_db.php"
+  chown() { :; }
+  mariadb() {
+    [ -f "$temp_dir/db_down" ] && return 1
+    case "$*" in
+      *information_schema.tables*) echo 180 ;;
+      *INITIAL_VERSION*) echo 7.0.2 ;;
+      *"SELECT User FROM mysql.user"*) printf 'User\nsite.example.com\n' ;;
+    esac
+    return 0
+  }
+
+  status=0
+  install_KVS >/dev/null 2>&1 || status=$?
+  assert_equal 0 "$status" "a re-run over an installed site must succeed" || return 1
+  assert_equal 600 "$(stat -c %a "$site/admin/include/setup_db.php")" \
+    "setup_db.php must stay 0600 after a re-run" || return 1
+
+  : >"$temp_dir/db_down"
+  status=0
+  install_KVS >/dev/null 2>&1 || status=$?
+  [[ $status -ne 0 ]] || fail "an unreachable database must fail the step" || return 1
+  assert_equal 600 "$(stat -c %a "$site/admin/include/setup_db.php")" \
+    "setup_db.php must stay 0600 when the database step fails" || return 1
+}
+
 run_test() {
   local name="$1"
   local function_name="$2"
@@ -1439,6 +1623,8 @@ run_test "the wrapper installs the requested branch" test_the_wrapper_installs_t
 run_test "the OS check sends Ubuntu to the Docker installation" test_os_check_sends_ubuntu_to_the_docker_installation || failures=$((failures + 1))
 run_test "a question with no answer left stops the installer" test_a_question_with_no_answer_left_stops_the_installer || failures=$((failures + 1))
 run_test "the installer says it needs bash" test_the_installer_says_it_needs_bash || failures=$((failures + 1))
+run_test "a failed database import is not reported as success" test_failed_db_import_keeps_install_files_and_retries || failures=$((failures + 1))
+run_test "an install re-run keeps setup_db.php restricted" test_install_rerun_keeps_setup_db_restricted || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2
