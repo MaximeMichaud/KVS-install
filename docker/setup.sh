@@ -1095,6 +1095,26 @@ parse_publish_endpoint() {
     PUBLISH_PORT=$((10#$port))
 }
 
+# Reject a port override before it is written to .env and later sourced as
+# shell by setup.sh, reconfigure.sh and kvsctl. HTTP_PORT and HTTPS_PORT accept
+# a bare port or a host:port binding, so they are checked with the endpoint
+# parser, which matches only digits into the port before any arithmetic and so
+# never evaluates an injected value. The loopback ports are published as
+# 127.0.0.1:<port>, so they must be a bare 1-65535 port number.
+function validate_port_override() {
+    local name="$1" value="$2"
+    case "$name" in
+    HTTP_PORT | HTTPS_PORT)
+        parse_publish_endpoint "$value"
+        ;;
+    *)
+        [[ "$value" =~ ^[0-9]{1,5}$ ]] &&
+            [ "$((10#$value))" -ge 1 ] &&
+            [ "$((10#$value))" -le 65535 ]
+        ;;
+    esac
+}
+
 resolve_public_port_configuration() {
     if [ "$MODE" = "multi" ]; then
         PUBLIC_HTTP_ENDPOINT=80
@@ -3577,7 +3597,18 @@ public_port_conflicts_exist() {
 }
 
 # Persist explicit port overrides before later `source .env` calls. This keeps
-# setup behavior consistent with Docker Compose environment precedence.
+# setup behavior consistent with Docker Compose environment precedence. Every
+# override is checked before any is written, so a refused run leaves .env as
+# it was. An empty one stands for the default, as Compose reads ${HTTP_PORT:-80}.
+for KVS_PORT_VARIABLE in "${!KVS_PORT_OVERRIDES[@]}"; do
+    [ -n "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}" ] || continue
+    if ! validate_port_override "$KVS_PORT_VARIABLE" "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}"; then
+        echo -e "${RED}ERROR: ${KVS_PORT_VARIABLE} is not a valid port.${NC}" >&2
+        echo "  value: ${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}" >&2
+        echo "  use a number from 1 to 65535 (HTTP_PORT and HTTPS_PORT also accept host:port)." >&2
+        exit 1
+    fi
+done
 for KVS_PORT_VARIABLE in "${!KVS_PORT_OVERRIDES[@]}"; do
     printf -v "$KVS_PORT_VARIABLE" '%s' "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}"
     export "${KVS_PORT_VARIABLE?}"
