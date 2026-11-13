@@ -1893,7 +1893,8 @@ done
             fail "W3: the version of KVS_${version}_[w3.example].zip was misread"
     done
     # A site in place: its version.php gives the series, with whatever
-    # follows the version, and no archive.
+    # follows the version, and no archive. setup.sh prints the version, the
+    # series and the source that gave them, which must be the site.
     for version in 6.2.0 6.2.1 7.0.2 7.0.3 '7.0.3 build 1'; do
         rm -rf "$w3_parity"
         mkdir -p "$w3_parity/kvs-archive" "$w3_parity/site/admin/include"
@@ -1902,7 +1903,7 @@ done
         setup_marker=$(cd "$w3_parity" && DOMAIN=w3.example kvs_documented_php_version "$w3_parity/site")
         add_version=$(kvs_site_version "$w3_parity/site") ||
             fail "W3: the version of a site in place (${version}) was not read"
-        [ "$(printf '%s\t%s' "$add_version" "$(kvs_php_series "$add_version")")" = "$setup_marker" ] ||
+        [ "$(printf '%s\t%s\tsite' "$add_version" "$(kvs_php_series "$add_version")")" = "$setup_marker" ] ||
             fail "W3: a site in place of KVS ${version}: add gives ${add_version}, setup.sh ${setup_marker}"
     done
     # shellcheck disable=SC2329

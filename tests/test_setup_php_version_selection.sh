@@ -204,16 +204,88 @@ $config['project_version'] = "6.2.0";
 EOF
 marker=$(kvs_documented_php_version "$TEST_DIR/site") ||
     fail "a site in place must give its version"
-[ "$marker" = $'6.2.0\t7.4' ] ||
+[ "$marker" = $'6.2.0\t7.4\tsite' ] ||
     fail "the version of the site in place decides the PHP release: $marker"
 sed -i 's/6.2.0/7.0.3/' "$TEST_DIR/site/admin/include/version.php"
 marker=$(kvs_documented_php_version "$TEST_DIR/site") ||
     fail "a 7.0.3 site in place must give its version"
-[ "$marker" = $'7.0.3\t8.3' ] ||
+[ "$marker" = $'7.0.3\t8.3\tsite' ] ||
     fail "a 7.0.3 site in place must select PHP 8.3: $marker"
 rm -f "$TEST_DIR/site/admin/include/version.php"
 kvs_documented_php_version "$TEST_DIR/site" > /dev/null 2>&1 &&
     fail "without version.php the site in place gives nothing"
+
+# 1d. X2: outside an import, the site in place decides before the name of an
+# archive left in kvs-archive/. kvs-init never extracts an archive over a
+# site, and a site updated from the KVS admin panel runs a newer release than
+# the archive it was installed from: a 7.0.2 archive name used to rebuild PHP
+# 8.1 under a 7.0.3 site, and a 6.2.0 one to refuse a 6.2.1 site. The archive
+# still decides for a new installation. An import takes the version of the
+# imported site first, then the archive, then the copied site. A 6.2.0 site
+# in place is refused even with a newer archive left, and the refusal names
+# the site, since that archive is never extracted over it.
+# The functions read /var/www/<domain>; these copies read a fixture instead.
+# shellcheck source=/dev/null
+source <(for name in kvs_documented_php_version refuse_unbuildable_kvs_php select_php_version; do
+    extract_function "$name"
+done | sed "s|/var/www/|$TEST_DIR/www/|g")
+DOMAIN=site.example
+seed_site() {
+    local archive="$1" site="$2"
+
+    seed_no_archive
+    [ -z "$archive" ] || : > "kvs-archive/KVS_${archive}_[example.com].zip"
+    rm -rf "$TEST_DIR/www"
+    if [ -n "$site" ]; then
+        mkdir -p "$TEST_DIR/www/$DOMAIN/admin/include"
+        printf '%s\n' '<?php' "\$config['project_version'] = \"$site\";" > "$TEST_DIR/www/$DOMAIN/admin/include/version.php"
+    fi
+}
+IONCUBE=YES KVS_PHP_VERSION='' HEADLESS=y IMPORT_MODE=false IMPORT_SITE_VERSION=''
+seed_site 7.0.2 7.0.3
+run_case "site 7.0.3 in place, archive 7.0.2 left" 8.3 select_php_version
+grep -q "Detected KVS version: 7.0.3" "$TEST_DIR/out" ||
+    fail "the site in place must decide over a stale archive name: $(cat "$TEST_DIR/out")"
+seed_site 7.0.3 7.0.2
+run_case "site 7.0.2 in place, archive 7.0.3 left" 8.1 select_php_version
+seed_site 6.2.0 6.2.1
+run_case "site 6.2.1 in place, archive 6.2.0 left" 8.1 select_php_version
+seed_site 6.2.0 ''
+refused "new installation from a 6.2.0 archive" 6.2.0 select_php_version
+grep -Fq 'Use an archive, or for an import a site, of KVS 6.2.1 or newer' "$TEST_DIR/out" ||
+    fail "a 6.2.0 archive must be told to use a newer archive: $(cat "$TEST_DIR/out")"
+seed_site 6.2.1 6.2.0
+refused "site 6.2.0 in place, archive 6.2.1 left" 6.2.0 select_php_version
+grep -Fq "The site in $TEST_DIR/www/$DOMAIN is KVS 6.2.0, and kvs-init does not extract an archive" "$TEST_DIR/out" ||
+    fail "the refusal must name the site in place that decided: $(cat "$TEST_DIR/out")"
+grep -Fq 'update that site itself to KVS 6.2.1 or newer' "$TEST_DIR/out" ||
+    fail "the refusal must say to update the site in place: $(cat "$TEST_DIR/out")"
+grep -Fq 'KVS_PHP_VERSION set' "$TEST_DIR/out" ||
+    fail "the refusal must keep the KVS_PHP_VERSION way out: $(cat "$TEST_DIR/out")"
+if grep -Fq 'Use an archive' "$TEST_DIR/out"; then
+    fail "an archive is already there and is not extracted over the site: $(cat "$TEST_DIR/out")"
+fi
+seed_site 7.0.3 ''
+run_case "new installation from a 7.0.3 archive" 8.3 select_php_version
+# An import: its own version first, then the archive, then the copied site.
+seed_site 7.0.2 7.0.2
+IMPORT_MODE=true IMPORT_SITE_VERSION=7.0.3
+run_case "import of a 7.0.3 site" 8.3 select_php_version
+seed_site 7.0.3 7.0.2
+IMPORT_MODE=true IMPORT_SITE_VERSION=''
+run_case "import without a version, 7.0.3 archive" 8.3 select_php_version
+# The copied site of an import is the import itself: another site is the way out.
+seed_site '' 6.2.0
+IMPORT_MODE=true IMPORT_SITE_VERSION=''
+refused "import of a copied 6.2.0 site" 6.2.0 select_php_version
+grep -Fq 'Use an archive, or for an import a site, of KVS 6.2.1 or newer' "$TEST_DIR/out" ||
+    fail "an import must be told to import a newer site: $(cat "$TEST_DIR/out")"
+IMPORT_MODE='' IMPORT_SITE_VERSION='' DOMAIN=''
+rm -rf "$TEST_DIR/www"
+# shellcheck source=/dev/null
+source <(for name in kvs_documented_php_version refuse_unbuildable_kvs_php select_php_version; do
+    extract_function "$name"
+done)
 
 # 2. An encoded archive must not silently consume a stray interactive answer.
 seed_archive 7.0.2

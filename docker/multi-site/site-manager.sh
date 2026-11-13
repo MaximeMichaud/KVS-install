@@ -694,8 +694,7 @@ select_site_archive() {
 # KVS the site's init will run, since the init keeps an installed site and
 # extracts no archive over it: when it has admin/include/functions_base.php,
 # its files decide, its version.php the series and functions_base.php
-# IONCUBE (setup.sh decides IONCUBE from a site in place this way, but the
-# series from the archive first). What they cannot tell
+# IONCUBE, as setup.sh decides for a site in place. What they cannot tell
 # comes from the archive: the series KVS documents for the release in its
 # name and IONCUBE from its own files. KVS_PHP_VERSION names the series
 # instead, as in setup.sh. A release that needs PHP 7.4, which this stack

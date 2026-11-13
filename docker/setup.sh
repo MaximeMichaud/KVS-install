@@ -1748,30 +1748,49 @@ php_version_is_supported() {
     return 1
 }
 
-# Read the recommended PHP version for the archive in kvs-archive/, or for
-# the imported site when no archive is there, or for the site in place
-# (imported without the archive, or installed from one since removed):
-# the site says its version itself. Prints nothing and fails when none
-# gives a version.
+# Read the recommended PHP version for the KVS release that will run. An
+# import says its version itself, then the archive in kvs-archive/ (setup
+# refuses an archive that does not match the imported site), then the site
+# in place when the import copied it already. Outside an import, a site in
+# place decides before the archive: kvs-init extracts the archive only into
+# an empty directory, and a site updated from the KVS admin panel since then
+# runs a newer release than the archive name says. The archive name decides
+# for a new installation. Prints the KVS version, the PHP version and the
+# source that gave them (import, archive or site), separated by tabs; prints
+# nothing and fails when none gives a version.
 kvs_documented_php_version() {
     local site="${1:-/var/www/${DOMAIN:-}}"
     local kvs_file
     local kvs_version=""
+    local source
     local major
     local minor
     local patch
+    local -a sources=(site archive)
 
-    kvs_file=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
-    if [ -n "$kvs_file" ]; then
-        kvs_version=$(basename "$kvs_file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    if [ "${IMPORT_MODE:-false}" = true ]; then
+        sources=(import archive site)
     fi
-    if [ -z "$kvs_version" ] && [ "${IMPORT_MODE:-false}" = true ]; then
-        kvs_version=$(printf '%s' "${IMPORT_SITE_VERSION:-}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-    fi
-    if [ -z "$kvs_version" ] && [ -f "$site/admin/include/version.php" ] &&
-        declare -F import_read_kvs_version > /dev/null; then
-        kvs_version=$(import_read_kvs_version "$site" 2>/dev/null | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-    fi
+    for source in "${sources[@]}"; do
+        case "$source" in
+            import)
+                kvs_version=$(printf '%s' "${IMPORT_SITE_VERSION:-}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+                ;;
+            archive)
+                kvs_file=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
+                if [ -n "$kvs_file" ]; then
+                    kvs_version=$(basename "$kvs_file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+                fi
+                ;;
+            site)
+                if [ -f "$site/admin/include/version.php" ] &&
+                    declare -F import_read_kvs_version > /dev/null; then
+                    kvs_version=$(import_read_kvs_version "$site" 2>/dev/null | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+                fi
+                ;;
+        esac
+        [ -z "$kvs_version" ] || break
+    done
     [ -n "$kvs_version" ] || return 1
 
     major=$(echo "$kvs_version" | cut -d. -f1)
@@ -1784,12 +1803,12 @@ kvs_documented_php_version() {
     if [ "$major" -lt 6 ] ||
         { [ "$major" -eq 6 ] && [ "$minor" -lt 2 ]; } ||
         { [ "$major" -eq 6 ] && [ "$minor" -eq 2 ] && [ "$patch" -eq 0 ]; }; then
-        printf '%s\t%s\n' "$kvs_version" "7.4"
+        printf '%s\t%s\t%s\n' "$kvs_version" "7.4" "$source"
     elif [ "$major" -gt 7 ] ||
         { [ "$major" -eq 7 ] && { [ "$minor" -gt 0 ] || [ "$patch" -ge 3 ]; }; }; then
-        printf '%s\t%s\n' "$kvs_version" "8.3"
+        printf '%s\t%s\t%s\n' "$kvs_version" "8.3" "$source"
     else
-        printf '%s\t%s\n' "$kvs_version" "8.1"
+        printf '%s\t%s\t%s\n' "$kvs_version" "8.1" "$source"
     fi
 }
 
@@ -1798,12 +1817,14 @@ kvs_documented_php_version() {
 # images install, and PHP 7.4 no longer receives security fixes. Such a site
 # is refused before anything is stopped or built, unless KVS_PHP_VERSION
 # names a version this stack builds, which only unencoded files can run on.
-# It runs once the version of the site can be known (the archive, the site
-# of an import, or the site in place) and again when the PHP version is
+# It runs once the version of the site can be known (the site in place, the
+# archive, or the site of an import) and again when the PHP version is
 # selected, since the archive may be copied in meanwhile. Fails with the
 # reason printed; succeeds for any other site, or when no version is known.
+# A site in place that decided is named: kvs-init does not extract an
+# archive over it, so a newer archive in kvs-archive/ changes nothing.
 refuse_unbuildable_kvs_php() {
-    local marker kvs_version documented
+    local marker kvs_version documented source
 
     if [ -n "${KVS_PHP_VERSION:-}" ]; then
         php_version_is_supported "$KVS_PHP_VERSION" && return 0
@@ -1812,13 +1833,17 @@ refuse_unbuildable_kvs_php() {
         return 1
     fi
     marker=$(kvs_documented_php_version) || return 0
-    kvs_version=${marker%%$'\t'*}
-    documented=${marker#*$'\t'}
+    IFS=$'\t' read -r kvs_version documented source <<< "$marker"
     php_version_is_supported "$documented" && return 0
     echo -e "${RED}ERROR: KVS ${kvs_version} needs PHP ${documented}, which this Docker installation does not build.${NC}"
     echo "The php:${documented} images are based on Debian 11, which lacks packages the PHP-FPM and cron"
     echo "images install, and PHP ${documented} no longer receives security fixes. Nothing was stopped or built."
-    echo "  - Use an archive, or for an import a site, of KVS 6.2.1 or newer, which runs on PHP 8.1."
+    if [ "$source" = site ] && [ "${IMPORT_MODE:-false}" != true ]; then
+        echo "  - The site in /var/www/${DOMAIN:-} is KVS ${kvs_version}, and kvs-init does not extract an archive"
+        echo "    over a site: update that site itself to KVS 6.2.1 or newer, which runs on PHP 8.1."
+    else
+        echo "  - Use an archive, or for an import a site, of KVS 6.2.1 or newer, which runs on PHP 8.1."
+    fi
     echo "  - Or install KVS ${kvs_version} without Docker: the standalone installation of kvs-install.sh"
     echo "    installs PHP ${documented}."
     echo "  - Or, only if its files are not IonCube encoded, run setup.sh again with KVS_PHP_VERSION set"
@@ -3950,8 +3975,8 @@ export DOMAIN EMAIL
 IMPORT_DATABASE_FORMAT=$IMPORT_DATABASE_FORMAT_REQUEST
 select_import_source
 import_check_leftover_dump
-# The KVS version of the site is known from here (the archive, the site of
-# an import, or the site in place): one this stack cannot build PHP for
+# The KVS version of the site is known from here (the site in place, the
+# archive, or the site of an import): one this stack cannot build PHP for
 # stops before anything is stopped, built or deleted.
 refuse_unbuildable_kvs_php || exit 1
 
@@ -4419,8 +4444,7 @@ select_php_version() {
     echo -e "${CYAN}Checking KVS version for PHP compatibility...${NC}"
 
     if marker=$(kvs_documented_php_version); then
-        kvs_version=${marker%%$'\t'*}
-        documented=${marker#*$'\t'}
+        IFS=$'\t' read -r kvs_version documented _ <<< "$marker"
         echo "Detected KVS version: $kvs_version"
     else
         kvs_version=""
