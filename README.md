@@ -148,6 +148,13 @@ leaving room for MariaDB, cache, search and the OS. With the default estimate
 memory reservations: adjust the worker estimate to observed memory use.
 `PHP_MEMORY_LIMIT` is a per-request ceiling, not this worker estimate.
 
+A busy worker can hold a database connection, so the automatic worker count
+is capped at `PHP_FPM_MAX_CHILDREN_CAP=128`, below MariaDB's default of 151
+connections; a 64 GiB host gets 128 workers rather than 256. Raise the cap
+together with MariaDB's `max_connections`. An explicit
+`PHP_FPM_MAX_CHILDREN` is never capped, and an explicit start or spare value
+above the cap raises the automatic count to it, within the memory budget.
+
 Set `PHP_FPM_MAX_CHILDREN`, `PHP_FPM_START_SERVERS`,
 `PHP_FPM_MIN_SPARE_SERVERS` and `PHP_FPM_MAX_SPARE_SERVERS` in `docker/.env`
 (or the site's `.env` in multi-site mode) to positive integers to override

@@ -10,7 +10,8 @@ source "$ROOT_DIR/docker/php/fpm-config.sh"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 reset_case() {
     unset PHP_FPM_MEMORY_PERCENT PHP_FPM_PROCESS_MEMORY_MB PHP_FPM_MAX_CHILDREN \
-        PHP_FPM_START_SERVERS PHP_FPM_MIN_SPARE_SERVERS PHP_FPM_MAX_SPARE_SERVERS
+        PHP_FPM_START_SERVERS PHP_FPM_MIN_SPARE_SERVERS PHP_FPM_MAX_SPARE_SERVERS \
+        PHP_FPM_MAX_CHILDREN_CAP
     rm -rf "$WORK/root"
     fixture="$WORK/root"
     mkdir -p "$fixture/proc/self" "$fixture/usr/local/etc/php-fpm.d" "$fixture/sys/fs/cgroup"
@@ -46,6 +47,25 @@ assert_sizes '128 32 16 64'
 printf 'MemTotal: 1048576 kB\nMemAvailable: 999999 kB\n' > "$fixture/proc/meminfo"
 assert_sizes '4 1 1 2'
 echo 'PASS: pool scales with capacity rather than fluctuating free memory'
+
+# A large host would otherwise ask for more workers than MariaDB's 151 default
+# connections: 64 GiB computes 256. The automatic count is capped (default 128)
+# so the workers cannot exhaust the connections, the cap is configurable, and an
+# explicit PHP_FPM_MAX_CHILDREN still bypasses the budget and the cap.
+reset_case
+printf 'MemTotal: 67108864 kB\nMemAvailable: 1 kB\n' > "$fixture/proc/meminfo"
+assert_sizes '128 32 16 64'
+PHP_FPM_MAX_CHILDREN_CAP=200 assert_sizes '200 50 25 100'
+PHP_FPM_MAX_CHILDREN=256 assert_sizes '256 64 32 128'
+# An explicit start or spare value above the cap raises the capped count to it,
+# up to the uncapped memory budget: a partial override the uncapped sizing
+# accepted keeps starting after the cap was introduced.
+PHP_FPM_START_SERVERS=150 assert_sizes '150 150 18 150'
+PHP_FPM_MIN_SPARE_SERVERS=130 assert_sizes '130 130 130 130'
+PHP_FPM_MAX_SPARE_SERVERS=200 assert_sizes '200 50 25 200'
+PHP_FPM_MAX_CHILDREN_CAP=100 PHP_FPM_START_SERVERS=150 assert_sizes '150 150 18 150'
+PHP_FPM_START_SERVERS=300 reject 'start above the uncapped budget'
+echo 'PASS: automatic workers are capped so they do not exhaust MariaDB connections'
 
 reset_case
 v2
@@ -117,7 +137,8 @@ echo 'PASS: budget, worker estimate and partial manual overrides'
 reset_case
 assert_sizes '64 16 8 32'
 for name in PHP_FPM_MEMORY_PERCENT PHP_FPM_PROCESS_MEMORY_MB PHP_FPM_MAX_CHILDREN \
-    PHP_FPM_START_SERVERS PHP_FPM_MIN_SPARE_SERVERS PHP_FPM_MAX_SPARE_SERVERS; do
+    PHP_FPM_START_SERVERS PHP_FPM_MIN_SPARE_SERVERS PHP_FPM_MAX_SPARE_SERVERS \
+    PHP_FPM_MAX_CHILDREN_CAP; do
     for value in 0 -1 01 1.5 999999999999999999999 '2+2' '1;touch unexpected'; do
         printf -v "$name" '%s' "$value"
         reject "$name=$value"
@@ -160,7 +181,8 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
                 if [ "$overrides" = yes ]; then
                     export PHP_FPM_MEMORY_PERCENT=40 PHP_FPM_PROCESS_MEMORY_MB=96 \
                         PHP_FPM_MAX_CHILDREN=40 PHP_FPM_START_SERVERS=10 \
-                        PHP_FPM_MIN_SPARE_SERVERS=5 PHP_FPM_MAX_SPARE_SERVERS=20
+                        PHP_FPM_MIN_SPARE_SERVERS=5 PHP_FPM_MAX_SPARE_SERVERS=20 \
+                        PHP_FPM_MAX_CHILDREN_CAP=300
                 fi
                 docker compose --env-file /dev/null -f "$ROOT_DIR/$compose" config --format json
             ) > "$WORK/compose.json"
@@ -168,8 +190,8 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
 import json
 import sys
 env = json.load(open(sys.argv[1]))["services"]["php-fpm"]["environment"]
-names = ["MEMORY_PERCENT", "PROCESS_MEMORY_MB", "MAX_CHILDREN", "START_SERVERS", "MIN_SPARE_SERVERS", "MAX_SPARE_SERVERS"]
-expected = ["25", "64", "auto", "auto", "auto", "auto"] if sys.argv[2] == "no" else ["40", "96", "40", "10", "5", "20"]
+names = ["MEMORY_PERCENT", "PROCESS_MEMORY_MB", "MAX_CHILDREN", "START_SERVERS", "MIN_SPARE_SERVERS", "MAX_SPARE_SERVERS", "MAX_CHILDREN_CAP"]
+expected = ["25", "64", "auto", "auto", "auto", "auto", "128"] if sys.argv[2] == "no" else ["40", "96", "40", "10", "5", "20", "300"]
 assert [env["PHP_FPM_" + name] for name in names] == expected, env
 PY
         done

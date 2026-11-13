@@ -110,6 +110,7 @@ services:
       - PHP_FPM_START_SERVERS=${PHP_FPM_START_SERVERS:-auto}
       - PHP_FPM_MIN_SPARE_SERVERS=${PHP_FPM_MIN_SPARE_SERVERS:-auto}
       - PHP_FPM_MAX_SPARE_SERVERS=${PHP_FPM_MAX_SPARE_SERVERS:-auto}
+      - PHP_FPM_MAX_CHILDREN_CAP=${PHP_FPM_MAX_CHILDREN_CAP:-128}
       # The loader ships in every image and the entrypoint turns it off for
       # NO, so a change needs no rebuild, only docker compose up -d: a
       # container keeps the environment it was created with, and

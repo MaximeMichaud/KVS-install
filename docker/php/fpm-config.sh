@@ -80,6 +80,7 @@ fpm_positive_integer() {
 configure_php_fpm() {
     local root="${1:-}" capacity=manual percent="${PHP_FPM_MEMORY_PERCENT:-25}"
     local process_mb="${PHP_FPM_PROCESS_MEMORY_MB:-64}" maximum start minimum spare
+    local cap="${PHP_FPM_MAX_CHILDREN_CAP:-128}" uncapped
     local name value output temporary
     maximum=${PHP_FPM_MAX_CHILDREN:-auto}
     start=${PHP_FPM_START_SERVERS:-auto}
@@ -92,6 +93,7 @@ configure_php_fpm() {
         return 1
     }
     fpm_positive_integer PHP_FPM_PROCESS_MEMORY_MB "$process_mb" || return 1
+    fpm_positive_integer PHP_FPM_MAX_CHILDREN_CAP "$cap" || return 1
     for name in PHP_FPM_MAX_CHILDREN PHP_FPM_START_SERVERS PHP_FPM_MIN_SPARE_SERVERS PHP_FPM_MAX_SPARE_SERVERS; do
         value=${!name:-auto}
         [ "$value" = auto ] || fpm_positive_integer "$name" "$value" || return 1
@@ -101,6 +103,22 @@ configure_php_fpm() {
         capacity=$(fpm_memory_mb "$root") || return 1
         maximum=$((capacity * percent / 100 / process_mb))
         [ "$maximum" -ge 1 ] || maximum=1
+        # MariaDB allows 151 connections by default and a busy worker can hold
+        # one, so an unbounded worker count exhausts them on a large host (cron
+        # and the Manticore indexer also connect). Cap the automatic count;
+        # operators who raise MariaDB's max_connections can raise
+        # PHP_FPM_MAX_CHILDREN_CAP, or set PHP_FPM_MAX_CHILDREN to bypass it.
+        if [ "$maximum" -gt "$cap" ]; then
+            uncapped=$maximum
+            maximum=$cap
+            # An explicit start or spare value above the cap raises the count
+            # to it, within the memory budget, so a partial override that the
+            # uncapped sizing accepted still starts.
+            for value in "$start" "$minimum" "$spare"; do
+                if [ "$value" != auto ] && [ "$value" -gt "$maximum" ]; then maximum=$value; fi
+            done
+            [ "$maximum" -le "$uncapped" ] || maximum=$uncapped
+        fi
     fi
     if [ "$spare" = auto ]; then
         spare=$((maximum / 2))
