@@ -140,10 +140,9 @@ echo "TABLES_PREFIX=kt vs;" > "$TEST_DIR/site-a/.env"
 [ "$(cd "$TEST_DIR/site-a" && site_tables_prefix)" = ktvs_ ] || fail "an unusable prefix in .env falls back to ktvs_"
 : > "$TEST_DIR/site-a/.env"
 [ "$(cd "$TEST_DIR/site-a" && site_tables_prefix)" = ktvs_ ] || fail "a site without the value runs with ktvs_"
-KVS_ARCHIVE_DIR="$TEST_DIR/docker/kvs-archive"
-[ "$(archive_tables_prefix)" = arch_ ] || fail "a new site takes the archive's prefix"
-KVS_ARCHIVE_DIR="$TEST_DIR/no-archive"
-[ "$(archive_tables_prefix)" = ktvs_ ] || fail "no archive falls back to ktvs_"
+[ "$(archive_tables_prefix "$TEST_DIR/docker/kvs-archive/KVS_7.0.2_[example.com].zip")" = arch_ ] ||
+    fail "a new site takes the archive's prefix"
+[ "$(archive_tables_prefix "")" = ktvs_ ] || fail "no archive falls back to ktvs_"
 grep -Fq 'TABLES_PREFIX=${tables_prefix}' "$ROOT_DIR/docker/multi-site/site-manager.sh" ||
     fail "a new site's .env must carry the prefix"
 grep -Fq '-e "TABLES_PREFIX=$(site_tables_prefix)"' "$ROOT_DIR/docker/multi-site/site-manager.sh" ||

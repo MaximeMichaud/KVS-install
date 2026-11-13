@@ -187,6 +187,8 @@ Both installers select **PHP 8.3 for KVS 7.0.3 and newer**. These archives can c
 
 For an existing installation managed by `kvsctl`, `setup.sh` preserves the current PHP series and reports the upgrade needed. Set `PHP_VERSION=8.3` in `docker/.env` and run `kvsctl upgrade` to install matching PHP-FPM and cron images. Updating the CLI alone does not change the PHP runtime.
 
+An additional site added with `docker/multi-site/site-manager.sh add <domain>` follows the same rules, from the archive the site's init installs, the one regular `KVS_*.zip` file directly in `docker/kvs-archive/`: the PHP series of its release, `IONCUBE` from its files, `KVS_PHP_VERSION` as an override, and a refusal of KVS 6.2.0 and older. A webroot that an earlier `remove` kept decides first, since the site's init runs the KVS it holds: its `admin/include/version.php` gives the PHP series and its `admin/include/functions_base.php` gives `IONCUBE`. With several archives in `docker/kvs-archive/`, add reads none of them, since the init installs whichever it lists first: unless a kept webroot decides, the site gets PHP 8.1 unless `KVS_PHP_VERSION` is set, `IONCUBE=YES` unless `IONCUBE` is set, and the table prefix `ktvs_`; keep only the site's archive there until its first start. Set these variables on the add command line only, as in `KVS_PHP_VERSION=8.3 IONCUBE=NO ./site-manager.sh add example.com`: add writes them to the site's `.env`, which `start` uses, and the other commands ignore an exported `IONCUBE`.
+
 #### Media processing security
 
 The PHP-FPM and cron images rebuild Debian's FFmpeg packages with the

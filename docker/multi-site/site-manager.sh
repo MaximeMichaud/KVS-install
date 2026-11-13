@@ -150,12 +150,12 @@ site_tables_prefix() {
     printf '%s\n' "$prefix"
 }
 
-# The table prefix written in the setup.php of the KVS archive a new site
-# starts from (ktvs_ for every archive KVS ships).
+# The table prefix written in the setup.php of <archive>, the KVS archive a
+# new site starts from, or ktvs_ (the prefix of every archive KVS ships) when
+# there is none to read.
 archive_tables_prefix() {
-    local archive pattern prefix
+    local archive="$1" pattern prefix
 
-    archive=$(compgen -G "${KVS_ARCHIVE_DIR}/KVS_*.zip" | head -n 1)
     pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
     prefix=""
     if [ -n "$archive" ] && command -v unzip >/dev/null 2>&1; then
@@ -660,6 +660,135 @@ remove_primary_site() {
 # Add Site
 # =============================================================================
 
+# Sets site_archive in the caller (add_site): the KVS archive a new site is
+# made from, when kvs-archive/ holds exactly one, and fails when it holds
+# none. The archives are what the site's init can install, the regular files
+# named KVS_*.zip directly in that directory, which its find_kvs_archive
+# lists with find -type f: a symlink or a directory of that name is not one.
+# find -H follows kvs-archive/ itself when it is a symlink, as the bind mount
+# of the init container does. The init installs the first archive find
+# lists, an order nothing fixes, so with several add reads none of them and
+# leaves site_archive empty, with a warning that names them.
+select_site_archive() {
+    local domain="$1"
+    local -a archives
+
+    site_archive=""
+    mapfile -t archives < <(find -H "$KVS_ARCHIVE_DIR" -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null)
+    if [ "${#archives[@]}" -eq 0 ]; then
+        log_error "No KVS archive found in ${KVS_ARCHIVE_DIR}/"
+        return 1
+    fi
+    if [ "${#archives[@]}" -eq 1 ]; then
+        site_archive=${archives[0]}
+        return 0
+    fi
+    log_warn "${KVS_ARCHIVE_DIR}/ holds ${#archives[@]} KVS archives; the new site's init installs the first one it lists, which add cannot tell:"
+    printf '  %s\n' "${archives[@]##*/}"
+    log_warn "add reads none of them: where the archive would decide, the new site gets PHP 8.1 unless KVS_PHP_VERSION is set, IONCUBE=YES unless IONCUBE is set, and the table prefix ktvs_"
+    log_warn "Keep only the new site's archive in ${KVS_ARCHIVE_DIR}/ until the site's first start. Give add its values on the add command line only, for example: KVS_PHP_VERSION=8.3 IONCUBE=NO ./site-manager.sh add ${domain}"
+}
+
+# Sets php_version and ioncube in the caller (add_site) for a new site made
+# from <archive> into <webroot>. A webroot an earlier remove kept holds the
+# KVS the site's init will run, since the init keeps an installed site and
+# extracts no archive over it: when it has admin/include/functions_base.php,
+# its files decide, its version.php the series and functions_base.php
+# IONCUBE (setup.sh decides IONCUBE from a site in place this way, but the
+# series from the archive first). What they cannot tell
+# comes from the archive: the series KVS documents for the release in its
+# name and IONCUBE from its own files. KVS_PHP_VERSION names the series
+# instead, as in setup.sh. A release that needs PHP 7.4, which this stack
+# does not build, is refused as setup.sh refuses it. What neither can tell,
+# all of it when there is no archive to read, comes from KVS_PHP_VERSION and
+# IONCUBE, or else is PHP 8.1 and IONCUBE=YES, what add wrote before it read
+# the archive.
+select_site_php() {
+    local archive="$1" webroot="$2"
+    local kvs_php_lib="${SCRIPT_DIR}/../lib/kvs-php.sh"
+    local kvs_version="" documented="" encoded="" version_source="" ioncube_source=""
+
+    if [ ! -r "$kvs_php_lib" ]; then
+        log_error "Missing ${kvs_php_lib}: it tells which PHP a KVS release needs"
+        return 1
+    fi
+    # shellcheck source=docker/lib/kvs-php.sh
+    source "$kvs_php_lib"
+
+    if [ -n "${KVS_PHP_VERSION:-}" ] && [[ ! "$KVS_PHP_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        log_error "KVS_PHP_VERSION=${KVS_PHP_VERSION} is not a PHP series such as 8.3"
+        return 1
+    fi
+    if [ -n "${IONCUBE:-}" ] && [ "$IONCUBE" != YES ] && [ "$IONCUBE" != NO ]; then
+        log_error "IONCUBE=${IONCUBE} is neither YES nor NO"
+        return 1
+    fi
+
+    if [ -f "${webroot}/admin/include/functions_base.php" ]; then
+        log_info "${webroot} holds a KVS site, which the new site's init keeps and runs: its files decide"
+        if kvs_version=$(kvs_site_version "$webroot") && documented=$(kvs_php_series "$kvs_version"); then
+            version_source=$webroot
+        else
+            kvs_version=""
+            documented=""
+            log_warn "Could not read the KVS version of ${webroot}"
+        fi
+        if encoded=$(kvs_site_ioncube "$webroot"); then
+            ioncube_source=$webroot
+        else
+            encoded=""
+            log_warn "Could not read ${webroot}/admin/include/functions_base.php"
+        fi
+    fi
+    if [ -n "$archive" ] && [ -z "$version_source" ]; then
+        if kvs_version=$(kvs_archive_version "$archive") && documented=$(kvs_php_series "$kvs_version"); then
+            version_source=${archive##*/}
+        else
+            kvs_version=""
+            documented=""
+            log_warn "Could not read the KVS version from ${archive##*/}"
+        fi
+    fi
+    if [ -n "$archive" ] && [ -z "$ioncube_source" ]; then
+        if encoded=$(kvs_archive_ioncube "$archive"); then
+            ioncube_source=${archive##*/}
+        else
+            encoded=""
+            log_warn "Could not inspect the PHP files of ${archive##*/}"
+        fi
+    fi
+    [ -z "$version_source" ] ||
+        log_info "KVS ${kvs_version} (${version_source}): PHP ${documented} is the documented runtime"
+    [ -z "$ioncube_source" ] || log_info "IonCube encoded files (${ioncube_source}): ${encoded}"
+
+    case "$encoded" in
+        yes) ioncube=YES ;;
+        no) ioncube=NO ;;
+        *) ioncube=${IONCUBE:-YES} ;;
+    esac
+    if [ -n "$encoded" ] && [ -n "${IONCUBE:-}" ] && [ "$IONCUBE" != "$ioncube" ]; then
+        log_warn "IONCUBE=${IONCUBE} is not used: the files of ${ioncube_source} give IONCUBE=${ioncube}"
+    fi
+
+    if [ -n "${KVS_PHP_VERSION:-}" ]; then
+        if [ -n "$documented" ] && [ "$ioncube" = YES ] && [ "$KVS_PHP_VERSION" != "$documented" ]; then
+            log_warn "With IONCUBE=YES, PHP ${documented} is the recommended runtime for KVS ${kvs_version}; PHP ${KVS_PHP_VERSION} must be compatible with the encoding of its files"
+        fi
+        php_version=$KVS_PHP_VERSION
+    elif [ "$documented" = 7.4 ]; then
+        log_error "KVS ${kvs_version} needs PHP 7.4, which this Docker installation does not build"
+        if [ "$version_source" = "$webroot" ]; then
+            log_error "That is the site kept in ${webroot}: move it away to install from an archive of KVS 6.2.1 or newer, or, only if its files are not IonCube encoded, set KVS_PHP_VERSION to a series docker/images.lock pins"
+        else
+            log_error "Use an archive of KVS 6.2.1 or newer, or, only if its files are not IonCube encoded, set KVS_PHP_VERSION to a series docker/images.lock pins"
+        fi
+        return 1
+    else
+        php_version=${documented:-8.1}
+    fi
+    log_info "New site: PHP ${php_version}, IONCUBE=${ioncube}"
+}
+
 add_site() {
     local domain="$1"
     validate_domain "$domain" || return 1
@@ -670,7 +799,8 @@ add_site() {
     local site_dir="${SITES_DIR}/${domain}"
     local site_prefix="kvs-${domain_safe}"
     local primary_domain
-    local php_version=8.1
+    local php_version
+    local ioncube
     local resolver="${SCRIPT_DIR}/../bin/resolve-bases.sh"
     local php_fpm_base php_cli_base
 
@@ -705,11 +835,14 @@ add_site() {
     local canonical_host alternate_host tls_directive
     caddy_route_hosts "$domain" "${CADDY_TLS_MODE:-public}" false auto || return 1
 
-    # Check KVS archive
-    if ! compgen -G "${KVS_ARCHIVE_DIR}/KVS_*.zip" >/dev/null; then
-        log_error "No KVS archive found in ${KVS_ARCHIVE_DIR}/"
-        exit 1
-    fi
+    # The PHP series, the IonCube setting and the table prefix come from the
+    # archive, by the rules setup.sh applies to the primary site, before
+    # anything is created; the series and IonCube from a webroot an earlier
+    # remove kept, when it holds a KVS site.
+    local site_archive
+    local webroot="${WEBROOT_BASE}/${domain}"
+    select_site_archive "$domain" || return 1
+    select_site_php "$site_archive" "$webroot" || return 1
 
     # The build bases of the PHP series, pinned by digest in
     # docker/images.lock, as setup.sh writes them for the primary site
@@ -728,7 +861,6 @@ add_site() {
     log_success "Created site directory: ${site_dir}"
 
     # Create webroot directory
-    local webroot="${WEBROOT_BASE}/${domain}"
     local webroot_created=false
     [ -e "$webroot" ] || webroot_created=true
     mkdir -p "${webroot}"
@@ -739,7 +871,7 @@ add_site() {
     # setup.php (ktvs_ for every archive KVS ships); the init reads it from
     # the site itself, .env carries it for the scripts outside the container.
     local tables_prefix
-    tables_prefix=$(archive_tables_prefix)
+    tables_prefix=$(archive_tables_prefix "$site_archive")
     (
         umask 077
         cat > "${site_dir}/.env" << EOF
@@ -765,7 +897,7 @@ MARIADB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
 PHP_VERSION=${php_version}
 PHP_FPM_BASE=${php_fpm_base}
 PHP_CLI_BASE=${php_cli_base}
-IONCUBE=YES
+IONCUBE=${ioncube}
 PHP_MEMORY_LIMIT=512M
 PHP_UPLOAD_MAX_FILESIZE=2048M
 PHP_POST_MAX_SIZE=2048M
@@ -1255,6 +1387,12 @@ usage() {
 # =============================================================================
 # Main
 # =============================================================================
+
+# Only add reads IONCUBE from the environment, for the .env of the site it
+# creates. Compose prefers a variable of the environment over the site's
+# .env, so an IONCUBE exported for an add would set the loader of every site
+# started or stopped from the same shell: the other commands drop it.
+[ "${1:-}" = add ] || unset IONCUBE
 
 case "${1:-}" in
     add)
