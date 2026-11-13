@@ -1713,6 +1713,120 @@ test_menu_add_site_refuses_on_a_docker_host() {
   unset TEST_WORKING_DIRS
 }
 
+# The native PHP settings were sed edits of php.ini on commented lines, but
+# stock php.ini-production has max_execution_time = 30 and max_input_time = 60
+# uncommented, so both stayed: long admin actions hit the 30 s limit. nginx
+# also had no fastcgi_read_timeout and gave up after its 60 s default. The
+# settings are now a conf.d file PHP-FPM reads after php.ini, whatever php.ini
+# holds, and the nginx include waits 300 s like the Docker vhost.
+test_php_settings_override_the_stock_php_ini() {
+  local temp_dir fpm conf status readme
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  KVS_PHP_INI_DIR="$temp_dir/etc-php"
+  PHP=8.3
+  webserver=nginx
+  VERSION_ID=13
+  fpm="$KVS_PHP_INI_DIR/$PHP/fpm"
+  mkdir -p "$fpm/conf.d"
+  # The relevant lines of php.ini-production, as PHP 8.4 ships them.
+  printf '%s\n' 'max_execution_time = 30' 'max_input_time = 60' ';max_input_vars = 1000' \
+    'memory_limit = 128M' 'post_max_size = 8M' 'upload_max_filesize = 2M' \
+    ';opcache.interned_strings_buffer=8' >"$fpm/php.ini"
+  cp "$fpm/php.ini" "$temp_dir/php.ini.orig"
+
+  curl() { :; }
+  gpg() { :; }
+  tee() { cat >/dev/null; }
+  lsb_release() { echo trixie; }
+  apt_get() { :; }
+  apt_install() { :; }
+  systemctl() { printf '%s\n' "$*" >>"$temp_dir/systemctl"; return "${SYSTEMCTL_RC:-0}"; }
+
+  APT_SOURCES_DIR="$temp_dir" aptinstall_php >/dev/null 2>&1
+  status=$?
+  assert_equal "0" "$status" "the PHP step must succeed" || return 1
+  conf="$fpm/conf.d/99-kvs.ini"
+  [[ -f "$conf" ]] || fail "no KVS settings file in the FPM conf.d" || return 1
+  # What PHP-FPM ends up with: php.ini, then conf.d in name order, last wins.
+  effective() {
+    cat "$fpm/php.ini" "$fpm"/conf.d/*.ini |
+      sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" | tail -n 1
+  }
+  assert_equal "300" "$(effective max_execution_time)" "max_execution_time" || return 1
+  assert_equal "360" "$(effective max_input_time)" "max_input_time" || return 1
+  assert_equal "10000" "$(effective max_input_vars)" "max_input_vars" || return 1
+  assert_equal "512M" "$(effective memory_limit)" "memory_limit" || return 1
+  assert_equal "2048M" "$(effective post_max_size)" "post_max_size" || return 1
+  assert_equal "2048M" "$(effective upload_max_filesize)" "upload_max_filesize" || return 1
+  assert_equal "16" "$(effective opcache.interned_strings_buffer)" "opcache.interned_strings_buffer" || return 1
+  grep -Fq "restart php$PHP-fpm" "$temp_dir/systemctl" || fail "PHP-FPM was not restarted" || return 1
+
+  # A re-run writes the same file and nothing more.
+  APT_SOURCES_DIR="$temp_dir" aptinstall_php >/dev/null 2>&1 || fail "a re-run of the PHP step failed" || return 1
+  assert_equal "1" "$(find "$fpm/conf.d" -type f | wc -l)" "one settings file after a re-run" || return 1
+
+  # The file wins over php.ini, so a value an administrator raised there
+  # goes back to the KVS one on every run. The file, the output of the step
+  # and the README say where local values go instead: a file sorting after
+  # it, which a re-run keeps and which still wins.
+  assert_file_contains "$conf" "99-local.ini" "the settings file must say where local values go" || return 1
+  APT_SOURCES_DIR="$temp_dir" aptinstall_php >"$temp_dir/out" 2>&1 || fail "the PHP step failed" || return 1
+  assert_file_contains "$temp_dir/out" "$fpm/conf.d/99-local.ini" "the step must say where local values go" || return 1
+  # Read whole first: grep -q stops at the first match, and the SIGPIPE of
+  # tr would fail the pipeline under pipefail.
+  readme=$(tr -d '\r' <"$REPO_DIR/README.md")
+  grep -q 'conf.d/99-kvs.ini.*99-local.ini' <<<"$readme" ||
+    fail "the README must say where local PHP values go" || return 1
+  printf 'memory_limit = 1024M\n' >"$fpm/conf.d/99-local.ini"
+  APT_SOURCES_DIR="$temp_dir" aptinstall_php >/dev/null 2>&1 || fail "a re-run with local values failed" || return 1
+  assert_equal "1024M" "$(effective memory_limit)" "a later local file must win over 99-kvs.ini" || return 1
+  # The same order with PHP itself, when the runner has one: it reads the
+  # files of its scan directory in name order.
+  if command -v php >/dev/null 2>&1; then
+    assert_equal "1024M 10000" \
+      "$(PHP_INI_SCAN_DIR="$fpm/conf.d" php -c "$fpm/php.ini" -r 'echo ini_get("memory_limit"), " ", ini_get("max_input_vars");')" \
+      "PHP must read 99-local.ini after 99-kvs.ini" || return 1
+  fi
+  rm -f "$fpm/conf.d/99-local.ini"
+
+  # A restart that fails fails the step. aptinstall_php already ended with
+  # the restart before the settings moved to conf.d, so this only guards
+  # the new order, the settings file written first.
+  SYSTEMCTL_RC=1 APT_SOURCES_DIR="$temp_dir" aptinstall_php >/dev/null 2>&1
+  status=$?
+  [[ $status -ne 0 ]] || fail "a failed PHP-FPM restart must fail the step" || return 1
+
+  # A settings file that cannot be written fails the step before the
+  # restart: conf.d taken by a file, then the temporary copy taken by a
+  # directory. Neither depends on permissions, so both fail as root too.
+  for blocked in conf.d tmp; do
+    rm -rf "$fpm/conf.d"
+    if [[ "$blocked" == conf.d ]]; then
+      : >"$fpm/conf.d"
+    else
+      mkdir -p "$fpm/conf.d/99-kvs.ini.tmp"
+    fi
+    : >"$temp_dir/systemctl"
+    APT_SOURCES_DIR="$temp_dir" aptinstall_php >"$temp_dir/out" 2>&1
+    status=$?
+    [[ $status -ne 0 ]] || fail "a settings file that cannot be written ($blocked) passed the step" || return 1
+    [[ ! -s "$temp_dir/systemctl" ]] || fail "PHP-FPM was restarted without its settings ($blocked)" || return 1
+    if [[ "$blocked" == tmp ]]; then
+      assert_file_contains "$temp_dir/out" "Could not write $fpm/conf.d/99-kvs.ini" "the failure must name the file" || return 1
+      [[ ! -e "$fpm/conf.d/99-kvs.ini" ]] || fail "a failed write left a settings file" || return 1
+    fi
+  done
+  rm -rf "$fpm/conf.d"
+
+  # nginx waits as long as PHP may run, as the Docker vhost does.
+  grep -Eq '^fastcgi_read_timeout[[:space:]]+300;$' "$REPO_DIR/conf/nginx/globals/php_fastcgi.conf" ||
+    fail "the native fastcgi include must wait 300 s for PHP" || return 1
+
+  unset -f curl gpg tee lsb_release apt_get apt_install systemctl effective
+  unset KVS_PHP_INI_DIR SYSTEMCTL_RC
+}
+
 # The www redirect vhost of the native install answered every request with
 # 444: its server_name is a wildcard and it compared $host with $server_name,
 # which holds that pattern. Rendered as the installer writes it, the redirect
@@ -1788,6 +1902,7 @@ run_test "the installer says it needs bash" test_the_installer_says_it_needs_bas
 run_test "a failed database import is not reported as success" test_failed_db_import_keeps_install_files_and_retries || failures=$((failures + 1))
 run_test "an install re-run keeps setup_db.php restricted" test_install_rerun_keeps_setup_db_restricted || failures=$((failures + 1))
 run_test "the site vhost redirects every other host" test_site_vhost_redirects_every_other_host || failures=$((failures + 1))
+run_test "PHP settings override the stock php.ini" test_php_settings_override_the_stock_php_ini || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2

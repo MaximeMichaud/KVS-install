@@ -230,6 +230,8 @@ The PHP sessions, which hold who is logged in to the site and to the admin panel
 
 For traditional bare-metal installation on Debian systems.
 
+The PHP settings KVS needs (`upload_max_filesize` and `post_max_size` 2048M, `memory_limit` 512M, `max_input_vars` 10000, `max_execution_time` 300, `max_input_time` 360, `opcache.interned_strings_buffer` 16) go to `/etc/php/<version>/fpm/conf.d/99-kvs.ini`, which PHP-FPM reads after `php.ini`. Its values win over the same settings in `php.ini`, and every run of the installer, "Restart the installation" included, writes the file again. Values of your own go in a file that sorts after it, such as `99-local.ini` in the same directory.
+
 ### Headless Usage
 
 Headless mode enables fully automated installations without interactive prompts. Ideal for scripted deployments, CI/CD pipelines, and mass installations.

@@ -1154,14 +1154,40 @@ function aptinstall_php() {
       fi
     fi
     apt_get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm,-imagick,-memcached} || return $?
-    sed -i "s|upload_max_filesize = 2M|upload_max_filesize = 2048M|
-                s|post_max_size = 8M|post_max_size = 2048M|
-                s|memory_limit = 128M|memory_limit = 512M|
-                s|;max_input_vars = 1000|max_input_vars = 10000|
-                s|;max_execution_time = 30|max_execution_time = 300|
-                s|;max_input_time = 30|max_input_time = 360|
-                s|;*opcache.interned_strings_buffer.*|opcache.interned_strings_buffer=16|" /etc/php/"$PHP"/fpm/php.ini
+    write_php_fpm_settings || return $?
     systemctl restart php"$PHP"-fpm
+}
+
+# The KVS PHP settings, the values docker/php/php.ini gives the Docker image,
+# as a conf.d file PHP-FPM reads after php.ini. Editing php.ini with sed
+# depended on how each line is written there: stock php.ini-production has
+# max_execution_time = 30 and max_input_time = 60 uncommented, which the old
+# patterns never matched. The file wins over the same settings in php.ini and
+# every run writes it again, "Restart the installation" included: values of
+# the administrator's own go in a file that sorts after it, which PHP reads
+# later.
+write_php_fpm_settings() {
+  local conf_dir="${KVS_PHP_INI_DIR:-/etc/php}/$PHP/fpm/conf.d"
+  local file="$conf_dir/99-kvs.ini"
+
+  mkdir -p "$conf_dir" || return $?
+  if ! cat >"$file.tmp" <<'INI' || ! mv -f "$file.tmp" "$file"; then
+; Written by kvs-install.sh; every run of it writes this file again.
+; Local values go in a file that sorts after this one, such as 99-local.ini
+; in this directory: PHP reads it later, so its settings win.
+upload_max_filesize = 2048M
+post_max_size = 2048M
+memory_limit = 512M
+max_input_vars = 10000
+max_execution_time = 300
+max_input_time = 360
+opcache.interned_strings_buffer = 16
+INI
+    rm -f "$file.tmp"
+    echo "Could not write $file" >&2
+    return 1
+  fi
+  echo "PHP settings written to $file; local values go in a later file such as $conf_dir/99-local.ini"
 }
 
 function aptinstall_phpmyadmin() {
