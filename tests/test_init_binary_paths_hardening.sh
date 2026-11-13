@@ -306,6 +306,33 @@ run_config "$site" > "$TEST_DIR/userini-again.log" 2>&1 || fail "the second run 
 cmp -s "$site/.user.ini" "$TEST_DIR/userini.first" || fail "a second run must leave .user.ini unchanged"
 if grep -Fq "now under" "$TEST_DIR/userini-again.log"; then fail "a second run must not announce a rewrite"; fi
 
+# --- the old directory before ":", a tab or a CRLF line end follows too ----
+# open_basedir and include_path separate their entries with ":", a tab may
+# stand before a comment, and an ini file written on Windows ends its lines
+# with CRLF: an old directory left in open_basedir refuses every PHP script
+# of the site.
+site="$TEST_DIR/userini-separators"
+write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump
+mkdir -p "$site/admin" "$site/player"
+printf '%s\n' 'open_basedir = /home/old/www:/tmp' 'include_path = ".:/home/old/www2:/home/old/www:/usr/share/php"' > "$site/.user.ini"
+printf '%s\n' 'open_basedir = "/home/old/www:/tmp"' 'include_path = /home/old/www'$'\t''; the site only' > "$site/admin/.user.ini"
+printf 'open_basedir=/home/old/www\r\nerror_log=/home/old/www2\r\n' > "$site/player/.user.ini"
+run_config "$site" > "$TEST_DIR/userini-separators.log" 2>&1 || fail "a site with these .user.ini files must be configured"
+grep -Fxq "open_basedir = $site:/tmp" "$site/.user.ini" ||
+    fail "the old directory before ':' must follow the site (got '$(head -n 1 "$site/.user.ini")')"
+grep -Fxq "include_path = \".:/home/old/www2:$site:/usr/share/php\"" "$site/.user.ini" ||
+    fail "an include_path entry must follow the site, a longer name must stay (got '$(sed -n 2p "$site/.user.ini")')"
+grep -Fxq "open_basedir = \"$site:/tmp\"" "$site/admin/.user.ini" ||
+    fail "a quoted open_basedir must follow the site (got '$(cat "$site/admin/.user.ini")')"
+grep -Fxq "include_path = $site"$'\t''; the site only' "$site/admin/.user.ini" ||
+    fail "the old directory before a tab must follow the site (got '$(sed -n 2p "$site/admin/.user.ini" | od -c | head -n 3)')"
+[ "$(cat "$site/player/.user.ini")" = "$(printf 'open_basedir=%s\r\nerror_log=/home/old/www2\r' "$site")" ] ||
+    fail "the old directory at the end of a CRLF line must follow the site, keeping the line ends (got '$(od -c "$site/player/.user.ini" | head -n 4)')"
+for file in .user.ini admin/.user.ini player/.user.ini; do
+    grep -Fxq "[INFO] $file: paths under /home/old/www now under $site" "$TEST_DIR/userini-separators.log" ||
+        fail "the rewrite of $file must be announced"
+done
+
 # --- plugin settings naming the old server's directory follow the site -----
 site="$TEST_DIR/plugins"
 write_site "$site" /usr/bin/php /usr/bin/ffmpeg /usr/bin/convert /usr/bin/mysqldump

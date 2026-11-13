@@ -77,16 +77,20 @@ set_setup_php_value() {
 # PHP-FPM applies the .user.ini files of the site on every request. One that
 # names a file under the directory the site had on the old server (an
 # auto_prepend_file above all) fails every page once the site lives at
-# KVS_PATH: point those paths at KVS_PATH. contents/ is not walked, PHP does
-# not run there and it holds most of the files.
+# KVS_PATH: point those paths at KVS_PATH. The old directory is one when a
+# "/", a quote, ";", ":" (the separator of open_basedir and include_path),
+# white space (a space, a tab, the carriage return of a CRLF line) or the
+# end of the line follows it, never when it only starts a longer name.
+# contents/ is not walked, PHP does not run there and it holds most of the
+# files.
 adopt_user_ini_paths() {
-    local old="$1" old_pattern new file
+    local old="$1" old_pattern new file boundary=$'[/"\';:[:space:]]'
 
     old_pattern=$(printf '%s' "$old" | sed -e 's/[][\\.^$*+?(){}|#]/\\&/g')
     new=$(escape_sed_replacement "$KVS_PATH")
     while IFS= read -r -d '' file; do
-        grep -Eq "${old_pattern}([/\"' ;]|\$)" "$file" || continue
-        sed -E -i "s#${old_pattern}([/\"' ;]|\$)#${new}\\1#g" "$file"
+        grep -Eq "${old_pattern}(${boundary}|\$)" "$file" || continue
+        sed -E -i "s#${old_pattern}(${boundary}|\$)#${new}\\1#g" "$file"
         log_info "${file#"$KVS_PATH"/}: paths under $old now under $KVS_PATH"
     done < <(find "$KVS_PATH" -path "$KVS_PATH/contents" -prune -o -name .user.ini -type f -print0)
 }
