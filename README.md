@@ -271,6 +271,7 @@ MODE_CHOICE=1 \
 | `INSTALL_TYPE` | `1`/`2` | `1` | 1=Docker, 2=Standalone |
 | `MENU_OPTION` | `1-5` | `1` | 1=Install, 2=Add site (work in progress, not working yet; refused when a Docker install is found, which adds sites with docker/multi-site/site-manager.sh), 3=Update PMA, 4=Update script, 5=Quit |
 | `KVS_EMAIL` | email | - | Email for SSL certificates (required for Let's Encrypt/ZeroSSL) |
+| `DOMAIN` | domain | the archive name, then the domain saved in `docker/.env` | Domain of the site. The archive name gives it while `docker/.env` saves none; a later run keeps the saved one (a KVS package also runs under the subdomains of its licensed domain), and `DOMAIN` switches to another |
 | `PREFIX_CHOICE` | `1-3` | `1` | 1=Auto (kvs-domain), 2=Legacy (kvs), 3=Custom. Used only when a prefix is chosen (first install, import under a new domain); an installed site keeps its prefix |
 | `SSL_CHOICE` | `1-3` | `1`, or the saved provider on a re-run | 1=Let's Encrypt, 2=ZeroSSL, 3=Self-signed |
 | `DB_CHOICE` | `1-3` | `1` | MariaDB version (1=12.3, 2=11.8, 3=11.4) |
@@ -557,7 +558,7 @@ In a 2023 test, a standard installation left 6.3GB free out of 10GB. Watch demo 
 - **Extended PHP Support**: Uses Sury's repository to provide extended PHP version support, incorporating security updates from [Freexian's Debian LTS project](https://www.freexian.com/lts/debian/).
 - **Memcached Configuration**: Sets Memcached memory allocation to a level suited for high traffic websites, optimizing cache performance.
 - **Automated Updates**: Enables automatic updates for all installed packages and added repositories to keep the server secure and up-to-date.
-- **Domain Configuration**: Automatically configures the server domain based on the uploaded CMS license, ensuring correct system operation. DNS zone configuration is still required.
+- **Domain Configuration**: Automatically configures the server domain based on the uploaded CMS license, ensuring correct system operation. DNS zone configuration is still required. The Docker installation takes the domain from the archive name (`KVS_X.X.X_[domain.tld].zip`) only while `docker/.env` saves none: a later run keeps the saved domain, which can be a subdomain the license accepts, and says so when the archive name differs; `DOMAIN=<domain>` switches it.
 - **MariaDB Latest LTS**: Installs the latest LTS version of MariaDB, offering more up-to-date solutions than standard repository versions with options to select preferred LTS versions.
 - **Resource Monitoring Tools**: Includes additional packages like ncdu, vnstat, and nload for resource monitoring.
 - **Optional IonCube Installation**: Provides the option to install or skip IonCube depending on licensing needs.

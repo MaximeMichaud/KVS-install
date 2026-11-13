@@ -847,6 +847,22 @@ archive_domain_from_name() {
   printf '%s\n' "${domain,,}"
 }
 
+# The domain a Docker .env saves for the site, read the way docker/setup.sh
+# reads it (it sources the file, so an exported or quoted DOMAIN counts and
+# the last one wins), lowercased. Empty when the file saves none yet: no
+# DOMAIN, an empty one, or the example.com placeholder of .env.example.
+saved_site_domain() {
+  local env_file="$1" domain
+  domain=$(
+    unset DOMAIN
+    # shellcheck source=/dev/null
+    source "$env_file" >/dev/null 2>&1
+    printf '%s' "${DOMAIN:-}"
+  )
+  domain=${domain,,}
+  [[ $domain == example.com ]] || printf '%s\n' "$domain"
+}
+
 # URL, the host the site answers on, and REDIRECT_SERVER_NAME, the server_name
 # of the vhost that sends every other host of the domain to it: the apex, or
 # www.<domain> with USE_WWW=true.
@@ -2774,7 +2790,7 @@ function dockerInstall() {
   fi
 
   # Extract the domain from the archive file name (KVS_X.X.X_[domain].zip).
-  local kvs_file archive_domain
+  local kvs_file archive_domain saved_domain
   kvs_file=$(find kvs-archive -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
   archive_domain=$(archive_domain_from_name "${kvs_file##*/}")
 
@@ -2786,20 +2802,36 @@ function dockerInstall() {
   chmod 600 .env
 
   # An explicit DOMAIN from the environment wins: setup.sh applies it through
-  # KVS_DOMAIN_OVERRIDE and saves it itself. It is not written into .env here:
-  # setup.sh compares it with the domain .env holds to notice a change (a site
-  # imported again under a new name), and would find none. The archive name
-  # only seeds .env when no such DOMAIN is in play, and a name that is renamed,
-  # bracket-less or invalid is a warning, not a failure, so it never aborts an
-  # install whose domain is otherwise known.
-  if [[ -n "${DOMAIN:-}" ]] && validate_kvs_domain "${DOMAIN,,}"; then
-    if [[ -n "$archive_domain" && "${DOMAIN,,}" != "$archive_domain" ]]; then
-      echo "${yellow}Archive name domain '$archive_domain' differs from DOMAIN='$DOMAIN'; keeping DOMAIN${normal}" >&2
+  # KVS_DOMAIN_OVERRIDE and saves it itself. Neither it nor the domain of the
+  # archive name is written into .env here: setup.sh compares the domain it
+  # is given with the one .env holds to notice a change (a site imported
+  # again under a new name, whose completed import and prefix belong to the
+  # old one), and would find none. A DOMAIN that fails the check here still
+  # goes to setup.sh as it is, which checks it too.
+  #
+  # The archive name only seeds the domain of a site whose .env saves none
+  # yet, and reaches setup.sh the same way. A KVS package also runs under
+  # the subdomains of the domain it is licensed for, so the name is not
+  # always the site's domain: a domain .env already saves is kept, and a
+  # different archive name is a warning that says how to switch. A name that
+  # is renamed, bracket-less or invalid is a warning, not a failure, so it
+  # never aborts an install whose domain is otherwise known.
+  saved_domain=$(saved_site_domain ./.env)
+  if [[ -n "${DOMAIN:-}" ]]; then
+    if validate_kvs_domain "${DOMAIN,,}"; then
+      if [[ -n "$archive_domain" && "${DOMAIN,,}" != "$archive_domain" ]]; then
+        echo "${yellow}Archive name domain '$archive_domain' differs from DOMAIN='$DOMAIN'; keeping DOMAIN${normal}" >&2
+      fi
+      export DOMAIN="${DOMAIN,,}"
+      echo "Domain: ${green}${DOMAIN}${normal}"
     fi
-    export DOMAIN="${DOMAIN,,}"
-    echo "Domain: ${green}${DOMAIN}${normal}"
+  elif [[ -n "$saved_domain" ]]; then
+    if [[ -n "$archive_domain" && "$archive_domain" != "$saved_domain" ]] && validate_kvs_domain "$archive_domain"; then
+      echo "${yellow}The archive name is for $archive_domain; keeping $saved_domain, the domain saved in .env. Run again with DOMAIN=$archive_domain to switch to it.${normal}" >&2
+    fi
+    echo "Domain: ${green}${saved_domain}${normal}"
   elif [[ -n "$archive_domain" ]] && validate_kvs_domain "$archive_domain"; then
-    sed -i "s/^DOMAIN=.*/DOMAIN=$archive_domain/" .env
+    export DOMAIN="$archive_domain"
     echo "Domain set to: ${green}$archive_domain${normal}"
   elif [[ -n "$archive_domain" ]]; then
     echo "${yellow}Archive name domain '$archive_domain' is not a valid domain; setup will ask or use .env${normal}" >&2

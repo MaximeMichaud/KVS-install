@@ -431,6 +431,13 @@ selection=$(grep -nx 'select_php_version' "$ROOT_DIR/docker/setup.sh" | cut -d: 
 # starts setup.sh when there is none: its PHP_VERSION is not a series a run
 # selected. The setup.sh it starts here runs the selection of setup.sh on the
 # .env it finds, with the site in place under the domain of the archive name.
+# Like setup.sh (KVS_DOMAIN_OVERRIDE), it takes a DOMAIN of the environment
+# over the one .env saves: kvs-install.sh passes the domain of the archive
+# name that way while .env saves none, and leaves the placeholder of
+# .env.example in it. It names the domain it selects for, which must be the
+# site's: under another one no site is in place, and a .env copied from
+# .env.example would select the documented series whatever saved_php_version
+# trusts.
 if command -v unzip > /dev/null 2>&1 && command -v python3 > /dev/null 2>&1; then
     {
         echo "source \"$ROOT_DIR/docker/lib/import.sh\""
@@ -443,8 +450,11 @@ if command -v unzip > /dev/null 2>&1 && command -v python3 > /dev/null 2>&1; the
 RED='' GREEN='' YELLOW='' CYAN='' NC=''
 set_env_value() { printf '%s=%s\n' "$1" "$2" > "$APPLIED"; }
 KVS_PHP_VERSION=${KVS_PHP_VERSION:-}
+KVS_DOMAIN_OVERRIDE=${DOMAIN:-}
 PHP_VERSION=
 source .env
+[ -z "$KVS_DOMAIN_OVERRIDE" ] || DOMAIN=$KVS_DOMAIN_OVERRIDE
+echo "Selecting for DOMAIN=$DOMAIN"
 IONCUBE=$SITE_IONCUBE
 select_php_version
 SH
@@ -479,18 +489,26 @@ SH
                 dockerInstall
             ' _ "$ROOT_DIR/kvs-install.sh" > "$TEST_DIR/out" 2>&1
     }
+    # installer_site <case>: the selection ran for the site in place.
+    installer_site() {
+        grep -Fxq 'Selecting for DOMAIN=site.example' "$TEST_DIR/out" ||
+            fail "kvs-install.sh $1: the selection must run for site.example, the site in place: $(grep -a 'Selecting for' "$TEST_DIR/out" || cat "$TEST_DIR/out")"
+    }
     installer NO 7.0.3 '' || fail "kvs-install.sh on an unencoded 7.0.3 site failed: $(cat "$TEST_DIR/out")"
+    installer_site "on an unencoded 7.0.3 site"
     grep -Fq 'Created .env from .env.example' "$TEST_DIR/out" || fail "kvs-install.sh must have created .env: $(cat "$TEST_DIR/out")"
     [ "$(applied_version)" = 8.3 ] ||
         fail "kvs-install.sh on an unencoded 7.0.3 site must select PHP 8.3, not the 8.1 of .env.example: $(cat "$TEST_DIR/out")"
     if installer YES 6.1.2 ''; then
         fail "kvs-install.sh on an encoded 6.1.2 site was not refused: $(cat "$TEST_DIR/out")"
     fi
+    installer_site "on an encoded 6.1.2 site"
     grep -Fq 'ERROR: KVS 6.1.2 needs PHP 7.4, which this Docker installation does not build.' "$TEST_DIR/out" ||
         fail "kvs-install.sh on an encoded 6.1.2 site must be refused for PHP 7.4: $(cat "$TEST_DIR/out")"
     [ ! -f "$TEST_DIR/applied" ] || fail "a PHP version was written for an encoded 6.1.2 site: $(cat "$TEST_DIR/applied")"
     installer NO 7.0.2 "DOMAIN=site.example\n$(saved 8.4)\n" ||
         fail "kvs-install.sh on a saved series failed: $(cat "$TEST_DIR/out")"
+    installer_site "on a saved series"
     [ "$(applied_version)" = 8.4 ] ||
         fail "kvs-install.sh must keep the series an earlier run saved: $(cat "$TEST_DIR/out")"
     rm -rf "$TEST_DIR/installer" "$TEST_DIR/www" "$TEST_DIR/applied"
