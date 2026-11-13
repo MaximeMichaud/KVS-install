@@ -1,8 +1,9 @@
 name: docker images
 
 # The suites of the PHP-FPM and cron images run here, on the images the build
-# jobs make, so a change to one of them, or to the kvsctl cache command the
-# cache suite drives, runs this workflow as well.
+# jobs make, so a change to one of them, to the kvsctl cache command the
+# cache suite drives, or to the doctor probe the cron health suite runs,
+# runs this workflow as well.
 on:
   push:
     paths:
@@ -11,6 +12,8 @@ on:
       - "tests/integration_php_security.py"
       - "tests/integration_php_sessions.py"
       - "tests/integration_cache.py"
+      - "tests/integration_cron_health.sh"
+      - "cli/internal/doctor/runtime.go"
       - "tests/fixtures/cache-probe.php"
       - "cli/internal/upgrade/cache*"
   pull_request:
@@ -20,6 +23,8 @@ on:
       - "tests/integration_php_security.py"
       - "tests/integration_php_sessions.py"
       - "tests/integration_cache.py"
+      - "tests/integration_cron_health.sh"
+      - "cli/internal/doctor/runtime.go"
       - "tests/fixtures/cache-probe.php"
       - "cli/internal/upgrade/cache*"
   # docker/images.lock pins every base and runtime image by digest, so an
@@ -130,7 +135,8 @@ jobs:
       # PHP release of its base, the extensions the stack needs and the PHP
       # 8.1 security backport; for PHP-FPM, consecutive requests with and
       # without ionCube, and the sessions kept in their volume across a
-      # recreated container.
+      # recreated container; for cron, a failing cron.php reported by the
+      # health check and the doctor probe.
       - name: the suites of the image
         env:
           SERVICE: ${{ matrix.service }}
@@ -147,6 +153,7 @@ jobs:
             python3 tests/integration_php_sessions.py "$IMAGE"
           else
             python3 tests/integration_php_security.py "$IMAGE" "$version"
+            bash tests/integration_cron_health.sh "$IMAGE"
           fi
 
       # The cache suite runs the PHP-FPM and cron images of PHP 8.1 together,

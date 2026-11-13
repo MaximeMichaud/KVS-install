@@ -291,11 +291,17 @@ COPY crontab /etc/cron.d/kvs-cron
 COPY yt-dlp-update.cron /etc/cron.d/yt-dlp-update
 COPY cron-log-rotate.cron /etc/cron.d/cron-log-rotate
 COPY yt-dlp-update.sh /usr/local/bin/yt-dlp-update
+# The KVS task runs cron.php through kvs-cron-run, which records in
+# /var/lib/kvs-cron, as www-data, whether each run completed or failed; the
+# health check reads that record.
+COPY cron-run.sh /usr/local/bin/kvs-cron-run
+COPY cron-health.sh /usr/local/bin/kvs-cron-health
 RUN chown root:root /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update /etc/cron.d/cron-log-rotate \
     && chmod 0644 /etc/cron.d/kvs-cron /etc/cron.d/yt-dlp-update /etc/cron.d/cron-log-rotate \
-    && chmod 0755 /usr/local/bin/yt-dlp-update \
+    && chmod 0755 /usr/local/bin/yt-dlp-update /usr/local/bin/kvs-cron-run /usr/local/bin/kvs-cron-health \
     && install -o www-data -g www-data -m 0660 /dev/null /var/log/cron.log \
-    && install -o root -g root -m 0600 /dev/null /var/log/yt-dlp-update.log
+    && install -o root -g root -m 0600 /dev/null /var/log/yt-dlp-update.log \
+    && install -d -o www-data -g www-data -m 0755 /var/lib/kvs-cron
 
 # Fail the build if security restrictions or normal media processing fail.
 COPY media-security-check.sh /usr/local/bin/kvs-media-security-check

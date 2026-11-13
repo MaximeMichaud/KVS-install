@@ -123,7 +123,7 @@ func Catalog() []Check {
 		{"database", "database", "Database query from PHP using the site's credentials", []string{"services"}},
 		{"cache", "cache", "Read-only cache protocol probe from PHP", []string{"services"}},
 		{"search", "search", "Manticore status and index rebuild failure markers", []string{"services"}},
-		{"cron", "cron", "Cron daemon and KVS schedule", []string{"services"}},
+		{"cron", "cron", "Cron daemon, KVS schedule and a recent completed cron.php run", []string{"services"}},
 		{"storage.installation", "storage", "Installation space, inodes and directory access", nil},
 		{"storage.data", "storage", "Docker and actual database/site mount filesystems", []string{"services"}},
 		{"backups", "backups", "Local backup metadata and age, without a restore", []string{"config.files"}},

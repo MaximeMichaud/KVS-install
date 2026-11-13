@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -323,6 +324,10 @@ func TestKVSTaskUser(t *testing.T) {
 		{"an indented line", "  * * * * *  www-data  cd /var/www/kvs/admin/include && php cron.php\n", true, true},
 		{"a setting that names cron.php", "MAILTO=cron.php\n", false, false},
 		{"root's table, a command that names www-data", "* * * * * cd /var/www/kvs/admin/include && php cron.php >> /var/log/www-data.log\n", true, false},
+		{"the kvs-cron-run wrapper", "* * * * * www-data /usr/local/bin/kvs-cron-run\n", true, true},
+		{"the wrapper through PATH", "* * * * * www-data kvs-cron-run\n", true, true},
+		{"the wrapper in root's table", "* * * * * /usr/local/bin/kvs-cron-run\n", true, false},
+		{"the health check, not the task", "* * * * * www-data /usr/local/bin/kvs-cron-health\n", false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -331,5 +336,18 @@ func TestKVSTaskUser(t *testing.T) {
 				t.Errorf("kvsTaskUser = (%t, %t), want (%t, %t)", task, site, c.task, c.site)
 			}
 		})
+	}
+}
+
+// The crontab this tree ships must read as a KVS task run by www-data,
+// whatever command it uses: otherwise an upgrade into it would never hand
+// the files of an old root cron to the site.
+func TestKVSTaskUserOfTheShippedCrontab(t *testing.T) {
+	data, err := os.ReadFile("../../../" + kvsCrontab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task, site := kvsTaskUser(data); !task || !site {
+		t.Errorf("kvsTaskUser(%s) = (%t, %t), want (true, true):\n%s", kvsCrontab, task, site, data)
 	}
 }

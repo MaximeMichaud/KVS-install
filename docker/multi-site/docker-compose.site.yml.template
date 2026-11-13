@@ -235,6 +235,15 @@ services:
         PHP_VERSION: ${PHP_VERSION:-8.1}
         PHP_BASE: ${PHP_CLI_BASE:-}
     container_name: ${SITE_PREFIX}-cron
+    # KVS registers its cron as <hostname>:/var/www/kvs in the site's database
+    # and refuses to run, "Duplicate cron operation", for up to 15 minutes
+    # when another host holds that registration. Docker would give every new
+    # container its own hostname, so a recreation without kvs-init (kvsctl
+    # upgrade, reconfigure.sh) paused KVS's tasks. A fixed name keeps the
+    # registration valid; each site has its own database, so sites sharing
+    # it do not meet, and it stays within the 64 bytes Docker allows a
+    # hostname whatever the site prefix.
+    hostname: kvs-cron
     # cron -f installs no SIGTERM handler, and the kernel drops such a signal
     # sent to PID 1, so docker stop waited out its whole timeout before
     # SIGKILL. Docker's init takes PID 1, passes SIGTERM on and reaps orphans.
@@ -265,10 +274,13 @@ services:
       php-fpm:
         condition: service_started
     healthcheck:
-      # The container listens on nothing, so the daemon itself is the signal.
-      # procps is installed (cron/Dockerfile) for pgrep, which finds the
-      # daemon by name: with init: true, PID 1 is Docker's init, not cron.
-      test: ["CMD", "pgrep", "-x", "cron"]
+      # The container listens on nothing: healthy while the cron daemon runs
+      # and KVS's cron.php completed a run within the last five minutes, or
+      # the container started less than five minutes ago (cron/cron-health.sh,
+      # which finds the daemon with pgrep: with init: true, PID 1 is Docker's
+      # init, not cron; cron/cron-run.sh records each run). An image older
+      # than that script is probed through its daemon alone, as before.
+      test: ["CMD-SHELL", "if [ -x /usr/local/bin/kvs-cron-health ]; then exec /usr/local/bin/kvs-cron-health; fi; exec pgrep -x cron"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -2257,11 +2257,29 @@ test_services_declare_health_checks() {
         fail "PHP-FPM must be probed by connecting to its FastCGI socket"
     grep -Fq 'socat' "$REPO_ROOT/docker/php/Dockerfile" ||
         fail "the PHP image no longer installs socat, its health check would fail"
-    jq -e '.services.cron.healthcheck.test == ["CMD", "pgrep", "-x", "cron"]' \
+    # cron listens on nothing: its probe is kvs-cron-health, the daemon and
+    # a recent completed cron.php run, or the daemon alone in an older
+    # image; tests/integration_cron_health.sh runs it in the cron image.
+    local cron_test='["CMD-SHELL", "if [ -x /usr/local/bin/kvs-cron-health ]; then exec /usr/local/bin/kvs-cron-health; fi; exec pgrep -x cron"]'
+    jq -e --argjson want "$cron_test" '.services.cron.healthcheck.test == $want' \
         "$single_json" >/dev/null ||
-        fail "cron must be probed through its daemon, the container listens on nothing"
+        fail "cron must be probed through kvs-cron-health, with the daemon alone as the fallback"
+    jq -e --argjson want "$cron_test" '.services.cron.healthcheck.test == $want' \
+        "$site_json" >/dev/null ||
+        fail "the cron of a multi-site site must be probed like the primary site's"
+    grep -Fq 'COPY cron-health.sh /usr/local/bin/kvs-cron-health' "$REPO_ROOT/docker/cron/Dockerfile" ||
+        fail "the cron image no longer installs kvs-cron-health"
+    grep -Fq 'install -d -o www-data -g www-data -m 0755 /var/lib/kvs-cron' "$REPO_ROOT/docker/cron/Dockerfile" ||
+        fail "the cron image gives the KVS task no directory for its records"
+    # KVS registers its cron under the hostname and refuses to run for up to
+    # 15 minutes after a recreation that changes it: both compose files give
+    # cron a fixed one, short enough for any site prefix.
+    jq -e '.services.cron.hostname == "kvs-cron"' "$single_json" >/dev/null ||
+        fail "cron must keep a fixed hostname across recreations"
+    jq -e '.services.cron.hostname == "kvs-cron"' "$site_json" >/dev/null ||
+        fail "the cron of a multi-site site must keep a fixed hostname across recreations"
     grep -Fq 'procps' "$REPO_ROOT/docker/cron/Dockerfile" ||
-        fail "the cron image no longer installs procps, pgrep would be missing"
+        fail "the cron image no longer installs procps, pgrep and ps would be missing"
     jq -e '.services.manticore.healthcheck.test ==
         ["CMD-SHELL", "mariadb --skip-ssl -h 127.0.0.1 -P 9306 -e '\''SHOW STATUS'\'' > /dev/null && if [ -e /var/run/manticore/kvs-build-failed ] || [ -e /var/run/manticore/kvs-rebuild-failed ]; then cat /var/run/manticore/kvs-build-failed /var/run/manticore/kvs-rebuild-failed 2> /dev/null; exit 1; fi"]' \
         "$single_json" >/dev/null ||

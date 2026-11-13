@@ -428,7 +428,10 @@ The checks cover:
 - A `SELECT 1` query from PHP using `setup_db.php`, restricted to the local
   MariaDB service, a read-only cache protocol query and optional Manticore
   status. Database credentials are never printed or passed in arguments.
-- The cron daemon and KVS schedule, without running a scheduled job.
+- The cron daemon and KVS schedule, without running a scheduled job, and
+  whether `cron.php` completed a run within the last five minutes (with its
+  last failed run when it did not); a cron image older than that check
+  shows the daemon and schedule only.
 - Disk space, inodes, directory access and actual database/site mounts.
 - Local backup metadata and age, recorded release file checksums and image
   pins. Backup inspection does not decompress or restore the database.

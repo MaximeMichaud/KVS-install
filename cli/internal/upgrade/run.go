@@ -811,9 +811,10 @@ func (r *Runner) cronHandOver(state *instance.State, dir string) bool {
 }
 
 // kvsTaskUser reads a crontab: task reports whether a line that is neither
-// a comment nor a setting runs cron.php, and site whether the first such
-// line names www-data as its user, the sixth field of an /etc/cron.d file.
-// The crontab of a release before e3a1dd3 went to root's own table, whose
+// a comment nor a setting runs the KVS task, cron.php itself or the
+// kvs-cron-run wrapper that runs it, and site whether the first such line
+// names www-data as its user, the sixth field of an /etc/cron.d file. The
+// crontab of a release before e3a1dd3 went to root's own table, whose
 // lines have no user field: its sixth field starts the command.
 func kvsTaskUser(data []byte) (task, site bool) {
 	for _, line := range strings.Split(string(data), "\n") {
@@ -821,11 +822,17 @@ func kvsTaskUser(data []byte) (task, site bool) {
 		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") || strings.Contains(fields[0], "=") {
 			continue
 		}
-		if strings.Contains(line, "cron.php") {
+		if strings.Contains(line, "cron.php") || slices.ContainsFunc(fields, isCronRun) {
 			return true, len(fields) > 6 && fields[5] == "www-data"
 		}
 	}
 	return false, false
+}
+
+// isCronRun reports whether a crontab field names kvs-cron-run, the
+// wrapper of the cron image that runs cron.php, by path or through PATH.
+func isCronRun(field string) bool {
+	return field == "kvs-cron-run" || strings.HasSuffix(field, "/kvs-cron-run")
 }
 
 // handOverSite gives uid and gid 1000 the entries of the site another user

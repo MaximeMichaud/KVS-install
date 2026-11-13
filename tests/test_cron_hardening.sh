@@ -99,8 +99,20 @@ for cron_file in "$KVS_CRON" "$UPDATER_CRON" "$LOG_ROTATE_CRON" "$MANTICORE_CRON
     check_command_syntax "$cron_file"
 done
 
-grep -Eq '^\* \* \* \* \* www-data cd /var/www/kvs/admin/include && /usr/local/bin/php cron\.php ' \
-    "$KVS_CRON" || fail "KVS cron is not assigned to www-data"
+# The KVS task runs as www-data through kvs-cron-run, which runs cron.php,
+# adds its output to the log and records whether the run completed or
+# failed for the health check (cron-run.sh, cron-health.sh,
+# tests/integration_cron_health.sh).
+grep -Eq '^\* \* \* \* \* www-data /usr/local/bin/kvs-cron-run$' \
+    "$KVS_CRON" || fail "KVS cron is not run as www-data through kvs-cron-run"
+grep -Fq 'COPY cron-run.sh /usr/local/bin/kvs-cron-run' "$CRON_DOCKERFILE" ||
+    fail "the cron image does not install kvs-cron-run"
+grep -Eq 'chmod 0755 .*/usr/local/bin/kvs-cron-run' "$CRON_DOCKERFILE" ||
+    fail "kvs-cron-run is not executable in the cron image"
+for expected in 'cd /var/www/kvs/admin/include' '/usr/local/bin/php cron.php' 'log=/var/log/cron.log'; do
+    grep -Fq "$expected" "$ROOT_DIR/docker/cron/cron-run.sh" ||
+        fail "kvs-cron-run does not run cron.php from its directory into the KVS cron log ($expected)"
+done
 if grep -Fq 'yt-dlp' "$KVS_CRON"; then
     fail "the privileged updater is mixed into the KVS crontab"
 fi

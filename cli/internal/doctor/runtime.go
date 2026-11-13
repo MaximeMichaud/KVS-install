@@ -245,11 +245,26 @@ func (r *runner) search(ctx context.Context) Result {
 	return good("Manticore answered SHOW STATUS; no index rebuild failure marker exists")
 }
 
+// cronProbe prints the user the KVS task runs as, then, in an image that
+// ships kvs-cron-health (docker/cron/cron-health.sh), "ok" or "failed" and
+// what it says about the last completed cron.php run, followed on a failure
+// by the last failed run, which kvs-cron-run (docker/cron/cron-run.sh)
+// records: cron.php writes its errors to /var/log/cron.log, not to the
+// container's output, and exits 0 on most of them. The KVS task is
+// kvs-cron-run, or cron.php itself in an older image.
 const cronProbe = `pgrep -x cron >/dev/null && test -r /var/www/kvs/admin/include/cron.php || exit 1
 for user in www-data root; do
-  if grep -Eq "^[[:space:]]*[^#[:space:]].*[[:space:]]${user}[[:space:]].*php[[:space:]]+cron[.]php" /etc/cron.d/kvs-cron /etc/crontab 2>/dev/null ||
+  if grep -Eq "^[[:space:]]*[^#[:space:]].*[[:space:]]${user}[[:space:]].*(php[[:space:]]+cron[.]php|/kvs-cron-run)" /etc/cron.d/kvs-cron /etc/crontab 2>/dev/null ||
      crontab -u "$user" -l 2>/dev/null | grep -Eq '^[[:space:]]*[^#[:space:]].*php[[:space:]]+cron[.]php'; then
-    printf '%s' "$user"; exit 0
+    printf '%s\n' "$user"
+    if [ -x /usr/local/bin/kvs-cron-health ]; then
+      if health=$(/usr/local/bin/kvs-cron-health); then
+        printf 'ok %s\n' "$health"
+      else
+        printf 'failed %s\n' "$health"
+      fi
+    fi
+    exit 0
   fi
 done
 exit 1`
@@ -263,11 +278,30 @@ func (r *runner) cron(ctx context.Context) Result {
 	if err != nil {
 		return failure("Cron daemon, KVS task file or expected schedule is missing", r.command("logs cron --tail 100"))
 	}
-	if strings.TrimSpace(string(out)) == "root" {
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	user := strings.TrimSpace(lines[0])
+	if user == "root" {
 		return warning("KVS cron is installed as root using a legacy schedule", "Review the cron image and migrate the task to the application's unprivileged user")
 	}
-	if strings.TrimSpace(string(out)) != "www-data" {
+	if user != "www-data" {
 		return failure("The KVS cron schedule could not be identified", r.command("logs cron --tail 100"))
 	}
-	return good("Cron daemon and KVS schedule are present; no job was executed")
+	if len(lines) < 2 {
+		// An image older than kvs-cron-health records no cron.php result.
+		return good("Cron daemon and KVS schedule are present; this cron image does not record whether cron.php runs complete")
+	}
+	status, health, _ := strings.Cut(strings.TrimSpace(lines[1]), " ")
+	switch status {
+	case "ok":
+		return good("Cron daemon and KVS schedule are present; " + health)
+	case "failed":
+		var tail []string
+		for _, line := range lines[2:] {
+			if line = strings.TrimRight(line, "\r"); line != "" {
+				tail = append(tail, line)
+			}
+		}
+		return failure("KVS cron.php is not completing its runs: "+health, "Run 'docker compose exec cron tail -n 100 /var/log/cron.log' in "+r.inst.DockerDir, tail...)
+	}
+	return failure("The KVS cron health could not be read", r.command("logs cron --tail 100"))
 }

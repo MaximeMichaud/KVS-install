@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -57,6 +58,49 @@ func TestLegacyCronIsAWarning(t *testing.T) {
 	report := r.run(context.Background())
 	if result := resultByID(t, report, "cron"); result.Status != Warn || !report.Complete || report.ExitCode != 0 {
 		t.Fatalf("%+v", report)
+	}
+}
+
+// The second line of the cron probe is the verdict of kvs-cron-health
+// (docker/cron/cron-health.sh) on the last completed cron.php run, and the
+// last failed run, which kvs-cron-run records, follows a failure;
+// tests/integration_cron_health.sh runs the probe itself in the cron image.
+func TestCronReportsAFailingCronPHP(t *testing.T) {
+	for _, tc := range []struct {
+		name, out, status, message string
+		details                    []string
+	}{
+		{"recent run", "www-data\nok cron.php last completed a run 12 s ago\n", OK, "cron.php last completed a run 12 s ago", nil},
+		{"first window", "www-data\nok cron.php has not completed a run yet, the container started 40 s ago\n", OK, "has not completed a run yet", nil},
+		{"failing", "www-data\nfailed cron.php last completed a run 900 s ago, more than 300 s\nlast failure 20 s ago, exit status 0: [FATAL]: can't connect to database\r\n\n",
+			Fail, "KVS cron.php is not completing its runs: cron.php last completed a run 900 s ago, more than 300 s",
+			[]string{"last failure 20 s ago, exit status 0: [FATAL]: can't connect to database"}},
+		{"no failure recorded", "www-data\nfailed cron.php has not completed a run since the container started 400 s ago: see /var/log/cron.log\n",
+			Fail, "has not completed a run since the container started 400 s ago: see /var/log/cron.log", nil},
+		{"older image", "www-data", OK, "this cron image does not record whether cron.php runs complete", nil},
+		{"unreadable verdict", "www-data\nmaybe\n", Fail, "The KVS cron health could not be read", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := fixture(t)
+			r.opts.Only = []string{"cron"}
+			r.probe.exec = func(_ context.Context, container string, _ io.Reader, args ...string) ([]byte, error) {
+				if container != "cron" || args[len(args)-1] != cronProbe {
+					t.Errorf("unexpected probe in %s: %v", container, args)
+				}
+				return []byte(tc.out), nil
+			}
+			report := r.run(context.Background())
+			result := resultByID(t, report, "cron")
+			if result.Status != tc.status || !strings.Contains(result.Message, tc.message) || !slices.Equal(result.Details, tc.details) {
+				t.Fatalf("%+v", result)
+			}
+			if tc.status == Fail && report.ExitCode == 0 {
+				t.Fatalf("a failing cron check left exit code 0: %+v", report)
+			}
+			if tc.name == "failing" && !strings.Contains(result.Next, "docker compose exec cron tail -n 100 /var/log/cron.log") {
+				t.Fatalf("the next step does not point at cron.log: %q", result.Next)
+			}
+		})
 	}
 }
 

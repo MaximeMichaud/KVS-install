@@ -3,4 +3,7 @@ SHELL=/bin/sh
 PATH=/usr/local/bin:/usr/bin:/bin
 
 # Run KVS as the same UID/GID that owns the shared application files.
-* * * * * www-data cd /var/www/kvs/admin/include && /usr/local/bin/php cron.php >> /var/log/cron.log 2>&1
+# kvs-cron-run (cron-run.sh) runs cron.php, adds its output to
+# /var/log/cron.log and records whether the run completed or failed, which
+# the health check reads (kvs-cron-health, cron-health.sh).
+* * * * * www-data /usr/local/bin/kvs-cron-run
