@@ -12,6 +12,15 @@ PMA_DEFAULT_SHA256=12ba1c425fa4071abbd4e7668c9ebdeac0b0755a467a6d6d5026122bb47c1
 
 TARGET_DIR=${PHPMYADMIN_TARGET_DIR:-/usr/share/phpmyadmin}
 COMPLETION_MARKER="${TARGET_DIR}/.kvs-install-complete"
+# phpMyAdmin runs as kvs-phpmyadmin, UID and GID 999 in the PHP-FPM image
+# (docker/php/Dockerfile), never as the site's www-data of UID 1000: it reads
+# config.inc.php, which it may not change, and alone writes tmp/, where it
+# compiles its templates to PHP. Earlier releases gave both to UID 1000.
+RUNTIME_UID=999
+RUNTIME_GID=999
+LEGACY_UID=1000
+# The PHP-FPM entrypoint keeps the socket of that pool here, for nginx.
+SOCKET_DIR="${TARGET_DIR}/.kvs-fpm"
 # The sample server is localhost, which PHP reaches through a Unix socket that
 # the PHP-FPM container does not have. MariaDB is the "mariadb" Compose service.
 SAMPLE_HOST_LINE="\$cfg['Servers'][\$i]['host'] = 'localhost';"
@@ -25,6 +34,7 @@ CHECKSUM_FILE=
 PROMOTION_DIR=
 BACKUP_DIR=
 MARKER_TMP=
+CONFIG_TMP=
 PROMOTION_IN_PROGRESS=false
 BACKUP_COMPLETE=false
 ORIGINAL_TARGET_UID=
@@ -35,14 +45,117 @@ metadata_is() {
     [ "$(stat -c '%u:%g:%a' "$1" 2>/dev/null)" = "$2" ]
 }
 
+config_is_current() {
+    metadata_is "${TARGET_DIR}/config.inc.php" "0:${RUNTIME_GID}:640"
+}
+
+tmp_is_current() {
+    metadata_is "${TARGET_DIR}/tmp" "${RUNTIME_UID}:${RUNTIME_GID}:700"
+}
+
+config_is_legacy() {
+    metadata_is "${TARGET_DIR}/config.inc.php" "${LEGACY_UID}:${LEGACY_UID}:600"
+}
+
+# Root alone may have written the file: root's, writable by no one else,
+# in a directory that is root's and writable by no one else either. stat
+# reads a link itself, which everyone may write.
+written_by_root_alone() {
+    for path in "$1" "$TARGET_DIR"; do
+        owner_mode=$(stat -c '%u %a' "$path") || return 1
+        [ "${owner_mode% *}" = 0 ] || return 1
+        [ $((0${owner_mode#* } & 022)) -eq 0 ] || return 1
+    done
+}
+
+# Writes the sample configuration <sample> to <output> with a new application
+# secret and the mariadb server entry.
+write_config_from_sample() {
+    BLOWFISH=$(head -c 48 /dev/urandom | base64 | tr -d '=+/' | cut -c 1-32)
+    [ "${#BLOWFISH}" -eq 32 ] || {
+        echo "ERROR: Could not generate the phpMyAdmin application secret" >&2
+        exit 1
+    }
+    sed -e "s|cfg\['blowfish_secret'\] = '';|cfg['blowfish_secret'] = '${BLOWFISH}';|" \
+        -e "$HOST_EDIT" \
+        "$1" > "$2"
+    if grep -Fq "\$cfg['blowfish_secret'] = '';" "$2" ||
+        ! grep -Fq "$BLOWFISH" "$2"; then
+        echo "ERROR: Could not write the phpMyAdmin application secret" >&2
+        exit 1
+    fi
+    unset BLOWFISH
+    if grep -Fqx "$SAMPLE_HOST_LINE" "$2" ||
+        ! grep -Fqx "$MARIADB_HOST_LINE" "$2"; then
+        echo "ERROR: Could not point phpMyAdmin at the mariadb service" >&2
+        exit 1
+    fi
+}
+
+# The sample of the installation can replace a config.inc.php of an earlier
+# release: root alone wrote it, and it is still the sample of a release.
+sample_is_trusted() {
+    sample="${TARGET_DIR}/config.sample.inc.php"
+    [ -f "$sample" ] && written_by_root_alone "$sample" &&
+        grep -Fq "\$cfg['blowfish_secret'] = '';" "$sample" &&
+        grep -Fqx "$SAMPLE_HOST_LINE" "$sample"
+}
+
+# Earlier releases gave config.inc.php to the site's PHP-FPM user, so the
+# site's PHP could have added code to it, which phpMyAdmin would run as its
+# own user, or read its secret. It is written anew from the sample, with a
+# new secret: settings made in it by hand are dropped, and phpMyAdmin's
+# logins end. The new file replaces the old one in a single rename.
+replace_legacy_config() {
+    CONFIG_TMP=$(mktemp "${TARGET_DIR}/.config.inc.php.XXXXXX") || adopt_runtime_owner_failed
+    write_config_from_sample "${TARGET_DIR}/config.sample.inc.php" "$CONFIG_TMP"
+    chown "0:${RUNTIME_GID}" "$CONFIG_TMP" || adopt_runtime_owner_failed
+    chmod 640 "$CONFIG_TMP" || adopt_runtime_owner_failed
+    mv -f "$CONFIG_TMP" "${TARGET_DIR}/config.inc.php" || adopt_runtime_owner_failed
+    CONFIG_TMP=
+    echo "Wrote config.inc.php anew from config.sample.inc.php with a new secret: the site's PHP-FPM user could change the one an earlier release left, and settings made in it by hand are not kept"
+}
+
 is_initialized() {
     [ -f "$COMPLETION_MARKER" ] &&
         [ -s "${TARGET_DIR}/index.php" ] &&
         [ -s "${TARGET_DIR}/config.inc.php" ] &&
+        [ ! -L "${TARGET_DIR}/config.inc.php" ] &&
         [ -d "${TARGET_DIR}/tmp" ] &&
+        [ ! -L "${TARGET_DIR}/tmp" ] &&
         metadata_is "$COMPLETION_MARKER" '0:0:600' &&
-        metadata_is "${TARGET_DIR}/config.inc.php" '1000:1000:600' &&
-        metadata_is "${TARGET_DIR}/tmp" '1000:1000:700'
+        { config_is_current ||
+            metadata_is "${TARGET_DIR}/config.inc.php" "${LEGACY_UID}:${LEGACY_UID}:600"; } &&
+        { tmp_is_current ||
+            metadata_is "${TARGET_DIR}/tmp" "${LEGACY_UID}:${LEGACY_UID}:700"; }
+}
+
+# An installation of an earlier release: its configuration is written anew
+# (replace_legacy_config), owned by root and read by kvs-phpmyadmin. Its tmp/
+# was written by the site's PHP, and phpMyAdmin runs the compiled templates
+# it finds there, so it starts empty. The marker goes first: a run stopped
+# halfway leaves an installation the next run installs again.
+adopt_runtime_owner() {
+    if config_is_current && tmp_is_current; then
+        return 0
+    fi
+    rm -f -- "$COMPLETION_MARKER" || adopt_runtime_owner_failed
+    if config_is_legacy; then
+        replace_legacy_config
+    fi
+    if ! tmp_is_current; then
+        rm -rf -- "${TARGET_DIR}/tmp" || adopt_runtime_owner_failed
+        mkdir "${TARGET_DIR}/tmp" || adopt_runtime_owner_failed
+        chown "${RUNTIME_UID}:${RUNTIME_GID}" "${TARGET_DIR}/tmp" || adopt_runtime_owner_failed
+        chmod 700 "${TARGET_DIR}/tmp" || adopt_runtime_owner_failed
+        echo "Emptied tmp/ and gave it to phpMyAdmin's own PHP-FPM user instead of the site's"
+    fi
+    write_completion_marker
+}
+
+adopt_runtime_owner_failed() {
+    echo "ERROR: Could not give the phpMyAdmin files to its own PHP-FPM user" >&2
+    exit 1
 }
 
 # Written last, through a temporary file that cleanup removes if the run stops.
@@ -91,7 +204,8 @@ remove_target_entries() {
         if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
             continue
         fi
-        if [ "$entry" = "$BACKUP_DIR" ] || [ "$entry" = "$PROMOTION_DIR" ]; then
+        if [ "$entry" = "$BACKUP_DIR" ] || [ "$entry" = "$PROMOTION_DIR" ] ||
+            [ "$entry" = "$SOCKET_DIR" ]; then
             continue
         fi
         rm -rf -- "$entry" || return 1
@@ -132,6 +246,7 @@ cleanup() {
         status=1
     fi
     [ -n "$MARKER_TMP" ] && rm -f -- "$MARKER_TMP"
+    [ -n "$CONFIG_TMP" ] && rm -f -- "$CONFIG_TMP"
     [ -n "$PROMOTION_DIR" ] && rm -rf -- "$PROMOTION_DIR"
     if [ "$rollback_failed" = false ] && [ -n "$BACKUP_DIR" ]; then
         rm -rf -- "$BACKUP_DIR"
@@ -147,9 +262,15 @@ trap 'exit 130' 2
 trap 'exit 143' 15
 
 if is_initialized; then
-    echo "phpMyAdmin is already initialized"
-    repair_database_host
-    exit 0
+    if config_is_legacy && ! sample_is_trusted; then
+        # Nothing root alone wrote to start the configuration from.
+        echo "config.inc.php of an earlier release cannot be written anew from a sample only root wrote: installing phpMyAdmin again"
+    else
+        echo "phpMyAdmin is already initialized"
+        adopt_runtime_owner
+        repair_database_host
+        exit 0
+    fi
 fi
 
 apk add --no-cache curl tar grep sed >/dev/null
@@ -217,25 +338,7 @@ grep -Fqx "$SAMPLE_HOST_LINE" "${STAGING_DIR}/config.sample.inc.php" || {
     exit 1
 }
 
-BLOWFISH=$(head -c 48 /dev/urandom | base64 | tr -d '=+/' | cut -c 1-32)
-[ "${#BLOWFISH}" -eq 32 ] || {
-    echo "ERROR: Could not generate the phpMyAdmin application secret" >&2
-    exit 1
-}
-sed -e "s|cfg\['blowfish_secret'\] = '';|cfg['blowfish_secret'] = '${BLOWFISH}';|" \
-    -e "$HOST_EDIT" \
-    "${STAGING_DIR}/config.sample.inc.php" > "${STAGING_DIR}/config.inc.php"
-if grep -Fq "\$cfg['blowfish_secret'] = '';" "${STAGING_DIR}/config.inc.php" ||
-    ! grep -Fq "$BLOWFISH" "${STAGING_DIR}/config.inc.php"; then
-    echo "ERROR: Could not write the phpMyAdmin application secret" >&2
-    exit 1
-fi
-unset BLOWFISH
-if grep -Fqx "$SAMPLE_HOST_LINE" "${STAGING_DIR}/config.inc.php" ||
-    ! grep -Fqx "$MARIADB_HOST_LINE" "${STAGING_DIR}/config.inc.php"; then
-    echo "ERROR: Could not point phpMyAdmin at the mariadb service" >&2
-    exit 1
-fi
+write_config_from_sample "${STAGING_DIR}/config.sample.inc.php" "${STAGING_DIR}/config.inc.php"
 
 if [ -e "$TARGET_DIR" ] && [ ! -d "$TARGET_DIR" ]; then
     echo "ERROR: phpMyAdmin target exists but is not a directory" >&2
@@ -254,8 +357,9 @@ cp -a "${STAGING_DIR}/." "$PROMOTION_DIR/"
 chown -R 0:0 "$PROMOTION_DIR"
 find "$PROMOTION_DIR" -type d -exec chmod 755 {} \;
 find "$PROMOTION_DIR" -type f -exec chmod 644 {} \;
-chown 1000:1000 "${PROMOTION_DIR}/config.inc.php" "${PROMOTION_DIR}/tmp"
-chmod 600 "${PROMOTION_DIR}/config.inc.php"
+chown "0:${RUNTIME_GID}" "${PROMOTION_DIR}/config.inc.php"
+chown "${RUNTIME_UID}:${RUNTIME_GID}" "${PROMOTION_DIR}/tmp"
+chmod 640 "${PROMOTION_DIR}/config.inc.php"
 chmod 700 "${PROMOTION_DIR}/tmp"
 
 BACKUP_DIR=$(mktemp -d "${TARGET_DIR}/.kvs-install-backup.XXXXXX")
@@ -268,7 +372,8 @@ do
     if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
         continue
     fi
-    if [ "$entry" = "$PROMOTION_DIR" ] || [ "$entry" = "$BACKUP_DIR" ]; then
+    if [ "$entry" = "$PROMOTION_DIR" ] || [ "$entry" = "$BACKUP_DIR" ] ||
+        [ "$entry" = "$SOCKET_DIR" ]; then
         continue
     fi
     mv -- "$entry" "$BACKUP_DIR/"

@@ -162,6 +162,18 @@ EOF
     chown -R 0:0 "$target"
     chmod 0755 "$target" "${target}/libraries"
     chmod 0644 "${target}/index.php" "${target}/libraries/legacy.txt"
+    # The owners phpMyAdmin runs with: root's configuration, which its own
+    # PHP-FPM user (999) reads, and a tmp/ only that user opens.
+    chown 0:999 "${target}/config.inc.php"
+    chown -R 999:999 "${target}/tmp"
+    chmod 0640 "${target}/config.inc.php"
+    chmod 0700 "${target}/tmp"
+}
+
+# What earlier releases left: both files for the site's PHP-FPM user.
+seed_legacy_owners() {
+    local target="$1"
+
     chown -R 1000:1000 "${target}/config.inc.php" "${target}/tmp"
     chmod 0600 "${target}/config.inc.php"
     chmod 0700 "${target}/tmp"
@@ -299,10 +311,10 @@ grep -Fq 'new phpMyAdmin' "${success_target}/index.php" ||
     fail "the completion marker has invalid content"
 [ "$(stat -c '%u:%g:%a' "${success_target}/.kvs-install-complete")" = '0:0:600' ] ||
     fail "the completion marker is not private and root-owned"
-[ "$(stat -c '%u:%g:%a' "${success_target}/config.inc.php")" = '1000:1000:600' ] ||
-    fail "config.inc.php is not private and readable by PHP-FPM"
-[ "$(stat -c '%u:%g:%a' "${success_target}/tmp")" = '1000:1000:700' ] ||
-    fail "the phpMyAdmin temporary directory is not private and writable by PHP-FPM"
+[ "$(stat -c '%u:%g:%a' "${success_target}/config.inc.php")" = '0:999:640' ] ||
+    fail "config.inc.php must be root's, readable by phpMyAdmin's own PHP-FPM user only: $(stat -c '%u:%g:%a' "${success_target}/config.inc.php")"
+[ "$(stat -c '%u:%g:%a' "${success_target}/tmp")" = '999:999:700' ] ||
+    fail "the phpMyAdmin temporary directory must be private to phpMyAdmin's own PHP-FPM user: $(stat -c '%u:%g:%a' "${success_target}/tmp")"
 [ "$(stat -c '%u:%g:%a' "${success_target}/index.php")" = '0:0:644' ] ||
     fail "phpMyAdmin application code remains writable by PHP-FPM"
 [ "$(stat -c '%u:%g:%a' "$success_target")" = '0:0:755' ] ||
@@ -345,6 +357,9 @@ seed_initialized_installation() {
         > "${target}/config.inc.php"
     printf '%s\n' complete > "${target}/.kvs-install-complete"
     chmod 0600 "${target}/.kvs-install-complete"
+    # The sample every release ships, root's like the rest of its code.
+    cp "${valid_root}/config.sample.inc.php" "${target}/config.sample.inc.php"
+    chmod 0644 "${target}/config.sample.inc.php"
 }
 
 repair_dir="${TEST_DIR}/repair"
@@ -368,7 +383,7 @@ grep -Fxq 'Switched the sample localhost server entry of config.inc.php to maria
     "${repair_dir}/first.log" || fail "the database host repair was not reported"
 cmp -s "${repair_dir}/expected.php" "$repair_config" ||
     fail "the database host repair changed more than the sample host line"
-[ "$(stat -c '%i:%u:%g:%a' "$repair_config")" = "${repair_inode}:1000:1000:600" ] ||
+[ "$(stat -c '%i:%u:%g:%a' "$repair_config")" = "${repair_inode}:0:999:640" ] ||
     fail "the database host repair replaced config.inc.php or changed its metadata"
 [ "$(stat -c '%u:%g:%a' "${repair_target}/.kvs-install-complete")" = '0:0:600' ] ||
     fail "the database host repair changed the completion marker"
@@ -479,6 +494,272 @@ grep -Fq 'ERROR: Could not point phpMyAdmin at the mariadb service' \
     fail "a repair that could not remove the completion marker was not reported"
 assert_no_transients "$kept_target" "$kept_temp"
 
+# Earlier releases left config.inc.php and tmp/ to the site's PHP-FPM user
+# (1000). A rerun hands them to phpMyAdmin's own user (999) without
+# downloading anything. The site's PHP could have added code to that
+# config.inc.php, which phpMyAdmin would run, so it is written anew from the
+# sample root installed, with a new secret and the mariadb host, and what was
+# set in it by hand is dropped. tmp/ starts empty, since phpMyAdmin runs the
+# templates it compiled there and the site's PHP could write them.
+REWRITTEN_CONFIG="Wrote config.inc.php anew from config.sample.inc.php with a new secret: the site's PHP-FPM user could change the one an earlier release left, and settings made in it by hand are not kept"
+EMPTIED_TMP="Emptied tmp/ and gave it to phpMyAdmin's own PHP-FPM user instead of the site's"
+
+# assert_config_from_sample <name> <config> <sample>: <config> is <sample>
+# with a new 32-character secret and the mariadb server entry, and nothing
+# else.
+assert_config_from_sample() {
+    local name="$1"
+    local config="$2"
+    local sample="$3"
+    local secret
+
+    secret=$(sed -n "s/^\$cfg\['blowfish_secret'\] = '\([A-Za-z0-9]\{32\}\)';$/\1/p" "$config")
+    [ "${#secret}" -eq 32 ] || fail "${name}: config.inc.php has no new secret: $(cat "$config")"
+    sed -e "s/^\$cfg\['blowfish_secret'\] = '';$/\$cfg['blowfish_secret'] = '${secret}';/" \
+        -e "s/^\$cfg\['Servers'\]\[\$i\]\['host'\] = 'localhost';$/\$cfg['Servers'][\$i]['host'] = 'mariadb';/" \
+        "$sample" | cmp -s - "$config" ||
+        fail "${name}: config.inc.php is not the sample with a new secret and the mariadb host: $(cat "$config")"
+}
+
+assert_owners_handed_over() {
+    local name="$1"
+    local legacy_config="$2"
+    local legacy_tmp="$3"
+    local case_dir="${TEST_DIR}/${name}"
+    local target="${case_dir}/target"
+    local temp_root="${case_dir}/tmp"
+    local config="${target}/config.inc.php"
+    local inode
+    local fingerprint
+    local expected_output='phpMyAdmin is already initialized'
+
+    mkdir -p "$target" "$temp_root"
+    seed_initialized_installation "$target" "$MARIADB_HOST_LINE" "\$cfg['Custom'] = 'kept';" \
+        "\$cfg['blowfish_secret'] = 'secret-of-the-earlier-release';"  # pragma: allowlist secret
+    mkdir -p "${target}/tmp/twig/aa"
+    printf '%s\n' '<?php /* compiled by the site */' > "${target}/tmp/twig/aa/compiled.php"
+    chown -R 999:999 "${target}/tmp"
+    if [ "$legacy_config" = true ]; then
+        # What the site's PHP could add to the file it owned.
+        # shellcheck disable=SC2016  # PHP code, written as it is.
+        printf '%s\n' 'file_put_contents("/tmp/stolen", $cfg["blowfish_secret"]);' >> "$config"
+        chown 1000:1000 "$config"
+        chmod 0600 "$config"
+        expected_output="${expected_output}
+${REWRITTEN_CONFIG}"
+    fi
+    if [ "$legacy_tmp" = true ]; then
+        chown -R 1000:1000 "${target}/tmp"
+        expected_output="${expected_output}
+${EMPTIED_TMP}"
+    fi
+    cp "$config" "${case_dir}/config.before"
+    inode=$(stat -c '%i' "$config")
+    run_init download-failure "$target" "$temp_root" "${case_dir}/first.log" \
+        "${case_dir}/curl.log" "${case_dir}/apk.log" ||
+        fail "${name}: an installation of an earlier release must be taken over: $(cat "${case_dir}/first.log")"
+    [ "$(cat "${case_dir}/first.log")" = "$expected_output" ] ||
+        fail "${name}: the hand-over was not reported: $(cat "${case_dir}/first.log")"
+    [ "$(stat -c '%u:%g:%a' "$config")" = 0:999:640 ] && [ -f "$config" ] && [ ! -L "$config" ] ||
+        fail "${name}: config.inc.php must be root's and read by 999: $(stat -c '%u:%g:%a' "$config")"
+    if [ "$legacy_config" = true ]; then
+        assert_config_from_sample "$name" "$config" "${target}/config.sample.inc.php"
+        if grep -Eq 'stolen|Custom|secret-of-the-earlier-release' "$config"; then
+            fail "${name}: what the site's user could write in config.inc.php was kept"
+        fi
+    else
+        cmp -s "${case_dir}/config.before" "$config" && [ "$(stat -c '%i' "$config")" = "$inode" ] ||
+            fail "${name}: the hand-over changed a configuration root wrote"
+    fi
+    [ "$(stat -c '%u:%g:%a' "${target}/tmp")" = '999:999:700' ] ||
+        fail "${name}: tmp/ must be private to 999: $(stat -c '%u:%g:%a' "${target}/tmp")"
+    if [ "$legacy_tmp" = true ]; then
+        [ -z "$(find "${target}/tmp" -mindepth 1 -print -quit)" ] ||
+            fail "${name}: what the site's PHP wrote in tmp/ was kept"
+    else
+        [ -s "${target}/tmp/twig/aa/compiled.php" ] ||
+            fail "${name}: a tmp/ only phpMyAdmin wrote must be kept"
+    fi
+    [ "$(stat -c '%u:%g:%a' "${target}/.kvs-install-complete")" = '0:0:600' ] &&
+        [ "$(cat "${target}/.kvs-install-complete")" = complete ] ||
+        fail "${name}: the hand-over left no valid completion marker"
+    [ ! -s "${case_dir}/curl.log" ] || fail "${name}: the hand-over attempted a download"
+    [ ! -s "${case_dir}/apk.log" ] || fail "${name}: the hand-over attempted package installation"
+    if find "$target" -maxdepth 1 -name '.config.inc.php.*' -print -quit | grep -q .; then
+        fail "${name}: the hand-over left its temporary configuration behind"
+    fi
+    assert_no_transients "$target" "$temp_root"
+
+    fingerprint=$(tree_fingerprint "$target")
+    run_init download-failure "$target" "$temp_root" "${case_dir}/second.log" \
+        "${case_dir}/curl.log" "${case_dir}/apk.log" ||
+        fail "${name}: the rerun after the hand-over failed"
+    [ "$(cat "${case_dir}/second.log")" = 'phpMyAdmin is already initialized' ] ||
+        fail "${name}: a rerun handed the files over again: $(cat "${case_dir}/second.log")"
+    [ "$(tree_fingerprint "$target")" = "$fingerprint" ] ||
+        fail "${name}: a rerun changed the installation"
+}
+
+assert_owners_handed_over legacy-both true true
+assert_owners_handed_over legacy-config true false
+assert_owners_handed_over legacy-tmp false true
+
+# Two hand-overs give two secrets.
+[ "$(grep blowfish_secret "${TEST_DIR}/legacy-both/target/config.inc.php")" != \
+    "$(grep blowfish_secret "${TEST_DIR}/legacy-config/target/config.inc.php")" ] ||
+    fail "config.inc.php was written anew with a secret that is not new"
+
+# Without a sample root alone wrote, there is nothing to write config.inc.php
+# anew from: phpMyAdmin is installed again, which writes it from the sample
+# of the verified release, and a failed download leaves the installation as
+# it was, which the PHP-FPM entrypoint does not serve.
+assert_legacy_config_reinstalled() {
+    local name="$1"
+    local case_dir="${TEST_DIR}/reinstall-${name}"
+    local target="${case_dir}/target"
+    local sample="${target}/config.sample.inc.php"
+    local fingerprint
+
+    for mode in download-failure valid; do
+        rm -rf "$case_dir"
+        mkdir -p "$target" "${case_dir}/tmp"
+        seed_initialized_installation "$target" "$MARIADB_HOST_LINE"
+        seed_legacy_owners "$target"
+        case "$name" in
+            sample-of-the-site) chown 1000:1000 "$sample" ;;
+            sample-group-writable) chown 0:1000 "$sample"; chmod 0664 "$sample" ;;
+            sample-link)
+                mv "$sample" "${case_dir}/sample.real"
+                ln -s "${case_dir}/sample.real" "$sample"
+                ;;
+            sample-missing) rm -f "$sample" ;;
+            sample-changed) sed -i '/blowfish_secret/d' "$sample" ;;
+            sample-host-changed) sed -i "s/'localhost'/'127.0.0.1'/" "$sample" ;;
+            directory-of-the-site) chown 1000:1000 "$target" ;;
+        esac
+        fingerprint=$(tree_fingerprint "$target")
+        if [ "$mode" = download-failure ]; then
+            if run_init "$mode" "$target" "${case_dir}/tmp" "${case_dir}/output.log" \
+                "${case_dir}/curl.log" "${case_dir}/apk.log"; then
+                fail "${name}: config.inc.php was taken over from a sample root alone did not write: $(cat "${case_dir}/output.log")"
+            fi
+            [ "$(tree_fingerprint "$target")" = "$fingerprint" ] ||
+                fail "${name}: a failed installation changed the installation of the earlier release"
+            [ "$(stat -c '%u:%g:%a' "${target}/config.inc.php")" = 1000:1000:600 ] ||
+                fail "${name}: a failed installation took config.inc.php over"
+        else
+            run_init "$mode" "$target" "${case_dir}/tmp" "${case_dir}/output.log" \
+                "${case_dir}/curl.log" "${case_dir}/apk.log" ||
+                fail "${name}: phpMyAdmin was not installed again: $(cat "${case_dir}/output.log")"
+            grep -Fq 'new phpMyAdmin' "${target}/index.php" ||
+                fail "${name}: the verified release was not installed"
+            [ "$(stat -c '%u:%g:%a' "${target}/config.inc.php")" = 0:999:640 ] ||
+                fail "${name}: the new config.inc.php is not root's"
+            assert_config_from_sample "$name" "${target}/config.inc.php" "${valid_root}/config.sample.inc.php"
+        fi
+        grep -Fxq 'config.inc.php of an earlier release cannot be written anew from a sample only root wrote: installing phpMyAdmin again' \
+            "${case_dir}/output.log" || fail "${name}: the new installation was not explained: $(cat "${case_dir}/output.log")"
+        [ -s "${case_dir}/curl.log" ] || fail "${name}: no download was attempted"
+        assert_no_transients "$target" "${case_dir}/tmp"
+    done
+}
+
+assert_legacy_config_reinstalled sample-of-the-site
+assert_legacy_config_reinstalled sample-group-writable
+assert_legacy_config_reinstalled sample-link
+assert_legacy_config_reinstalled sample-missing
+assert_legacy_config_reinstalled sample-changed
+assert_legacy_config_reinstalled sample-host-changed
+assert_legacy_config_reinstalled directory-of-the-site
+
+# The marker goes before the files change hands: a hand-over that fails
+# halfway leaves no marker, so the next run installs phpMyAdmin again rather
+# than taking the half-moved files for an installation.
+handover_dir="${TEST_DIR}/handover-failure"
+handover_target="${handover_dir}/target"
+handover_temp="${handover_dir}/tmp"
+mkdir -p "$handover_target" "$handover_temp" "${handover_dir}/bin"
+cat > "${handover_dir}/bin/chown" <<'MOCK'
+#!/bin/sh
+case "$*" in
+    */tmp)
+        exit 1
+        ;;
+esac
+exec "${MOCK_REAL_CHOWN:?}" "$@"
+MOCK
+chmod 0755 "${handover_dir}/bin/chown"
+seed_initialized_installation "$handover_target" "$MARIADB_HOST_LINE"
+seed_legacy_owners "$handover_target"
+if MOCK_REAL_CHOWN="$(command -v chown)" PATH="${handover_dir}/bin:$PATH" \
+    run_init download-failure "$handover_target" "$handover_temp" "${handover_dir}/output.log" \
+    "${handover_dir}/curl.log" "${handover_dir}/apk.log"; then
+    fail "a hand-over that could not give tmp/ to phpMyAdmin succeeded"
+fi
+grep -Fxq "ERROR: Could not give the phpMyAdmin files to its own PHP-FPM user" \
+    "${handover_dir}/output.log" || fail "a failed hand-over was not reported: $(cat "${handover_dir}/output.log")"
+[ ! -e "${handover_target}/.kvs-install-complete" ] ||
+    fail "a failed hand-over kept the completion marker"
+
+# A configuration written anew that cannot become root's leaves the one of the
+# earlier release as it was, and no temporary file.
+rewrite_dir="${TEST_DIR}/rewrite-failure"
+rewrite_target="${rewrite_dir}/target"
+mkdir -p "$rewrite_target" "${rewrite_dir}/tmp" "${rewrite_dir}/bin"
+sed 's|\*/tmp)|*/.config.inc.php.*)|' "${handover_dir}/bin/chown" > "${rewrite_dir}/bin/chown"
+chmod 0755 "${rewrite_dir}/bin/chown"
+seed_initialized_installation "$rewrite_target" "$MARIADB_HOST_LINE"
+seed_legacy_owners "$rewrite_target"
+cp "${rewrite_target}/config.inc.php" "${rewrite_dir}/config.before"
+rewrite_inode=$(stat -c '%i' "${rewrite_target}/config.inc.php")
+if MOCK_REAL_CHOWN="$(command -v chown)" PATH="${rewrite_dir}/bin:$PATH" \
+    run_init download-failure "$rewrite_target" "${rewrite_dir}/tmp" "${rewrite_dir}/output.log" \
+    "${rewrite_dir}/curl.log" "${rewrite_dir}/apk.log"; then
+    fail "a configuration that could not become root's was written"
+fi
+grep -Fxq "ERROR: Could not give the phpMyAdmin files to its own PHP-FPM user" \
+    "${rewrite_dir}/output.log" || fail "a failed rewrite was not reported: $(cat "${rewrite_dir}/output.log")"
+{ [ "$(stat -c '%i:%u:%g:%a' "${rewrite_target}/config.inc.php")" = "${rewrite_inode}:1000:1000:600" ] &&
+    cmp -s "${rewrite_dir}/config.before" "${rewrite_target}/config.inc.php"; } ||
+    fail "a failed rewrite changed the configuration of the earlier release"
+[ ! -e "${rewrite_target}/.kvs-install-complete" ] || fail "a failed rewrite kept the completion marker"
+if find "$rewrite_target" -maxdepth 1 -name '.config.inc.php.*' -print -quit | grep -q .; then
+    fail "a failed rewrite left its temporary configuration behind"
+fi
+
+# The PHP-FPM entrypoint keeps the socket of phpMyAdmin's pool in .kvs-fpm,
+# where nginx opens it, while PHP-FPM runs. Installing phpMyAdmin again, or
+# rolling a failed installation back, leaves it in place.
+make_socket() {
+    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"
+}
+
+for socket_case in installed rolled-back; do
+    case_dir="${TEST_DIR}/socket-${socket_case}"
+    target="${case_dir}/target"
+    mkdir -p "$target" "${case_dir}/tmp" "${target}/.kvs-fpm"
+    seed_complete_installation "$target"
+    make_socket "${target}/.kvs-fpm/php-fpm.sock"
+    socket_inode=$(stat -c '%i' "${target}/.kvs-fpm/php-fpm.sock")
+    if [ "$socket_case" = installed ]; then
+        run_init valid "$target" "${case_dir}/tmp" "${case_dir}/output.log" \
+            "${case_dir}/curl.log" "${case_dir}/apk.log" ||
+            fail "phpMyAdmin did not install beside the socket of its pool: $(cat "${case_dir}/output.log")"
+        grep -Fq 'new phpMyAdmin' "${target}/index.php" ||
+            fail "the verified release was not promoted beside the socket of its pool"
+    elif run_init valid "$target" "${case_dir}/tmp" "${case_dir}/output.log" \
+        "${case_dir}/curl.log" "${case_dir}/apk.log" 6; then
+        fail "a failed phpMyAdmin promotion beside the socket returned success"
+    else
+        grep -Fq 'legacy phpMyAdmin' "${target}/index.php" ||
+            fail "a failed promotion beside the socket did not restore the previous installation"
+    fi
+    [ -S "${target}/.kvs-fpm/php-fpm.sock" ] &&
+        [ "$(stat -c '%i' "${target}/.kvs-fpm/php-fpm.sock")" = "$socket_inode" ] ||
+        fail "${socket_case}: the socket of the phpMyAdmin pool did not stay in place"
+    assert_no_transients "$target" "${case_dir}/tmp"
+done
+
 # Exercise the same script with Alpine's BusyBox tools, in the Alpine image
 # the release pins for phpmyadmin-init (docker/images.lock), never whatever
 # alpine:latest a machine has cached. It is pulled when missing, and only
@@ -517,8 +798,8 @@ if [ "$alpine_ready" = true ]; then
         -v "${RUNTIME_VOLUME}:/usr/share/phpmyadmin:ro" \
         "$ALPINE_IMAGE" sh -ceu '
             [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/.kvs-install-complete)" = 0:0:600 ]
-            [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/config.inc.php)" = 1000:1000:600 ]
-            [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/tmp)" = 1000:1000:700 ]
+            [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/config.inc.php)" = 0:999:640 ]
+            [ "$(stat -c "%u:%g:%a" /usr/share/phpmyadmin/tmp)" = 999:999:700 ]
             [ -s /usr/share/phpmyadmin/index.php ]
         ' || fail "the Alpine runtime produced unsafe phpMyAdmin metadata"
     # Put back the localhost line of earlier installations. Its repair runs
@@ -539,7 +820,7 @@ if [ "$alpine_ready" = true ]; then
             grep -Fqx "$EXPECTED_HOST_LINE" "$config"
             printf "%s\n" "<?php" "$LEGACY_HOST_LINE" "// $LEGACY_HOST_LINE" > "$config"
             metadata=$(stat -c "%i:%u:%g:%a" "$config")
-            [ "${metadata#*:}" = 1000:1000:600 ]
+            [ "${metadata#*:}" = 0:999:640 ]
             init-phpmyadmin > /tmp/repair.log
             grep -Fqx "Switched the sample localhost server entry of config.inc.php to mariadb" \
                 /tmp/repair.log
@@ -551,6 +832,43 @@ if [ "$alpine_ready" = true ]; then
             [ ! -e /tmp/curl.log ]
             [ ! -e /tmp/apk.log ]
         ' || fail "the Alpine runtime did not write or repair the database host in place"
+    # Give the files back to the site's user, as earlier releases did, and
+    # let BusyBox hand them to phpMyAdmin's own user again.
+    docker run --rm --pull never --network none \
+        -e MOCK_CURL_MODE=download-failure \
+        -e MOCK_CURL_LOG=/tmp/curl.log \
+        -e MOCK_APK_LOG=/tmp/apk.log \
+        -e MOCK_REAL_MV=/bin/mv \
+        -e PATH=/mock:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        -v "${RUNTIME_VOLUME}:/usr/share/phpmyadmin" \
+        -v "${INIT_SCRIPT}:/usr/local/bin/init-phpmyadmin:ro" \
+        -v "${MOCK_BIN}:/mock:ro" \
+        -e REWRITTEN_CONFIG="$REWRITTEN_CONFIG" \
+        -e EMPTIED_TMP="$EMPTIED_TMP" \
+        -e EXPECTED_HOST_LINE="$MARIADB_HOST_LINE" \
+        "$ALPINE_IMAGE" sh -ceu '
+            root=/usr/share/phpmyadmin
+            mkdir -p "$root/tmp/twig"
+            echo "<?php" > "$root/tmp/twig/compiled.php"
+            echo "file_put_contents(\"/tmp/stolen\", \"x\");" >> "$root/config.inc.php"
+            old_secret=$(grep blowfish_secret "$root/config.inc.php" || true)
+            chown -R 1000:1000 "$root/config.inc.php" "$root/tmp"
+            chmod 600 "$root/config.inc.php"
+            init-phpmyadmin > /tmp/handover.log
+            grep -Fxq "$REWRITTEN_CONFIG" /tmp/handover.log
+            grep -Fxq "$EMPTIED_TMP" /tmp/handover.log
+            [ "$(stat -c "%u:%g:%a" "$root/config.inc.php")" = 0:999:640 ]
+            ! grep -Fq stolen "$root/config.inc.php"
+            new_secret=$(grep blowfish_secret "$root/config.inc.php")
+            [ "$new_secret" != "$old_secret" ]
+            printf "%s\n" "$new_secret" | grep -Eq "= .[A-Za-z0-9]{32}.;$"
+            grep -Fqx "$EXPECTED_HOST_LINE" "$root/config.inc.php"
+            [ "$(stat -c "%u:%g:%a" "$root/tmp")" = 999:999:700 ]
+            [ -z "$(find "$root/tmp" -mindepth 1)" ]
+            [ -z "$(find "$root" -maxdepth 1 -name ".config.inc.php.*")" ]
+            [ ! -e /tmp/curl.log ]
+            [ ! -e /tmp/apk.log ]
+        ' || fail "the Alpine runtime did not hand the files of an earlier release to phpMyAdmin's own user"
     docker volume rm -f "$RUNTIME_VOLUME" >/dev/null
     RUNTIME_VOLUME=
 fi

@@ -172,11 +172,115 @@ apply_session_storage() {
     echo "PHP sessions kept in the php-sessions volume (${directory})"
 }
 
+# phpMyAdmin is where the MariaDB root password is typed, so it does not run
+# as the site's www-data: PHP code of the site (a hole in KVS or in a plugin)
+# could rewrite config.inc.php, or a template phpMyAdmin compiled to PHP in
+# tmp/, and keep the password of the next login, or read the sessions and
+# config.inc.php, which hold the keys of phpMyAdmin's login cookies. It runs
+# in a PHP-FPM pool of its own as kvs-phpmyadmin, which listens on a socket
+# only the group of nginx's workers may open: on a port, PHP code of the site
+# could send that pool FastCGI requests of its own, with the PHP settings it
+# likes. The two pools share the OPcache memory, where the site's PHP would
+# run phpMyAdmin's cached config.inc.php though it may not read the file:
+# validate_permission makes OPcache check that first. config.inc.php and
+# tmp/ belonged to www-data in earlier releases. A tmp/ owned by anyone else
+# than kvs-phpmyadmin is emptied and taken over at every start. A
+# config.inc.php that root alone may not have written is not: the site's PHP
+# could have added code to it, which this pool would run, so phpMyAdmin is
+# not served until docker/phpmyadmin/init.sh writes it anew (status 2). That
+# script installs phpMyAdmin with the same owners.
+prepare_phpmyadmin_files() {
+    local directory="$1"
+    local uid="$2"
+    local gid="$3"
+    local socket_directory="${directory}/.kvs-fpm"
+    local config="${directory}/config.inc.php"
+    local tmp="${directory}/tmp"
+
+    chown 0:0 "$directory" && chmod 0755 "$directory" || return 1
+    if [ -L "$socket_directory" ] || { [ -e "$socket_directory" ] && [ ! -d "$socket_directory" ]; }; then
+        rm -f -- "$socket_directory" || return 1
+    fi
+    mkdir -p "$socket_directory" && chown 0:0 "$socket_directory" &&
+        chmod 0755 "$socket_directory" || return 1
+    if [ -L "$config" ]; then
+        return 1
+    fi
+    if [ -f "$config" ]; then
+        local config_owner config_mode
+        config_owner=$(stat -c %u "$config") && config_mode=$(stat -c %a "$config") || return 1
+        if [ "$config_owner" != 0 ] || (( 8#$config_mode & 8#022 )); then
+            return 2
+        fi
+        chown "0:${gid}" "$config" && chmod 0640 "$config" || return 1
+    fi
+    if [ -L "$tmp" ] || { [ -e "$tmp" ] && { [ ! -d "$tmp" ] ||
+        [ "$(stat -c %u:%g "$tmp")" != "${uid}:${gid}" ]; }; }; then
+        rm -rf -- "$tmp" && mkdir "$tmp" || return 1
+    fi
+    if [ -d "$tmp" ]; then
+        chown "${uid}:${gid}" "$tmp" && chmod 0700 "$tmp" || return 1
+    fi
+}
+
+apply_phpmyadmin_pool() {
+    local directory=/usr/share/phpmyadmin
+    local pool_conf=/usr/local/etc/php-fpm.d/zz-kvs-phpmyadmin.conf
+    local opcache_ini=/usr/local/etc/php/conf.d/zz-kvs-phpmyadmin.ini
+    local uid
+    local gid
+    local prepared=0
+
+    rm -f "$pool_conf" "$opcache_ini"
+    if [ ! -d "$directory" ]; then
+        echo "phpMyAdmin is not mounted on ${directory}, so its PHP-FPM pool is not started"
+        return
+    fi
+    if ! uid=$(id -u kvs-phpmyadmin) || ! gid=$(id -g kvs-phpmyadmin); then
+        prepared=1
+    else
+        prepare_phpmyadmin_files "$directory" "$uid" "$gid" || prepared=$?
+    fi
+    if [ "$prepared" -eq 2 ]; then
+        echo "WARNING: ${directory}/config.inc.php may have been written by another user than root, as earlier releases let the site's PHP do, so phpMyAdmin is not served until phpmyadmin-init writes it anew: run setup.sh, or docker compose --profile setup run --rm phpmyadmin-init, then docker compose restart php-fpm" >&2
+        return
+    fi
+    if [ "$prepared" -ne 0 ]; then
+        echo "WARNING: cannot give ${directory} to kvs-phpmyadmin, so phpMyAdmin is not served" >&2
+        return
+    fi
+    # Before the pool: without it, the site's PHP reads what the pool caches.
+    {
+        echo "; Written by docker-entrypoint.sh with the phpMyAdmin pool."
+        echo "opcache.validate_permission = 1"
+    } > "$opcache_ini"
+    # nginx's workers run as the nginx user of its image, GID 101.
+    cat > "$pool_conf" << EOF
+; Written by docker-entrypoint.sh: phpMyAdmin, apart from the site's PHP.
+[phpmyadmin]
+user = kvs-phpmyadmin
+group = kvs-phpmyadmin
+listen = ${directory}/.kvs-fpm/php-fpm.sock
+listen.owner = kvs-phpmyadmin
+listen.group = 101
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 4
+pm.process_idle_timeout = 60s
+security.limit_extensions = .php
+php_admin_value[session.save_path] = /var/lib/kvs-phpmyadmin/sessions
+php_admin_value[upload_tmp_dir] = /var/lib/kvs-phpmyadmin/tmp
+php_admin_value[sys_temp_dir] = /var/lib/kvs-phpmyadmin/tmp
+EOF
+    echo "phpMyAdmin runs in its own PHP-FPM pool as kvs-phpmyadmin"
+}
+
 case "${1:-}" in
     php-fpm|/usr/local/sbin/php-fpm)
         # shellcheck source=docker/php/fpm-config.sh
         source /usr/local/lib/kvs/fpm-config.sh
         configure_php_fpm
+        apply_phpmyadmin_pool
         ;;
 esac
 

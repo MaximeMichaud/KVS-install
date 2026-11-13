@@ -321,6 +321,17 @@ RUN ln -sf /usr/local/bin/php /usr/bin/php \
     && usermod -u 1000 www-data && groupmod -g 1000 www-data \
     && install -d -o www-data -g www-data -m 0700 /var/lib/php/sessions
 
+# phpMyAdmin runs in a PHP-FPM pool of its own as kvs-phpmyadmin, UID and GID
+# 999, the owner docker/phpmyadmin/init.sh gives its files, never as the
+# site's www-data (docker-entrypoint.sh writes the pool). Its sessions and
+# temporary files stay in a directory only that user opens.
+RUN groupadd --system --gid 999 kvs-phpmyadmin \
+    && useradd --system --uid 999 --gid 999 --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin kvs-phpmyadmin \
+    && install -d -o kvs-phpmyadmin -g kvs-phpmyadmin -m 0700 \
+        /var/lib/kvs-phpmyadmin /var/lib/kvs-phpmyadmin/sessions \
+        /var/lib/kvs-phpmyadmin/tmp
+
 # Fail the build if security restrictions or normal media processing fail.
 COPY media-security-check.sh /usr/local/bin/kvs-media-security-check
 RUN chmod 0755 /usr/local/bin/kvs-media-security-check \

@@ -124,8 +124,10 @@ server {
         # PHP files
         location ~ ^/phpmyadmin/(.+\.php)$ {
             alias /usr/share/phpmyadmin/$1;
-            ${RESOLVER_LINE}
-            fastcgi_pass ${PHP_FPM_UPSTREAM};
+            # phpMyAdmin's own PHP-FPM pool, apart from the site's PHP, on
+            # the socket in the phpmyadmin-data volume that only nginx's
+            # workers may open (php/docker-entrypoint.sh).
+            fastcgi_pass unix:/usr/share/phpmyadmin/.kvs-fpm/php-fpm.sock;
             fastcgi_param SCRIPT_FILENAME $request_filename;
             include fastcgi_params;
             fastcgi_param HTTP_HOST $host;
