@@ -5866,20 +5866,56 @@ else
     fi
 fi
 
-# Older installations may still contain the archive's default admin account.
-# Rotate it during this run without changing an already-hardened credential.
-if [ -z "${KVS_ADMIN_PASSWORD:-}" ]; then
-    DEFAULT_ADMIN_COUNT=$(
-        run_root_mariadb -u root "$DOMAIN" -N -e \
-            "SELECT COUNT(*) FROM ${TABLES_PREFIX:-ktvs_}admin_users WHERE user_id=1 AND login='admin' AND pass=MD5(CONCAT('pass:',MD5('123')));" \
-            2>/dev/null || echo 0
-    )
-    if [ "$DEFAULT_ADMIN_COUNT" -gt 0 ]; then
-        KVS_ADMIN_PASSWORD=$(openssl rand -base64 30 | tr -d '/+=' | cut -c 1-32)
-        KVS_ADMIN_PASSWORD_GENERATED=true
-        export KVS_ADMIN_PASSWORD
+# Prints the login of the primary KVS admin account when it will hold the
+# archive default password at kvs-init, nothing when it will not. The account
+# is user_id 1 whatever its login, the one 35-harden-admin-users.sh refuses to
+# leave on the default: a site whose owner renamed it but kept the archive
+# password needs a new one as well. A database without any table yet (a first
+# run stopped before kvs-init) is the one 30-import-database.sh seeds, with
+# the archive's admin account and default password, so it needs one too.
+# Fails when MariaDB cannot answer, or when the database has tables but no
+# admin table under this prefix: kvs-init would stop on it anyway, and a
+# password planned for a table read under the wrong prefix would replace a
+# hardened one.
+setup_default_admin_login() {
+    local table_count
+
+    table_count=$(run_root_mariadb -u root -N -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${DOMAIN}';") ||
+        return 1
+    table_count=${table_count//[[:space:]]/}
+    case "$table_count" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$table_count" -eq 0 ]; then
+        printf '%s\n' admin
+        return 0
     fi
-fi
+    run_root_mariadb -u root "$DOMAIN" -N -e \
+        "SELECT login FROM ${TABLES_PREFIX:-ktvs_}admin_users WHERE user_id=1 AND pass=MD5(CONCAT('pass:',MD5('123')));"
+}
+
+# Older installations may still contain the archive's default admin account.
+# Rotate it during this run without changing an already-hardened credential,
+# and remember the login the one-time password belongs to.
+setup_plan_admin_password() {
+    local login
+
+    [ -z "${KVS_ADMIN_PASSWORD:-}" ] || return 0
+    if ! login=$(setup_default_admin_login); then
+        echo -e "${RED}ERROR: could not check whether the primary KVS admin account (user_id 1) still has the archive default password${NC}"
+        echo "    Debug: tail -50 $DEBUG_LOG"
+        return 1
+    fi
+    [ -n "$login" ] || return 0
+    KVS_ADMIN_LOGIN=$login
+    KVS_ADMIN_PASSWORD=$(openssl rand -base64 30 | tr -d '/+=' | cut -c 1-32)
+    KVS_ADMIN_PASSWORD_GENERATED=true
+    export KVS_ADMIN_PASSWORD
+}
+
+KVS_ADMIN_LOGIN="admin"
+setup_plan_admin_password || exit 1
 
 # The MariaDB image creates the database and user named in .env only when it
 # initializes an empty volume. A volume initialized for another domain keeps
@@ -6034,7 +6070,7 @@ announce_generated_admin_password() {
     if [ "${KVS_ADMIN_PASSWORD_GENERATED:-false}" != true ]; then
         return 0
     fi
-    echo -e "  ${CYAN}Admin login:${NC} admin"
+    echo -e "  ${CYAN}Admin login:${NC} ${KVS_ADMIN_LOGIN:-admin}"
     echo -e "  ${CYAN}One-time admin password:${NC} $KVS_ADMIN_PASSWORD"
     echo -e "  ${YELLOW}Save it now. It is set during initialization and is not written to .env or the setup log.${NC}"
 }

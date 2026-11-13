@@ -105,12 +105,12 @@ docker() {
                 fi
                 return 0
             fi
+            # The login of user 1 while it holds the archive password.
             if [[ " $* " == *'MD5(CONCAT('* ]]; then
+                [ "${MOCK_ADMIN_QUERY_STATUS:-0}" -eq 0 ] || return "$MOCK_ADMIN_QUERY_STATUS"
                 if [ -n "${MOCK_ADMIN_STATE_FILE:-}" ] &&
                     grep -Fxq default "$MOCK_ADMIN_STATE_FILE" 2>/dev/null; then
-                    printf '%s\n' 1
-                else
-                    printf '%s\n' 0
+                    printf '%s\n' "${MOCK_ADMIN_LOGIN:-admin}"
                 fi
                 return 0
             fi
@@ -532,6 +532,42 @@ if grep -Fq 'deterministic-test-password' "$start_log"; then
 fi
 if grep -Eq '^KVS_ADMIN_PASSWORD=' "$example_env"; then
     fail "the generated admin password was persisted in the site environment"
+fi
+
+# A kept database whose user 1 was renamed but still has the archive
+# password: the one-time password is printed with that login. When the check
+# itself fails, the start stops before kvs-init instead of printing a login
+# it did not read next to a password it applied.
+renamed_state="${TEST_DIR}/valid/admin-state-renamed"
+renamed_output="${TEST_DIR}/valid/renamed-start.log"
+printf '%s\n' default > "$renamed_state"
+MOCK_DOCKER_LOG="${TEST_DIR}/valid/renamed-docker.log" \
+MOCK_ADMIN_STATE_FILE="$renamed_state" \
+MOCK_ADMIN_LOGIN=boss \
+KVS_WEBROOT_BASE="$valid_webroot" \
+    bash "$valid_script" start example.com > "$renamed_output"
+grep -Fxq 'Admin login: boss' "$renamed_output" ||
+    fail "the one-time password was not shown with the renamed account's login"
+grep -Fq 'One-time admin password:' "$renamed_output" ||
+    fail "a renamed account with the archive password got no one-time password"
+
+check_failure_state="${TEST_DIR}/valid/admin-state-check-failure"
+check_failure_output="${TEST_DIR}/valid/check-failure-start.log"
+check_failure_log="${TEST_DIR}/valid/check-failure-docker.log"
+printf '%s\n' default > "$check_failure_state"
+set +e
+MOCK_DOCKER_LOG="$check_failure_log" \
+MOCK_ADMIN_STATE_FILE="$check_failure_state" \
+MOCK_ADMIN_QUERY_STATUS=1 \
+KVS_WEBROOT_BASE="$valid_webroot" \
+    bash "$valid_script" start example.com > "$check_failure_output" 2>&1
+check_failure_status=$?
+set -e
+[ "$check_failure_status" -ne 0 ] ||
+    fail "a failed admin account check did not stop the start"
+if grep -Fq 'Admin login:' "$check_failure_output" ||
+    grep -Fq 'run --rm --no-deps kvs-init' "$check_failure_log"; then
+    fail "the start went on after the admin account check failed"
 fi
 
 mkdir -p "${TEST_DIR}/valid/docker/multi-site/sites/oneshot-failure.example"

@@ -28,6 +28,7 @@ suites=(
     integration_nginx_log_rotation.sh
     integration_database_runtime.sh
     integration_import_collation.sh
+    integration_admin_default_check.sh
     integration_native_import.sh
     integration_resume_import.sh
     integration_resume_compose.sh
@@ -46,9 +47,9 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # Every image a suite runs: the default MariaDB series of docker/.env.example
-# for the database runtime, 12.3 for the imports and 11.8 for Manticore, every
-# series setup.sh offers (11.4, 11.8, 12.3) for the collation import, and the
-# Caddy of the multi-site front end.
+# for the database runtime and the admin account check, 12.3 for the imports
+# and 11.8 for Manticore, every series setup.sh offers (11.4, 11.8, 12.3) for
+# the collation import, and the Caddy of the multi-site front end.
 php_fpm=$(lock php-fpm 8.1)
 php_cli=$(lock php-cli 8.1)
 default_mariadb=$(sed -n 's/^MARIADB_VERSION=//p' "$ROOT_DIR/docker/.env.example")

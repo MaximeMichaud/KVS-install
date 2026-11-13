@@ -98,7 +98,10 @@ case "$*" in
     'compose exec -T mariadb sh -c '*)
         query=${!#}
         case "$query" in
-            *"login='admin'"*) echo 0 ;;
+            # The imported database holds user 1 with its own password: no
+            # default credential to rotate (setup asks as 35-harden does).
+            *"FROM information_schema.tables WHERE table_schema='resume.example.com';") echo 1 ;;
+            *"SELECT login FROM ktvs_admin_users WHERE user_id=1 AND pass="*) ;;
             'SELECT 1') echo 1 ;;
             *'FROM information_schema.schemata '*|*'FROM mysql.user '*) echo 1 ;;
             "SHOW TABLES LIKE '%options%';") echo ktvs_options ;;

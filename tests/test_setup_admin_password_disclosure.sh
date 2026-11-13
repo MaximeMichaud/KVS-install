@@ -61,6 +61,78 @@ grep -Fq "Admin login:" <<<"$out" ||
     fail "the admin login was not shown with the generated password"
 echo "PASS: a generated one-time password is disclosed"
 
+# A renamed primary account keeps its login: the password goes with the
+# login it really has, not with the archive's admin.
+out=$(bash -c '
+    set -e
+    source "$1"
+    KVS_ADMIN_PASSWORD_GENERATED=true
+    KVS_ADMIN_PASSWORD="$2"
+    KVS_ADMIN_LOGIN=boss
+    announce_generated_admin_password
+' _ "$harness" "$SAMPLE_PASSWORD")
+grep -Fxq "  Admin login: boss" <<<"$out" ||
+    fail "the one-time password was not shown with the account's own login: $out"
+echo "PASS: the one-time password is shown with the account's own login"
+
+# setup_plan_admin_password carries the login the check found to the
+# announcement, plans nothing for a hardened account, keeps a supplied
+# password without asking MariaDB, and stops when the check fails. The check
+# itself runs against a real MariaDB in integration_admin_default_check.sh.
+plan_harness="$TEST_DIR/plan-harness.sh"
+{
+    echo "RED=''; GREEN=''; YELLOW=''; CYAN=''; NC=''; DEBUG_LOG=/dev/null"
+    extract_function setup_plan_admin_password
+    extract_function announce_generated_admin_password
+} > "$plan_harness"
+grep -q '^setup_plan_admin_password() {' "$plan_harness" ||
+    fail "setup_plan_admin_password not found in setup.sh"
+grep -A1 -x 'KVS_ADMIN_LOGIN="admin"' "$SETUP" | grep -qx 'setup_plan_admin_password || exit 1' ||
+    fail "setup.sh does not plan the admin password, or goes on when the check fails"
+
+run_plan() {
+    local check="$1" supplied="$2"
+    bash -c '
+        set -e
+        source "$1"
+        check=$2
+        setup_default_admin_login() { echo checked >&2; eval "$check"; }
+        KVS_ADMIN_PASSWORD_GENERATED=false
+        KVS_ADMIN_PASSWORD="$3"
+        KVS_ADMIN_LOGIN=admin
+        setup_plan_admin_password || { echo "plan-failed"; exit 0; }
+        echo "generated=$KVS_ADMIN_PASSWORD_GENERATED length=${#KVS_ADMIN_PASSWORD}"
+        announce_generated_admin_password
+    ' _ "$plan_harness" "$check" "$supplied" 2>&1
+}
+
+out=$(run_plan 'printf "%s\n" boss' "")
+grep -Fxq "generated=true length=32" <<<"$out" ||
+    fail "a renamed account with the default password got no one-time password: $out"
+grep -Fxq "  Admin login: boss" <<<"$out" ||
+    fail "the planned password was announced under another login than the account's: $out"
+echo "PASS: the planned password is announced with the login the check found"
+
+out=$(run_plan 'true' "")
+grep -Fxq "generated=false length=0" <<<"$out" ||
+    fail "a hardened account got a new password planned: $out"
+echo "PASS: a hardened account gets no password planned"
+
+out=$(run_plan 'printf "%s\n" boss' "$SAMPLE_PASSWORD")
+grep -Fxq "generated=false length=${#SAMPLE_PASSWORD}" <<<"$out" ||
+    fail "a supplied password was replaced: $out"
+if grep -Fxq checked <<<"$out"; then
+    fail "the default check ran although a password was supplied"
+fi
+echo "PASS: a supplied password is kept without a check"
+
+out=$(run_plan 'return 1' "")
+grep -Fxq plan-failed <<<"$out" ||
+    fail "a failed check did not stop the planning: $out"
+grep -Fq "ERROR: could not check whether the primary KVS admin account" <<<"$out" ||
+    fail "a failed check stopped the planning without saying why: $out"
+echo "PASS: a failed check stops the setup with an error"
+
 # A kept or supplied password prints nothing here (nothing to lose, or shown
 # elsewhere).
 out=$(run_announce false)
