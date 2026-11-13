@@ -346,6 +346,13 @@ import_prepare_dump() {
             ;;
     esac
     {
+        # Enter the mariadb client sandbox before anything is replayed, so a
+        # dump cannot run client commands (\!, system, source, \.): the
+        # entrypoint replays this file with the mariadb client, as root in the
+        # container, and an older mysqldump carries no such guard. The
+        # /*M!999999\- ... */ directive is the one mariadb-dump itself writes
+        # and is an inert comment to any other client.
+        printf '%s\n' '/*M!999999\- enable the sandbox mode */'
         # The mariadb image maps utf8mb4 and utf8mb3 to the uca1400
         # collations (character-set-collations), so a CREATE TABLE that
         # names a charset without COLLATE - what MySQL 5.x and MariaDB

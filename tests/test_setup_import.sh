@@ -217,6 +217,8 @@ test_prepared_dump_loads_into_the_container_database() {
     [ "$result" = $'2\t\t2' ] || fail "preparation must report the inspection: got '$result'"
     [ "$(import_field $'a\t\tc' 2)" = "" ] && [ "$(import_field $'a\t\tc' 3)" = "c" ] || fail "import_field must keep empty fields"
     content=$(zstd -dc "$output")
+    [ "$(head -n 1 <<< "$content")" = '/*M!999999\- enable the sandbox mode */' ] ||
+        fail "the prepared dump must open the mariadb client sandbox on its first line, so a dump cannot run client commands: got '$(head -n 1 <<< "$content")'"
     grep -q "^CREATE DATABASE" <<< "$content" && fail "CREATE DATABASE must be dropped"
     grep -q "^USE " <<< "$content" && fail "USE must be dropped"
     grep -q "^CREATE TABLE \`ktvs_options\`" <<< "$content" || fail "the tables must be kept"

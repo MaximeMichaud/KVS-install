@@ -593,4 +593,16 @@ batch_proof cancel-third > "$TEST_DIR/batch-cancel-third.log"
     fail 'SIGINT is ignored in this shell, so the INT case cannot interrupt the batch: run the suite in the foreground'
 for signal in HUP INT TERM; do batch_proof "cancel-active-$signal" > "$TEST_DIR/batch-cancel-active-$signal.log"; done
 echo 'PASS: preserved-index workers overlap, respect the bound, drain failures and handle HUP/INT/TERM without another launch'
+# M2: the native schema stream, built and replayed inside the container,
+# must open the mariadb client sandbox before any table-definition file, so
+# a .sql cannot run client commands (backslash-bang, system, source).
+native_runtime="$ROOT_DIR/docker/lib/native-import-runtime.sh"
+m2_sandbox=$(grep -n 'enable the sandbox mode' "$native_runtime" | head -1 | cut -d: -f1)
+m2_fkoff=$(grep -n "printf 'SET SESSION foreign_key_checks=0;" "$native_runtime" | head -1 | cut -d: -f1)
+[ -n "$m2_sandbox" ] || fail "the native schema stream does not open the mariadb sandbox"
+[ -n "$m2_fkoff" ] || fail "the native schema stream prelude changed; re-check the sandbox placement"
+[ "$m2_sandbox" -lt "$m2_fkoff" ] ||
+    fail "the sandbox line must be emitted first in the native schema stream"
+echo 'PASS: the native schema stream opens the mariadb sandbox before any table file'
+
 echo 'PASS: native bundle integrity, safe extraction, schema mapping, concurrency and completion gates'

@@ -228,6 +228,10 @@ native_import_run() {
     if ! (
         set -o pipefail
         {
+            # Sandbox the mariadb client first, so a .sql table definition
+            # cannot run client commands (\!, system, source): this stream is
+            # replayed by the client as mysql in the container.
+            printf '%s\n' '/*M!999999\- enable the sandbox mode */'
             printf 'SET SESSION foreign_key_checks=0;\n'
             for file in "$root/data/$database/"*.sql; do
                 cat -- "$file" || exit 1
