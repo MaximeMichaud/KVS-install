@@ -2307,13 +2307,29 @@ kvs_publish_export() {
         kvs_error "$output is not a regular output file"
         return 1
     fi
-    if [ -f "$output" ]; then
-        # mode includes the access ACL; chmod --reference alone loses it.
-        # Copy attributes only, leaving the completed export data intact.
+    if [ -f "$output" ] && [ -O "$output" ]; then
+        # A previous output of ours keeps its mode, which includes the access
+        # ACL; chmod --reference alone loses it. Copy attributes only, leaving
+        # the completed export data intact.
         if ! cp --attributes-only --preserve=mode,ownership -- "$output" "$staged"; then
             kvs_error "could not preserve the permissions of $output"
             return 1
         fi
+        # Swapped for someone else's file after the check: its owner would
+        # have been copied onto the export.
+        if [ ! -O "$staged" ]; then
+            kvs_error "$output changed owner during the export; the previous output was not replaced"
+            return 1
+        fi
+    elif ! chmod 600 -- "$staged"; then
+        # No previous output of ours to inherit a mode from: the staged file
+        # was created with the caller's umask (0644 under 022) and holds the
+        # database dump and setup_db.php, so restrict it before it leaves the
+        # 0700 stage for a possibly world-readable destination. An output
+        # another user created first (a shared /tmp, a predictable name) is
+        # replaced by this private file, never lent its owner or mode.
+        kvs_error "could not restrict the permissions of the staged export"
+        return 1
     fi
     # -T refuses a directory created at the destination during the export.
     if ! mv -fT -- "$staged" "$output"; then

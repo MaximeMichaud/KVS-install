@@ -1722,6 +1722,66 @@ PY
     pass 'export replacements preserve access ACLs as well as mode bits'
 }
 
+test_a_fresh_export_is_created_private() {
+    local site="$TMP_ROOT/private-site" work="$TMP_ROOT/private"
+    local kind mode
+    local -a options
+
+    make_site "$site"
+    mkdir -p "$work"
+    # A permissive caller umask must not leave a fresh export world-readable:
+    # the archive and the dump carry the database and setup_db.php. An existing
+    # output keeps its own mode (test_export_replacements_preserve_access_acls).
+    for kind in dump archive; do
+        options=()
+        [ "$kind" != dump ] || options+=(--dump-only)
+        rm -f "$work/export"
+        (
+            umask 022
+            run_export "$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+                --yes --gzip --no-size --database-format sql --output "$work/export" \
+                "${options[@]}" "$site"
+        ) || fail "a fresh $kind export failed: $(cat "$work/stderr")"
+        mode=$(stat -c %a "$work/export")
+        [ "$mode" = 600 ] || fail "a fresh $kind export must be mode 600, got $mode"
+    done
+    pass 'a fresh export archive and dump are created mode 600 under a permissive umask'
+}
+
+test_an_output_another_user_owns_is_not_inherited() {
+    local site="$TMP_ROOT/foreign-site" work="$TMP_ROOT/foreign"
+    local kind got
+    local -a options
+
+    # Another user who creates the output name first (a shared /tmp, a
+    # predictable default name) must not end up owning the export or reading
+    # it: only an output the running user owns lends its owner and mode. A
+    # user namespace stands in for the two users; CI enables it.
+    if ! unshare --map-root-user --map-auto true 2> /dev/null; then
+        pass 'an output another user owns is not inherited (skipped: no user namespace with subordinate ids)'
+        return 0
+    fi
+    make_site "$site"
+    mkdir -p "$work"
+    for kind in dump archive; do
+        options=()
+        [ "$kind" != dump ] || options+=(--dump-only)
+        rm -f "$work/export"
+        got=$(EXPORT_PATH="$STUB_BIN:$MIN_BIN" unshare --map-root-user --map-auto "$BASH" -c '
+            work=$1
+            shift
+            : > "$work/export" && chown 1:1 "$work/export" && chmod 666 "$work/export" || exit 90
+            umask 022
+            PATH=$EXPORT_PATH "$BASH" "$0" "$@" > "$work/stdout" 2> "$work/stderr" < /dev/null || exit $?
+            stat -c "%u:%g %a" "$work/export"
+        ' "$EXPORT_SCRIPT" "$work" --yes --gzip --no-size --database-format sql --output "$work/export" \
+            "${options[@]}" "$site") || fail "a $kind export over another user's output failed: $(cat "$work/stderr")"
+        [ "$got" = "0:0 600" ] ||
+            fail "a $kind export over another user's output must be ours and mode 600, got $got"
+    done
+    pass 'an output another user owns is not inherited'
+}
+
 test_array_expansions_are_guarded_for_old_bash() {
     local bare
 
@@ -1939,6 +1999,8 @@ test_failed_exports_preserve_the_previous_output
 test_interrupted_exports_stop_their_database_processes
 test_exports_refuse_non_regular_destinations
 test_export_replacements_preserve_access_acls
+test_a_fresh_export_is_created_private
+test_an_output_another_user_owns_is_not_inherited
 test_array_expansions_are_guarded_for_old_bash
 test_the_site_is_searched_under_the_configured_roots
 test_a_site_without_its_config_files_is_refused
