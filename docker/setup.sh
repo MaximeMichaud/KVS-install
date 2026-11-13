@@ -1297,6 +1297,7 @@ setup_start_runtime_services() {
         log_command docker compose stop cron || return 1
     fi
     # MariaDB was started and verified earlier. Never recreate it here.
+    SETUP_RUNTIME_SERVICES=("${services[@]}")
     log_command docker compose up "${SETUP_RUNTIME_FLAGS[@]}" "${services[@]}"
 }
 
@@ -1328,6 +1329,115 @@ setup_add_exit_trap() {
     fi
     # shellcheck disable=SC2064 # The command is complete now.
     trap "$command" EXIT
+}
+
+# docker compose up -d returns once the containers are started, whatever
+# they do next: a PHP-FPM that exits at once restarts in a loop while Nginx
+# answers 502, and an Nginx that does not serve the domain fails its probe.
+# Before the setup calls itself complete, every service it started
+# (setup_start_runtime_services, then cron) must run without restarting,
+# and be healthy where the compose file gives it a healthcheck. The first
+# probe of a container can come up to its interval (30 s) after it starts,
+# so a service this run recreated is waited for, up to
+# SETUP_RUNTIME_WAIT_SECONDS. No page is requested: a PHP error on every
+# page, or a certificate problem, is not seen here. Each container is
+# looked at twice at least, 2 s apart: one caught between two restarts
+# runs, and only its restart count growing in between, or the restarting
+# state Docker reports while it waits to start it again, shows the loop.
+# The containers docker compose run leaves beside a service (kvsctl, a
+# Manticore rebuild request or a command run by hand, exited or still
+# running) are not the service and are skipped. Manticore must run without
+# restarting, but its probe may fail meanwhile: Docker reports it starting
+# during its start period, and a start that builds every index before
+# searchd answers, on the request an import, a fresh database or search
+# switched on again leaves (setup_request_manticore_rebuild), turns
+# unhealthy after that period until the build ends, which a large import
+# reaches before this check. So starting is enough for Manticore, and
+# unhealthy too while that build goes on (setup_manticore_builds). A
+# container that is missing, has exited, restarts or turns unhealthy fails
+# at once, one still starting at the limit fails then, each with its state
+# on standard error. Succeeds once every service is up.
+SETUP_RUNTIME_WAIT_SECONDS=300
+setup_verify_runtime_services() {
+    local -a services=("${SETUP_RUNTIME_SERVICES[@]}")
+    local -A restarts=() looks=()
+    local service ids id state status health count code oneoff found pending deadline
+
+    if [ "$SETUP_CRON_PENDING" = true ]; then
+        services+=(cron)
+    fi
+    deadline=$((SECONDS + SETUP_RUNTIME_WAIT_SECONDS))
+    while :; do
+        pending=""
+        for service in "${services[@]}"; do
+            ids=$(database_docker_query compose ps -a -q "$service") || ids=""
+            found=false
+            while IFS= read -r id; do
+                [ -n "$id" ] || continue
+                state=$(database_docker_query inspect --format \
+                    '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}} {{.State.ExitCode}} {{index .Config.Labels "com.docker.compose.oneoff"}}' "$id") || state=""
+                read -r status health count code oneoff <<< "$state"
+                if [ -z "${count:-}" ]; then
+                    echo "ERROR: the state of the ${service} container could not be read." >&2
+                    return 1
+                fi
+                [ "$oneoff" != True ] || continue
+                found=true
+                looks[$id]=$((${looks[$id]:-0} + 1))
+                [ -n "${restarts[$id]+set}" ] || restarts[$id]=$count
+                if [ "$count" != "${restarts[$id]}" ] || [ "$status" = restarting ]; then
+                    echo "ERROR: the ${service} container restarts (exit code ${code}, ${count} restarts)." >&2
+                    return 1
+                fi
+                case "$status:$health" in
+                    exited:* | dead:* | removing:*)
+                        echo "ERROR: the ${service} container has stopped (${status}, exit code ${code})." >&2
+                        return 1
+                        ;;
+                    running:unhealthy)
+                        if [ "$service" != manticore ] || ! setup_manticore_builds "$id"; then
+                            echo "ERROR: the ${service} container is unhealthy: its healthcheck fails." >&2
+                            return 1
+                        fi
+                        ;;
+                    *:unhealthy)
+                        echo "ERROR: the ${service} container is unhealthy: its healthcheck fails." >&2
+                        return 1
+                        ;;
+                    running:none | running:healthy) ;;
+                    running:starting)
+                        [ "$service" = manticore ] || pending+=" ${service}"
+                        ;;
+                    *) pending+=" ${service}" ;;
+                esac
+                [ "${looks[$id]}" -ge 2 ] || pending+=" ${service}"
+            done <<< "$ids"
+            if [ "$found" != true ]; then
+                echo "ERROR: the ${service} service has no container." >&2
+                return 1
+            fi
+        done
+        [ -n "$pending" ] || return 0
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "ERROR: still starting after ${SETUP_RUNTIME_WAIT_SECONDS} s:${pending}." >&2
+            return 1
+        fi
+        sleep 2
+    done
+}
+
+# Whether the Manticore container <id> builds every index on a rebuild
+# request, before searchd answers: its entrypoint keeps kvs-requested-build
+# in /var/run/manticore during that build (manticore/docker-entrypoint.sh,
+# lib/manticore.sh), and no build of this start has left the reason it
+# failed there (kvs-build-failed, kvs-rebuild-failed), which also fails its
+# probe.
+setup_manticore_builds() {
+    # The shell of the container expands the arguments.
+    # shellcheck disable=SC2016
+    database_docker_query exec "$1" sh -c 'test -e "$1" && test ! -e "$2" && test ! -e "$3"' sh \
+        /var/run/manticore/kvs-requested-build /var/run/manticore/kvs-build-failed \
+        /var/run/manticore/kvs-rebuild-failed > /dev/null 2>&1
 }
 
 # KVS initialization was built before the SQL import started. Compose run
@@ -6955,6 +7065,14 @@ fi
 progress_bar "Finalizing setup"
 import_finish
 setup_start_cron
+echo "  Waiting for the runtime services to be up..."
+if ! setup_verify_runtime_services; then
+    echo -e "${RED}ERROR: the setup did not complete: a service it started is not up.${NC}"
+    echo "    Check: docker compose ps -a"
+    echo "    Logs:  docker compose logs --tail 50"
+    echo "    Debug: tail -50 $DEBUG_LOG"
+    exit 1
+fi
 
 # Done
 if [ "$SETUP_ACME_FAILED" = true ]; then

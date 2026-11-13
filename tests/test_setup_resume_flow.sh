@@ -10,8 +10,26 @@ mkdir "$fixture/bin"
 cat > "$fixture/bin/docker" <<'SH'
 #!/bin/bash
 set -euo pipefail
+# The check of the runtime services before "Complete" (H5): one container
+# per service it started, in the state Docker reports with the format
+# setup.sh asks for; RUNTIME_STATE_<SERVICE> changes it.
+runtime_format='{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}} {{.State.ExitCode}} {{index .Config.Labels "com.docker.compose.oneoff"}}'
+if [ "$#" -eq 4 ] && [ "$1 $2" = 'inspect --format' ] && [ "$3" = "$runtime_format" ]; then
+    case "$4" in
+        runtime-php-fpm) state=${RUNTIME_STATE_PHP_FPM:-running healthy 0 0} ;;
+        runtime-nginx) state='running healthy 0 0' ;;
+        runtime-cron) state='running healthy 0 0' ;;
+        runtime-memcached) state='running none 0 0' ;;
+        *) echo unexpected:docker >> "$CALLS"; printf 'Unexpected Docker command: %s\n' "$*" >&2; exit 97 ;;
+    esac
+    echo "inspect-$4" >> "$CALLS"
+    echo "$state False"
+    exit 0
+fi
 case "$*" in
     'compose version') echo 'Docker Compose version v2.32.2' ;;
+    'compose ps -a -q php-fpm' | 'compose ps -a -q nginx' | 'compose ps -a -q cron' | 'compose ps -a -q memcached')
+        echo "runtime-$5" ;;
     'compose ps -a -q mariadb')
         if [ "${HANG_METADATA:-no}" = yes ]; then exec /usr/bin/sleep 30; fi
         # A host still loaded by the import answers one check late, as the
@@ -257,8 +275,33 @@ expected = ['discover', 'wait', 'marker', 'token', 'verify', 'check-init-image',
             'kvs-init', 'stop-cron', 'reload-nginx', 'count-rows', 'delete-marker', 'start-cron']
 positions = [calls.index(item) for item in expected]
 assert positions == sorted(positions), calls
+# Every service the run started, cron included, is looked at twice once
+# cron is started, and nothing else.
+looks = [call for call in calls if call.startswith('inspect-runtime-')]
+assert sorted(looks) == sorted(2 * ['inspect-runtime-' + service for service in ('php-fpm', 'nginx', 'memcached', 'cron')]), calls
+assert calls.index(looks[0]) > calls.index('start-cron'), calls
 PY
 echo 'PASS: full --resume-import runs both initializers, preserves MariaDB, starts runtime services and records completion before cleanup.'
+
+# A PHP-FPM that restarts in a loop: the import is complete and cron runs,
+# but the run must not call itself complete.
+make_case "$fixture/runtime-down"
+if RUNTIME_STATE_PHP_FPM='restarting starting 1 78' run_case "$fixture/runtime-down" no; then
+    tail -n 20 "$fixture/runtime-down/output.log" >&2
+    echo 'FAIL: a PHP-FPM restarting in a loop ended the resumed setup with status 0' >&2
+    exit 1
+fi
+if ! grep -Fxq 'ERROR: the php-fpm container restarts (exit code 78, 1 restarts).' "$fixture/runtime-down/output.log" ||
+    ! grep -Fq 'ERROR: the setup did not complete: a service it started is not up.' "$fixture/runtime-down/output.log" ||
+    ! grep -q '^KVS_IMPORT_COMPLETED=' "$fixture/runtime-down/.env" ||
+    ! grep -Fxq start-cron "$fixture/runtime-down/calls" ||
+    grep -q '^unexpected:' "$fixture/runtime-down/calls"; then
+    tail -n 20 "$fixture/runtime-down/output.log" >&2
+    cat "$fixture/runtime-down/calls" >&2
+    echo 'FAIL: a PHP-FPM restarting in a loop was not reported once the import completed' >&2
+    exit 1
+fi
+echo 'PASS: a resumed import whose PHP-FPM restarts in a loop completes the import, starts cron and fails.'
 grep -Fxq 'kvs-init-rewrites-sha256:' "$fixture/success/calls" ||
     { echo 'FAIL: a resume whose pass vouched for no rewrites passed a sha256 to the init' >&2; exit 1; }
 

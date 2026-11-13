@@ -33,6 +33,7 @@ suites=(
     integration_native_import.sh
     integration_resume_import.sh
     integration_resume_compose.sh
+    integration_setup_runtime_check.sh
     integration_php_fpm_resources.sh
     integration_php_image_downloads.sh
     integration_manticore_startup.sh
