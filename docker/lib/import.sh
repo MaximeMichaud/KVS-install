@@ -319,13 +319,14 @@ import_dump_write() {
 }
 
 # import_prepare_dump <dump> <table prefix> <KVS version> <old project path> <new project path> <output> <token>
-# Write the dump the MariaDB init directory will replay: CREATE DATABASE
-# and USE statements dropped (the init runs inside the database named in
-# .env), the GTID and binary log session settings a MySQL 8 mysqldump
-# writes dropped (MariaDB knows no GTID_PURGED and would stop the replay
-# there), INITIAL_VERSION added when the old site never recorded it, server
-# paths rewritten to the container path, DEFINER clauses of views and
-# triggers dropped (their user does not exist here), and a completion marker row
+# Write the dump the MariaDB init directory will replay: CREATE DATABASE,
+# ALTER DATABASE and USE statements dropped (the init runs inside the
+# database named in .env, and the old one does not exist here), the GTID
+# and binary log session settings a MySQL 8 mysqldump writes dropped
+# (MariaDB knows no GTID_PURGED and would stop the replay there),
+# INITIAL_VERSION added when the old site never recorded it, server paths
+# rewritten to the container path, DEFINER clauses of views, triggers,
+# routines and events dropped (their user does not exist here), and a completion marker row
 # KVS_INSTALL_IMPORT=<token> as the very last statement: the MariaDB image
 # restarts on a failed init file and would serve the partial database, so
 # the caller checks the marker before touching anything.
@@ -388,11 +389,15 @@ import_prepare_dump() {
             # general_ci, so there is nothing to undo).
             printf "/*M!110300 SET SESSION character_set_collations='' */;\n"
             # shellcheck disable=SC2016  # The backticks are SQL quoting inside the sed program.
+            # The dump tools wrap a routine, trigger or event whose recorded
+            # database collation differs from the database's in ALTER DATABASE
+            # `<old name>` lines, which would stop the replay here; without
+            # them it takes the collation of this database.
             # A MySQL dump writes GTID_PURGED over several lines when the source
             # knew several servers (one UUID set per line, up to the semicolon).
             # The caller checks this function conditionally, disabling errexit.
             # Stop on read/filter failures before appending a completion marker.
-            import_dump_cat "$dump" | sed -E -e '/^(CREATE DATABASE|USE )/d' \
+            import_dump_cat "$dump" | sed -E -e '/^(CREATE DATABASE|ALTER DATABASE|USE )/d' \
                 -e '/^SET @@(GLOBAL|SESSION)\.GTID_PURGED/{' -e ':gtid' -e '/;[[:space:]]*$/!{' -e 'N' -e 'b gtid' -e '}' -e 'd' -e '}' \
                 -e '/^SET @@(GLOBAL|SESSION)\.SQL_LOG_BIN/d' -e '/^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
                 import_innodb_row_format - || exit 1

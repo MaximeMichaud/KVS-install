@@ -6389,6 +6389,7 @@ import_place_site_files() {
 # dump that failed part way (the image restarts and serves what it has).
 import_verify_database() {
     local marker
+    local events
 
     [ "$IMPORT_MODE" = true ] || return 0
     marker=$(run_root_mariadb -u root "$DOMAIN" -N -e \
@@ -6400,6 +6401,14 @@ import_verify_database() {
         exit 1
     fi
     echo -e "  ${GREEN}✓${NC} Database imported ($IMPORT_DUMP_TABLES tables in the dump)"
+    # The events of the old database came along, but the MariaDB of the
+    # stack keeps the server's default event scheduler, off: they exist and
+    # do not run until it is turned on.
+    events=$(run_root_mariadb -u root "$DOMAIN" -N -e \
+        "SELECT COUNT(*) FROM information_schema.events WHERE event_schema = DATABASE() AND status = 'ENABLED' AND @@event_scheduler <> 'ON';" 2>/dev/null | tr -d '\r') || events=""
+    if [[ "$events" =~ ^[1-9][0-9]*$ ]]; then
+        echo -e "  ${YELLOW}The database holds $events enabled events, which do not run while the event scheduler of MariaDB is off, its default here; the README says how to turn it on${NC}"
+    fi
 }
 
 progress_bar "Starting MariaDB"

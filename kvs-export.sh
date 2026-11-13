@@ -81,6 +81,11 @@ DB_TABLES="0"
 DB_SIZE_MB="0"
 DB_NON_TRANSACTIONAL="0"
 DB_SYSTEM_VERSIONED="0"
+DB_ROUTINES="0"
+DB_ROUTINES_UNREADABLE="0"
+DB_ROUTINES_ERROR=""
+DB_EVENTS="0"
+DB_EVENTS_ERROR=""
 DB_UTF8MB4="yes"
 DB_DUMP_FORMAT="sql"
 DB_DIRECTORY_REASON="not checked"
@@ -151,6 +156,9 @@ STAGING_DIR=""
 NATIVE_STAGING_DIR=""
 NATIVE_DUMP_READY="no"
 TEMP_ERR_FILE=""
+# What the last kvs_probe_query printed, and its error.
+PROBE_OUT=""
+PROBE_ERR=""
 UNITS_FILE=""
 LINKS_FILE=""
 # The size walk in progress: its lines arrive on descriptor 3.
@@ -839,6 +847,8 @@ kvs_ignore_user_option_files() {
 # the prefix, size, and the tables on a non-transactional engine (MyISAM,
 # Aria), which decide how the dump keeps the data consistent. A failure is
 # not fatal: detect reports db_ok=no and the caller decides what to do.
+# Once the database answers, kvs_probe_schema_objects counts the stored
+# routines and events.
 kvs_probe_database() {
     local like
     local query
@@ -855,6 +865,11 @@ kvs_probe_database() {
     DB_SIZE_MB="0"
     DB_NON_TRANSACTIONAL="0"
     DB_SYSTEM_VERSIONED="0"
+    DB_ROUTINES="0"
+    DB_ROUTINES_UNREADABLE="0"
+    DB_ROUTINES_ERROR=""
+    DB_EVENTS="0"
+    DB_EVENTS_ERROR=""
     DB_UTF8MB4="yes"
     if [ -z "$DB_CLIENT" ]; then
         DB_ERROR="no mariadb or mysql client on this server"
@@ -910,7 +925,89 @@ kvs_probe_database() {
         DB_UTF8MB4="no"
     fi
     DB_OK="yes"
+    kvs_probe_schema_objects
     return 0
+}
+
+# kvs_probe_query <query>: one query as the site's account, in its
+# database. PROBE_OUT gets what it printed, PROBE_ERR the server's error
+# line (or what the client wrote) when it fails; returns the client's
+# status. The password goes through the environment of the client and
+# nowhere else: an argument would show up in ps for every user on the box.
+kvs_probe_query() {
+    local status
+    local err
+    local error_line
+
+    PROBE_OUT=""
+    PROBE_ERR=""
+    TEMP_ERR_FILE=$(mktemp 2> /dev/null) || TEMP_ERR_FILE=""
+    if [ -z "$TEMP_ERR_FILE" ]; then
+        PROBE_ERR="cannot create a temporary file"
+        return 1
+    fi
+    PROBE_OUT=$(
+        # shellcheck disable=SC2030,SC2031  # Same deliberate subshell as the probe.
+        export MYSQL_PWD="$DB_PASSWORD"
+        kvs_ignore_user_option_files
+        "$DB_CLIENT" --connect-timeout=10 ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} -N -B -e "$1" "$DB_NAME" 2> "$TEMP_ERR_FILE" < /dev/null
+    )
+    status=$?
+    err=$(< "$TEMP_ERR_FILE")
+    rm -f -- "$TEMP_ERR_FILE"
+    TEMP_ERR_FILE=""
+    if [ "$status" -ne 0 ]; then
+        # Newer clients write notes such as the TLS one before the error.
+        error_line=$(printf '%s\n' "$err" | sed -n '/^ERROR /{p;q;}')
+        PROBE_ERR=$(kvs_one_line "${error_line:-$err}")
+        if [ -z "$PROBE_ERR" ]; then
+            PROBE_ERR="$DB_CLIENT exited with status $status"
+        fi
+    fi
+    return "$status"
+}
+
+# The stored routines and the events the dump must carry, each kind in a
+# query of its own after the main probe: a server may fail to list one kind
+# while the database answers, and the dump then goes on without it, with
+# the warning kvs_require_dump_tool prints, as it did before the dump
+# carried them. information_schema.routines fails with error 1805 when
+# mysql.proc is older than the server (an upgrade without mysql_upgrade).
+# routine_definition stays NULL to an account that neither defined the
+# routine nor may read its body, and the dump tool then stops on it. The
+# events are counted with SHOW EVENTS, the statement the dump tool runs
+# for --events: it fails with error 1044 for an account without the EVENT
+# privilege on the database, to which information_schema.events shows
+# none, and with error 1577 on a server started with
+# event_scheduler=DISABLED or whose mysql.event is older than the server.
+kvs_probe_schema_objects() {
+    local line
+    local count
+
+    DB_ROUTINES="0"
+    DB_ROUTINES_UNREADABLE="0"
+    DB_ROUTINES_ERROR=""
+    DB_EVENTS="0"
+    DB_EVENTS_ERROR=""
+    if kvs_probe_query "SELECT COUNT(*), COALESCE(SUM(routine_definition IS NULL), 0) FROM information_schema.routines WHERE routine_schema = DATABASE()"; then
+        IFS=$'\t' read -r DB_ROUTINES DB_ROUTINES_UNREADABLE <<< "${PROBE_OUT%%$'\n'*}"
+        if ! kvs_is_number "$DB_ROUTINES" || ! kvs_is_number "$DB_ROUTINES_UNREADABLE"; then
+            DB_ROUTINES="0"
+            DB_ROUTINES_UNREADABLE="0"
+            DB_ROUTINES_ERROR="the routine count came back unreadable"
+        fi
+    else
+        DB_ROUTINES_ERROR=$PROBE_ERR
+    fi
+    if kvs_probe_query "SHOW EVENTS"; then
+        count=0
+        while IFS= read -r line; do
+            [ -z "$line" ] || count=$((count + 1))
+        done <<< "$PROBE_OUT"
+        DB_EVENTS=$count
+    else
+        DB_EVENTS_ERROR=$PROBE_ERR
+    fi
 }
 
 #################################################################
@@ -1812,7 +1909,16 @@ kvs_build_dump_args() {
     if kvs_tool_advertises "$DB_DUMP_TOOL" "set-gtid-purged"; then
         DUMP_ARGS+=(--set-gtid-purged=OFF)
     fi
-    # No --routines: KVS has none and the site user rarely has the privilege.
+    # Stock KVS defines no stored routine or event, but a customised site
+    # can, and a view or trigger using a routine left behind breaks on the
+    # new server. Each option is passed only when the database holds such
+    # objects: the dump tool needs the EVENT privilege even to find none.
+    if [ "$DB_ROUTINES" -gt 0 ]; then
+        DUMP_ARGS+=(--routines)
+    fi
+    if [ "$DB_EVENTS" -gt 0 ]; then
+        DUMP_ARGS+=(--events)
+    fi
     # No --databases: the importer drops CREATE DATABASE and USE anyway.
     DUMP_ARGS+=(${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} "$DB_NAME")
 }
@@ -2225,6 +2331,8 @@ kvs_stream_directory_bundle() {
 }
 
 kvs_require_dump_tool() {
+    local remedy
+
     if [ "$DB_OK" != "yes" ]; then
         kvs_error "the database is not reachable: $DB_ERROR"
         return 3
@@ -2239,6 +2347,32 @@ kvs_require_dump_tool() {
     # importer cannot safely translate those periods to an unknown target.
     if [ "$DB_SYSTEM_VERSIONED" -gt 0 ]; then
         kvs_error "the database contains $DB_SYSTEM_VERSIONED system-versioned tables: this exporter cannot preserve their history across MariaDB versions; use a history-aware backup with a compatible restore target or a physical backup"
+        return 3
+    fi
+    # A kind the server could not list stays behind, as it did before the
+    # dump carried routines and events: the dump tool would stop on it
+    # (its --events runs the SHOW EVENTS that failed), and the site may
+    # well have none. Say so, and what would carry them.
+    if [ -n "$DB_ROUTINES_ERROR" ]; then
+        case $DB_ROUTINES_ERROR in
+            "ERROR 1805 "*) remedy="run mysql_upgrade (mariadb-upgrade on MariaDB 10.4 and later) on this server, whose mysql.proc is older than the server" ;;
+            *) remedy="make them readable to ${DB_USER:-this user}" ;;
+        esac
+        kvs_warn "the stored routines of $DB_NAME could not be listed ($DB_ROUTINES_ERROR), so the dump carries none, and a view or trigger using one would fail on the new server; if the site has stored routines, $remedy, then run the export again"
+    fi
+    if [ -n "$DB_EVENTS_ERROR" ]; then
+        case $DB_EVENTS_ERROR in
+            "ERROR 1577 "*) remedy="start this server with event_scheduler=OFF or ON instead of DISABLED; if its error log says the Event Scheduler could not initialize its system tables, run mysql_upgrade (mariadb-upgrade on MariaDB 10.4 and later) first" ;;
+            "ERROR 1044 "* | "ERROR 1142 "* | "ERROR 1227 "*) remedy="give ${DB_USER:-this user} the EVENT privilege on $DB_NAME, without which it sees none" ;;
+            *) remedy="make them readable to ${DB_USER:-this user}" ;;
+        esac
+        kvs_warn "the events of $DB_NAME could not be listed ($DB_EVENTS_ERROR), so the dump carries none; if the site has events, $remedy, then run the export again"
+    fi
+    # The dump tool stops on a routine whose body it may not read, and
+    # leaving the routines out would break the views and triggers that
+    # call them on the new server.
+    if [ "$DB_ROUTINES_UNREADABLE" -gt 0 ]; then
+        kvs_error "$DB_ROUTINES_UNREADABLE of the $DB_ROUTINES stored routines of $DB_NAME were defined by another account and ${DB_USER:-this user} may not read their bodies, so the dump cannot carry them; give ${DB_USER:-this user} read access to routine definitions (SELECT on mysql.proc, SHOW CREATE ROUTINE on MariaDB 11.3 and later, SHOW_ROUTINE on MySQL 8.0) or drop the routines the site does not use, then run the export again"
         return 3
     fi
     return 0

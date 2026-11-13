@@ -212,6 +212,30 @@ for arg in "$@"; do
             printf 'kvs-native-export-probe\n' > "$path"
             exit 0
             ;;
+        *information_schema.routines*)
+            # The routines of the site's own database and those whose body
+            # the account may not read, for the exact query only.
+            [ "$arg" = "SELECT COUNT(*), COALESCE(SUM(routine_definition IS NULL), 0) FROM information_schema.routines WHERE routine_schema = DATABASE()" ] || exit 97
+            if [ -n "${STUB_ROUTINES_ERROR:-}" ]; then
+                printf '%s\n' "$STUB_ROUTINES_ERROR" >&2
+                exit 1
+            fi
+            printf '%s\t%s\n' "${STUB_ROUTINES:-0}" "${STUB_ROUTINES_UNREADABLE:-0}"
+            exit 0
+            ;;
+        'SHOW EVENTS')
+            # One row per event, as the batch mode prints them; the error
+            # the server gives without the EVENT privilege or with the
+            # scheduler DISABLED.
+            if [ -n "${STUB_EVENTS_ERROR:-}" ]; then
+                printf '%s\n' "$STUB_EVENTS_ERROR" >&2
+                exit 1
+            fi
+            for ((i = 1; i <= ${STUB_EVENTS:-0}; i++)); do
+                printf 'oldsite\tevent_%s\tkvs@%%\tSYSTEM\tRECURRING\tNULL\t1\tDAY\t2026-01-01 00:00:00\tNULL\tENABLED\t1\tutf8mb4\tutf8mb4_general_ci\tutf8mb4_general_ci\n' "$i"
+            done
+            exit 0
+            ;;
         *admin_servers*)
             # The storage server rows, tab separated, as the batch mode prints them.
             printf '%b' "${STUB_SERVERS:-}"
@@ -2100,6 +2124,129 @@ test_non_transactional_tables_switch_the_dump_to_table_locks() {
     pass "non transactional tables switch the dump to table locks"
 }
 
+dump_argv() {
+    grep -- '^mariadb-dump argv:' "$STUB_LOG" | grep -Fv -- '[--help]' || true
+}
+
+test_stored_routines_and_events_travel_with_the_dump() {
+    local site="$TMP_ROOT/routines-site"
+    local out="$TMP_ROOT/routines.out"
+    local err="$TMP_ROOT/routines.err"
+    local archive="$TMP_ROOT/routines.tar"
+    local format status
+
+    make_site "$site"
+    # None: neither option, since the dump tool needs the EVENT privilege
+    # even to find no event.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "a database without routines must dump"
+    [ -n "$(dump_argv)" ] || fail "the dump tool must run"
+    dump_argv | grep -Fq -- '[--routines]' && fail "no --routines without stored routines: $(dump_argv)"
+    dump_argv | grep -Fq -- '[--events]' && fail "no --events without events: $(dump_argv)"
+
+    export STUB_ROUTINES=2 STUB_EVENTS=1
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "routines the account can read must dump: $(cat "$err")"
+    dump_argv | grep -Fq -- '[--routines]' || fail "stored routines must travel with the dump: $(dump_argv)"
+    dump_argv | grep -Fq -- '[--events]' || fail "events must travel with the dump: $(dump_argv)"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" archive "$site" --yes --dump-only --output "$archive" ||
+        fail "the archive command must dump routines too: $(cat "$err")"
+    dump_argv | grep -Fq -- '[--routines] [--events]' || fail "the archive dump must carry routines and events: $(dump_argv)"
+    rm -f "$archive"
+
+    export STUB_ROUTINES=0 STUB_EVENTS=1
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "events alone must dump"
+    dump_argv | grep -Fq -- '[--events]' || fail "events alone must travel: $(dump_argv)"
+    dump_argv | grep -Fq -- '[--routines]' && fail "no --routines for events alone: $(dump_argv)"
+
+    # A routine another account defined, whose body this one may not read:
+    # the dump tool would stop on it, and leaving it out would break what
+    # calls it on the new server.
+    export STUB_ROUTINES=3 STUB_ROUTINES_UNREADABLE=1 STUB_EVENTS=0
+    for format in auto sql; do
+        status=0
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" --database-format "$format" || status=$?
+        [ "$status" = 3 ] || fail "an unreadable routine must stop the dump with status 3, got $status"
+        [ ! -s "$out" ] || fail "the refusal must not stream a partial dump"
+        [ -z "$(dump_argv)" ] || fail "the dump tool must not run: $(dump_argv)"
+        grep -Fq '1 of the 3 stored routines of oldsite' "$err" || fail "the refusal must count the routines: $(cat "$err")"
+        grep -Fq 'mysql.proc' "$err" || fail "the refusal must say how to give access: $(cat "$err")"
+        status=0
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" archive "$site" --yes --output "$archive" --database-format "$format" || status=$?
+        [ "$status" = 3 ] || fail "an unreadable routine must stop the archive with status 3, got $status"
+        [ ! -e "$archive" ] || fail "the refusal must not create an archive"
+    done
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must still report the site"
+    assert_key "$out" db_ok yes
+
+    unset STUB_ROUTINES STUB_ROUTINES_UNREADABLE STUB_EVENTS
+    pass "stored routines and events travel with the dump"
+}
+
+# A server that cannot list one kind of object still exports, without
+# that kind and with a warning naming the server's error and the remedy,
+# as it did before the dump carried routines and events.
+test_routines_or_events_the_server_cannot_list_stay_behind_with_a_warning() {
+    local site="$TMP_ROOT/unlisted-site"
+    local out="$TMP_ROOT/unlisted.out"
+    local err="$TMP_ROOT/unlisted.err"
+    local archive="$TMP_ROOT/unlisted.tar"
+    local command
+
+    make_site "$site"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "a database without routines must dump"
+    grep -Fq 'could not be listed' "$err" && fail "nothing to warn about when both kinds are listed: $(cat "$err")"
+
+    # mysql.proc older than the server: error 1805. The events still travel.
+    export STUB_ROUTINES_ERROR='ERROR 1805 (HY000) at line 1: Column count of mysql.proc is wrong. Expected 21, found 20. The table is probably corrupted' STUB_EVENTS=1
+    for command in dump archive; do
+        rm -f "$archive"
+        if [ "$command" = dump ]; then
+            run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "an unlistable routine kind must not stop the dump: $(cat "$err")"
+        else
+            run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" archive "$site" --yes --dump-only --output "$archive" ||
+                fail "an unlistable routine kind must not stop the archive: $(cat "$err")"
+        fi
+        dump_argv | grep -Fq -- '[--routines]' && fail "$command: no --routines when they cannot be listed: $(dump_argv)"
+        dump_argv | grep -Fq -- '[--events]' || fail "$command: the events must still travel: $(dump_argv)"
+        grep -Fq 'WARNING: the stored routines of oldsite could not be listed (ERROR 1805 (HY000) at line 1: Column count of mysql.proc is wrong' "$err" ||
+            fail "$command: the warning must name the routines and the server error: $(cat "$err")"
+        grep -Fq 'run mysql_upgrade (mariadb-upgrade on MariaDB 10.4 and later)' "$err" || fail "$command: the warning must give the remedy: $(cat "$err")"
+    done
+    rm -f "$archive"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must still report the site"
+    assert_key "$out" db_ok yes
+
+    # The event scheduler started DISABLED (or turned off at start by an
+    # old mysql.event): error 1577 even to list events. The note a newer
+    # client writes first is not taken for the error.
+    unset STUB_ROUTINES_ERROR
+    export STUB_ROUTINES=2 STUB_EVENTS=0 STUB_EVENTS_ERROR=$'WARNING: option --ssl-verify-server-cert is disabled, because of an insecure passwordless login.\nERROR 1577 (HY000) at line 1: Cannot proceed, because event scheduler is disabled'
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "an unlistable event kind must not stop the dump: $(cat "$err")"
+    dump_argv | grep -Fq -- '[--events]' && fail "no --events when they cannot be listed: $(dump_argv)"
+    dump_argv | grep -Fq -- '[--routines]' || fail "the routines must still travel: $(dump_argv)"
+    grep -Fq 'WARNING: the events of oldsite could not be listed (ERROR 1577 (HY000) at line 1: Cannot proceed, because event scheduler is disabled), so the dump carries none' "$err" ||
+        fail "the warning must name the events and the server error: $(cat "$err")"
+    grep -Fq 'start this server with event_scheduler=OFF or ON instead of DISABLED' "$err" || fail "the warning must give the remedy: $(cat "$err")"
+
+    # An account without the EVENT privilege sees no event at all: SHOW
+    # EVENTS, which the dump tool runs too, refuses it.
+    export STUB_EVENTS_ERROR="ERROR 1044 (42000) at line 1: Access denied for user 'kvs'@'localhost' to database 'oldsite'"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "an account without EVENT must still dump: $(cat "$err")"
+    dump_argv | grep -Fq -- '[--events]' && fail "no --events without the EVENT privilege: $(dump_argv)"
+    dump_argv | grep -Fq -- '[--routines]' || fail "the routines must still travel without the EVENT privilege: $(dump_argv)"
+    grep -Fq 'give kvs the EVENT privilege on oldsite' "$err" || fail "the warning must name the missing privilege: $(cat "$err")"
+
+    # A routine count that does not read as numbers is not taken as none.
+    unset STUB_EVENTS_ERROR
+    export STUB_ROUTINES=two STUB_EVENTS=1
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "an unreadable count must not stop the dump: $(cat "$err")"
+    dump_argv | grep -Fq -- '[--routines]' && fail "no --routines from an unreadable count: $(dump_argv)"
+    dump_argv | grep -Fq -- '[--events]' || fail "the events must still travel with an unreadable routine count: $(dump_argv)"
+    grep -Fq 'the stored routines of oldsite could not be listed (the routine count came back unreadable)' "$err" ||
+        fail "an unreadable count must be reported: $(cat "$err")"
+    unset STUB_ROUTINES STUB_EVENTS
+    pass "routines or events the server cannot list stay behind with a warning"
+}
+
 test_versioned_tables_are_refused_before_any_export_is_written() {
     local site="$TMP_ROOT/history-site"
     local out="$TMP_ROOT/history.out"
@@ -3030,6 +3177,8 @@ test_native_format_selection_and_bundle_integrity
 test_column_statistics_is_passed_only_to_a_tool_that_knows_it
 test_gtid_state_is_left_out_by_a_tool_that_records_it
 test_non_transactional_tables_switch_the_dump_to_table_locks
+test_stored_routines_and_events_travel_with_the_dump
+test_routines_or_events_the_server_cannot_list_stay_behind_with_a_warning
 test_versioned_tables_are_refused_before_any_export_is_written
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent
 test_the_archive_holds_the_site_the_dump_and_the_manifest

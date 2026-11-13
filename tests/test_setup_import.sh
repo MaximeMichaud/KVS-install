@@ -273,6 +273,27 @@ test_prepared_dump_loads_into_the_container_database() {
     grep -Fq '/*!50013  SQL SECURITY DEFINER */' "$TMP_ROOT/prepared-definers.sql" || fail "the view must keep its SQL SECURITY clause"
     grep -Fq "DEFINER=\`keep\`@\`me\` in a value" "$TMP_ROOT/prepared-definers.sql" || fail "row data must never be rewritten"
 
+    # A routine (trigger, event) whose recorded database collation differs
+    # from the database's comes wrapped in ALTER DATABASE lines naming the
+    # old database, which does not exist here; the routine itself stays.
+    {
+        cat "$dump"
+        echo '/*!50003 DROP FUNCTION IF EXISTS `kvs_one` */;'
+        echo 'ALTER DATABASE `oldsite` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci ;'
+        echo 'DELIMITER ;;'
+        echo 'CREATE DEFINER=`kvs`@`localhost` FUNCTION `kvs_one`() RETURNS int(11)'
+        echo 'RETURN 1 ;;'
+        echo 'DELIMITER ;'
+        echo 'ALTER DATABASE `oldsite` CHARACTER SET latin1 COLLATE latin1_swedish_ci ;'
+        echo "INSERT INTO \`ktvs_options\` VALUES ('NOTE','ALTER DATABASE x');"
+    } > "$TMP_ROOT/routines.sql"
+    import_prepare_dump "$TMP_ROOT/routines.sql" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/prepared-routines.sql" token-6 >/dev/null ||
+        fail "a dump with routines must be prepared"
+    grep -q '^ALTER DATABASE' "$TMP_ROOT/prepared-routines.sql" && fail "ALTER DATABASE of the old database must be dropped"
+    grep -Fxq 'CREATE  FUNCTION `kvs_one`() RETURNS int(11)' "$TMP_ROOT/prepared-routines.sql" ||
+        fail "the routine must stay, without its DEFINER: $(grep -n FUNCTION "$TMP_ROOT/prepared-routines.sql")"
+    grep -Fq "('NOTE','ALTER DATABASE x')" "$TMP_ROOT/prepared-routines.sql" || fail "row data must never be rewritten"
+
     # An InnoDB table converted from MyISAM on a lenient server keeps
     # ROW_FORMAT=FIXED, which a strict MariaDB refuses to create. MyISAM
     # keeps it, and neither a comment nor row data is touched.
@@ -813,6 +834,57 @@ test_the_staged_dump_is_readable_by_the_database_group_only() {
     pass "the staged dump is readable by the database group only"
 }
 
+# Imported events exist but do not run while the event scheduler of the
+# stack's MariaDB is off, its default: the setup says so once the replay is
+# verified. The stub answers the count from fixture events and the
+# scheduler state, by the predicates the query holds.
+test_the_setup_says_when_imported_events_do_not_run() {
+    local lib="$TMP_ROOT/verify-database.sh"
+    local fixture statuses scheduler expected output
+
+    awk '$0 == "import_verify_database() {" { capture = 1 } capture { print } capture && /^}$/ { exit }' \
+        "$REPO_ROOT/docker/setup.sh" > "$lib"
+    grep -q 'information_schema.events' "$lib" || fail "import_verify_database must look for events"
+    for fixture in 'ENABLED ENABLED DISABLED|OFF|2' 'ENABLED|DISABLED|1' 'DISABLED|OFF|' 'ENABLED|ON|' '|OFF|' 'fail|OFF|'; do
+        IFS='|' read -r statuses scheduler expected <<< "$fixture"
+        output=$(
+            # shellcheck source=/dev/null
+            source "$lib"
+            # shellcheck disable=SC2034  # Read by the extracted function.
+            IMPORT_MODE=true IMPORT_TOKEN=token-7 IMPORT_DUMP_TABLES=3 IMPORT_TABLES_PREFIX=ktvs_ DOMAIN=example.com
+            # shellcheck disable=SC2034  # Read by the extracted function.
+            GREEN='' YELLOW='' RED='' NC=''
+            # shellcheck disable=SC2329  # Called by the extracted function.
+            run_root_mariadb() {
+                local query="${!#}" status count=0
+
+                [ "$1 $2 $3" = "-u root example.com" ] || return 1
+                case $query in
+                    *"FROM ktvs_options WHERE variable='KVS_INSTALL_IMPORT'"*) printf '%s\r\n' "$IMPORT_TOKEN" ;;
+                    *"FROM information_schema.events WHERE event_schema = DATABASE()"*)
+                        [ "$statuses" != fail ] || return 1
+                        for status in $statuses; do
+                            [[ "$query" != *"status = 'ENABLED'"* || "$status" = ENABLED ]] && count=$((count + 1))
+                        done
+                        [[ "$query" == *"@@event_scheduler <> 'ON'"* && "$scheduler" = ON ]] && count=0
+                        printf '%s\r\n' "$count"
+                        ;;
+                    *) return 1 ;;
+                esac
+            }
+            import_verify_database
+        ) || fail "the verification must pass with events $statuses: $output"
+        grep -Fq 'Database imported (3 tables in the dump)' <<< "$output" || fail "the import must be confirmed: $output"
+        if [ -n "$expected" ]; then
+            grep -Fxq "  The database holds $expected enabled events, which do not run while the event scheduler of MariaDB is off, its default here; the README says how to turn it on" <<< "$output" ||
+                fail "events $statuses with the scheduler $scheduler must be announced: $output"
+        elif grep -Fq 'enabled events' <<< "$output"; then
+            fail "events $statuses with the scheduler $scheduler need no notice: $output"
+        fi
+    done
+    pass "the setup says when imported events do not run"
+}
+
 test_php_config_values_are_read_as_kvs_writes_them
 test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip
@@ -831,5 +903,6 @@ test_cached_dump_inspection_preserves_output
 test_dump_preparation_stops_after_a_decompression_failure
 test_corrupt_or_truncated_compressed_dumps_are_refused
 test_the_staged_dump_is_readable_by_the_database_group_only
+test_the_setup_says_when_imported_events_do_not_run
 
 echo "All $TESTS_RUN import tests passed."
