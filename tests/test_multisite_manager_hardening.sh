@@ -49,9 +49,32 @@ docker() {
 
     case "${1:-}" in
         ps)
+            # The R1 collision checks query Compose project labels with
+            # --filter. Plain name checks (Caddy, nginx) carry no --filter and
+            # keep their historical answer below. Both label queries default to
+            # empty, so an add in the other fixtures still sees no project.
+            if [[ " $* " == *' --filter '* ]]; then
+                case " $* " in
+                    *project.working_dir*)
+                        [ -z "${MOCK_PROJECT_WORKDIRS:-}" ] ||
+                            printf '%s\n' "${MOCK_PROJECT_WORKDIRS}"
+                        ;;
+                    *)
+                        [ -z "${MOCK_PROJECT_CONTAINERS:-}" ] ||
+                            printf '%s\n' "${MOCK_PROJECT_CONTAINERS}"
+                        ;;
+                esac
+                return 0
+            fi
             if [ "${MOCK_CADDY_RUNNING:-true}" = true ]; then
                 printf '%s\n' 'kvs-caddy'
             fi
+            ;;
+        volume)
+            # volume ls --filter label=com.docker.compose.project=<prefix>
+            [ -z "${MOCK_PROJECT_VOLUMES:-}" ] ||
+                printf '%s\n' "${MOCK_PROJECT_VOLUMES}"
+            return 0
             ;;
         network)
             case "${2:-}" in
@@ -614,5 +637,163 @@ forced_reload_call_count=$(grep -Fc 'docker exec kvs-caddy caddy reload --force'
 [ "$reload_call_count" -eq "$forced_reload_call_count" ] &&
     [ "$reload_call_count" -gt 0 ] ||
     fail "site-manager.sh contains an unforced Caddy reload path"
+
+# ---------------------------------------------------------------------------
+# R1: a new site must not reuse the primary's Compose project, and remove must
+# not 'down -v' a project whose containers were created from another directory
+# (a single-mode primary that shares the kvs-<domain> project name).
+# ---------------------------------------------------------------------------
+
+# setup.sh names the primary a-test.example kvs-a-test (its domain without the
+# TLD), and add a.test derives the same kvs-a-test. A single-mode primary
+# records it in docker/.env only, with no .primary.env: add must refuse it.
+create_fixture r1_env
+r1_env_script="${TEST_DIR}/r1_env/docker/multi-site/site-manager.sh"
+printf 'COMPOSE_PROJECT_NAME=kvs-a-test\nSITE_PREFIX=kvs-a-test\n' > "${TEST_DIR}/r1_env/docker/.env"  # pragma: allowlist secret
+set +e
+MOCK_DOCKER_LOG="${TEST_DIR}/r1_env/docker.log" \
+KVS_WEBROOT_BASE="${TEST_DIR}/r1_env/webroots" \
+    bash "$r1_env_script" add a.test >/dev/null 2>&1
+status=$?
+set -e
+[ "$status" -ne 0 ] ||
+    fail "add reused the single-mode primary's project recorded in docker/.env"
+[ ! -e "${TEST_DIR}/r1_env/docker/multi-site/sites/a.test" ] ||
+    fail "the refused add created the site directory"
+
+# Whatever docker/.env says, a project that already owns containers must not be
+# reused: docker/.env names another prefix here, but a container exists.
+create_fixture r1_label
+r1_label_script="${TEST_DIR}/r1_label/docker/multi-site/site-manager.sh"
+printf 'COMPOSE_PROJECT_NAME=kvs-other\nSITE_PREFIX=kvs-other\n' > "${TEST_DIR}/r1_label/docker/.env"  # pragma: allowlist secret
+set +e
+MOCK_PROJECT_CONTAINERS='c0ffee' \
+MOCK_DOCKER_LOG="${TEST_DIR}/r1_label/docker.log" \
+KVS_WEBROOT_BASE="${TEST_DIR}/r1_label/webroots" \
+    bash "$r1_label_script" add a.test >/dev/null 2>&1
+status=$?
+set -e
+[ "$status" -ne 0 ] ||
+    fail "add reused a Compose project that already has containers"
+[ ! -e "${TEST_DIR}/r1_label/docker/multi-site/sites/a.test" ] ||
+    fail "the refused add (existing project) created the site directory"
+
+# The primary registers its own prefix. setup.sh has written it to docker/.env
+# before it runs primary-config, the first time multi mode is set up (a fresh
+# multi install or a single to multi switch, where the primary's containers
+# already exist). Neither the docker/.env check nor the container check of add
+# may refuse it, or setup.sh stops and every re-run fails the same way.
+create_fixture r1_primary
+r1_primary_script="${TEST_DIR}/r1_primary/docker/multi-site/site-manager.sh"
+r1_primary_sites="${TEST_DIR}/r1_primary/docker/multi-site/sites"
+printf 'SITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\nMODE=multi\nDOMAIN=a-test.example\n' \
+    > "${TEST_DIR}/r1_primary/docker/.env"  # pragma: allowlist secret
+set +e
+MOCK_CADDY_RUNNING=false \
+    bash "$r1_primary_script" primary-config a-test.example kvs-a-test internal false \
+    > "${TEST_DIR}/r1_primary/out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 0 ] ||
+    fail "primary-config refused the primary's own prefix recorded in docker/.env: $(cat "${TEST_DIR}/r1_primary/out")"
+grep -Fxq 'SITE_PREFIX=kvs-a-test' "${r1_primary_sites}/.primary.env" 2>/dev/null ||
+    fail "primary-config did not record the primary's reservation"
+rm -f "${r1_primary_sites}/.primary.env"
+set +e
+MOCK_CADDY_RUNNING=false MOCK_PROJECT_CONTAINERS='0123abcd' \
+    bash "$r1_primary_script" primary-config a-test.example kvs-a-test internal false \
+    > "${TEST_DIR}/r1_primary/out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 0 ] ||
+    fail "primary-config refused the primary because its own containers exist: $(cat "${TEST_DIR}/r1_primary/out")"
+echo "PASS: primary-config accepts the primary's own prefix and containers"
+
+# remove must not 'down -v' a project whose containers were created elsewhere.
+create_fixture r1_remove
+r1_remove_script="${TEST_DIR}/r1_remove/docker/multi-site/site-manager.sh"
+r1_remove_site="${TEST_DIR}/r1_remove/docker/multi-site/sites/a.test"
+mkdir -p "$r1_remove_site"
+printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
+    > "$r1_remove_site/.env"
+r1_remove_log="${TEST_DIR}/r1_remove/docker.log"
+: > "$r1_remove_log"
+set +e
+printf 'yes\n' | MOCK_PROJECT_WORKDIRS="${TEST_DIR}/r1_remove/docker" \
+    MOCK_DOCKER_LOG="$r1_remove_log" \
+    KVS_WEBROOT_BASE="${TEST_DIR}/r1_remove/webroots" \
+    bash "$r1_remove_script" remove a.test >/dev/null 2>&1
+status=$?
+set -e
+[ "$status" -ne 0 ] ||
+    fail "remove tore down a project whose working directory differs"
+! grep -q 'compose.* down -v' "$r1_remove_log" ||
+    fail "remove ran 'docker compose down -v' on a project from another directory"
+[ -d "$r1_remove_site" ] ||
+    fail "remove deleted the site directory despite refusing 'down -v'"
+
+# A site created before the add checks existed can still share the primary's
+# project. With the primary stopped by 'docker compose down', its containers
+# are gone and only its volumes remain, so no label tells them apart: remove
+# must refuse a project the primary records in docker/.env or .primary.env.
+for r1_record in env reservation; do
+    create_fixture "r1_shared_${r1_record}"
+    r1_shared_root="${TEST_DIR}/r1_shared_${r1_record}/docker"
+    r1_shared_site="${r1_shared_root}/multi-site/sites/a.test"
+    mkdir -p "$r1_shared_site"
+    printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
+        > "$r1_shared_site/.env"
+    if [ "$r1_record" = env ]; then
+        printf 'COMPOSE_PROJECT_NAME=kvs-a-test\nSITE_PREFIX=kvs-a-test\n' > "${r1_shared_root}/.env"  # pragma: allowlist secret
+    else
+        printf 'DOMAIN=a-test.example\nSITE_PREFIX=kvs-a-test\n' \
+            > "${r1_shared_root}/multi-site/sites/.primary.env"
+        chmod 600 "${r1_shared_root}/multi-site/sites/.primary.env"
+    fi
+    r1_shared_log="${TEST_DIR}/r1_shared_${r1_record}/docker.log"
+    : > "$r1_shared_log"
+    set +e
+    printf 'yes\nn\n' | MOCK_PROJECT_VOLUMES='kvs-a-test_mariadb-data' \
+        MOCK_DOCKER_LOG="$r1_shared_log" \
+        KVS_WEBROOT_BASE="${TEST_DIR}/r1_shared_${r1_record}/webroots" \
+        bash "${r1_shared_root}/multi-site/site-manager.sh" remove a.test >/dev/null 2>&1
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] ||
+        fail "remove accepted a site sharing the primary's project (${r1_record})"
+    ! grep -q 'compose.* down -v' "$r1_shared_log" ||
+        fail "remove ran 'docker compose down -v' on the primary's project (${r1_record})"
+    [ -d "$r1_shared_site" ] ||
+        fail "remove deleted a site sharing the primary's project (${r1_record})"
+done
+echo "PASS: remove refuses a project the primary records, without containers"
+
+# The guard must still allow a legitimate removal whose project comes from this
+# site's own directory, also when Compose recorded it through a symlinked path,
+# and down -v must name the site's project so an exported COMPOSE_PROJECT_NAME
+# cannot point it at another stack.
+create_fixture r1_remove_ok
+r1_ok_script="${TEST_DIR}/r1_remove_ok/docker/multi-site/site-manager.sh"
+r1_ok_site="${TEST_DIR}/r1_remove_ok/docker/multi-site/sites/a.test"
+mkdir -p "$r1_ok_site"
+ln -s "$r1_ok_site" "${TEST_DIR}/r1_remove_ok/site-link"
+printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
+    > "$r1_ok_site/.env"
+r1_ok_log="${TEST_DIR}/r1_remove_ok/docker.log"
+: > "$r1_ok_log"
+set +e
+printf 'yes\n' | MOCK_PROJECT_WORKDIRS="${TEST_DIR}/r1_remove_ok/site-link" \
+    COMPOSE_PROJECT_NAME=kvs-elsewhere \
+    MOCK_DOCKER_LOG="$r1_ok_log" \
+    KVS_WEBROOT_BASE="${TEST_DIR}/r1_remove_ok/webroots" \
+    bash "$r1_ok_script" remove a.test >/dev/null 2>&1
+status=$?
+set -e
+[ "$status" -eq 0 ] ||
+    fail "remove refused a legitimate site whose project matches its own directory"
+grep -Fxq 'compose -p kvs-a-test down -v' "$r1_ok_log" ||
+    fail "a legitimate remove did not run 'docker compose -p kvs-a-test down -v': $(cat "$r1_ok_log")"
+[ ! -d "$r1_ok_site" ] ||
+    fail "a legitimate remove kept the site directory"
 
 echo "PASS: Multi-site manager hardening"

@@ -165,6 +165,48 @@ archive_tables_prefix() {
     printf '%s\n' "$prefix"
 }
 
+# The single-mode primary records its identity in docker/.env, next to the
+# multi-site directory, not in the .primary.env reservation (which exists only
+# once multi mode is set up). Read its Compose project name so a new site
+# cannot take the same project and, on remove, tear the primary's data down.
+single_mode_primary_prefix() {
+    local env_file="${SCRIPT_DIR}/../.env" prefix=""
+    [ -f "$env_file" ] || return 0
+    prefix=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$env_file" | head -n 1)
+    [ -n "$prefix" ] || prefix=$(sed -n 's/^SITE_PREFIX=//p' "$env_file" | head -n 1)
+    printf '%s\n' "$prefix"
+}
+
+# Whether any container or volume already belongs to a Compose project of this
+# name. It covers a single-mode primary whose prefix matches, a stopped stack
+# and an earlier site, so add never adopts another stack's containers or
+# volumes by reusing its project name.
+compose_project_exists() {
+    local project="$1"
+    [ -n "$project" ] || return 1
+    if [ -n "$(docker ps -a \
+        --filter "label=com.docker.compose.project=${project}" \
+        --format '{{.ID}}' 2>/dev/null)" ]; then
+        return 0
+    fi
+    if [ -n "$(docker volume ls \
+        --filter "label=com.docker.compose.project=${project}" \
+        --format '{{.Name}}' 2>/dev/null)" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# The directories the containers of a Compose project were created from, one
+# per line and de-duplicated. remove reads them to be sure a down -v tears down
+# this site's own stack and not a primary that shares the project name.
+compose_project_working_dirs() {
+    local project="$1"
+    docker ps -a --filter "label=com.docker.compose.project=${project}" \
+        --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null |
+        sort -u
+}
+
 ensure_site_prefix_available() {
     local requested_domain="$1"
     local requested_prefix="$2"
@@ -194,6 +236,32 @@ ensure_site_prefix_available() {
             return 1
         fi
     done
+}
+
+# A new site's project must belong to no other stack. The primary's own
+# registration (primary-config) does not come here: its prefix is the one
+# docker/.env records and its containers already exist on a single to multi
+# switch, so these checks would refuse the primary itself.
+ensure_new_site_project_free() {
+    local requested_domain="$1"
+    local requested_prefix="$2"
+    local single_primary
+
+    # A single-mode primary has no .primary.env, only docker/.env. Its project
+    # can equal a new site's kvs-<domain>, and remove would then down -v it.
+    single_primary=$(single_mode_primary_prefix)
+    if [ -n "$single_primary" ] && [ "$single_primary" = "$requested_prefix" ]; then
+        log_error "Site prefix ${requested_prefix} is used by the primary site recorded in docker/.env"
+        return 1
+    fi
+
+    # Whatever the mode, never reuse a Compose project that already has
+    # containers or volumes: that is how a new site would adopt and later
+    # delete the primary's stack.
+    if compose_project_exists "$requested_prefix"; then
+        log_error "A Docker Compose project named ${requested_prefix} already exists (containers or volumes); refusing to reuse it for ${requested_domain}"
+        return 1
+    fi
 }
 
 check_caddy_running() {
@@ -482,6 +550,7 @@ add_site() {
     fi
 
     ensure_site_prefix_available "$domain" "$site_prefix" || return 1
+    ensure_new_site_project_free "$domain" "$site_prefix" || return 1
 
     # Check KVS archive
     if ! compgen -G "${KVS_ARCHIVE_DIR}/KVS_*.zip" >/dev/null; then
@@ -730,9 +799,54 @@ remove_site() {
 
     log_info "Removing site: ${domain}"
 
-    # Stop containers and remove volumes
+    # Only tear down a Compose project that is this site's own. A site created
+    # before add refused the primary's project can share its name, and down -v
+    # on it would delete the primary's containers and volumes. Refuse a project
+    # the primary records (docker/.env, .primary.env): with the primary stopped
+    # by 'docker compose down' only its volumes remain and no container label
+    # tells the two apart. Refuse too when the project has containers created
+    # from another directory, comparing resolved paths because Compose records
+    # the path it was started from, symlinks included.
+    local remove_project working_dirs primary_prefix site_real wd wd_real foreign_dir=""
+    remove_project=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$site_dir/.env" | head -n 1)
+    [ -n "$remove_project" ] ||
+        remove_project=$(sed -n 's/^SITE_PREFIX=//p' "$site_dir/.env" | head -n 1)
+    if [ -n "$remove_project" ]; then
+        for primary_prefix in "$(single_mode_primary_prefix)" "$(primary_site_value SITE_PREFIX)"; do
+            if [ -n "$primary_prefix" ] && [ "$primary_prefix" = "$remove_project" ]; then
+                log_error "Refusing 'docker compose down -v' for project ${remove_project}: the primary site uses that project name"
+                log_error "Remove aborted to protect the primary's containers and volumes"
+                exit 1
+            fi
+        done
+        working_dirs=$(compose_project_working_dirs "$remove_project")
+        if [ -n "$working_dirs" ]; then
+            site_real=$(cd "$site_dir" && pwd -P)
+            while IFS= read -r wd; do
+                if [ -z "$wd" ]; then
+                    foreign_dir="(a container with no working directory label)"
+                    continue
+                fi
+                wd_real=$(cd "$wd" 2>/dev/null && pwd -P) || wd_real=$wd
+                [ "$wd_real" = "$site_real" ] || foreign_dir=$wd
+            done <<< "$working_dirs"
+        fi
+        if [ -n "$foreign_dir" ]; then
+            log_error "Refusing 'docker compose down -v' for project ${remove_project}: it has containers from ${foreign_dir}, not ${site_dir}"
+            log_error "The primary site may share this project name; remove aborted to protect its data"
+            exit 1
+        fi
+    fi
+
+    # Stop containers and remove volumes. The project is named explicitly so
+    # a COMPOSE_PROJECT_NAME exported in the operator's shell, which Compose
+    # prefers over the site's .env, cannot point down -v at another stack.
     cd "$site_dir"
-    docker compose down -v 2>/dev/null || true
+    if [ -n "$remove_project" ]; then
+        docker compose -p "$remove_project" down -v 2>/dev/null || true
+    else
+        (unset COMPOSE_PROJECT_NAME; docker compose down -v 2>/dev/null) || true
+    fi
 
     # Remove Caddy config
     rm -f "$caddy_config"
