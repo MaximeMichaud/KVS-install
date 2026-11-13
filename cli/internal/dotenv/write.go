@@ -27,7 +27,9 @@ import (
 // and not looked for. The lines the edit writes are in a form both read
 // alike, but a shell such a line throws off may not read them at all, a
 // quote left open taking in the lines after it: the edit does not make the
-// file readable by the shell.
+// file readable by the shell. A key is added before a word with no =
+// that ends the file, which stays its last line, and refused where AddAt
+// finds that no line can go there.
 func Set(data []byte, key, value string) ([]byte, error) {
 	if !shellName(key) {
 		return nil, fmt.Errorf("%s: the shell of the scripts cannot set a variable of that name, so no setting reads alike in docker compose and in the scripts", key)
@@ -66,14 +68,12 @@ func Set(data []byte, key, value string) ([]byte, error) {
 	if found {
 		return out, nil
 	}
-	if out, err = endJoin(data, entries, key); err != nil {
+	head, tail, err := endJoin(data, entries, key)
+	if err != nil {
 		return nil, err
 	}
-	newline := LineBreak(data)
-	if len(out) > 0 && out[len(out)-1] != '\n' {
-		out = append(out, '\n')
-	}
-	return append(out, key+"="+written+newline...), nil
+	out = append(head, key+"="+written+LineBreak(data)...)
+	return append(out, tail...), nil
 }
 
 // LineBreak is the line break of a line added to data: CRLF when every
@@ -95,8 +95,11 @@ func LineBreak(data []byte) string {
 // each on a line of its own (rewrite). A file compose cannot read is not
 // edited, and neither is one where a line of the operator's would have the
 // shell of the scripts read the result, or the opposite edit, otherwise
-// than compose, in the cases shellHazard finds (Set). A line the shell
-// misreads before the edit is the operator's, and stays as it is.
+// than compose, in the cases shellHazard finds (Set). The opposite edit,
+// which a rollback makes, adds key again at the end of what is left: where
+// that is refused (endJoin), so is the edit, so that what kvsctl removes
+// can always be put back. A line the shell misreads before the edit is the
+// operator's, and stays as it is.
 func Unset(data []byte, key string) ([]byte, bool, error) {
 	entries, err := Scan(data)
 	if err != nil {
@@ -116,6 +119,19 @@ func Unset(data []byte, key string) ([]byte, bool, error) {
 	if !found {
 		return data, false, nil
 	}
+	left, err := Scan(out)
+	if err != nil {
+		return nil, false, err
+	}
+	// A refusal names a line at the end, which no line the edit changed
+	// follows: in data, it comes as many lines later as the edit removed.
+	shift := bytes.Count(data, []byte("\n")) - bytes.Count(out, []byte("\n"))
+	for n := range left {
+		left[n].Line += shift
+	}
+	if _, _, err := endJoin(out, left, key); err != nil {
+		return nil, false, err
+	}
 	return out, true, nil
 }
 
@@ -124,12 +140,13 @@ func Unset(data []byte, key string) ([]byte, bool, error) {
 // key in data becomes the last one of donor, as donor writes it (export
 // keyword, quotes, comment and all) on a line of its own, or goes when
 // donor has none, and its later settings go; the ones only donor has are
-// added at the end, in the order donor first sets them, where the shell
-// reads them on their own (endJoin). Everything else of data stays as it
-// is, comments, blank lines and values on several lines included, but for
-// the other settings of a line it changes (rewrite). It also returns the
-// keys pick accepted in either file, sorted. A file compose cannot read is
-// refused, and so are keys to add after a backslash that ends data.
+// added at the end, before a word with no = that ends data (AddAt), in the
+// order donor first sets them, where the shell reads them on their own
+// (endJoin). Everything else of data stays as it is, comments, blank lines
+// and values on several lines included, but for the other settings of a
+// line it changes (rewrite). It also returns the keys pick accepted in
+// either file, sorted. A file compose cannot read is refused, and so are
+// keys to add where endJoin refuses a line.
 func Graft(data, donor []byte, pick func(key string) bool) ([]byte, []string, error) {
 	theirs, err := Scan(donor)
 	if err != nil {
@@ -180,15 +197,14 @@ func Graft(data, donor []byte, pick func(key string) bool) ([]byte, []string, er
 		if err != nil {
 			return nil, nil, err
 		}
-		if out, err = endJoin(out, grafted, added[0]); err != nil {
+		head, tail, err := endJoin(out, grafted, added[0])
+		if err != nil {
 			return nil, nil, err
 		}
-	}
-	for _, key := range added {
-		if len(out) > 0 && out[len(out)-1] != '\n' {
-			out = append(out, '\n')
+		for _, key := range added {
+			head = append(head, taken[key]+"\n"...)
 		}
-		out = append(out, taken[key]+"\n"...)
+		out = append(head, tail...)
 	}
 	return out, slices.Sorted(maps.Keys(keys)), nil
 }
@@ -388,21 +404,64 @@ func continues(data []byte, prev Entry, at int) bool {
 	return (len(value)-len(bytes.TrimRight(value, `\`)))%2 == 1
 }
 
-// endJoin is a copy of data, whose settings are entries, ready for a line
-// that an edit of key adds at its end. After a last value that ends with a
-// backslash, the shell joins the next line to it: a line feed ends that
-// line first, so the line added is read on its own. Right at the end of
-// the file the shell reads that backslash as itself, which a line feed
-// would change, and the edit is refused.
-func endJoin(data []byte, entries []Entry, key string) ([]byte, error) {
-	out := append([]byte(nil), data...)
+// endJoin splits a copy of data, whose settings are entries, where an edit
+// of key adds lines (AddAt): the lines added, each ended with its line
+// break, go after head, which is empty or ends with one, and tail follows
+// them. After a last value that ends with a backslash, the shell joins the
+// next line to it: a line feed ends that line first, so the line added is
+// read on its own. Right at the end of the file the shell reads that
+// backslash as itself, which a line feed would change, and the edit is
+// refused.
+func endJoin(data []byte, entries []Entry, key string) (head, tail []byte, err error) {
+	at, err := AddAt(data, entries, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	head = append([]byte(nil), data[:at]...)
+	if at < len(data) {
+		return head, data[at:], nil
+	}
 	if n := len(entries); n > 0 && continues(data, entries[n-1], len(data)) {
 		if entries[n-1].End == len(data) {
-			return nil, joined(key, entries[n-1])
+			return nil, nil, joined(key, entries[n-1])
 		}
-		out = append(out, '\n')
+		head = append(head, '\n')
 	}
-	return out, nil
+	if len(head) > 0 && head[len(head)-1] != '\n' {
+		head = append(head, '\n')
+	}
+	return head, nil, nil
+}
+
+// AddAt is the offset where an edit of key adds lines to a .env, data,
+// whose settings are entries: its end, but for a file that ends with a
+// word that has no = or : after it and no line break. Compose reads that
+// word as the value of a key with no name, which nothing reads; a line
+// break after it would make it a key alone on its line, which compose
+// takes from its environment and Isolate leaves there: after
+// DOMAIN=example.com, a last line DOMAIN would have kvsctl and compose read
+// the DOMAIN a shell exported. The lines added go before the line of that
+// word instead, which stays the last line, with no break, as it was:
+// compose and the shell of the scripts, which runs it as a command, read
+// it as before. The edit is refused when the word shares its line with a
+// setting before it, which the lines added would cut from it or have read
+// below them, and when the shell joins that line to the one before,
+// through a backslash. The refusal names the line, not the word, which may
+// be a secret pasted on a line of its own.
+func AddAt(data []byte, entries []Entry, key string) (int, error) {
+	n := len(entries)
+	if n == 0 || !entries[n-1].bare {
+		return len(data), nil
+	}
+	word := entries[n-1]
+	at := bytes.LastIndexByte(data[:word.Start], '\n') + 1
+	if len(bytes.TrimFunc(data[at:word.Start], unicode.IsSpace)) > 0 {
+		return 0, fmt.Errorf("%s: line %d: the file ends with a word that has no = after it and no line break, after a setting on the same line, and a line added there would change how docker compose or the scripts read that line: write the word as KEY=value on a line of its own, or remove it", key, word.Line)
+	}
+	if n > 1 && continues(data, entries[n-2], at) {
+		return 0, joined(key, entries[n-2])
+	}
+	return at, nil
 }
 
 // joined is the refusal of an edit of key next to prev, whose line the

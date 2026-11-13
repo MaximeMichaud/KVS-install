@@ -37,6 +37,10 @@ type Entry struct {
 	// keyAt and valueAt are the offsets of the key and of the value, its
 	// opening quote included.
 	keyAt, valueAt int
+	// bare is set for a word that runs to the end of the data with no =
+	// or : after it and no line break: compose reads it as the value of a
+	// key with no name (AddAt).
+	bare bool
 }
 
 // Scan lists the settings of a .env file in their order, without expanding
@@ -126,6 +130,7 @@ func scanEntry(src string, start int) (Entry, int, error) {
 		i += size
 	}
 	valueStart := keyStart
+	e.bare = sep < 0
 	if sep >= 0 {
 		e.Key = strings.TrimRightFunc(src[keyStart:sep], unicode.IsSpace)
 		e.Inherited = src[sep] == '\n'

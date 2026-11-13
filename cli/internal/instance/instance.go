@@ -363,7 +363,8 @@ var mergeKept = map[string]bool{
 // in the order the example lists them. Both files are read the way compose
 // reads them: a key the live file sets in any form, exported or left to the
 // environment, keeps its value and its place, and the keys of mergeKept are
-// never added.
+// never added. A word with no = that ends the live file stays its last
+// line, the keys going before it (dotenv.AddAt).
 func (i *Instance) MergeEnv(examplePath string) ([]string, error) {
 	example, err := os.ReadFile(examplePath)
 	if err != nil {
@@ -408,18 +409,22 @@ func (i *Instance) MergeEnv(examplePath string) ([]string, error) {
 	if len(added) == 0 {
 		return nil, nil
 	}
-	// The last line that is not blank keeps its line break, and gets a
-	// line feed when it has none. The lines added end with CRLF only in a
-	// file saved with CRLF throughout, as dotenv.Set adds a line: a CRLF
-	// elsewhere is no reason for one the shell of the scripts reads into
-	// the value before it.
-	kept := strings.TrimRight(string(live), "\r\n")
+	at, err := dotenv.AddAt(live, have, added[0])
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", i.EnvPath, err)
+	}
+	// The last line that is not blank before them keeps its line break,
+	// and gets a line feed when it has none. The lines added end with CRLF
+	// only in a file saved with CRLF throughout, as dotenv.Set adds a line:
+	// a CRLF elsewhere is no reason for one the shell of the scripts reads
+	// into the value before it.
+	kept := strings.TrimRight(string(live[:at]), "\r\n")
 	end := "\n"
 	if strings.HasPrefix(string(live[len(kept):]), "\r\n") {
 		end = "\r\n"
 	}
 	newline := dotenv.LineBreak(live)
-	body := kept + end + strings.Join(appended, newline) + newline
+	body := kept + end + strings.Join(appended, newline) + newline + string(live[at:])
 	if err := i.ReplaceEnv([]byte(body)); err != nil {
 		return nil, err
 	}

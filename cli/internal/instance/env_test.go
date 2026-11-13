@@ -352,3 +352,66 @@ func TestIonCubeAgreesWithTheEntrypoints(t *testing.T) {
 		}
 	}
 }
+
+// MergeEnv and SetEnv add their lines before a word with no = that ends
+// the live .env, which a line break after it would turn into a key compose
+// takes from its environment: the word stays the last line, and kvsctl
+// reads every setting as before. An upgrade that removes a key there, and
+// its rollback that puts the key back, both go through.
+func TestEnvEditsKeepALastWordWithoutEqualsLast(t *testing.T) {
+	t.Setenv("DOMAIN", "old.example.com")
+	const live = "DOMAIN=example.com\nKVS_CRON_IMAGE=r/cron:1.0.0\nDOMAIN"
+	inst := newInstance(t, live)
+	example := filepath.Join(t.TempDir(), ".env.example")
+	if err := os.WriteFile(example, []byte("# New.\nNEW_KEY=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := inst.MergeEnv(example); err != nil || strings.Join(added, ",") != "NEW_KEY" {
+		t.Fatalf("MergeEnv: added %v, %v", added, err)
+	}
+	if err := inst.SetEnv("KVS_STACK_VERSION", "26.10.0"); err != nil {
+		t.Fatal(err)
+	}
+	const want = "DOMAIN=example.com\nKVS_CRON_IMAGE=r/cron:1.0.0\n\n# New.\nNEW_KEY=1\nKVS_STACK_VERSION=26.10.0\nDOMAIN"
+	if got, _ := os.ReadFile(inst.EnvPath); string(got) != want {
+		t.Errorf(".env =\n%q\nwant\n%q", got, want)
+	}
+	if inst.Env["DOMAIN"] != "example.com" || inst.Env["NEW_KEY"] != "1" || inst.Env["KVS_STACK_VERSION"] != "26.10.0" {
+		t.Errorf("Env = %q", inst.Env)
+	}
+	if err := inst.UnsetEnv("KVS_CRON_IMAGE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.SetEnv("KVS_CRON_IMAGE", "r/cron:1.0.0"); err != nil {
+		t.Fatalf("the rollback of UnsetEnv: %v", err)
+	}
+	if inst.Env["KVS_CRON_IMAGE"] != "r/cron:1.0.0" || inst.Env["DOMAIN"] != "example.com" {
+		t.Errorf("Env = %q", inst.Env)
+	}
+}
+
+// Where no line can go before that word, after a setting on its line or
+// on a line the shell joins to the one before, MergeEnv and SetEnv refuse,
+// and so does UnsetEnv, whose rollback would have to add the key back
+// there: the file stays as it was.
+func TestEnvEditsRefuseWhereNoLineCanGoBeforeTheLastWord(t *testing.T) {
+	for _, live := range []string{"DOMAIN=example.com\nKVS_CRON_IMAGE=r/cron:1.0.0\nNOTE=\"a\" DOMAIN", "DOMAIN=example.com\nKVS_CRON_IMAGE=r/cron:1.0.0\nNOTE=a\\\nDOMAIN"} {
+		inst := newInstance(t, live)
+		example := filepath.Join(t.TempDir(), ".env.example")
+		if err := os.WriteFile(example, []byte("# New.\nNEW_KEY=1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if added, err := inst.MergeEnv(example); err == nil || !strings.Contains(err.Error(), inst.EnvPath+": NEW_KEY: line 3: ") || added != nil {
+			t.Errorf("%q: MergeEnv added %v, %v", live, added, err)
+		}
+		if err := inst.SetEnv("KVS_STACK_VERSION", "26.10.0"); err == nil || !strings.Contains(err.Error(), "KVS_STACK_VERSION: line 3: ") {
+			t.Errorf("%q: SetEnv: %v", live, err)
+		}
+		if err := inst.UnsetEnv("KVS_CRON_IMAGE"); err == nil || !strings.Contains(err.Error(), "KVS_CRON_IMAGE: line 3: ") {
+			t.Errorf("%q: UnsetEnv: %v", live, err)
+		}
+		if got, _ := os.ReadFile(inst.EnvPath); string(got) != live {
+			t.Errorf(".env = %q, want it left as %q", got, live)
+		}
+	}
+}

@@ -1084,3 +1084,118 @@ func TestGraft(t *testing.T) {
 		t.Errorf("keys added after a backslash at the end: %q, %v", got, err)
 	}
 }
+
+// A word with no = that ends the file, with no line break after it, is the
+// value of a key with no name for compose. The line break a setting added
+// after it would need makes it a key alone on its line, which compose and
+// Isolate take from the environment: Set and Graft add their lines before
+// the line of that word instead, which stays the last one, and compose and
+// the shell of the scripts read every setting of the operator as before.
+// Unset and Set take each other back there, byte for byte.
+func TestEditsKeepALastWordWithoutEqualsLast(t *testing.T) {
+	bash, _ := exec.LookPath("bash")
+	environ := []string{"DOMAIN=old.example.com"}
+	managed := func(key string) bool { return strings.HasPrefix(key, "KVS_") }
+	composeReads := func(text string) map[string]string {
+		t.Helper()
+		read, err := Parse([]byte(text), Lookup(environ, "", []byte(text), nil))
+		if err != nil {
+			t.Fatalf("%q: %v", text, err)
+		}
+		return read
+	}
+	for _, tc := range []struct{ name, data, want string }{
+		{"a word alone", "DOMAIN=example.com\nDOMAIN", "DOMAIN=example.com\nKVS_STACK_VERSION=26.10.0\nDOMAIN"},
+		{"a word after export", "DOMAIN=example.com\nexport DOMAIN", "DOMAIN=example.com\nKVS_STACK_VERSION=26.10.0\nexport DOMAIN"},
+		{"a word between blanks", "DOMAIN=example.com\n  DOMAIN \t", "DOMAIN=example.com\nKVS_STACK_VERSION=26.10.0\n  DOMAIN \t"},
+		{"a word before a carriage return", "DOMAIN=example.com\r\nDOMAIN\r", "DOMAIN=example.com\r\nKVS_STACK_VERSION=26.10.0\nDOMAIN\r"},
+		{"a word below a comment", "DOMAIN=example.com\n# note\nDOMAIN", "DOMAIN=example.com\n# note\nKVS_STACK_VERSION=26.10.0\nDOMAIN"},
+		{"a word below a backslash and a blank line", "DOMAIN=example.com\\\n\nDOMAIN", "DOMAIN=example.com\\\n\nKVS_STACK_VERSION=26.10.0\nDOMAIN"},
+		{"a word alone in the file", "DOMAIN", "KVS_STACK_VERSION=26.10.0\nDOMAIN"},
+	} {
+		// Added after the word, the line would have compose read the
+		// DOMAIN the shell exported.
+		if after := composeReads(tc.data + "\nKVS_STACK_VERSION=26.10.0\n"); tc.name == "a word alone" && after["DOMAIN"] != "old.example.com" {
+			t.Fatalf("a line added after the word reads DOMAIN=%q", after["DOMAIN"])
+		}
+		before := composeReads(tc.data)
+		want := maps.Clone(before)
+		want["KVS_STACK_VERSION"] = "26.10.0"
+		got, err := Set([]byte(tc.data), "KVS_STACK_VERSION", "26.10.0")
+		if err != nil || string(got) != tc.want {
+			t.Errorf("%s: Set: %q, %v; want %q", tc.name, got, err, tc.want)
+			continue
+		}
+		if read := composeReads(string(got)); !maps.Equal(read, want) {
+			t.Errorf("%s: compose reads %q, want %q", tc.name, read, want)
+		}
+		if bash != "" {
+			keys := []string{"DOMAIN", "KVS_STACK_VERSION"}
+			shell := shellReads(t, bash, []byte(tc.data), keys)
+			shell["KVS_STACK_VERSION"] = "26.10.0"
+			if read := shellReads(t, bash, got, keys); !maps.Equal(read, shell) {
+				t.Errorf("%s: the shell reads %q, want %q", tc.name, read, shell)
+			}
+		}
+		grafted, _, err := Graft([]byte(tc.data), []byte("KVS_STACK_VERSION=26.10.0\n"), managed)
+		if err != nil || string(grafted) != tc.want {
+			t.Errorf("%s: Graft: %q, %v; want %q", tc.name, grafted, err, tc.want)
+		}
+		back, found, err := Unset(got, "KVS_STACK_VERSION")
+		if err != nil || !found || string(back) != tc.data {
+			t.Errorf("%s: Unset takes back %q as %q, %v, %v; want %q", tc.name, got, back, found, err, tc.data)
+		}
+	}
+	// The rollback of an upgrade that dropped a variant key puts it back.
+	const live = "DOMAIN=example.com\nKVS_CRON_IMAGE=r/cron:1.0.0\nHTTP_PROXY"
+	left, found, err := Unset([]byte(live), "KVS_CRON_IMAGE")
+	if err != nil || !found {
+		t.Fatalf("Unset: %q, %v, %v", left, found, err)
+	}
+	if back, err := Set(left, "KVS_CRON_IMAGE", "r/cron:1.0.0"); err != nil || string(back) != live {
+		t.Errorf("Set takes back %q as %q, %v; want %q", left, back, err, live)
+	}
+	if got, _, err := Graft([]byte("KVS_X=0\nFOO"), []byte("KVS_X=1\nKVS_Y=2\nA=3\n"), managed); err != nil || string(got) != "KVS_X=1\nKVS_Y=2\nFOO" {
+		t.Errorf("a graft that writes one key in place and adds another: %q, %v", got, err)
+	}
+}
+
+// Where no line can go before the word without changing how compose or the
+// shell reads an operator's line, Set, Graft and Unset all refuse and name
+// the line: the word after a setting on its line, which the lines added
+// would cut from it or have read below them; a line the shell joins to the
+// one of the word, through a backslash; and, as before, a backslash that
+// ends the file. Unset refuses as Set would to add its key back, the edit
+// that takes it back, so that a rollback never meets a refusal where the
+// upgrade met none.
+func TestEditsRefuseWhereNoLineCanGoBeforeTheLastWord(t *testing.T) {
+	managed := func(key string) bool { return strings.HasPrefix(key, "KVS_") }
+	for _, tc := range []struct{ name, data, want string }{
+		{"a word after a setting in quotes", "KVS_X=1\nNOTE=\"${KVS_Y}\" SECRET", "KVS_Y: line 2: the file ends with a word that has no = after it and no line break, after a setting on the same line"},
+		{"a word right after a setting in quotes", "KVS_X=1\nexport NOTE='a'SECRET", "KVS_Y: line 2: the file ends with a word that has no = after it and no line break, after a setting on the same line"},
+		{"a word the shell joins to a backslash", "KVS_X=1\nNOTE=a\\\nSECRET", "KVS_Y: line 2: the value of NOTE ends with a backslash out of quotes"},
+		{"a backslash that ends the file", "KVS_X=1\nNOTE=a\\", "KVS_Y: line 2: the value of NOTE ends with a backslash out of quotes"},
+	} {
+		if got, err := Set([]byte(tc.data), "KVS_Y", "2"); err == nil || !strings.HasPrefix(err.Error(), tc.want) || got != nil {
+			t.Errorf("%s: Set: %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+		if got, _, err := Graft([]byte(tc.data), []byte("KVS_X=1\nKVS_Y=2\n"), managed); err == nil || !strings.HasPrefix(err.Error(), tc.want) || got != nil {
+			t.Errorf("%s: Graft: %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+		if strings.Contains(fmt.Sprint(Set([]byte(tc.data), "KVS_Y", "2"))+fmt.Sprint(Unset([]byte(tc.data), "KVS_X")), "SECRET") {
+			t.Errorf("%s: a refusal quotes the word, which may be a secret", tc.name)
+		}
+		want := "KVS_X" + strings.TrimPrefix(tc.want, "KVS_Y")
+		if got, found, err := Unset([]byte(tc.data), "KVS_X"); err == nil || !strings.HasPrefix(err.Error(), want) || got != nil || found {
+			t.Errorf("%s: Unset: %q, %v, %v; want %q", tc.name, got, found, err, want)
+		}
+		// A key that is not there is no edit, and a setting written where
+		// it stands adds no line.
+		if got, found, err := Unset([]byte(tc.data), "KVS_Z"); err != nil || found || string(got) != tc.data {
+			t.Errorf("%s: Unset of a key that is not there: %q, %v, %v", tc.name, got, found, err)
+		}
+		if got, err := Set([]byte(tc.data), "KVS_X", "2"); err != nil || string(got) != "KVS_X=2"+strings.TrimPrefix(tc.data, "KVS_X=1") {
+			t.Errorf("%s: Set in place: %q, %v", tc.name, got, err)
+		}
+	}
+}
