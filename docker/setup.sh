@@ -5526,7 +5526,7 @@ chown 1000:1000 /var/www/"$DOMAIN"
 # database named in .env: an imported dump goes there, prepared for the
 # container and readable by the database user of the image.
 import_stage_dump() {
-    local target inspection=""
+    local target inspection="" directory_mode=750 file_mode=640
 
     [ "$IMPORT_MODE" = true ] || return 0
     if import_is_native_dump "$IMPORT_DB_DUMP" && ! import_native_target_supported; then
@@ -5534,6 +5534,21 @@ import_stage_dump() {
         exit 1
     fi
     mkdir -p mariadb/init || exit 1
+    # The staged dump is the whole source database, including admin password
+    # hashes and user emails, and it stays here until the import finishes (so
+    # indefinitely when it fails or waits for --resume-import). Keep it out of
+    # reach of other local users while the MariaDB image, which drops to its
+    # mysql user, uid 999, before replaying it, can still read it. Root keeps
+    # the files and group 999 may only read them: the host account that has
+    # uid 999 must not be able to rewrite the SQL replayed as the database
+    # root, or add a script the entrypoint sources. Where the group cannot be
+    # set, everything stays readable, since a directory the image cannot list
+    # stops MariaDB at start.
+    if ! chown 0:999 mariadb/init 2>/dev/null; then
+        directory_mode=755 file_mode=644
+        echo -e "  ${YELLOW}WARNING: mariadb/init could not be given to group 999, the database user of the MariaDB image; the staged dump stays readable by other local users${NC}"
+    fi
+    chmod "$directory_mode" mariadb/init || exit 1
     rm -rf -- mariadb/init/10-kvs-import-native
     find mariadb/init -maxdepth 1 -type f -name '*kvs-import*' -delete
     IMPORT_TOKEN="$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
@@ -5561,7 +5576,10 @@ import_stage_dump() {
         echo -e "${RED}ERROR: could not prepare $IMPORT_DB_DUMP${NC}"
         exit 1
     fi
-    chmod 644 "$target"
+    if [ "$file_mode" = 640 ]; then
+        chown 0:999 "$target" || exit 1
+    fi
+    chmod "$file_mode" "$target" || exit 1
     IMPORT_STAGED_DUMP=$target
     echo -e "  ${GREEN}✓${NC} Dump staged in $target"
 }

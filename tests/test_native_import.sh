@@ -6,6 +6,15 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$ROOT_DIR/docker/lib/import.sh"
 # shellcheck source=/dev/null
 source "$ROOT_DIR/docker/lib/native-import.sh"
+# native_import_prepare gives the payload to root and group 999 (mysql in the
+# image) and locks it down when it can; otherwise it leaves it readable so an
+# unprivileged caller does not lock the image out. This unit runs
+# unprivileged, so the ownership change is stubbed: it records what was asked
+# and succeeds unless CHOWN_FAILS=yes.
+chown() {
+    printf '%s\n' "$*" >> "$TEST_DIR/chown.log"
+    [ "${CHOWN_FAILS:-no}" != yes ]
+}
 TEST_DIR=$(mktemp -d /tmp/kvs-native-unit.XXXXXX)
 trap 'rm -rf -- "$TEST_DIR"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -85,7 +94,19 @@ if native_import_inspect "$TEST_DIR/fixture.mariadb.tar.gz" other_ >/dev/null 2>
 prepare_fixture good >/dev/null
 [ -f "$TEST_DIR/init/good/data/new-site.example/ktvs_videos.txt" ] || fail 'destination schema mapping'
 [ ! -x "$TEST_DIR/init/good.sh" ] || fail 'entrypoint hook must be sourced'
-[ "$(stat -c %a "$TEST_DIR/init/good/data/new-site.example/ktvs_videos.txt")" = 644 ] || fail 'mysql-readable payload mode'
+[ "$(stat -c %a "$TEST_DIR/init/good/data/new-site.example/ktvs_videos.txt")" = 640 ] || fail 'payload file must be mode 640, out of reach of other local users'
+[ "$(stat -c %a "$TEST_DIR/init/good")" = 750 ] || fail 'staged payload directory must be mode 750'
+[ "$(stat -c %a "$TEST_DIR/init/good/data/new-site.example")" = 750 ] || fail 'payload subdirectories must be mode 750'
+[ "$(stat -c %a "$TEST_DIR/init/good.sh")" = 640 ] || fail 'entrypoint hook must be mode 640'
+# Group 999 reads, root owns: the host account with uid 999 must not be able
+# to rewrite the SQL, the runtime or the hook the entrypoint sources.
+grep -Eq "^-R 0:999 $TEST_DIR/[^ ]+/payload $TEST_DIR/[^ ]+/hook\.sh\$" "$TEST_DIR/chown.log" ||
+    fail "the payload must stay root's, readable by group 999: chown $(cat "$TEST_DIR/chown.log")"
+# Without that ownership the payload stays readable by the image.
+CHOWN_FAILS=yes prepare_fixture readable >/dev/null
+[ "$(stat -c %a "$TEST_DIR/init/readable/data/new-site.example/ktvs_videos.txt")" = 644 ] || fail 'payload file must stay readable without the ownership'
+[ "$(stat -c %a "$TEST_DIR/init/readable")" = 755 ] || fail 'payload directory must stay readable without the ownership'
+[ "$(stat -c %a "$TEST_DIR/init/readable.sh")" = 644 ] || fail 'entrypoint hook must stay readable without the ownership'
 grep -Fq 'SET autocommit=1;' "$TEST_DIR/init/good/finalize.sql" || fail 'finalization does not commit'
 tail -n 1 "$TEST_DIR/init/good/finalize.sql" | grep -Fq "'KVS_INSTALL_IMPORT', 'unit-marker'" || fail 'completion marker must be last'
 if prepare_fixture good >/dev/null 2>&1; then fail 'existing staging was overwritten'; fi

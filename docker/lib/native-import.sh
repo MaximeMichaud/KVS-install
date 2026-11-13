@@ -327,9 +327,23 @@ native_import_run "$native_import_root" "$native_import_database" "$native_impor
 unset native_import_root native_import_database native_import_tables native_import_jobs
 HOOK
     } > "$work/hook.sh" || return 1
-    find "$work/payload" -type d -exec chmod 755 {} + || return 1
-    find "$work/payload" -type f -exec chmod 644 {} + || return 1
-    chmod 644 "$work/hook.sh" || return 1
+    # The payload is the whole source database, including admin password hashes
+    # and user emails. Keep other local users out while it waits in
+    # mariadb/init: root owns it and group 999 (mysql in the image, which reads
+    # the payload during initialization) may only read it, so the host account
+    # that has uid 999 cannot rewrite the SQL, the runtime or the hook the
+    # entrypoint sources as the database root. Setting that group needs root,
+    # as setup.sh is; an unprivileged caller cannot, and the payload then stays
+    # readable so the image is not locked out of its own import.
+    if chown -R 0:999 "$work/payload" "$work/hook.sh" 2>/dev/null; then
+        find "$work/payload" -type d -exec chmod 750 {} + || return 1
+        find "$work/payload" -type f -exec chmod 640 {} + || return 1
+        chmod 640 "$work/hook.sh" || return 1
+    else
+        find "$work/payload" -type d -exec chmod 755 {} + || return 1
+        find "$work/payload" -type f -exec chmod 644 {} + || return 1
+        chmod 644 "$work/hook.sh" || return 1
+    fi
     mv "$work/payload" "$stage" || return 1
     if ! mv "$work/hook.sh" "$stage.sh"; then
         rm -rf -- "$stage"

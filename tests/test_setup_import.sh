@@ -622,6 +622,56 @@ SQL
     pass 'dump preparation rejects a failed second stream without leaving a partial import'
 }
 
+# The staged dump is the whole source database. It waits in mariadb/init,
+# which the MariaDB image replays as its mysql user, uid 999: root keeps it,
+# group 999 may only read it, and nobody else gets in, from before the dump
+# is written. Where the group cannot be set the image must still read it.
+test_the_staged_dump_is_readable_by_the_database_group_only() {
+    local work="$TMP_ROOT/stage" functions="$TMP_ROOT/stage-functions.sh" out staged
+    awk '$0 == "import_stage_dump() {" { capture = 1 } capture { print } capture && /^}$/ { exit }' \
+        "$REPO_ROOT/docker/setup.sh" > "$functions"
+    grep -q '^import_stage_dump() {$' "$functions" || fail "import_stage_dump is extracted"
+
+    stage_case() {
+        rm -rf "$work" && mkdir -p "$work" && cd "$work" || return 1
+        # shellcheck disable=SC2034,SC2329  # Read and called by the extracted import_stage_dump.
+        (
+            # shellcheck source=/dev/null
+            source "$functions"
+            umask 022
+            RED='' GREEN='' YELLOW='' NC=''
+            IMPORT_MODE=true IMPORT_DB_DUMP="$work/source.sql" IMPORT_DUMP_IDENTITY=""
+            IMPORT_TABLES_PREFIX=ktvs_ IMPORT_SITE_VERSION=7.0.2 IMPORT_OLD_PATH=/var/www/old
+            import_is_native_dump() { return 1; }
+            chown() { printf '%s\n' "$*" >> "$work/chown.log"; [ "${CHOWN_FAILS:-no}" != yes ]; }
+            import_prepare_dump() {
+                stat -c %a mariadb/init > "$work/mode-at-write"
+                printf 'CREATE TABLE t (a int);\n' > "$6"
+            }
+            import_stage_dump
+            printf '%s\n' "$IMPORT_STAGED_DUMP" > "$work/staged"
+        )
+    }
+
+    out=$(stage_case 2>&1) || fail "the dump is staged: $out"
+    staged=$work/$(cat "$work/staged")
+    [ "$(cat "$work/mode-at-write")" = 750 ] || fail "mariadb/init is closed before the dump is written (mode $(cat "$work/mode-at-write"))"
+    [ "$(stat -c %a "$work/mariadb/init")" = 750 ] || fail "mariadb/init is 0750"
+    [ "$(stat -c %a "$staged")" = 640 ] || fail "the staged dump is 0640, got $(stat -c %a "$staged")"
+    grep -Fxq '0:999 mariadb/init' "$work/chown.log" || fail "mariadb/init stays root's, readable by group 999: $(cat "$work/chown.log")"
+    grep -Fxq "0:999 $(cat "$work/staged")" "$work/chown.log" || fail "the dump stays root's, readable by group 999: $(cat "$work/chown.log")"
+    grep -q '999:999' "$work/chown.log" && fail "uid 999 must not own the staged files: $(cat "$work/chown.log")"
+
+    out=$(CHOWN_FAILS=yes stage_case 2>&1) || fail "the dump is staged without the group: $out"
+    staged=$work/$(cat "$work/staged")
+    [ "$(stat -c %a "$work/mariadb/init")" = 755 ] || fail "without the group mariadb/init stays readable by the image"
+    [ "$(stat -c %a "$staged")" = 644 ] || fail "without the group the dump stays readable by the image"
+    grep -q 'WARNING: mariadb/init could not be given to group 999' <<< "$out" || fail "the readable fallback is announced: $out"
+    cd "$REPO_ROOT"
+    unset -f stage_case
+    pass "the staged dump is readable by the database group only"
+}
+
 test_php_config_values_are_read_as_kvs_writes_them
 test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip
@@ -636,5 +686,6 @@ test_setup_and_init_are_wired_for_imports
 test_source_domain_persistence_errors_stop_import
 test_cached_dump_inspection_preserves_output
 test_dump_preparation_stops_after_a_decompression_failure
+test_the_staged_dump_is_readable_by_the_database_group_only
 
 echo "All $TESTS_RUN import tests passed."
