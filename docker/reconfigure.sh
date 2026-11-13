@@ -269,7 +269,7 @@ validate_domain() {
     local -a labels
 
     [ -n "$domain" ] && [ "${#domain}" -le 64 ] || return 1
-    [[ "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$ ]] ||
+    [[ "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.([a-z]{2,}|xn--[a-z0-9-]+)$ ]] ||
         return 1
     IFS='.' read -r -a labels <<< "$domain"
     for label in "${labels[@]}"; do
@@ -278,7 +278,7 @@ validate_domain() {
 }
 
 validate_email() {
-    [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
+    [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.([a-zA-Z]{2,}|xn--[a-zA-Z0-9-]+)$ ]]
 }
 
 parse_publish_endpoint_port() {

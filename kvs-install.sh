@@ -682,7 +682,7 @@ function installQuestions() {
       echo "Required for certificate notifications."
       while true; do
         prompt_read -p "Email: " EMAIL
-        if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        if email_is_valid "$EMAIL"; then
           break
         else
           echo "Please enter a valid email address."
@@ -815,7 +815,7 @@ validate_kvs_domain() {
   local -a labels
 
   if [[ -z "$domain" || ${#domain} -gt 64 ]] ||
-     [[ ! "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$ ]]; then
+     [[ ! "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.([a-z]{2,}|xn--[a-z0-9-]*[a-z0-9])$ ]]; then
     return 1
   fi
 
@@ -824,6 +824,23 @@ validate_kvs_domain() {
     [[ ${#label} -le 63 ]] || return 1
   done
   return 0
+}
+
+# An address for the certificate notices. Its domain ends with a letter TLD or
+# a punycode one (xn--p1ai), in either case: domain names are case-insensitive.
+email_is_valid() {
+  [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.([a-zA-Z]{2,}|[xX][nN]--[a-zA-Z0-9-]*[a-zA-Z0-9])$ ]]
+}
+
+# The domain carried by a KVS archive file name, KVS_X.X.X_[domain.tld].zip,
+# lowercased, or empty when the name has no [...] part. A renamed archive
+# (KVS_7.0.3.zip) has none, and must not be read as the whole file name.
+archive_domain_from_name() {
+  local name="$1" domain
+  [[ "$name" == *'['*']'* ]] || return 0
+  domain=${name#*[}
+  domain=${domain%]*}
+  printf '%s\n' "${domain,,}"
 }
 
 function whatisdomain() {
@@ -2346,14 +2363,10 @@ function dockerInstall() {
     echo "${green}KVS archive copied${normal}"
   fi
 
-  # Extract domain from KVS archive filename
-  local kvs_file
+  # Extract the domain from the archive file name (KVS_X.X.X_[domain].zip).
+  local kvs_file archive_domain
   kvs_file=$(find kvs-archive -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
-  kvs_file=${kvs_file##*/}
-  local archive_domain
-  archive_domain=${kvs_file#*[}
-  archive_domain=${archive_domain%]*}
-  archive_domain=${archive_domain,,}
+  archive_domain=$(archive_domain_from_name "${kvs_file##*/}")
 
   # Setup .env file
   if [ ! -f .env ]; then
@@ -2362,13 +2375,24 @@ function dockerInstall() {
   fi
   chmod 600 .env
 
-  # Update .env with domain from archive
-  if [[ -n "$archive_domain" ]] && validate_kvs_domain "$archive_domain"; then
+  # An explicit DOMAIN from the environment wins: setup.sh applies it through
+  # KVS_DOMAIN_OVERRIDE and saves it itself. It is not written into .env here:
+  # setup.sh compares it with the domain .env holds to notice a change (a site
+  # imported again under a new name), and would find none. The archive name
+  # only seeds .env when no such DOMAIN is in play, and a name that is renamed,
+  # bracket-less or invalid is a warning, not a failure, so it never aborts an
+  # install whose domain is otherwise known.
+  if [[ -n "${DOMAIN:-}" ]] && validate_kvs_domain "${DOMAIN,,}"; then
+    if [[ -n "$archive_domain" && "${DOMAIN,,}" != "$archive_domain" ]]; then
+      echo "${yellow}Archive name domain '$archive_domain' differs from DOMAIN='$DOMAIN'; keeping DOMAIN${normal}" >&2
+    fi
+    export DOMAIN="${DOMAIN,,}"
+    echo "Domain: ${green}${DOMAIN}${normal}"
+  elif [[ -n "$archive_domain" ]] && validate_kvs_domain "$archive_domain"; then
     sed -i "s/^DOMAIN=.*/DOMAIN=$archive_domain/" .env
     echo "Domain set to: ${green}$archive_domain${normal}"
   elif [[ -n "$archive_domain" ]]; then
-    echo "${red}Invalid archive domain: $archive_domain${normal}" >&2
-    return 1
+    echo "${yellow}Archive name domain '$archive_domain' is not a valid domain; setup will ask or use .env${normal}" >&2
   fi
 
   # Email, SSL provider, and password prompts are handled by setup.sh

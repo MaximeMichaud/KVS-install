@@ -634,7 +634,7 @@ validate_domain() {
     if [ -z "$domain" ] || [ "${#domain}" -gt 64 ]; then
         return 1
     fi
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.([a-zA-Z]{2,}|xn--[a-zA-Z0-9-]+)$ ]]; then
         return 1
     fi
 
@@ -3441,7 +3441,7 @@ validate_site_prefix() {
 # Email validation
 validate_email() {
     local email="$1"
-    if [[ ! "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    if [[ ! "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.([a-zA-Z]{2,}|xn--[a-zA-Z0-9-]+)$ ]]; then
         return 1
     fi
     return 0
