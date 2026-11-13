@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/MaximeMichaud/KVS-install/cli/internal/semver"
 )
 
 func TestCacheRoutingPreflightMatchesPublisher(t *testing.T) {
@@ -110,5 +113,41 @@ func TestDirectCacheReleaseRequiresItsMigrationCLI(t *testing.T) {
 	}
 	if err := run.sign("26.12.0", second, "--cache-routing", "proxy"); err == nil {
 		t.Fatal("unknown cache routing was signed")
+	}
+}
+
+// The version of a release is written as given into docker/RELEASE, the
+// override and the manifest, where semver.Parse reads a leading v and
+// blanks around it too: every command that takes --version refuses any
+// spelling but the one Version.String prints, before it reads anything
+// else, so that a release never gets a second spelling in a manifest.
+func TestReleaseVersionHasOneSpelling(t *testing.T) {
+	dir := t.TempDir()
+	for _, version := range []string{"v26.11.0", " 26.11.0", "26.11.0 ", "v26.11.0-rc1", "\t26.11.0-rc1"} {
+		v, err := semver.Parse(version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf("--version %q is written %s: ", version, v)
+		var out bytes.Buffer
+		for name, err := range map[string]error{
+			"bundle": bundle([]string{"--version", version, "--out", filepath.Join(dir, "b.tar.gz"), "--repo", filepath.Join(dir, "none")}),
+			"manifest": manifestCmd([]string{"--key", filepath.Join(dir, "none.key"), "--out", dir, "--version", version,
+				"--bundle-url", "file:///nowhere/b.tar.gz", "--bundle", filepath.Join(dir, "none.tar.gz")}),
+			"check-cache-routing": checkCacheRouting([]string{"--version", version}, &out),
+		} {
+			if err == nil || !strings.HasPrefix(err.Error(), want) {
+				t.Errorf("%s --version %q: %v, want it refused saying %q", name, version, err, want)
+			}
+		}
+		if out.Len() != 0 {
+			t.Errorf("check-cache-routing --version %q printed %q", version, out.String())
+		}
+	}
+	for _, version := range []string{"26.11.0", "26.11.0-rc1"} {
+		var out bytes.Buffer
+		if err := checkCacheRouting([]string{"--version", version}, &out); err != nil || out.String() != "kvsctl min: none\n" {
+			t.Errorf("check-cache-routing --version %s: %q, %v", version, out.String(), err)
+		}
 	}
 }

@@ -112,3 +112,43 @@ func TestIsPrerelease(t *testing.T) {
 		}
 	}
 }
+
+// Compare reads a pre-release as its label and its number, which another
+// spelling of either would leave alike: Parse refuses an upper case label
+// and a number with a leading zero, as the release workflow refuses them in
+// a tag, and a label without a number sorts before the same label with one.
+// Two versions Parse accepts then compare equal only when they print alike.
+func TestPrereleaseHasOneSpelling(t *testing.T) {
+	for _, s := range []string{"26.11.0-RC1", "26.11.0-Rc1", "26.11.0-rC1", "26.11.0-BETA", "26.11.0-rc01", "26.11.0-rc00"} {
+		if v, err := Parse(s); err == nil {
+			t.Errorf("Parse(%q) = %s, which Compare reads as another spelling of a version", s, v)
+		}
+	}
+	if _, err := Parse("26.11.0-rc01"); err == nil || !strings.Contains(err.Error(), "leading zero") {
+		t.Errorf("Parse(26.11.0-rc01) error = %v, it must name the rule", err)
+	}
+	versions := []string{"26.10.0", "26.11.0", "v26.11.0", "26.11.0-rc", "26.11.0-rc0", "26.11.0-rc1", "26.11.0-rc10",
+		"26.11.0-beta", "26.11.0-beta0", "26.11.0-beta2", "v26.11.0-rc1"}
+	for _, a := range versions {
+		va, err := Parse(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range versions {
+			vb, err := Parse(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if equal := Compare(va, vb) == 0; equal != (va.String() == vb.String()) {
+				t.Errorf("Compare(%s, %s) = %d, and they print as %q and %q", a, b, Compare(va, vb), va, vb)
+			}
+		}
+	}
+	if !Less("26.11.0-rc", "26.11.0-rc0") || !Less("26.11.0-rc0", "26.11.0-rc1") || !Less("26.11.0-beta", "26.11.0-rc") {
+		t.Error("a label without a number sorts before the same label with one, and after a label before it")
+	}
+	const largest = "26.11.0-rc9223372036854775807"
+	if !Less("26.11.0-rc", largest) || Less(largest, "26.11.0-rc") {
+		t.Errorf("%s must sort after 26.11.0-rc", largest)
+	}
+}

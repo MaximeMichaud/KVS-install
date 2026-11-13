@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -153,6 +154,36 @@ func usePlan(t *testing.T, plan *upgrade.Plan) *upgrade.Options {
 
 // readyPlan is a plan nothing blocks, from 1.0.0 to 1.1.0, in a manifest
 // whose latest release, 1.2.0, upgrades from 1.1.0 only.
+// The KVS line puts the minimum of the release next to the version the site
+// runs, and says when that version is one kvsctl cannot compare, which the
+// plan does not hold against the site.
+func TestPrintPlanSaysWhenTheKVSVersionIsNotCompared(t *testing.T) {
+	root := newRoot(t)
+	state := &instance.State{Current: "1.0.0", Files: []string{"docker/docker-compose.yml"}}
+	inst := saveState(t, root, state)
+	inst.WebRoot = t.TempDir()
+	version := filepath.Join(inst.WebRoot, "admin", "include", "version.php")
+	if err := os.MkdirAll(filepath.Dir(version), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan := readyPlan()
+	plan.Target.Requires.KVSMin = "7.0.0"
+	for kvs, want := range map[string]string{
+		"7.1.0-RC1": "KVS          release supports 7.0.0 and newer, site runs 7.1.0-RC1\n",
+		"7.1":       "KVS          release supports 7.0.0 and newer, site runs 7.1, which kvsctl cannot compare, so it is not checked\n",
+		"":          "KVS          release supports 7.0.0 and newer, site runs an unknown version\n",
+	} {
+		if err := os.WriteFile(version, []byte("<?php\n$config['project_version'] = '"+kvs+"';\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		printPlan(&out, plan, inst, state, "", "")
+		if text := out.String(); !strings.Contains(text, want) {
+			t.Errorf("KVS %q: the plan lacks %q:\n%s", kvs, want, text)
+		}
+	}
+}
+
 func readyPlan() *upgrade.Plan {
 	m := &manifest.Manifest{Releases: []manifest.Release{
 		{Version: "1.2.0", Date: "2026-10-05", Requires: manifest.Requires{MinFrom: "1.1.0"}},

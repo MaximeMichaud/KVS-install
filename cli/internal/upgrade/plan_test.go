@@ -1402,6 +1402,37 @@ func TestPlanKVSMinimum(t *testing.T) {
 			t.Errorf("version.php %q: %v", content, plan.Blockers)
 		}
 	}
+	// KVS writes its own versions, in forms a version of the stack may
+	// not take: a pre-release label in upper case or with a leading zero
+	// is compared as its lower case label and plain number, and one that
+	// does not parse even so is shown and not held against the site.
+	for kvs, below := range map[string]bool{
+		"7.1.0-RC1": false, "7.1.0-rc01": false, "7.0.1-Beta": false,
+		"6.4.0-RC1": true, "7.0.0-RC1": true, "7.0.0-rc01": true,
+		"6.4": false, "7.1": false, "7.1.0 beta": false,
+	} {
+		plan := planWith("<?php\n$config['project_version'] = '" + kvs + "';\n")
+		if !below {
+			if len(plan.Blockers) != 0 {
+				t.Errorf("KVS %s: %v", kvs, plan.Blockers)
+			}
+			continue
+		}
+		blocked(t, plan, "1.1.0 supports KVS 7.0.0 and newer, this site runs KVS "+kvs+": update KVS from its admin panel first")
+	}
+}
+
+func TestSiteKVS(t *testing.T) {
+	for kvs, want := range map[string]string{
+		"7.0.0": "7.0.0", "v7.0.0": "7.0.0", "7.1.0-RC1": "7.1.0-rc1", "7.1.0-rc01": "7.1.0-rc1",
+		"7.1.0-rc00": "7.1.0-rc0", "7.1.0-rc0": "7.1.0-rc0", "7.1.0-BETA": "7.1.0-beta", "7.1.0-rc10": "7.1.0-rc10",
+		"7.1": "", "7.1.0 beta": "", "7.1.0-rc1.2": "", "7.01.0": "", "": "",
+	} {
+		v, ok := SiteKVS(kvs)
+		if ok != (want != "") || (ok && v.String() != want) {
+			t.Errorf("SiteKVS(%q) = %s, %v; want %q", kvs, v, ok, want)
+		}
+	}
 }
 
 // With the containerd image store, the pulled layers land under the root

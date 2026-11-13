@@ -454,7 +454,7 @@ func bundle(args []string) error {
 	if *version == "" || *out == "" {
 		return errors.New("--version and --out are required")
 	}
-	if _, err := semver.Parse(*version); err != nil {
+	if _, err := releaseVersion(*version); err != nil {
 		return err
 	}
 	specs, err := parseImages(*imageSpecs)
@@ -860,7 +860,7 @@ func manifestCmd(args []string) error {
 	if len(keyPaths) == 0 || *version == "" || *bundleURL == "" || *bundlePath == "" {
 		return errors.New("--key, --version, --bundle-url and --bundle are required")
 	}
-	released, err := semver.Parse(*version)
+	released, err := releaseVersion(*version)
 	if err != nil {
 		return err
 	}
@@ -1167,6 +1167,22 @@ func checkSeries(listed, published []string) error {
 
 // commitRe is a full git commit id, as the manifest accepts it: 40
 // hexadecimal characters, or 64 in a repository using SHA-256.
+// releaseVersion reads the --version of a release, which is written as
+// it stands into docker/RELEASE, the override and the manifest. semver
+// reads a leading v and blanks around it too, which would give one release
+// a second spelling: a version not written the way Version.String prints
+// it, the tag itself, is refused.
+func releaseVersion(version string) (semver.Version, error) {
+	v, err := semver.Parse(version)
+	if err != nil {
+		return semver.Version{}, err
+	}
+	if version != v.String() {
+		return semver.Version{}, fmt.Errorf("--version %q is written %s: the version is the tag itself, without a v or blanks", version, v)
+	}
+	return v, nil
+}
+
 var commitRe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
 // checkRequires refuses what kvsctl could not use. A minimum that is not a

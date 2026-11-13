@@ -11,10 +11,13 @@
 // numbers back, so 26.01.0 would come back as 26.1.0 and stop naming its
 // tag. A pre-release suffix (26.11.0-rc1) sorts before the release carrying
 // the same numbers, so a candidate never looks newer than the release it
-// leads to.
+// leads to. Its label is lower case and its number carries no leading zero
+// either, the form the release workflow tags: two versions Parse accepts
+// then compare equal only when Version.String prints them alike.
 package semver
 
 import (
+	"cmp"
 	"fmt"
 	"strconv"
 	"strings"
@@ -24,8 +27,8 @@ import (
 type Version struct {
 	Major, Minor, Patch int
 	// Pre is the pre-release suffix without its dash ("rc1", "beta2"),
-	// empty for a release. Parse fills it and checks its form: letters
-	// followed by digits.
+	// empty for a release. Parse fills it and checks its form: lower case
+	// letters, then an optional number without a leading zero.
 	Pre string
 }
 
@@ -67,7 +70,9 @@ func Parse(s string) (Version, error) {
 
 // Compare returns -1, 0 or 1. A pre-release sorts before the release of the
 // same numbers; two pre-releases compare by label and then by number, so
-// 26.11.0-beta2 comes before 26.11.0-rc1, itself before 26.11.0-rc2.
+// 26.11.0-beta2 comes before 26.11.0-rc1, itself before 26.11.0-rc2, and a
+// label without a number before the same label with one, 26.11.0-rc before
+// 26.11.0-rc0.
 func Compare(a, b Version) int {
 	switch {
 	case a.Major != b.Major:
@@ -88,7 +93,9 @@ func Compare(a, b Version) int {
 	if labelA != labelB {
 		return strings.Compare(labelA, labelB)
 	}
-	return sign(numberA - numberB)
+	// Not a difference, which -1 for no number takes past the range of int
+	// from the largest number.
+	return cmp.Compare(numberA, numberB)
 }
 
 // Less reports whether a sorts before b; unparsable strings sort first.
@@ -115,23 +122,28 @@ func (v Version) String() string {
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
 }
 
-// splitPre reads a pre-release suffix as a lower case label and a number,
-// "rc1" as ("rc", 1) and "beta" as ("beta", 0).
+// splitPre reads a pre-release suffix as its label and its number, -1 when
+// it has none: "rc1" as ("rc", 1) and "beta" as ("beta", -1). The label is
+// lower case letters, and the number carries no leading zero: Compare reads
+// the two as they stand, so RC1 or rc01 would tie with rc1 and print apart.
 func splitPre(pre string) (string, int, error) {
 	end := 0
-	for end < len(pre) && isLetter(pre[end]) {
+	for end < len(pre) && 'a' <= pre[end] && pre[end] <= 'z' {
 		end++
 	}
-	label, digits := strings.ToLower(pre[:end]), pre[end:]
+	label, digits := pre[:end], pre[end:]
 	if label == "" {
-		return "", 0, fmt.Errorf("pre-release %q is not letters followed by digits (rc1, beta2)", pre)
+		return "", 0, fmt.Errorf("pre-release %q is not lower case letters followed by digits (rc1, beta2)", pre)
 	}
 	if digits == "" {
-		return label, 0, nil
+		return label, -1, nil
 	}
 	n, err := number(digits)
 	if err != nil {
-		return "", 0, fmt.Errorf("pre-release %q is not letters followed by digits (rc1, beta2)", pre)
+		return "", 0, fmt.Errorf("pre-release %q is not lower case letters followed by digits (rc1, beta2)", pre)
+	}
+	if len(digits) > 1 && digits[0] == '0' {
+		return "", 0, fmt.Errorf("pre-release %q has a leading zero, its number is written plainly (rc1, not rc01)", pre)
 	}
 	return label, n, nil
 }
@@ -148,10 +160,6 @@ func number(s string) (int, error) {
 		}
 	}
 	return strconv.Atoi(s)
-}
-
-func isLetter(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func sign(n int) int {

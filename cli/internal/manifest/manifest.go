@@ -546,13 +546,9 @@ func ParseCLI(raw []byte) (*Manifest, error) {
 	}
 	seen := map[string]bool{}
 	for _, r := range f.Releases {
-		if _, err := semver.Parse(r.Version); err != nil {
+		if err := listedOnce(r.Version, seen); err != nil {
 			return nil, err
 		}
-		if seen[r.Version] {
-			return nil, fmt.Errorf("release %s is listed twice", r.Version)
-		}
-		seen[r.Version] = true
 		rel := Release{Version: r.Version}
 		for platform, build := range r.CLI {
 			if rel.CLI == nil {
@@ -598,14 +594,26 @@ func (m *Manifest) CheckChannel(url string) error {
 	return fmt.Errorf("the manifest at %s %s, and that URL serves stable releases only: a candidate was published as the latest release by mistake; wait until the latest release is a stable one again, or point --manifest at the manifest of the release to install", url, what)
 }
 
-func checkRelease(r *Release, seen map[string]bool) error {
-	if _, err := semver.Parse(r.Version); err != nil {
+// listedOnce refuses a version that does not parse, and one seen lists
+// already in any spelling semver.Parse reads alike: v26.11.0, 26.11.0 and
+// " 26.11.0" are one release, which Compare finds equal and whose order
+// the sort would leave to the manifest.
+func listedOnce(version string, seen map[string]bool) error {
+	v, err := semver.Parse(version)
+	if err != nil {
 		return err
 	}
-	if seen[r.Version] {
-		return fmt.Errorf("release %s is listed twice", r.Version)
+	if seen[v.String()] {
+		return fmt.Errorf("release %s is listed twice", v)
 	}
-	seen[r.Version] = true
+	seen[v.String()] = true
+	return nil
+}
+
+func checkRelease(r *Release, seen map[string]bool) error {
+	if err := listedOnce(r.Version, seen); err != nil {
+		return err
+	}
 	if r.Bundle.URL == "" || len(r.Bundle.SHA256) != 64 {
 		return fmt.Errorf("release %s has no bundle with a sha256", r.Version)
 	}

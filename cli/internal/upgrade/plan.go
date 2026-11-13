@@ -117,7 +117,8 @@ func (r *Runner) Plan(ctx context.Context, state *instance.State) (*Plan, error)
 	}
 	r.planCompose(ctx, plan)
 	if kvsMin := plan.Target.Requires.KVSMin; kvsMin != "" {
-		if kvs := r.Inst.KVSVersion(); kvs != "" && semver.Less(kvs, kvsMin) {
+		kvs := r.Inst.KVSVersion()
+		if v, ok := SiteKVS(kvs); ok && semver.Less(v.String(), kvsMin) {
 			plan.Blockers = append(plan.Blockers, fmt.Sprintf("%s supports KVS %s and newer, this site runs KVS %s: update KVS from its admin panel first", plan.Target.Version, kvsMin, kvs))
 		}
 	}
@@ -129,6 +130,31 @@ func (r *Runner) Plan(ctx context.Context, state *instance.State) (*Plan, error)
 	r.planImages(ctx, plan, running, active, coming)
 	r.planDisk(ctx, plan)
 	return plan, nil
+}
+
+// SiteKVS reads the KVS version of a site, as its version.php writes it,
+// to compare with the KVS minimum of a release. KVS numbers its own
+// versions: a pre-release label in upper case or a number with a leading
+// zero, which semver.Parse refuses in a version of the stack (7.1.0-RC1,
+// 7.1.0-rc01), is read as the lower case label and the plain number
+// (7.1.0-rc1). ok is false for a version that does not parse even so,
+// which is not held against the site, as a Compose version that does not
+// parse is not (planCompose): the plan shows it, not compared.
+func SiteKVS(kvs string) (v semver.Version, ok bool) {
+	core, pre, hasPre := strings.Cut(kvs, "-")
+	if hasPre {
+		pre = strings.ToLower(pre)
+		digits := strings.TrimLeft(pre, "abcdefghijklmnopqrstuvwxyz")
+		if plain := strings.TrimLeft(digits, "0"); plain != digits {
+			if plain == "" {
+				plain = "0"
+			}
+			pre = pre[:len(pre)-len(digits)] + plain
+		}
+		core += "-" + pre
+	}
+	v, err := semver.Parse(core)
+	return v, err == nil
 }
 
 // planKvsctl stops the plan when a release it installs needs a newer

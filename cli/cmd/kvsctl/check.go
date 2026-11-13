@@ -153,6 +153,8 @@ func printPlan(w io.Writer, plan *upgrade.Plan, inst *instance.Instance, state *
 		site := inst.KVSVersion()
 		if site == "" {
 			site = "an unknown version"
+		} else if _, ok := upgrade.SiteKVS(site); !ok {
+			site += ", which kvsctl cannot compare, so it is not checked"
 		}
 		line("KVS", "release supports %s and newer, site runs %s", kvsMin, site)
 	}

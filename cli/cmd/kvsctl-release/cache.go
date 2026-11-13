@@ -23,7 +23,7 @@ func checkCacheRouting(args []string, out io.Writer) error {
 	if *version == "" || fs.NArg() != 0 {
 		return fmt.Errorf("--version is required; positional arguments are not accepted")
 	}
-	released, err := semver.Parse(*version)
+	released, err := releaseVersion(*version)
 	if err != nil {
 		return err
 	}

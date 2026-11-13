@@ -617,7 +617,9 @@ without touching anything, when:
 - the release publishes no image for the PHP series of the site; or, for a
   release that ships a single PHP, the site is IonCube encoded for another
   series;
-- the site runs a KVS older than the release supports (`kvs_min`);
+- the site runs a KVS older than the release supports (`kvs_min`); a KVS
+  version that does not read as one, such as `7.1`, is shown in the plan
+  as not compared and blocks nothing;
 - the Docker Compose plugin is older than the release needs (`compose_min`),
   or its version cannot be read;
 - the Docker engine runs on another architecture than x86_64, or is too old
