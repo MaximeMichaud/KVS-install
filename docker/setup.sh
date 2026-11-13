@@ -1466,6 +1466,10 @@ fi
 
 #################################################################
 # Headless mode defaults (inherit from parent kvs-install.sh)
+# VOLUME_CHOICE_DEFAULT records that VOLUME_CHOICE below is the headless
+# default, not the operator's answer: a change of MariaDB series in place
+# needs the answer (ask_existing_volume).
+VOLUME_CHOICE_DEFAULT=false
 if [[ "$HEADLESS" == "y" ]]; then
     # PREFIX_CHOICE, SSL_CHOICE and CACHE_CHOICE are left unset on purpose: a
     # default of 1 here overrides what .env already holds (a saved prefix, SSL
@@ -1474,7 +1478,10 @@ if [[ "$HEADLESS" == "y" ]]; then
     # being chosen (a fresh .env, or a new domain) takes the default 1.
     DB_CHOICE=${DB_CHOICE:-1}               # 1=the newest LTS (MARIADB_LTS_VERSIONS)
     IONCUBE_CHOICE=${IONCUBE_CHOICE:-1}     # 1=yes, 2=no
-    VOLUME_CHOICE=${VOLUME_CHOICE:-2}       # For credential mismatch: 1=delete volume, 2=exit (safe default)
+    # An existing database volume: 1=delete it, 2=keep it, 3=exit. Kept by
+    # default; on a change of MariaDB series only an explicit 2 upgrades it.
+    [ -n "${VOLUME_CHOICE:-}" ] || VOLUME_CHOICE_DEFAULT=true
+    VOLUME_CHOICE=${VOLUME_CHOICE:-2}
     STOP_EXISTING=${STOP_EXISTING:-Y}       # Y=stop existing containers
     DNS_CHOICE=${DNS_CHOICE:-2}             # 1=retry, 2=continue anyway, 3=exit
     GEOIP_CHOICE=${GEOIP_CHOICE:-1}         # 1=download GeoLite2-Country, 2=skip
@@ -5299,8 +5306,38 @@ import_require_empty_volume() {
     echo -e "${YELLOW}The database volume ${volume_name} will be deleted right before MariaDB starts (VOLUME_CHOICE=1).${NC}"
 }
 
+# mariadb_next_series <series>: the series MARIADB_LTS_VERSIONS offers
+# right after it, the one a database of that series may be upgraded to in
+# place. Prints nothing when the series is the newest offered or not offered.
+mariadb_next_series() {
+    local index
+
+    for index in "${!MARIADB_LTS_VERSIONS[@]}"; do
+        [ "${MARIADB_LTS_VERSIONS[$index]}" = "$1" ] || continue
+        if [ "$index" -gt 0 ]; then
+            printf '%s\n' "${MARIADB_LTS_VERSIONS[$((index - 1))]}"
+        fi
+        return 0
+    done
+    return 0
+}
+
+# mariadb_series_choice <series>: the DB_CHOICE that selects an offered
+# series.
+mariadb_series_choice() {
+    local index
+
+    for index in "${!MARIADB_LTS_VERSIONS[@]}"; do
+        if [ "${MARIADB_LTS_VERSIONS[$index]}" = "$1" ]; then
+            printf '%s\n' "$((index + 1))"
+            return 0
+        fi
+    done
+    return 1
+}
+
 ask_existing_volume() {
-    local probe_image
+    local probe_image next_series
 
     echo ""
     echo -e "${CYAN}Checking for existing database...${NC}"
@@ -5413,27 +5450,70 @@ ask_existing_volume() {
                     ;;
             esac
         elif [ "$VERSION_MISMATCH" = true ]; then
-            # Upgrade detected (minor version change or major upgrade)
+            # An upgrade. As kvsctl upgrade --mariadb-series does, it goes one
+            # offered series at a time, and a series this setup does not
+            # offer (10.x) moves as a dump. It needs the operator's own
+            # answer: the headless default keeps a database on its series
+            # only, and MARIADB_AUTO_UPGRADE backs up the system tables alone.
+            # The selection already saved the new series in .env, where any
+            # later docker compose up -d would read it and upgrade the
+            # database in place: .env names the series of the database again
+            # until it is upgraded or deleted below, whichever way the run
+            # stops before.
+            next_series=$(mariadb_next_series "$VOLUME_MAJOR_MINOR")
             echo -e "${YELLOW}You selected 'Restart installation' but a database already exists.${NC}"
             echo -e "${YELLOW}Note: MariaDB version will change from ${VOLUME_MAJOR_MINOR} → ${SELECTED_MAJOR_MINOR}${NC}"
+            if ! set_env_value MARIADB_VERSION "$VOLUME_MAJOR_MINOR"; then
+                echo -e "${RED}ERROR: could not write MARIADB_VERSION=${VOLUME_MAJOR_MINOR}, the series of the database, back to .env. The site was not stopped.${NC}" >&2
+                exit 1
+            fi
+            echo "Until the database is upgraded or deleted below, .env names its series again"
+            echo "(MARIADB_VERSION=${VOLUME_MAJOR_MINOR}): a docker compose up -d keeps it on MariaDB ${VOLUME_MAJOR_MINOR}."
             echo ""
+            if [ "$next_series" != "$SELECTED_MAJOR_MINOR" ]; then
+                echo -e "${RED}MariaDB ${SELECTED_MAJOR_MINOR} cannot upgrade this database in place.${NC}"
+                if [ -n "$next_series" ]; then
+                    echo "An upgrade in place goes one series at a time: after ${VOLUME_MAJOR_MINOR} comes ${next_series}."
+                    echo "Back the database up, run setup with MariaDB ${next_series} first (headless:"
+                    echo "KEEP_VERSION=n DB_CHOICE=$(mariadb_series_choice "$next_series") VOLUME_CHOICE=2), then again with ${SELECTED_MAJOR_MINOR}."
+                else
+                    echo "MariaDB ${VOLUME_MAJOR_MINOR} is not one of the series this setup offers (${MARIADB_LTS_VERSIONS[*]}):"
+                    echo "move the database as a dump replayed into a new server, for instance by importing"
+                    echo "the site with its dump (README, Importing an existing site)."
+                fi
+                echo "Run setup again as it is to keep the database on MariaDB ${VOLUME_MAJOR_MINOR}."
+                echo ""
+            fi
             echo "What do you want to do with the existing database?"
             echo ""
             echo "  1) Fresh start - Delete old database (recommended for reinstall)"
             echo -e "     ${RED}⚠ All data will be lost${NC} (videos metadata, users, etc.)"
             echo ""
-            echo "  2) Keep existing database and upgrade MariaDB"
-            echo "     Use this if you want to keep your data"
-            echo -e "     ${YELLOW}⚠ MariaDB will auto-upgrade the database format${NC}"
-            echo ""
+            if [ "$next_series" = "$SELECTED_MAJOR_MINOR" ]; then
+                echo "  2) Keep existing database and upgrade MariaDB"
+                echo "     Use this if you want to keep your data"
+                echo -e "     ${YELLOW}⚠ MariaDB will upgrade the database format in place; it backs up${NC}"
+                echo -e "     ${YELLOW}  only its system tables, not the KVS database: back it up first${NC}"
+                echo ""
+            fi
             echo "  3) Exit - Backup database first"
             echo "     Backup command: docker run --rm -v ${VOLUME_NAME}:/backup ..."
             echo ""
 
             if [[ -z "$VOLUME_CHOICE" ]]; then
-                echo -n "Select [1-3] (default: 3): "
-                read -r VOLUME_CHOICE
+                if [ "$next_series" = "$SELECTED_MAJOR_MINOR" ]; then
+                    echo -n "Select [1-3] (default: 3): "
+                else
+                    echo -n "Select [1 or 3] (default: 3): "
+                fi
+                prompt_read VOLUME_CHOICE
                 VOLUME_CHOICE=${VOLUME_CHOICE:-3}
+            elif [ "$VOLUME_CHOICE" = 2 ] && [ "${VOLUME_CHOICE_DEFAULT:-false}" = true ] &&
+                [ "$next_series" = "$SELECTED_MAJOR_MINOR" ]; then
+                echo -e "${RED}ERROR: a headless run keeps a database on its own MariaDB series unless VOLUME_CHOICE=2 is given.${NC}"
+                echo "Back the database up, then run again with KEEP_VERSION=n DB_CHOICE=$(mariadb_series_choice "$SELECTED_MAJOR_MINOR") VOLUME_CHOICE=2"
+                echo "to upgrade it from ${VOLUME_MAJOR_MINOR} to ${SELECTED_MAJOR_MINOR}; run again as it is to keep it on ${VOLUME_MAJOR_MINOR}. The site was not stopped."
+                exit 1
             fi
 
             case $VOLUME_CHOICE in
@@ -5441,10 +5521,23 @@ ask_existing_volume() {
                     echo ""
                     echo -e "${YELLOW}Deleting existing database...${NC}"
                     delete_database_volume "$VOLUME_NAME" || exit 1
+                    if ! set_env_value MARIADB_VERSION "$MARIADB_VERSION"; then
+                        echo -e "${RED}ERROR: the database was deleted, but MARIADB_VERSION=${MARIADB_VERSION} could not be written back to .env.${NC}" >&2
+                        exit 1
+                    fi
                     echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
                     KEEP_EXISTING_DB=false
                     ;;
                 2)
+                    if [ "$next_series" != "$SELECTED_MAJOR_MINOR" ]; then
+                        echo ""
+                        echo -e "${RED}ERROR: MariaDB ${SELECTED_MAJOR_MINOR} cannot upgrade the MariaDB ${VOLUME_MAJOR_MINOR} database in place (VOLUME_CHOICE=2). The site was not stopped.${NC}"
+                        exit 1
+                    fi
+                    if ! set_env_value MARIADB_VERSION "$MARIADB_VERSION"; then
+                        echo -e "${RED}ERROR: could not write MARIADB_VERSION=${MARIADB_VERSION} back to .env. The site was not stopped.${NC}" >&2
+                        exit 1
+                    fi
                     echo ""
                     echo -e "${YELLOW}Keeping existing database for upgrade...${NC}"
                     echo "MariaDB will auto-upgrade from ${VOLUME_MAJOR_MINOR} to ${SELECTED_MAJOR_MINOR}"

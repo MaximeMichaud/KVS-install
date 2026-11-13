@@ -278,6 +278,7 @@ MODE_CHOICE=1 \
 | `MODE_CHOICE` | `1`/`2` | `1` | 1=Single site, 2=Multi site |
 | `MANTICORE_CHOICE` | `1`/`2` | `2` | 1=Manticore Search (the External Search plugin is pointed at it), 2=KVS search |
 | `STOP_EXISTING` | `Y`/`n` | `Y` | Stop existing KVS containers |
+| `VOLUME_CHOICE` | `1-3` | `2` | A database volume left by an earlier installation: 1=delete it, 2=keep it, 3=exit. Moving it to another MariaDB series in place needs `VOLUME_CHOICE=2` set explicitly, after a backup, and goes one offered series at a time (11.4, then 11.8, then 12.3, each with `KEEP_VERSION=n` and its `DB_CHOICE`); an older series moves as a dump. A run that stops there instead leaves `MARIADB_VERSION` in `.env` on the series of the database |
 | `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry (10 times, 30 s apart, then stop; `DNS_RETRY_ATTEMPTS` and `DNS_RETRY_DELAY`, whole numbers, change both), 2=Continue anyway, 3=Exit. Any other value stops the setup before it changes anything |
 | `MARIADB_HOST_PORT`, `CACHE_HOST_PORT`, `MANTICORE_MYSQL_HOST_PORT`, `MANTICORE_HTTP_HOST_PORT` | port | `3306`, `11211`, `9306`, `9308` | Loopback ports the stack publishes for the host's tools (MariaDB, cache, Manticore); move one when a service of the host already listens there |
 | `DISABLE_KVS_SUPPORT_ACCESS` | `true`/`false` | `false` | Turn off KVS support access (Kernel Team login with kvs_support); the admin dashboard re-enables it |

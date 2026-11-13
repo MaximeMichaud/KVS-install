@@ -76,11 +76,15 @@ TEST_DIR=$(mktemp -d /tmp/kvs-mariadb-versions.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT
 mkdir -p "$TEST_DIR/docker/bin" "$TEST_DIR/stub"
 cp "$ROOT_DIR/docker/bin/resolve-bases.sh" "$TEST_DIR/docker/bin/"
-awk '
-    $0 == "ask_existing_volume() {" { capture = 1 }
-    capture { print }
-    capture && /^}$/ { exit }
-' "$ROOT_DIR/docker/setup.sh" > "$TEST_DIR/docker/volume.sh"
+{
+    grep '^readonly MARIADB_LTS_VERSIONS=' "$ROOT_DIR/docker/setup.sh"
+    awk '
+        $0 == "ask_existing_volume() {" || $0 == "mariadb_next_series() {" || $0 == "prompt_read() {" ||
+            $0 == "mariadb_series_choice() {" || $0 == "set_env_value() {" || $0 == "remove_env_value() {" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { capture = 0 }
+    ' "$ROOT_DIR/docker/setup.sh"
+} > "$TEST_DIR/docker/volume.sh"
 cat > "$TEST_DIR/stub/docker" <<'EOF'
 #!/bin/bash
 printf '%s|' "$@" >> "$DOCKER_CALLS"
@@ -88,24 +92,51 @@ echo >> "$DOCKER_CALLS"
 case "$1 $2" in
     'compose config') printf 'volumes:\n  mariadb-data:\n    name: kvs_mariadb-data\n' ;;
     'volume ls') echo kvs_mariadb-data ;;
-    'run --rm') echo 11.8.9-MariaDB ;;
+    'run --rm') echo "${VOLUME_INFO-11.8.9-MariaDB}" ;;
 esac
 EOF
 chmod +x "$TEST_DIR/stub/docker"
 
-# check_volume <lock>: ask_existing_volume with that images.lock.
+# check_volume <lock>: ask_existing_volume with that images.lock. The
+# selected series, VOLUME_CHOICE and VOLUME_CHOICE_DEFAULT are 11.8, 2 and
+# false unless CHECK_MARIADB_VERSION, CHECK_VOLUME_CHOICE and
+# CHECK_VOLUME_CHOICE_DEFAULT say otherwise; a deletion is recorded, not run.
+# The selection saved the selected series in .env, which set_env_value
+# rewrites as setup.sh does; CHECK_FAIL_WRITE=<series> makes the write of
+# that series fail.
 check_volume() (
     cd "$TEST_DIR/docker" || exit 1
     cp "$1" images.lock
     : > "$TEST_DIR/calls"
+    printf 'MARIADB_VERSION=%s\nEXTRA=neighbor\n' "${CHECK_MARIADB_VERSION:-11.8}" > .env
+    chmod 600 .env
     export PATH="$TEST_DIR/stub:$PATH" DOCKER_CALLS="$TEST_DIR/calls"
     # shellcheck disable=SC2034  # Read by ask_existing_volume.
-    CYAN='' GREEN='' RED='' YELLOW='' NC='' MARIADB_VERSION=11.8 VOLUME_CHOICE=2
+    CYAN='' GREEN='' RED='' YELLOW='' NC='' MARIADB_VERSION=${CHECK_MARIADB_VERSION:-11.8} \
+        VOLUME_CHOICE=${CHECK_VOLUME_CHOICE-2} VOLUME_CHOICE_DEFAULT=${CHECK_VOLUME_CHOICE_DEFAULT:-false}
     # shellcheck source=/dev/null
     source ./volume.sh
+    if [ -n "${CHECK_FAIL_WRITE:-}" ]; then
+        eval "real_$(declare -f set_env_value)"
+        # shellcheck disable=SC2329  # Called by ask_existing_volume.
+        set_env_value() {
+            [ "$1=$2" != "MARIADB_VERSION=$CHECK_FAIL_WRITE" ] || return 1
+            real_set_env_value "$@"
+        }
+    fi
+    # shellcheck disable=SC2329  # Called by ask_existing_volume.
+    delete_database_volume() { echo "DELETED $1"; }
     ask_existing_volume
     echo "KEEP_EXISTING_DB=$KEEP_EXISTING_DB"
 )
+
+# saved_series <series>: .env names that series, once, and keeps its other
+# lines.
+saved_series() {
+    [ "$(grep -c '^MARIADB_VERSION=' "$TEST_DIR/docker/.env")" -eq 1 ] &&
+        grep -Fxq "MARIADB_VERSION=$1" "$TEST_DIR/docker/.env" &&
+        grep -Fxq 'EXTRA=neighbor' "$TEST_DIR/docker/.env"
+}
 
 alpine=$(awk -F '\t' '$1 == "alpine" && $2 == "-" { print $3 }' "$ROOT_DIR/docker/images.lock")
 [[ "$alpine" =~ ^alpine:[0-9.]+@sha256:[0-9a-f]{64}$ ]] ||
@@ -130,6 +161,153 @@ if ! grep -Fq 'no entry for alpine' "$TEST_DIR/out" || ! grep -Fq 'VOLUME VERSIO
     fail "a lock without Alpine must leave the version unknown and say why: $(cat "$TEST_DIR/out")"
 fi
 echo 'PASS: setup.sh reads the MariaDB version of an existing volume with the Alpine of docker/images.lock'
+
+# U5: a database volume on another series. kvsctl moves one offered series
+# at a time, 10.x only through a dump, while setup kept a 10.6 or 11.4
+# database for MariaDB 12.3 ("MariaDB will auto-upgrade"), and a headless
+# run did so with nothing more than its default VOLUME_CHOICE=2.
+# series_change <volume info> <MARIADB_VERSION> <VOLUME_CHOICE> <VOLUME_CHOICE_DEFAULT>:
+# ask_existing_volume on a volume whose upgrade info file reads that.
+series_change() {
+    VOLUME_INFO=$1 CHECK_MARIADB_VERSION=$2 CHECK_VOLUME_CHOICE=$3 CHECK_VOLUME_CHOICE_DEFAULT=$4 \
+        check_volume "$ROOT_DIR/docker/images.lock"
+}
+
+# refused_change <description> <expected text> <series_change arguments...>:
+# the run stops with the database as it is, and .env names its series again,
+# so a later docker compose up -d does not upgrade it.
+refused_change() {
+    local description="$1" expected="$2" volume="${3%%-*}"
+    shift 2
+
+    if series_change "$@" > "$TEST_DIR/out" 2>&1 < /dev/null; then
+        fail "$description: the database was kept or the run went on: $(cat "$TEST_DIR/out")"
+    fi
+    if grep -Eq '^(KEEP_EXISTING_DB=|DELETED )' "$TEST_DIR/out"; then
+        fail "$description: the database was kept or deleted: $(cat "$TEST_DIR/out")"
+    fi
+    grep -Fq -- "$expected" "$TEST_DIR/out" || fail "$description: the refusal must say '$expected': $(cat "$TEST_DIR/out")"
+    saved_series "${volume%.*}" || fail "$description: .env must name MariaDB ${volume%.*} again: $(cat "$TEST_DIR/docker/.env")"
+    grep -Fq "(MARIADB_VERSION=${volume%.*}): a docker compose up -d keeps it on MariaDB ${volume%.*}." "$TEST_DIR/out" ||
+        fail "$description: the run must say that .env names MariaDB ${volume%.*} again: $(cat "$TEST_DIR/out")"
+}
+
+# kept_change <description> <series_change arguments...> [input on stdin]
+kept_change() {
+    local description="$1"
+    shift
+
+    series_change "$@" > "$TEST_DIR/out" 2>&1 ||
+        fail "$description: the run stopped: $(cat "$TEST_DIR/out")"
+    grep -Fxq 'KEEP_EXISTING_DB=true' "$TEST_DIR/out" || fail "$description: the database was not kept: $(cat "$TEST_DIR/out")"
+    grep -q '^DELETED ' "$TEST_DIR/out" && fail "$description: the database was deleted: $(cat "$TEST_DIR/out")"
+    return 0
+}
+
+# More than one series, or from a series this setup does not offer: no
+# upgrade in place, whatever VOLUME_CHOICE says.
+refused_change "11.4 to 12.3 with VOLUME_CHOICE=2" 'An upgrade in place goes one series at a time: after 11.4 comes 11.8.' \
+    11.4.9-MariaDB 12.3 2 false
+grep -Fq 'KEEP_VERSION=n DB_CHOICE=2 VOLUME_CHOICE=2), then again with 12.3.' "$TEST_DIR/out" ||
+    fail "the refusal must name the settings of the step to 11.8: $(cat "$TEST_DIR/out")"
+refused_change "11.4 to 12.3 with the headless default" 'cannot upgrade the MariaDB 11.4 database in place' \
+    11.4.9-MariaDB 12.3 2 true
+refused_change "10.6 to 11.4 with VOLUME_CHOICE=2" 'MariaDB 10.6 is not one of the series this setup offers (12.3 11.8 11.4)' \
+    10.6.24-MariaDB 11.4 2 false
+refused_change "10.11 to 12.3 with VOLUME_CHOICE=2" 'Run setup again as it is to keep the database on MariaDB 10.11.' \
+    10.11.9-MariaDB 12.3 2 false
+if series_change 11.4.9-MariaDB 12.3 '' false > "$TEST_DIR/out" 2>&1 <<< "2"; then
+    fail "an answer of 2 must not upgrade 11.4 to 12.3 in place: $(cat "$TEST_DIR/out")"
+fi
+grep -q '^KEEP_EXISTING_DB=' "$TEST_DIR/out" && fail "an answer of 2 kept 11.4 for 12.3: $(cat "$TEST_DIR/out")"
+grep -Fq 'cannot upgrade the MariaDB 11.4 database in place (VOLUME_CHOICE=2)' "$TEST_DIR/out" ||
+    fail "an answer of 2 for 11.4 to 12.3 must be refused: $(cat "$TEST_DIR/out")"
+saved_series 11.4 || fail "an answer of 2 for 11.4 to 12.3 must leave .env on MariaDB 11.4: $(cat "$TEST_DIR/docker/.env")"
+grep -Fxq '  2) Keep existing database and upgrade MariaDB' "$TEST_DIR/out" &&
+    fail "an upgrade in place of 11.4 to 12.3 must not be offered: $(cat "$TEST_DIR/out")"
+grep -Fq 'Select [1 or 3] (default: 3): ' "$TEST_DIR/out" ||
+    fail "the prompt must offer only the choices the menu lists: $(cat "$TEST_DIR/out")"
+# Enter still exits, and an explicit 1 still deletes (--dev sets it); the
+# series of the database stays in .env until it is deleted.
+series_change 11.4.9-MariaDB 12.3 '' false > "$TEST_DIR/out" 2>&1 <<< "" ||
+    fail "Enter must exit without an error: $(cat "$TEST_DIR/out")"
+grep -Eq '^(KEEP_EXISTING_DB=|DELETED )' "$TEST_DIR/out" && fail "Enter must change nothing: $(cat "$TEST_DIR/out")"
+grep -Fq 'Exiting. Please backup your database' "$TEST_DIR/out" || fail "Enter must exit: $(cat "$TEST_DIR/out")"
+saved_series 11.4 || fail "Enter must leave .env on MariaDB 11.4: $(cat "$TEST_DIR/docker/.env")"
+series_change 11.4.9-MariaDB 12.3 1 false > "$TEST_DIR/out" 2>&1 ||
+    fail "VOLUME_CHOICE=1 must delete the database: $(cat "$TEST_DIR/out")"
+if ! grep -Fxq 'DELETED kvs_mariadb-data' "$TEST_DIR/out" || ! grep -Fxq 'KEEP_EXISTING_DB=false' "$TEST_DIR/out"; then
+    fail "VOLUME_CHOICE=1 must delete the database: $(cat "$TEST_DIR/out")"
+fi
+saved_series 12.3 || fail "a fresh database must be on the selected MariaDB 12.3: $(cat "$TEST_DIR/docker/.env")"
+# The next series: an upgrade in place on the operator's own answer, never
+# on the headless default.
+kept_change "11.8 to 12.3 with VOLUME_CHOICE=2" 11.8.6-MariaDB 12.3 2 false
+grep -Fq 'MariaDB will auto-upgrade from 11.8 to 12.3' "$TEST_DIR/out" || fail "the upgrade must be announced: $(cat "$TEST_DIR/out")"
+saved_series 12.3 || fail "the upgrade must leave .env on MariaDB 12.3: $(cat "$TEST_DIR/docker/.env")"
+kept_change "11.4 to 11.8 answered 2" 11.4.9-MariaDB 11.8 '' false <<< "2"
+grep -Fq 'not the KVS database: back it up first' "$TEST_DIR/out" ||
+    fail "the upgrade in place must say that it backs up only the system tables: $(cat "$TEST_DIR/out")"
+grep -Fq 'Select [1-3] (default: 3): ' "$TEST_DIR/out" || fail "the prompt must offer the three choices: $(cat "$TEST_DIR/out")"
+saved_series 11.8 || fail "the upgrade must leave .env on MariaDB 11.8: $(cat "$TEST_DIR/docker/.env")"
+refused_change "11.8 to 12.3 with the headless default" 'run again with KEEP_VERSION=n DB_CHOICE=1 VOLUME_CHOICE=2' \
+    11.8.6-MariaDB 12.3 2 true
+refused_change "11.4 to 11.8 with no answer left" 'no answer left on standard input' \
+    11.4.9-MariaDB 11.8 '' false
+# A .env that cannot name the series of the database stops the run before
+# the question, with nothing kept or deleted; a deletion whose new series
+# cannot be saved stops it too.
+if CHECK_FAIL_WRITE=11.4 series_change 11.4.9-MariaDB 11.8 2 false > "$TEST_DIR/out" 2>&1; then
+    fail "a failed write of the series of the database was ignored: $(cat "$TEST_DIR/out")"
+fi
+if ! grep -Fq 'could not write MARIADB_VERSION=11.4, the series of the database, back to .env' "$TEST_DIR/out" ||
+    grep -Eq '^(KEEP_EXISTING_DB=|DELETED )|What do you want to do' "$TEST_DIR/out"; then
+    fail "a failed write of the series of the database must stop the run first: $(cat "$TEST_DIR/out")"
+fi
+if CHECK_FAIL_WRITE=12.3 series_change 11.4.9-MariaDB 12.3 1 false > "$TEST_DIR/out" 2>&1; then
+    fail "a failed write of the selected series after a deletion was ignored: $(cat "$TEST_DIR/out")"
+fi
+grep -Fq 'the database was deleted, but MARIADB_VERSION=12.3 could not be written back to .env' "$TEST_DIR/out" ||
+    fail "a failed write after a deletion must be reported: $(cat "$TEST_DIR/out")"
+saved_series 11.4 || fail "a failed write must leave .env as it was: $(cat "$TEST_DIR/docker/.env")"
+if CHECK_FAIL_WRITE=12.3 series_change 11.8.6-MariaDB 12.3 2 false > "$TEST_DIR/out" 2>&1; then
+    fail "a failed write of the selected series before an upgrade was ignored: $(cat "$TEST_DIR/out")"
+fi
+grep -q '^KEEP_EXISTING_DB=' "$TEST_DIR/out" && fail "the database was kept for an upgrade .env does not name: $(cat "$TEST_DIR/out")"
+saved_series 11.8 || fail "a failed write must leave .env on MariaDB 11.8: $(cat "$TEST_DIR/docker/.env")"
+# The headless default still keeps a database on its own series, and one
+# whose series is unknown, as every headless re-run does, without touching
+# .env.
+kept_change "the same series with the headless default" 11.8.6-MariaDB 11.8 2 true
+saved_series 11.8 || fail "the same series must leave .env as it is: $(cat "$TEST_DIR/docker/.env")"
+kept_change "an unknown series with the headless default" '' 12.3 2 true
+saved_series 12.3 || fail "an unknown series must leave .env as it is: $(cat "$TEST_DIR/docker/.env")"
+echo 'PASS: setup.sh upgrades a database in place one offered series at a time, on an explicit answer, and leaves .env on the series of the database otherwise'
+
+# VOLUME_CHOICE_DEFAULT: set by the headless defaults of setup.sh, run as
+# written, only when they choose VOLUME_CHOICE themselves.
+headless_block=$(awk '
+    /^VOLUME_CHOICE_DEFAULT=false$/ { capture = 1 }
+    capture { print }
+    capture && /^fi$/ { exit }
+' "$ROOT_DIR/docker/setup.sh")
+grep -q 'VOLUME_CHOICE=${VOLUME_CHOICE:-2}' <<< "$headless_block" ||
+    fail "setup.sh must set VOLUME_CHOICE_DEFAULT where it gives VOLUME_CHOICE its headless default"
+# headless_default <HEADLESS> <VOLUME_CHOICE or unset>: VOLUME_CHOICE and
+# VOLUME_CHOICE_DEFAULT once the block ran.
+headless_default() (
+    unset VOLUME_CHOICE
+    [ "$2" = unset ] || VOLUME_CHOICE=$2
+    # shellcheck disable=SC2034  # Read by the block.
+    HEADLESS=$1 VOLUME_CHOICE_DEFAULT=true
+    eval "$headless_block"
+    echo "${VOLUME_CHOICE:-}:$VOLUME_CHOICE_DEFAULT"
+)
+[ "$(headless_default y unset)" = '2:true' ] || fail "the headless default must be recorded: $(headless_default y unset)"
+[ "$(headless_default y 2)" = '2:false' ] || fail "an explicit VOLUME_CHOICE=2 is not the default: $(headless_default y 2)"
+[ "$(headless_default y 1)" = '1:false' ] || fail "VOLUME_CHOICE=1 (--dev) is not the default: $(headless_default y 1)"
+[ "$(headless_default '' unset)" = ':false' ] || fail "an interactive run has no default: $(headless_default '' unset)"
+echo 'PASS: only the headless default of VOLUME_CHOICE counts as one'
 
 
 # A selected series must survive a new shell and Compose load without
