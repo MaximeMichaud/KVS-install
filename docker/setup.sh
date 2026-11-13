@@ -13,20 +13,30 @@ umask 022
 readonly LOG_DIR="/opt/kvs/logs"
 readonly DEBUG_LOG="${LOG_DIR}/setup-debug.log"
 
+# The directory of this script, absolute and physical, taken before anything
+# changes directory. setup_enter_script_dir moves there, and every library
+# and helper of the script is named from it: a path computed from a relative
+# BASH_SOURCE (bash docker/setup.sh from the repository root, or
+# ../kvs/docker/setup.sh) would be resolved again from the new directory and
+# lead nowhere once the script has moved.
+SETUP_SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
+
 # Import of an existing site (experimental): an archive, a directory plus a
 # dump, or the old server over SSH. The functions live in lib/import.sh,
 # shared with the standalone installer. Only an import needs the library,
 # so a copy of this script running alone still installs a fresh site.
-IMPORT_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/import.sh"
+IMPORT_LIB="$SETUP_SCRIPT_DIR/lib/import.sh"
 if [ -f "$IMPORT_LIB" ]; then
     # shellcheck source=lib/import.sh
     source "$IMPORT_LIB"
 fi
-if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh" ]; then
-    source "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh"
+if [ -f "$SETUP_SCRIPT_DIR/lib/database.sh" ]; then
+    # shellcheck source=lib/database.sh
+    source "$SETUP_SCRIPT_DIR/lib/database.sh"
 fi
-if [ -f "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh" ]; then
-    source "$(dirname "${BASH_SOURCE[0]}")/lib/native-import.sh"
+if [ -f "$SETUP_SCRIPT_DIR/lib/native-import.sh" ]; then
+    # shellcheck source=lib/native-import.sh
+    source "$SETUP_SCRIPT_DIR/lib/native-import.sh"
 fi
 
 # The compose file, .env and the staging directories are named relative to
@@ -34,11 +44,12 @@ fi
 # docker/setup.sh from the repository root, or from /root) would write
 # them where it stands and find no compose file, so it moves here first.
 # The paths an operator named stay relative to where the command was typed.
+# Another directory with a compose file of its own (another project) is no
+# reason to stay: its .env would be read and changed in place of this one.
 setup_enter_script_dir() {
-    local script_dir start_dir name
+    local script_dir=$SETUP_SCRIPT_DIR start_dir name
 
-    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || return 1
-    if [ -f docker-compose.yml ] || [ ! -f "$script_dir/docker-compose.yml" ]; then
+    if [ "$PWD" -ef "$script_dir" ] || [ ! -f "$script_dir/docker-compose.yml" ]; then
         return 0
     fi
     start_dir=$PWD
@@ -63,7 +74,7 @@ setup_enter_script_dir || exit 1
 kvs_install_version() {
     local dir release=""
 
-    dir=$(dirname "${BASH_SOURCE[0]}")
+    dir=$SETUP_SCRIPT_DIR
     if [ -f "$dir/RELEASE" ]; then
         IFS= read -r release 2>/dev/null < "$dir/RELEASE" || true
         release=${release%$'\r'}
@@ -1512,7 +1523,7 @@ setup_resume_import() {
         return 1
     fi
     echo "Inspecting the saved import configuration and existing MariaDB container..."
-    resume_library="$(dirname "${BASH_SOURCE[0]}")/lib/import-resume.sh"
+    resume_library="$SETUP_SCRIPT_DIR/lib/import-resume.sh"
 
     if [ ! -f .env ] || [ ! -f docker-compose.yml ] || [ ! -f "$resume_library" ]; then
         echo "ERROR: run --resume-import from the existing docker directory with its saved .env and recovery helpers." >&2
@@ -1823,7 +1834,7 @@ IMPORT_NGINX_CONFIG=""
 IMPORT_STAGING="$(pwd)/import"
 # shellcheck disable=SC2034  # Read by docker/lib/import.sh.
 IMPORT_MARKER_DIR="$IMPORT_STAGING"
-IMPORT_EXPORTER="$(dirname "${BASH_SOURCE[0]}")/../kvs-export.sh"
+IMPORT_EXPORTER="$SETUP_SCRIPT_DIR/../kvs-export.sh"
 # The links report of a site directory the operator saw, kept until the
 # copy is over (import_check_site_links, import_recheck_site_links).
 IMPORT_LINKS_SHOWN=""
@@ -4764,7 +4775,7 @@ select_php_version() {
 # so the images setup.sh builds are the bytes the release CI builds from.
 set_php_bases() {
     local series fpm cli resolver
-    resolver="$(dirname "${BASH_SOURCE[0]}")/bin/resolve-bases.sh"
+    resolver="$SETUP_SCRIPT_DIR/bin/resolve-bases.sh"
     series=${PHP_VERSION:-}
     if ! fpm=$("$resolver" --get php-fpm "$series") ||
         ! cli=$("$resolver" --get php-cli "$series"); then
@@ -5573,7 +5584,7 @@ ask_existing_volume() {
         # runs, never whatever alpine:latest is on the day it pulls: without
         # that entry, the version stays unknown.
         VOLUME_VERSION=""
-        if probe_image=$("$(dirname "${BASH_SOURCE[0]}")/bin/resolve-bases.sh" --get alpine); then
+        if probe_image=$("$SETUP_SCRIPT_DIR/bin/resolve-bases.sh" --get alpine); then
             VOLUME_VERSION=$(docker run --rm -v "$VOLUME_NAME:/data:ro" "$probe_image" sh -c 'cat /data/mariadb_upgrade_info 2>/dev/null || cat /data/mysql_upgrade_info 2>/dev/null' || echo "")
         fi
         VOLUME_MAJOR_MINOR=""
@@ -7048,7 +7059,7 @@ setup_request_manticore_rebuild() {
     fi
     echo "  Manticore builds its indexes from this database before it answers; KVS uses its own search until then."
     # shellcheck source=lib/manticore.sh
-    source "$(dirname "${BASH_SOURCE[0]}")/lib/manticore.sh" || return 1
+    source "$SETUP_SCRIPT_DIR/lib/manticore.sh" || return 1
     log_command manticore_request_rebuild || return 1
     remove_env_value MANTICORE_REBUILD_PENDING || return $?
     unset MANTICORE_REBUILD_PENDING

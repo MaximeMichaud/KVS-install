@@ -21,7 +21,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 awk '
-    /^readonly SUPPORTED_PHP_VERSIONS=/ { print }
+    /^readonly SUPPORTED_PHP_VERSIONS=/ || /^SETUP_SCRIPT_DIR=/ { print }
     $0 == "kvsctl_manages_stack() {" || $0 == "preflight_checks() {" ||
         $0 == "kvsctl_keep_mariadb_series() {" || $0 == "choose_mariadb_version() {" ||
         $0 == "kvsctl_note_php_change() {" || $0 == "preflight_kernel_writeback_status() {" ||

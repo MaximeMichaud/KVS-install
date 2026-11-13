@@ -411,7 +411,7 @@ rm -f .env
 # after the selection.
 # shellcheck source=/dev/null disable=SC2016  # The literal text of setup.sh.
 source <(extract_function set_php_bases |
-    sed 's|"$(dirname "${BASH_SOURCE\[0\]}")/bin/resolve-bases.sh"|"$ROOT_DIR/docker/bin/resolve-bases.sh"|')
+    sed 's|"$SETUP_SCRIPT_DIR/bin/resolve-bases.sh"|"$ROOT_DIR/docker/bin/resolve-bases.sh"|')
 grep -Fq "\"\$ROOT_DIR/docker/bin/resolve-bases.sh\"" <(declare -f set_php_bases) ||
     fail "set_php_bases must run the resolver of the repository"
 DOMAIN=site.example

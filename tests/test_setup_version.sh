@@ -14,6 +14,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 probe() {
     mkdir -p "$1/docker"
     {
+        grep -E '^SETUP_SCRIPT_DIR=' "$ROOT_DIR/docker/setup.sh"
         awk '$0 == "kvs_install_version() {" { capture = 1 } capture { print } capture && /^}$/ { exit }' \
             "$ROOT_DIR/docker/setup.sh"
         grep -Fx 'KVS_INSTALL_VERSION=$(kvs_install_version)' "$ROOT_DIR/docker/setup.sh"

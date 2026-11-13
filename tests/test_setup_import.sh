@@ -465,7 +465,7 @@ test_setup_and_init_are_wired_for_imports() {
     local settings="$REPO_ROOT/docker/init/docker-entrypoint.d/70-system-settings.sh"
     local config_php="$REPO_ROOT/docker/init/docker-entrypoint.d/10-config-php.sh"
 
-    grep -Fq 'IMPORT_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/import.sh"' "$setup" || fail "setup.sh must locate lib/import.sh next to itself"
+    grep -Fq 'IMPORT_LIB="$SETUP_SCRIPT_DIR/lib/import.sh"' "$setup" || fail "setup.sh must locate lib/import.sh next to itself"
     grep -Fq 'if [ -f "$IMPORT_LIB" ]; then' "$setup" || fail "a copy of setup.sh without the library must still install a fresh site"
     grep -Fq 'declare -F import_validate_site' "$setup" || fail "an import without the library must stop with an explanation"
     grep -Fq 'Import an existing KVS site (experimental)' "$setup" || fail "the import must be labelled experimental"
@@ -494,7 +494,7 @@ test_setup_and_init_are_wired_for_imports() {
     grep -A2 -E '^import_require_empty_volume$' "$setup" | grep -Fq 'if [ "$IMPORT_MODE" = true ]; then' || fail "the generic volume prompt must be skipped in import mode"
     grep -Fq 'Installation detected on $IMPORT_REMOTE_HOST' "$setup" || fail "the remote detection must be displayed"
     grep -Fq 'db_password_hint' "$setup" || fail "the database password must only be shown masked"
-    grep -Fq 'IMPORT_EXPORTER="$(dirname "${BASH_SOURCE[0]}")/../kvs-export.sh"' "$setup" || fail "the exporter travels from the repository root"
+    grep -Fq 'IMPORT_EXPORTER="$SETUP_SCRIPT_DIR/../kvs-export.sh"' "$setup" || fail "the exporter travels from the repository root"
     grep -Fq 'stage=$(import_stage_dir_for "$destination")' "$setup" || fail "an archive must be unpacked in a private stage, not in the webroot"
     grep -Fq 'IMPORT_SSH_ACCEPT_NEW' "$setup" || fail "accepting unknown host keys must be an opt-in"
     grep -B4 -F 'Transferring the site files from $IMPORT_SSH_TARGET' "$setup" | grep -Fq 'Dump received:' || fail "the dump must be taken before the files travel"

@@ -1612,8 +1612,9 @@ test_setup_moves_to_its_directory_when_started_elsewhere() {
     local functions_file="$case_dir/stack/functions.sh"
     local output status
 
-    mkdir -p "$case_dir/stack" "$case_dir/elsewhere" "$case_dir/logs"
+    mkdir -p "$case_dir/stack" "$case_dir/elsewhere" "$case_dir/other-project" "$case_dir/logs"
     awk '
+        /^SETUP_SCRIPT_DIR=/ { print }
         $0 == "setup_enter_script_dir() {" { capture = 1 }
         capture { print }
         capture && /^}$/ { exit }
@@ -1642,6 +1643,22 @@ test_setup_moves_to_its_directory_when_started_elsewhere() {
     grep -Fxq "archive=export.tar" <<< "$output" || fail "a relative path must stay as typed from the stack directory: $output"
     grep -q "Working in" <<< "$output" && fail "no move to announce from the stack directory: $output"
 
+    # From a symlink to the stack directory: the same directory, nothing moves.
+    ln -s "$case_dir/stack" "$case_dir/stack-link"
+    output=$(run_enter "$case_dir/stack-link" export.tar) || fail "a run through a link to the stack directory failed: $output"
+    grep -Fxq "pwd=$case_dir/stack-link" <<< "$output" || fail "a link to the stack directory is the stack directory: $output"
+    grep -q "Working in" <<< "$output" && fail "no move to announce through a link to the stack directory: $output"
+
+    # From another project's directory, which has a compose file and a .env
+    # of its own: the stack directory is entered all the same.
+    printf 'services: {}\n' > "$case_dir/other-project/docker-compose.yml"
+    printf 'DOMAIN=other.example\nOTHER_SETTING=kept\n' > "$case_dir/other-project/.env"
+    chmod 644 "$case_dir/other-project/.env"
+    cp -p "$case_dir/other-project/.env" "$case_dir/other-project.env.before"
+    output=$(run_enter "$case_dir/other-project" export.tar) || fail "entering the stack directory from another project failed: $output"
+    grep -Fxq "pwd=$case_dir/stack" <<< "$output" || fail "another project's compose file must not keep the setup there: $output"
+    grep -Fxq "archive=$case_dir/other-project/export.tar" <<< "$output" || fail "a relative path stays relative to the other project: $output"
+
     # The whole script, started from elsewhere: it works in its directory
     # and then asks its first question there.
     local setup_copy="$case_dir/stack/setup.sh" mock_bin="$case_dir/bin"
@@ -1657,7 +1674,109 @@ test_setup_moves_to_its_directory_when_started_elsewhere() {
     [ "$status" -eq 1 ] || fail "the setup must stop at the end of its input (status $status): $(tail -n 3 "$case_dir/output.log")"
     assert_file_contains "$case_dir/output.log" "Working in $case_dir/stack"
     [ ! -e "$case_dir/elsewhere/.env" ] || fail "nothing may be written where the command was typed"
+
+    # The whole script, started from another project's directory: that
+    # project's .env is neither read nor changed.
+    set +e
+    (
+        cd "$case_dir/other-project"
+        PATH="$mock_bin:/usr/bin:/bin" PREFLIGHT_BYPASS=y timeout 60 "$setup_copy" < /dev/null
+    ) > "$case_dir/other-project.log" 2>&1
+    status=$?
+    set -e
+    [ "$status" -eq 1 ] || fail "the setup must stop at the end of its input (status $status): $(tail -n 3 "$case_dir/other-project.log")"
+    assert_file_contains "$case_dir/other-project.log" "Working in $case_dir/stack (started from $case_dir/other-project)"
+    cmp -s "$case_dir/other-project.env.before" "$case_dir/other-project/.env" || fail "another project's .env must not change"
+    [ "$(stat -c %a "$case_dir/other-project/.env")" = 644 ] || fail "another project's .env must keep its mode, got $(stat -c %a "$case_dir/other-project/.env")"
+    [ "$(find "$case_dir/other-project" -mindepth 1 | wc -l)" -eq 2 ] || fail "nothing may be written in another project's directory: $(ls -A "$case_dir/other-project")"
     pass "the setup moves to its directory when started elsewhere"
+}
+
+# Started through a relative path (bash docker/setup.sh from the repository
+# root, bash ../kvs/docker/setup.sh from another project's directory), the
+# setup moves to its directory and must still find what lies next to it:
+# a path derived from the relative BASH_SOURCE after the move points nowhere.
+test_setup_finds_its_files_through_a_relative_path() {
+    local case_dir="$TMP_ROOT/setup-relative"
+    local repo="$case_dir/repo" mock_bin="$case_dir/bin"
+    local stack="$case_dir/repo/docker"
+    local from script log status derived
+
+    mkdir -p "$stack/bin" "$stack/lib" "$stack/kvs-archive" "$case_dir/other-project" "$case_dir/logs" \
+        "$case_dir/decoy/docker"
+    make_preflight_mocks "$mock_bin"
+    printf '#!/bin/bash\nexit 0\n' > "$mock_bin/ss"
+    chmod +x "$mock_bin/ss"
+    make_setup_test_copy "$stack/setup.sh" "$case_dir/logs"
+    cp "$REPO_ROOT/docker/docker-compose.yml" "$REPO_ROOT/docker/.env.example" "$REPO_ROOT/docker/images.lock" "$stack/"
+    cp "$REPO_ROOT/docker/bin/resolve-bases.sh" "$stack/bin/"
+    cp "$REPO_ROOT"/docker/lib/*.sh "$stack/lib/"
+    cp "$REPO_ROOT/kvs-export.sh" "$repo/"
+    printf '26.99.0\n' > "$stack/RELEASE"
+    : > "$stack/kvs-archive/KVS_7.0.2_mysite.test.zip"
+    printf 'services: {}\n' > "$case_dir/other-project/docker-compose.yml"
+
+    for from in repo other-project; do
+        case $from in
+            repo) script=docker/setup.sh ;;
+            *) script=../repo/docker/setup.sh ;;
+        esac
+        log="$case_dir/$from.log"
+        cp "$stack/.env.example" "$stack/.env"
+        # A headless run with stand-ins goes past the PHP bases, then stops
+        # at the first check the stand-ins cannot satisfy. An exported
+        # CDPATH with a docker directory of its own does not lead the setup
+        # there.
+        set +e
+        (
+            cd "$case_dir/$from"
+            CDPATH="$case_dir/decoy" env -u COMPOSE_PROJECT_NAME -u SITE_PREFIX -u SSL_PROVIDER -u CACHE_CHOICE -u PREFIX_CHOICE -u SSL_CHOICE \
+                PATH="$mock_bin:/usr/bin:/bin" HEADLESS=y PREFLIGHT_BYPASS=y GEOIP_CHOICE=2 \
+                DOMAIN=mysite.test EMAIL=ops@mysite.test timeout 120 bash "$script" < /dev/null
+        ) > "$log" 2>&1
+        status=$?
+        set -e
+        [ "$status" -ne 124 ] || fail "$script from $from: the setup hung"
+        assert_file_contains "$log" "Working in $stack (started from $case_dir/$from)"
+        # docker/RELEASE, read once the setup has moved.
+        assert_file_contains "$log" "=== KVS Docker Setup (kvs-install 26.99.0) ==="
+        # bin/resolve-bases.sh, which set_php_bases runs.
+        ! grep -Fq "has no pinned base" "$log" || fail "$script from $from: the base resolver was not found: $(grep -F 'No such file' "$log")"
+        grep -Eq '^PHP_FPM_BASE=.+@sha256:' "$stack/.env" || fail "$script from $from: the PHP bases were not pinned: $(tail -n 3 "$log")"
+        ! grep -Fq "No such file" "$log" || fail "$script from $from: a file next to the script was not found: $(grep -F 'No such file' "$log")"
+    done
+
+    # The import library and the exporter, which only an import reaches: the
+    # same run, stopped right after the exporter is named.
+    awk '
+        { print }
+        /^IMPORT_EXPORTER=/ {
+            print "for found in \"$IMPORT_LIB\" \"$IMPORT_EXPORTER\"; do [ -f \"$found\" ] && echo \"found $found\" || echo \"missing $found\"; done"
+            print "exit 0"
+        }
+    ' "$stack/setup.sh" > "$stack/setup-probe.sh"
+    grep -Fxq 'exit 0' "$stack/setup-probe.sh" || fail "the exporter line of setup.sh was not found"
+    for from in repo other-project; do
+        case $from in
+            repo) script=docker/setup-probe.sh ;;
+            *) script=../repo/docker/setup-probe.sh ;;
+        esac
+        log="$case_dir/$from-probe.log"
+        (cd "$case_dir/$from" && PATH="$mock_bin:/usr/bin:/bin" HEADLESS=y DOMAIN=mysite.test bash "$script" < /dev/null) > "$log" 2>&1 ||
+            fail "$script from $from: the probe failed: $(tail -n 3 "$log")"
+        assert_file_contains "$log" "found $stack/lib/import.sh"
+        assert_file_contains "$log" "found $stack/../kvs-export.sh"
+    done
+
+    # Every other file next to the script (the resume helpers, the Manticore
+    # library, the Alpine probe of the volume check) is named from the same
+    # directory: no other line derives a path from where bash was told the
+    # script is.
+    # shellcheck disable=SC2016  # The patterns are literal code of setup.sh.
+    derived=$(grep -nE 'BASH_SOURCE|dirname (-- )?"?\$0' "$REPO_ROOT/docker/setup.sh" | grep -vE '^[0-9]+:[[:space:]]*#' |
+        grep -vF 'SETUP_SCRIPT_DIR=$(CDPATH='"''"' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1' || true)
+    [ -z "$derived" ] || fail "a path must come from SETUP_SCRIPT_DIR, not from BASH_SOURCE or \$0: $derived"
+    pass "the setup finds its files when started through a relative path"
 }
 
 test_the_docker_snap_is_refused_before_anything_is_built() {
@@ -2528,6 +2647,7 @@ test_system_settings_keep_the_limits_an_admin_raised
 test_manticore_scripts_survive_a_failed_download_once_installed
 test_cache_settings_follow_small_hosts
 test_setup_moves_to_its_directory_when_started_elsewhere
+test_setup_finds_its_files_through_a_relative_path
 test_the_docker_snap_is_refused_before_anything_is_built
 test_files_for_the_containers_survive_a_strict_umask
 test_reconfigure_fails_when_container_inspection_fails

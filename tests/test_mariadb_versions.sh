@@ -77,6 +77,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 mkdir -p "$TEST_DIR/docker/bin" "$TEST_DIR/stub"
 cp "$ROOT_DIR/docker/bin/resolve-bases.sh" "$TEST_DIR/docker/bin/"
 {
+    grep '^SETUP_SCRIPT_DIR=' "$ROOT_DIR/docker/setup.sh"
     grep '^readonly MARIADB_LTS_VERSIONS=' "$ROOT_DIR/docker/setup.sh"
     awk '
         $0 == "ask_existing_volume() {" || $0 == "mariadb_next_series() {" || $0 == "prompt_read() {" ||

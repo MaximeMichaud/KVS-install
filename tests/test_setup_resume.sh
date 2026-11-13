@@ -17,6 +17,8 @@ names = ('validate_domain', 'check_mariadb_stop_grace_period', 'check_cloudflare
          'setup_resume_assert_database', 'setup_start_runtime_services', 'setup_start_cron', 'import_count_rows',
          'setup_resume_docker_query', 'setup_resume_database_snapshot', 'import_finish', 'remove_env_value', 'set_env_value')
 with open(sys.argv[2], 'w') as target:
+    # The helpers are named from the directory of the script, here the fixture.
+    target.write(re.search(r'^SETUP_SCRIPT_DIR=.*\n', source, re.M).group())
     for name in names:
         match = re.search(r'^' + name + r'\(\) [\{(]\n.*?^[\})]\n', source, re.M | re.S)
         assert match, name

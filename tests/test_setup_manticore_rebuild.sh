@@ -40,6 +40,7 @@ mkdir -p "$TEST_DIR/lib" "$TEST_DIR/bin" "$TEST_DIR/site"
 cp "$ROOT_DIR/docker/lib/manticore.sh" "$TEST_DIR/lib/"
 request_harness="$TEST_DIR/request.sh"
 {
+    grep -E '^SETUP_SCRIPT_DIR=' "$SETUP"
     echo "log_command() { \"\$@\"; }"
     extract_function database_docker_query "$ROOT_DIR/docker/lib/database.sh"
     extract_function setup_resume_docker_query
