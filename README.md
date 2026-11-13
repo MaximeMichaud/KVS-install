@@ -274,7 +274,7 @@ MODE_CHOICE=1 \
 | `MODE_CHOICE` | `1`/`2` | `1` | 1=Single site, 2=Multi site |
 | `MANTICORE_CHOICE` | `1`/`2` | `2` | 1=Manticore Search (the External Search plugin is pointed at it), 2=KVS search |
 | `STOP_EXISTING` | `Y`/`n` | `Y` | Stop existing KVS containers |
-| `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry, 2=Continue anyway, 3=Exit |
+| `DNS_CHOICE` | `1-3` | `2` | DNS check: 1=Retry (10 times, 30 s apart, then stop; `DNS_RETRY_ATTEMPTS` and `DNS_RETRY_DELAY`, whole numbers, change both), 2=Continue anyway, 3=Exit. Any other value stops the setup before it changes anything |
 | `MARIADB_HOST_PORT`, `CACHE_HOST_PORT`, `MANTICORE_MYSQL_HOST_PORT`, `MANTICORE_HTTP_HOST_PORT` | port | `3306`, `11211`, `9306`, `9308` | Loopback ports the stack publishes for the host's tools (MariaDB, cache, Manticore); move one when a service of the host already listens there |
 | `DISABLE_KVS_SUPPORT_ACCESS` | `true`/`false` | `false` | Turn off KVS support access (Kernel Team login with kvs_support); the admin dashboard re-enables it |
 | `KVS_PHP_VERSION` | `8.1`-`8.4` | detected | PHP runtime override; encoded archives use the recommended default unless explicitly overridden, with a compatibility warning. KVS 6.2.0 and older needs PHP 7.4, which the Docker installation does not build: `setup.sh` stops on such an archive unless this names a release for its unencoded files |

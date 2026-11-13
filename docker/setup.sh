@@ -1424,6 +1424,38 @@ if [[ "$HEADLESS" == "y" ]]; then
     # Note: PREFLIGHT_BYPASS can be set as environment variable (no default)
 fi
 
+# DNS_CHOICE and the pace of its retries, given beforehand (headless runs,
+# or exported in an interactive one), are checked here, before anything is
+# written or stopped, so a typo changes nothing: the DNS check refused an
+# unknown DNS_CHOICE only once .env had been rewritten and, on a re-run,
+# the running stack stopped for the port check. The counts are read in
+# base 10: with a leading zero, bash arithmetic took them as octal (08 an
+# error, 010 eight).
+validate_dns_settings() {
+    local name unit value
+    case ${DNS_CHOICE:-} in
+        ''|1|2|3) ;;
+        *)
+            echo -e "${RED}ERROR: DNS_CHOICE=${DNS_CHOICE} is not one of 1 (retry), 2 (continue anyway) or 3 (exit)${NC}" >&2
+            return 1
+            ;;
+    esac
+    for name in DNS_RETRY_ATTEMPTS DNS_RETRY_DELAY; do
+        value=${!name:-}
+        [ -n "$value" ] || continue
+        if [[ ! "$value" =~ ^[0-9]{1,6}$ ]]; then
+            unit=retries
+            [ "$name" = DNS_RETRY_DELAY ] && unit=seconds
+            echo -e "${RED}ERROR: ${name}=${value} is not a number of ${unit} from 0 to 999999${NC}" >&2
+            return 1
+        fi
+        printf -v "$name" '%d' "$((10#$value))"
+    done
+    DNS_RETRY_ATTEMPTS=${DNS_RETRY_ATTEMPTS:-10}
+    DNS_RETRY_DELAY=${DNS_RETRY_DELAY:-30}
+}
+validate_dns_settings || exit 1
+
 # Import of an existing site: one source at a time (lib/import.sh).
 # Interactive runs choose in the questionnaire; headless runs set the
 # variables.
@@ -5431,6 +5463,19 @@ check_dns() {
 # runs as a condition: a plain call under set -e ended the setup on the
 # first mismatch, before the choice to continue (a first pass always runs
 # while the DNS still points at the old server).
+#
+# DNS_CHOICE given beforehand (headless runs, or exported) answers every
+# mismatch: 2 goes on, 3 exits, and 1 checks again DNS_RETRY_ATTEMPTS times
+# (10), DNS_RETRY_DELAY seconds apart (30), then stops the setup. Any other
+# value is refused by validate_dns_settings, which also sets both counts:
+# at the start, before anything changes, and once more here, since .env has
+# been sourced several times since then and a line added to it by hand
+# would override the checked values. A retry used to run again at once and
+# for ever, with an unknown value as with 1: thousands of lookups a minute,
+# and no end.
+validate_dns_settings || exit 1
+dns_retries_left=$DNS_RETRY_ATTEMPTS
+dns_retry_delay=$DNS_RETRY_DELAY
 while true; do
     if check_dns; then
         dns_status=0
@@ -5466,7 +5511,20 @@ while true; do
             prompt_read dns_answer
         fi
         case $dns_answer in
-            1) continue ;;
+            1)
+                # Someone at the terminal retries when they choose to; a
+                # DNS_CHOICE given beforehand waits between bounded retries.
+                if [[ -n "$DNS_CHOICE" ]]; then
+                    if (( dns_retries_left == 0 )); then
+                        echo -e "${RED}ERROR: the DNS records still do not point to this server after the retries of DNS_CHOICE=1. Run the setup again once they do, or set DNS_CHOICE=2 to continue anyway.${NC}" >&2
+                        exit 1
+                    fi
+                    dns_retries_left=$((dns_retries_left - 1))
+                    echo "Checking the DNS again in ${dns_retry_delay}s (DNS_CHOICE=1, ${dns_retries_left} retries left after this one)..."
+                    sleep "$dns_retry_delay"
+                fi
+                continue
+                ;;
             2) echo "Continuing without valid DNS..."; break ;;
             3) exit 1 ;;
             *) continue ;;
