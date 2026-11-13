@@ -666,6 +666,114 @@ test_the_log_tee_ignores_ctrl_c() {
   grep -qx after "$temp_dir/out" || fail "Ctrl-C ended the tee of the screen: $(cat "$temp_dir/out")" || return 1
 }
 
+# The log keeps passwords: the database password of a native install and
+# the one-time admin password docker/setup.sh shows. Under the 022 umask
+# the installer sets, a new log is 600 all the same, and a log an older run
+# left 644 is made 600 before the first line reaches it. A log path that
+# is a symbolic link, or no regular file at all, is never passed to chmod,
+# which would change what it points at. setup.sh is told where the log is,
+# so that it can say where the password is kept.
+test_the_log_is_readable_by_root_only() {
+  local temp_dir
+  local log
+  local attempt
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+
+  printf 'an older run\n' >"$temp_dir/older.log"
+  chmod 644 "$temp_dir/older.log"
+  # A new log is private from the start, not only once chmod has run.
+  chmod() {
+    [[ ${*: -1} != "$temp_dir/new.log" ]] || stat -c %a "$temp_dir/new.log" >"$temp_dir/created-mode"
+    command chmod "$@"
+  }
+  for log in new.log older.log; do
+    (
+      umask 022
+      TERM=dumb initialize_runtime_output "$temp_dir/$log"
+      echo "Password: written-by-$log"
+    ) >"$temp_dir/out" 2>&1
+    for ((attempt = 0; attempt < 100; attempt++)); do
+      grep -qx "Password: written-by-$log" "$temp_dir/$log" && break
+      sleep 0.05
+    done
+    grep -qx "Password: written-by-$log" "$temp_dir/$log" ||
+      fail "the log of $log did not receive the output: $(cat "$temp_dir/$log")" || return 1
+    [[ "$(stat -c %a "$temp_dir/$log")" == 600 ]] ||
+      fail "the installer log must be readable by root only, $log is $(stat -c %a "$temp_dir/$log")" || return 1
+  done
+  [[ "$(cat "$temp_dir/created-mode" 2>/dev/null)" == 600 ]] ||
+    fail "a new installer log must be created 600, it was $(cat "$temp_dir/created-mode" 2>/dev/null)" || return 1
+  unset -f chmod
+
+  # A log path an operator pointed elsewhere: the target keeps its mode, as
+  # /dev/null must for every user, and still receives the output. A target
+  # that a dangling link makes the log create is created 600.
+  printf 'kept elsewhere\n' >"$temp_dir/elsewhere.log"
+  chmod 666 "$temp_dir/elsewhere.log"
+  ln -s "$temp_dir/elsewhere.log" "$temp_dir/link.log"
+  ln -s "$temp_dir/created-through-link.log" "$temp_dir/dangling.log"
+  for log in link.log dangling.log; do
+    (
+      umask 022
+      TERM=dumb initialize_runtime_output "$temp_dir/$log"
+      echo "Password: written-by-$log"
+    ) >"$temp_dir/out" 2>&1
+    for ((attempt = 0; attempt < 100; attempt++)); do
+      grep -qx "Password: written-by-$log" "$temp_dir/$log" && break
+      sleep 0.05
+    done
+    grep -qx "Password: written-by-$log" "$temp_dir/$log" ||
+      fail "the target of $log did not receive the output: $(cat "$temp_dir/$log")" || return 1
+    [[ -L $temp_dir/$log ]] || fail "$log must stay a link" || return 1
+  done
+  [[ "$(stat -c %a "$temp_dir/elsewhere.log")" == 666 ]] ||
+    fail "the target of a linked log must keep its mode, it is now $(stat -c %a "$temp_dir/elsewhere.log")" || return 1
+  [[ "$(stat -c %a "$temp_dir/created-through-link.log")" == 600 ]] ||
+    fail "a log created through a link must be created 600, it is $(stat -c %a "$temp_dir/created-through-link.log")" || return 1
+  # Nor is a device such as /dev/null: chmod only records the call here.
+  chmod() { printf '%s\n' "$*" >>"$temp_dir/chmod-calls"; }
+  (
+    TERM=dumb initialize_runtime_output /dev/null
+    echo "to a device"
+  ) >"$temp_dir/out" 2>&1
+  unset -f chmod
+  [[ ! -s $temp_dir/chmod-calls ]] || fail "chmod must not run on a device: $(cat "$temp_dir/chmod-calls")" || return 1
+
+  export KVS_INSTALL_DIR="$temp_dir/install"
+  export KVS_BACKUP_DIR="$temp_dir/backup"
+  seed_installation "$KVS_INSTALL_DIR"
+  git() {
+    local target="${*: -1}"
+
+    case ${1:-} in
+      pull | fetch) return 1 ;;
+      clone)
+        mkdir -p "$target/.git" "$target/docker"
+        printf 'fresh\n' >"$target/docker/docker-compose.yml"
+        printf 'DOMAIN=example.com\n' >"$target/docker/.env.example"
+        # shellcheck disable=SC2016  # Expanded by the stub setup.sh.
+        printf '#!/bin/bash\necho "setup-ran log=${KVS_INSTALL_LOG-unset}"\n' >"$target/docker/setup.sh"
+        ;;
+    esac
+    return 0
+  }
+  (
+    TERM=dumb initialize_runtime_output "$temp_dir/install.log"
+    dockerInstall
+  ) >"$temp_dir/out" 2>&1
+  status=$?
+  [[ $status -eq 0 ]] || fail "dockerInstall failed (status $status): $(cat "$temp_dir/out")" || return 1
+  # The tee of the log may still be writing once the run has returned.
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    grep -Fxq "setup-ran log=$temp_dir/install.log" "$temp_dir/out" && break
+    sleep 0.05
+  done
+  grep -Fxq "setup-ran log=$temp_dir/install.log" "$temp_dir/out" ||
+    fail "setup.sh was not told where the installer log is: $(cat "$temp_dir/out")" || return 1
+}
+
 # An update stopped outright (kill -9, a power cut) runs no trap, and the
 # files of kvsctl stay beside the installation, where kvsctl does not look.
 # The next run of the installer moves them back before anything else,
@@ -1153,6 +1261,7 @@ run_test "a failed swap puts the files of kvsctl back" test_failed_swap_puts_the
 run_test "an interrupted swap moves the files of kvsctl back" test_interrupted_swap_moves_the_kvsctl_data_back || failures=$((failures + 1))
 run_test "a signal to the whole run moves the files of kvsctl back" test_a_signal_to_the_whole_run_moves_the_kvsctl_data_back || failures=$((failures + 1))
 run_test "the tee of the log ignores Ctrl-C" test_the_log_tee_ignores_ctrl_c || failures=$((failures + 1))
+run_test "the log is readable by root only" test_the_log_is_readable_by_root_only || failures=$((failures + 1))
 run_test "a later run moves back what an update left aside" test_a_later_run_moves_back_what_an_update_left_aside || failures=$((failures + 1))
 
 if ((failures != 0)); then

@@ -6680,14 +6680,29 @@ if [ "$IMPORT_MODE" = true ] && declare -F import_writeback_dying >/dev/null; th
 fi
 
 # announce_generated_admin_password shows the one-time admin password of a
-# fresh install. It prints nothing for a supplied or a kept password.
+# fresh install. It prints nothing for a supplied or a kept password. The
+# setup keeps no copy, but kvs-install.sh logs everything it prints and
+# passes that log in KVS_INSTALL_LOG. The installer makes its log readable
+# by root only when the log is a regular file; a path that is a symbolic
+# link, or no regular file, keeps the mode the operator gave what it points
+# at. The log is called private only when it is a regular file, not a link,
+# with no permission for the group or others.
 announce_generated_admin_password() {
+    local log=${KVS_INSTALL_LOG:-} mode=""
+
     if [ "${KVS_ADMIN_PASSWORD_GENERATED:-false}" != true ]; then
         return 0
     fi
     echo -e "  ${CYAN}Admin login:${NC} ${KVS_ADMIN_LOGIN:-admin}"
     echo -e "  ${CYAN}One-time admin password:${NC} $KVS_ADMIN_PASSWORD"
-    echo -e "  ${YELLOW}Save it now. It is set during initialization and is not written to .env or the setup log.${NC}"
+    if [ -n "$log" ] && [ -f "$log" ] && [ ! -L "$log" ] && mode=$(stat -c %a -- "$log" 2>/dev/null) &&
+        [[ $mode =~ ^[0-7]+$ ]] && (( (8#$mode & 8#077) == 0 )); then
+        echo -e "  ${YELLOW}Save it now. It is set during initialization and is not written to .env; the installer log ${log}, readable by root only, keeps it.${NC}"
+    elif [ -n "$log" ]; then
+        echo -e "  ${YELLOW}Save it now. It is set during initialization and is not written to .env; the installer writes what is shown here to ${log}.${NC}"
+    else
+        echo -e "  ${YELLOW}Save it now. It is set during initialization and is not written to .env or the setup log.${NC}"
+    fi
 }
 
 # Show the one-time password before kvs-init runs. 35-harden sets it early,

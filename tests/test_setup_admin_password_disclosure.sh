@@ -61,6 +61,46 @@ grep -Fq "Admin login:" <<<"$out" ||
     fail "the admin login was not shown with the generated password"
 echo "PASS: a generated one-time password is disclosed"
 
+# Run alone, the setup keeps no copy of the password and says so. Run by
+# kvs-install.sh, whose log keeps everything it prints, it names that log
+# instead of claiming the password is not logged, and calls it readable by
+# root only when it is: a regular file, not a link, with no permission for
+# the group or others. The installer leaves a log path that is a link, or
+# no regular file, as the operator set it.
+grep -Fq "is not written to .env or the setup log." <<<"$out" ||
+    fail "a setup run alone must say the password is not logged: $out"
+logs="$TEST_DIR/logs"
+mkdir "$logs"
+printf 'log\n' > "$logs/private.log"
+chmod 600 "$logs/private.log"
+printf 'log\n' > "$logs/shared.log"
+chmod 644 "$logs/shared.log"
+printf 'log\n' > "$logs/group.log"
+chmod 640 "$logs/group.log"
+ln -s "$logs/private.log" "$logs/link-to-private.log"
+ln -s "$logs/shared.log" "$logs/link-to-shared.log"
+ln -s /dev/null "$logs/link-to-null.log"
+mkfifo -m 600 "$logs/fifo.log"
+for log in private.log shared.log group.log link-to-private.log link-to-shared.log link-to-null.log fifo.log missing.log; do
+    out=$(KVS_INSTALL_LOG="$logs/$log" run_announce true)
+    grep -Fq "$SAMPLE_PASSWORD" <<<"$out" ||
+        fail "$log: the password must be shown under the installer too: $out"
+    if grep -Fq "or the setup log" <<<"$out"; then
+        fail "$log: under the installer, the setup must not claim the password is not logged: $out"
+    fi
+    if [ "$log" = private.log ]; then
+        grep -Fq "is not written to .env; the installer log $logs/$log, readable by root only, keeps it." <<<"$out" ||
+            fail "$log: under the installer, the setup must say which log keeps the password: $out"
+    else
+        grep -Fq "is not written to .env; the installer writes what is shown here to $logs/$log." <<<"$out" ||
+            fail "$log: the setup must name where the installer writes its output: $out"
+        if grep -Fq "readable by root only" <<<"$out"; then
+            fail "$log: a log that is not a private regular file must not be called readable by root only: $out"
+        fi
+    fi
+done
+echo "PASS: the setup says where the password is kept, and calls the log private only when it is"
+
 # A renamed primary account keeps its login: the password goes with the
 # login it really has, not with the archive's admin.
 out=$(bash -c '

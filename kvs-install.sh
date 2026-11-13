@@ -65,12 +65,21 @@ white=""
 normal=""
 on_red=""
 alert=""
+# The log the output goes to, once initialize_runtime_output has run.
+RUNTIME_LOG_FILE=""
 
 # Everything the installer prints also goes to the log, LOG_FILE unless
 # another file is given (the tests). Ctrl-C reaches the tee as well, and
 # bash 5.2 leaves it at its default in a coprocess, where 5.3 ignores it:
 # the tee ignores it itself (-i), so what the installer prints once
 # interrupted, before it stops, still reaches the screen and the log.
+# That output includes passwords (the database password of a native
+# install, the one-time admin password docker/setup.sh shows): the log is
+# made readable by root only before the first line, also when an older run
+# left it with the mode of the umask. Only a regular file is tightened:
+# chmod follows a symbolic link, and a log path an operator pointed
+# elsewhere (at /dev/null, at a log of their own) keeps the mode of its
+# target. A file the log creates through a link is still created 600.
 #
 # The copy the update of the menu runs in place of this one (update) is
 # the same process, and its output still goes through the tee of the first
@@ -81,6 +90,8 @@ alert=""
 initialize_runtime_output() {
   local log_file="${1:-$LOG_FILE}"
 
+  (umask 077 && : >>"$log_file") && [[ -f $log_file && ! -L $log_file ]] && chmod 600 "$log_file"
+  RUNTIME_LOG_FILE=$log_file
   if [[ "${KVS_INSTALL_LOG_PID:-}" != "$$" ]]; then
     exec 3<&1
     coproc mytee { tee -i "$log_file" >&3; }
@@ -2854,9 +2865,10 @@ function dockerInstall() {
 
   # Email, SSL provider, and password prompts are handled by setup.sh
 
-  # Run Docker setup (pass any flags like --dev)
+  # Run Docker setup (pass any flags like --dev). It is told where its
+  # output is kept, which it says when it shows the admin password.
   chmod +x setup.sh
-  ./setup.sh "${SETUP_ARGS[@]}"
+  KVS_INSTALL_LOG="$RUNTIME_LOG_FILE" ./setup.sh "${SETUP_ARGS[@]}"
 }
 
 # Resolve the installation directory the Docker install uses, honouring
