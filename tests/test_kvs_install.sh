@@ -2404,6 +2404,42 @@ test_php_settings_override_the_stock_php_ini() {
   unset KVS_PHP_INI_DIR SYSTEMCTL_RC
 }
 
+# The PHP-FPM step copied www.conf to www.conf.bak before it set the pm
+# values, on every run: "Restart the installation" replaced the stock file
+# kept there with the one the first run had already changed. The backup is
+# now made once and kept.
+test_php_fpm_pool_backup_keeps_the_stock_file() {
+  local temp_dir pool
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  KVS_PHP_INI_DIR="$temp_dir/etc-php"
+  PHP=8.3
+  pool="$KVS_PHP_INI_DIR/$PHP/fpm/pool.d"
+  mkdir -p "$pool"
+  # Values the step never writes (it sets at least 5, 2, 1 and 3), so the
+  # first run is certain to change the file.
+  printf '%s\n' '[www]' 'pm = dynamic' 'pm.max_children = 1' 'pm.start_servers = 1' \
+    'pm.min_spare_servers = 0' 'pm.max_spare_servers = 1' >"$pool/www.conf"
+  cp "$pool/www.conf" "$temp_dir/www.conf.stock"
+  systemctl() { :; }
+
+  configure_dynamic_php_fpm >/dev/null 2>&1
+  cmp -s "$pool/www.conf.bak" "$temp_dir/www.conf.stock" ||
+    fail "the first run must keep the stock www.conf in www.conf.bak" || return 1
+  ! cmp -s "$pool/www.conf" "$temp_dir/www.conf.stock" ||
+    fail "the first run must set the pm values in www.conf" || return 1
+  cp "$pool/www.conf" "$temp_dir/www.conf.first"
+
+  configure_dynamic_php_fpm >/dev/null 2>&1
+  cmp -s "$pool/www.conf.bak" "$temp_dir/www.conf.stock" ||
+    fail "a re-run must not replace the stock file in www.conf.bak: $(grep max_children "$pool/www.conf.bak")" || return 1
+  cmp -s "$pool/www.conf" "$temp_dir/www.conf.first" ||
+    fail "a re-run must leave the pm values as the first run set them" || return 1
+
+  unset -f systemctl
+  unset KVS_PHP_INI_DIR
+}
+
 # The www redirect vhost of the native install answered every request with
 # 444: its server_name is a wildcard and it compared $host with $server_name,
 # which holds that pattern. Rendered as the installer writes it, the redirect
@@ -2455,6 +2491,7 @@ run_test "nginx files come from the checkout or the branch" test_nginx_files_com
 run_test "the self-update replaces the running copy or nothing" test_the_self_update_replaces_the_running_copy_or_nothing || failures=$((failures + 1))
 run_test "the self-update keeps the log and the arguments" test_the_self_update_keeps_the_log_and_the_arguments || failures=$((failures + 1))
 run_test "the self-update runs once for MENU_OPTION=4" test_the_self_update_runs_once_for_menu_option_4 || failures=$((failures + 1))
+run_test "the PHP-FPM pool backup keeps the stock file" test_php_fpm_pool_backup_keeps_the_stock_file || failures=$((failures + 1))
 run_test "auto-updates follow upstream repositories" test_auto_updates_follow_upstream_repositories || failures=$((failures + 1))
 run_test "the ionCube loader is added once and a failure stops the step" test_ioncube_loader_is_added_once_and_a_failure_stops_the_step || failures=$((failures + 1))
 run_test "KVS system settings select nginx" test_kvs_system_settings_select_nginx || failures=$((failures + 1))

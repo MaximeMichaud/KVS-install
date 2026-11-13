@@ -1703,10 +1703,12 @@ configure_dynamic_php_fpm() {
   [ $max_spare_servers -lt $start_servers ] && max_spare_servers=$((start_servers + 1))
 
   # Path to PHP-FPM configuration file for www pool
-  php_fpm_conf="/etc/php/$PHP/fpm/pool.d/www.conf"
+  php_fpm_conf="${KVS_PHP_INI_DIR:-/etc/php}/$PHP/fpm/pool.d/www.conf"
 
-  # Backup the original configuration file
-  cp "$php_fpm_conf" "${php_fpm_conf}.bak"
+  # Back up the file as it was before the installer first changed it, and
+  # only then: a re-run ("Restart the installation") would otherwise replace
+  # that copy with the file the first run already changed.
+  [[ -e "${php_fpm_conf}.bak" ]] || cp "$php_fpm_conf" "${php_fpm_conf}.bak"
 
   # Update PHP-FPM configuration with new calculated values
   sed -i "s/pm.max_children =.*/pm.max_children = $max_children/" "$php_fpm_conf"
