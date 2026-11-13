@@ -41,7 +41,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: lint every Dockerfile
         run: |
           files=$(find docker -name Dockerfile | sort)
@@ -49,7 +51,7 @@ jobs:
           # Word splitting is what passes one argument per Dockerfile.
           # shellcheck disable=SC2086
           docker run --rm -v "$PWD:/repo:ro" -w /repo \
-            hadolint/hadolint:v2.14.0 hadolint $files
+            hadolint/hadolint:v2.14.0@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e hadolint $files
 
   build:
     name: build ${{ matrix.service }}${{ matrix.php && format(' php{0}', matrix.php) || '' }}${{ matrix.arch && format(' {0}', matrix.arch) || '' }}
@@ -87,8 +89,14 @@ jobs:
           - { service: cron, context: docker/cron, base: php-cli, php: "8.3", arch: arm64, runner: ubuntu-24.04-arm }
           - { service: cron, context: docker/cron, base: php-cli, php: "8.4", arch: arm64, runner: ubuntu-24.04-arm }
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The builder runs this BuildKit, pinned like the actions: the default
+      # is moby/buildkit:buildx-stable-1, a tag that moves.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
       - name: build arguments
         id: args
         env:
@@ -104,7 +112,7 @@ jobs:
             echo 'ARGS_EOF'
           } >> "$GITHUB_OUTPUT"
       - name: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch || 'amd64' }}
@@ -151,7 +159,7 @@ jobs:
           set -o pipefail
           docker save "kvs-install/${SERVICE}:ci" | zstd -T0 -3 -q -o "${RUNNER_TEMP}/cache-suite-${SERVICE}.tar.zst"
       - if: matrix.php == '8.1' && !matrix.arch
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cache-suite-${{ matrix.service }}
           path: ${{ runner.temp }}/cache-suite-${{ matrix.service }}.tar.zst
@@ -170,13 +178,15 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The suite runs the real-Docker test of the kvsctl cache command.
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: cache-suite-*
           merge-multiple: true
@@ -210,6 +220,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: resolve every pinned tag again
         run: ./docker/bin/resolve-bases.sh --check

@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
   "enabledManagers": ["gomod", "github-actions", "pre-commit", "custom.regex"],
   "pre-commit": {
     "enabled": true
@@ -20,6 +20,25 @@
     "addLabels": ["security"]
   },
   "customManagers": [
+    {
+      "description": "The workflows run images by tag and digest (hadolint, the BuildKit of the image builds); the tag and the digest move together",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>v?\\d+\\.\\d+\\.\\d+)@(?<currentDigest>sha256:[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "description": "The ShellCheck workflow downloads the ShellCheck release the pre-commit hook runs: the same package as that hook, so both move in the same pull request",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/push\\.yml$/"],
+      "matchStrings": [
+        "uses: ludeeus/action-shellcheck@[0-9a-f]{40} # [^\\n]+\\n\\s+with:\\n\\s+version: (?<currentValue>v\\d+\\.\\d+\\.\\d+)\\n"
+      ],
+      "depNameTemplate": "koalaman/shellcheck-precommit",
+      "datasourceTemplate": "github-tags"
+    },
     {
       "description": "The kvsctl workflow runs govulncheck at a pinned version",
       "customType": "regex",
@@ -67,6 +86,25 @@
       "matchUpdateTypes": ["major"],
       "groupName": "all major dependencies",
       "groupSlug": "all-major"
+    },
+    {
+      "description": "An action pinned to a commit whose commit changes while its version stays is an action whose tag was moved, which a release does not do: the update waits for approval on the dependency dashboard, in a pull request of its own that is never merged by itself",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "moved tags",
+      "groupSlug": "moved-tags",
+      "automerge": false,
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "The same for the images the workflows run by tag and digest, named one by one",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["hadolint/hadolint", "moby/buildkit"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "moved tags",
+      "groupSlug": "moved-tags",
+      "automerge": false,
+      "dependencyDashboardApproval": true
     },
     {
       "description": "Bubble Tea, Bubbles and Lip Gloss 2 moved to charm.land with a new API, a change of code no bot makes, and the printing of Bubble Tea 2.1.0 above an inline program writes over the terminal history the kvsctl screen prints its notes under: they stay on 1.x",
