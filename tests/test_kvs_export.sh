@@ -1592,6 +1592,7 @@ test_the_password_reaches_the_client_only_through_the_environment() {
 test_the_connection_follows_the_host_written_in_setup_db() {
     local out="$TMP_ROOT/host.out"
     local err="$TMP_ROOT/host.err"
+    local host expected i=0
 
     make_site "$TMP_ROOT/host-local" "https://a.example.com" "localhost"
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/host-local" || fail "detect must succeed"
@@ -1621,6 +1622,24 @@ test_the_connection_follows_the_host_written_in_setup_db() {
     make_site "$TMP_ROOT/host-remote" "https://d.example.com" "db.example.com"
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/host-remote" || fail "detect must succeed"
     argv_lines | grep -Fq -- '[-h] [db.example.com]' || fail "a bare host must be passed with -h"
+
+    # IPv6: a bare address holds several colons and no port, a port comes
+    # after the address in brackets, and the clients take no brackets.
+    for host in '::1|[-h] [::1] [-u]' '[::1]|[-h] [::1] [-u]' \
+        '[::1]:3307|[--protocol=tcp] [-h] [::1] [-P] [3307] [-u]' '[::1]:x|[-h] [[::1]:x] [-u]' \
+        '2001:db8::5|[-h] [2001:db8::5] [-u]' '[2001:db8::5]:3308|[--protocol=tcp] [-h] [2001:db8::5] [-P] [3308] [-u]' \
+        'db.example.com:3307|[--protocol=tcp] [-h] [db.example.com] [-P] [3307] [-u]' \
+        'db.example.com|[-h] [db.example.com] [-u]'; do
+        i=$((i + 1))
+        expected=${host#*|}
+        host=${host%%|*}
+        make_site "$TMP_ROOT/host-ipv6-$i" "https://f$i.example.com" "$host"
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/host-ipv6-$i" || fail "detect must succeed for $host"
+        argv_lines | grep -F -- "[--connect-timeout=10] $expected" | grep -Fq -- '[-N] [-B]' ||
+            fail "DB_HOST $host must connect with $expected: $(argv_lines | head -n 1)"
+        argv_lines | grep -Fq -- '[-P]' && [[ "$expected" != *'[-P]'* ]] && fail "DB_HOST $host has no port: $(argv_lines | head -n 1)"
+        assert_key "$out" db_host "$host"
+    done
     pass "the connection follows the host written in setup_db.php"
 }
 

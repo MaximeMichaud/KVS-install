@@ -805,19 +805,39 @@ kvs_detect_tools() {
 
 # DB_HOST is whatever the site was configured with: a bare host uses TCP,
 # localhost uses the socket the client defaults to, host:port forces a port
-# and host:/path names a socket, exactly like the PHP drivers read it. The
+# and host:/path names a socket, exactly like the PHP drivers read it. An
+# IPv6 address takes its port in brackets, [::1]:3307, and comes alone
+# bare or in brackets, ::1 or [::1]: a bare address holds several colons
+# and no port, and the clients want it without the brackets. The
 # arguments are shared by the client and the dump tool, so only what both
 # accept goes here: the dump tool refuses the client's connect timeout.
 # A port forces TCP: the clients take the host name localhost as the
 # socket and would ignore the port, where PHP connects to it.
 kvs_build_connection_args() {
     local port
+    local host
 
     DB_CONN_ARGS=()
     case $DB_HOST_RAW in
         '' | localhost) ;;
+        \[*\]:*)
+            host=${DB_HOST_RAW%%]:*}
+            port=${DB_HOST_RAW#*]:}
+            if kvs_is_number "$port"; then
+                DB_CONN_ARGS+=(--protocol=tcp -h "${host#\[}" -P "$port")
+            else
+                DB_CONN_ARGS+=(-h "$DB_HOST_RAW")
+            fi
+            ;;
+        \[*\])
+            host=${DB_HOST_RAW#\[}
+            DB_CONN_ARGS+=(-h "${host%\]}")
+            ;;
         *:/*)
             DB_CONN_ARGS+=(-S "${DB_HOST_RAW#*:}")
+            ;;
+        *:*:*)
+            DB_CONN_ARGS+=(-h "$DB_HOST_RAW")
             ;;
         *:*)
             port=${DB_HOST_RAW##*:}
