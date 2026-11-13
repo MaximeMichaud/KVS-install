@@ -52,6 +52,9 @@ DESCRIPTION:
 
     Switching MODE between single and multi is not handled here,
     because it requires the orchestration performed by setup.sh.
+    Neither is a domain change: a DOMAIN other than the one the running
+    site was created with is refused before anything changes, here and
+    by --manticore enable and disable. setup.sh changes the domain.
 
 OPTIONS:
     --help      Show this help message
@@ -349,6 +352,48 @@ SSL_PROVIDER="${SSL_PROVIDER:-letsencrypt}"
 USE_WWW="${USE_WWW:-false}"
 SITE_PREFIX="${SITE_PREFIX:-kvs}"
 
+container_environment() {
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1"
+}
+
+# The domain the running site was created with, from the environment of its
+# Nginx container, which has carried DOMAIN since the first stack, or of its
+# PHP-FPM container when Nginx is not running.
+installed_domain() {
+    local container
+    local environment
+    local value
+
+    for container in "$NGINX_CONTAINER" "$PHP_CONTAINER"; do
+        grep -Fxq "$container" <<< "$RUNNING_CONTAINER_NAMES" || continue
+        environment=$(container_environment "$container") || continue
+        value=$(sed -n 's/^DOMAIN=//p' <<< "$environment" | tail -n 1)
+        if [ -n "$value" ]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# This script applies settings to the installed site and cannot move it to
+# another domain: a DOMAIN other than the one the running containers were
+# created with is refused, before anything changes.
+refuse_edited_domain() {
+    local installed
+
+    if ! installed=$(installed_domain); then
+        echo -e "${RED}ERROR: Could not tell which domain the running site serves: neither ${NGINX_CONTAINER} nor ${PHP_CONTAINER} reports a DOMAIN${NC}"
+        echo "Start the Nginx container of the site (docker compose start nginx), then run reconfigure.sh again. Nothing was changed."
+        return 1
+    fi
+    if [ "$installed" != "$DOMAIN" ]; then
+        echo -e "${RED}ERROR: DOMAIN in .env is ${DOMAIN}, but the running site serves ${installed}${NC}"
+        echo "reconfigure.sh cannot change the domain of an installed site: set DOMAIN=${installed} in .env again, or change the domain with setup.sh. Nothing was changed."
+        return 1
+    fi
+}
+
 if ! validate_domain "${DOMAIN:-}"; then
     echo -e "${RED}ERROR: DOMAIN is missing or invalid in .env${NC}"
     exit 1
@@ -372,6 +417,17 @@ if [ -n "$RUNTIME_ACTION" ]; then
             import_writeback_check "" 5 "$PWD"
             ;;
         manticore)
+            # Enable and disable run kvs-init on the site directory and the
+            # database user of DOMAIN.
+            if [ "$MANTICORE_ACTION" != status ]; then
+                NGINX_CONTAINER="${SITE_PREFIX:-kvs}-nginx"
+                PHP_CONTAINER="${SITE_PREFIX:-kvs}-php"
+                if ! RUNNING_CONTAINER_NAMES=$(docker ps --format '{{.Names}}' 2>/dev/null); then
+                    echo -e "${RED}ERROR: Could not inspect running containers; nothing was changed${NC}"
+                    exit 1
+                fi
+                refuse_edited_domain || exit 1
+            fi
             # shellcheck source=/dev/null
             source "$(dirname "${BASH_SOURCE[0]}")/lib/manticore.sh"
             manticore_manage "$MANTICORE_ACTION"
@@ -1488,10 +1544,6 @@ service_container_name() {
     esac
 }
 
-container_environment() {
-    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1"
-}
-
 # The hash Compose labels a container with, of the whole configuration it
 # created the container from: environment, command, ports, image and the
 # rest, whatever .env values went into them.
@@ -1676,6 +1728,11 @@ restore_runtime_environment() {
         echo -e "${YELLOW}Not running before this run, left as the edited .env created them: ${added}${NC}" || true
     return "$status"
 }
+
+# DOMAIN names the site directory the containers mount, the Nginx host and
+# its certificate, and the MariaDB user and database: an edited one is
+# refused before anything changes.
+refuse_edited_domain || exit 1
 
 if [ "$MODE" = "multi" ]; then
     prepare_multi_application_snapshot || exit 1

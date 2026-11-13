@@ -2015,6 +2015,12 @@ if [ "${1:-}" = "ps" ]; then
     exit "${TEST_DOCKER_PS_STATUS:-0}"
 fi
 
+# The running containers were created with the domain of the case.
+if [ "${1:-}" = "inspect" ]; then
+    printf 'DOMAIN=%s\n' "${TEST_DOCKER_DOMAIN:?}"
+    exit 0
+fi
+
 if [[ "$*" == *'/acme.sh/'* ]] && [[ "$*" == *'Le_API'* ]]; then
     printf '%s\n' 'https://acme-v02.api.letsencrypt.org/directory'
     exit 0
@@ -2099,6 +2105,7 @@ EOF
         PATH="$case_dir/bin:/usr/bin:/bin" \
             TEST_DOCKER_CALLS="$case_dir/docker-calls.log" \
             TEST_DOCKER_PS_STATUS="${TEST_DOCKER_PS_STATUS:-0}" \
+            TEST_DOCKER_DOMAIN="$domain" \
             TEST_MARIADB_PASSWORD=test-password \
             "$REPO_ROOT/docker/reconfigure.sh"
     ) > "$case_dir/output.log" 2>&1

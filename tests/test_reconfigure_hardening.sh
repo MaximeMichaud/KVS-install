@@ -988,6 +988,138 @@ for name in cloudflare-invalid cloudflare-multi; do
     assert_eq '' "$(cat "$LAST_DIR/docker.calls")" "invalid Cloudflare settings reached Docker"
 done
 
+# R4: DOMAIN decides the webroot mount, the Nginx host and certificate, and
+# the MariaDB user and database. Edited in .env, it must be refused before
+# anything changes, not half-applied: no recreation, no certificate.
+for name in r4-domain-edited r4-domain-edited-php r4-domain-unknown \
+    r4-domain-edited-multi; do
+    create_fixture "$name"
+done
+set_env_value "$TEST_ROOT/r4-domain-edited-multi" MODE multi
+set_env_value "$TEST_ROOT/r4-domain-edited-multi" COMPOSE_FILE \
+    'docker-compose.yml:docker-compose.multi.yml'
+printf '%s\n' old-route > \
+    "$TEST_ROOT/r4-domain-edited-multi/multi-site/caddy/sites/old.example.org.caddy"
+cp "$TEST_ROOT/r4-domain-edited/.env" "$TEST_ROOT/r4-domain-edited.env.before"
+run_case r4-domain-edited \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx' \
+    MOCK_INITIAL_ENV_nginx=$'DOMAIN=old.example.org\nUSE_WWW=false'
+assert_failure "R4: edited DOMAIN"
+assert_contains "$LAST_DIR/output.log" \
+    'DOMAIN in .env is 7.0.2.example.org, but the running site serves old.example.org' \
+    "R4: the domain mismatch was not explained"
+assert_contains "$LAST_DIR/output.log" 'setup.sh' \
+    "R4: the refusal did not point to setup.sh"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose up' \
+    "R4: a container was recreated for the edited domain"
+assert_not_contains "$LAST_DIR/docker.calls" 'acme.sh' \
+    "R4: a certificate was requested for the edited domain"
+assert_not_contains "$LAST_DIR/docker.calls" 'mariadb' \
+    "R4: the database was queried for the edited domain"
+assert_eq "$(<"$TEST_ROOT/r4-domain-edited.env.before")" "$(<"$LAST_DIR/.env")" \
+    "R4: the refusal changed .env"
+
+# Nginx is not running: the PHP-FPM container tells the installed domain.
+run_case r4-domain-edited-php \
+    MOCK_RUNNING_NAMES='kvs-php' \
+    MOCK_INITIAL_ENV_php_fpm=$'DOMAIN=old.example.org\nSSL_PROVIDER=letsencrypt'
+assert_failure "R4: edited DOMAIN seen from PHP-FPM"
+assert_contains "$LAST_DIR/output.log" 'the running site serves old.example.org' \
+    "R4: the PHP-FPM domain was not compared"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose up' \
+    "R4: a container was recreated after the PHP-FPM domain mismatch"
+
+# No running container tells its domain: refuse rather than guess.
+run_case r4-domain-unknown \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx' \
+    MOCK_INITIAL_ENV_nginx=$'USE_WWW=false' \
+    MOCK_INITIAL_ENV_php_fpm=$'SSL_PROVIDER=letsencrypt'
+assert_failure "R4: unknown installed domain"
+assert_contains "$LAST_DIR/output.log" \
+    'Could not tell which domain the running site serves' \
+    "R4: an unknown installed domain was not refused"
+assert_contains "$LAST_DIR/output.log" \
+    'Start the Nginx container of the site (docker compose start nginx), then run reconfigure.sh again. Nothing was changed.' \
+    "R4: the refusal did not say how to let the script tell the domain"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose up' \
+    "R4: a container was recreated without knowing the installed domain"
+
+# Multi mode is refused by the same check, before the application snapshot
+# and the Caddy route.
+run_case r4-domain-edited-multi \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-caddy' \
+    MOCK_INITIAL_ENV_nginx=$'DOMAIN=old.example.org\nMODE=multi'
+assert_failure "R4: edited DOMAIN in multi mode"
+assert_contains "$LAST_DIR/output.log" 'the running site serves old.example.org' \
+    "R4: the multi-mode domain mismatch was not explained"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose up' \
+    "R4: a container was recreated for the edited multi-mode domain"
+assert_not_contains "$LAST_DIR/docker.calls" 'KVS_SNAPSHOT_PATH=' \
+    "R4: the application was snapshotted for the edited multi-mode domain"
+assert_not_contains "$LAST_DIR/docker.calls" 'caddy reload' \
+    "R4: Caddy was reloaded for the edited multi-mode domain"
+[ ! -e "$LAST_DIR/multi-site/caddy/sites/7.0.2.example.org.caddy" ] ||
+    fail "R4: a Caddy route was written for the edited multi-mode domain"
+assert_eq old-route \
+    "$(<"$LAST_DIR/multi-site/caddy/sites/old.example.org.caddy")" \
+    "R4: the installed Caddy route changed"
+
+# --manticore enable and disable run kvs-init with DOMAIN: the site
+# directory and the database user of an edited one. They are refused the
+# same way, while status, which changes nothing, still runs.
+# r4_manticore_case <case> <action> [ASSIGNMENTS...]
+r4_manticore_case() {
+    local name="$1"
+    local action="$2"
+    shift 2
+
+    LAST_DIR="$TEST_ROOT/$name"
+    mkdir -p "$LAST_DIR/lib" "$LAST_DIR/state"
+    : > "$LAST_DIR/docker.calls"
+    # shellcheck disable=SC2016
+    printf '%s\n' 'manticore_manage() { echo "manticore_manage $1"; }' > \
+        "$LAST_DIR/lib/manticore.sh"
+    set +e
+    (
+        cd "$LAST_DIR" &&
+            env PATH="$LAST_DIR/bin:/usr/bin:/bin" \
+                MOCK_CALLS="$LAST_DIR/docker.calls" MOCK_STATE="$LAST_DIR/state" \
+                "$@" ./reconfigure.sh --manticore "$action"
+    ) > "$LAST_DIR/output.log" 2>&1
+    LAST_STATUS=$?
+    set -e
+}
+for action in enable disable status; do
+    create_fixture "r4-manticore-${action}"
+    cp "$TEST_ROOT/r4-manticore-${action}/.env" \
+        "$TEST_ROOT/r4-manticore-${action}.env.before"
+    r4_manticore_case "r4-manticore-${action}" "$action" \
+        MOCK_RUNNING_NAMES='kvs-php kvs-nginx' \
+        MOCK_INITIAL_ENV_nginx=$'DOMAIN=old.example.org\nUSE_WWW=false'
+    if [ "$action" = status ]; then
+        assert_success "R4: --manticore status with an edited DOMAIN"
+        assert_contains "$LAST_DIR/output.log" 'manticore_manage status' \
+            "R4: the status of search did not run with an edited DOMAIN"
+        continue
+    fi
+    assert_failure "R4: --manticore ${action} with an edited DOMAIN"
+    assert_contains "$LAST_DIR/output.log" \
+        'DOMAIN in .env is 7.0.2.example.org, but the running site serves old.example.org' \
+        "R4: --manticore ${action} did not refuse the edited DOMAIN"
+    assert_not_contains "$LAST_DIR/output.log" 'manticore_manage' \
+        "R4: --manticore ${action} ran for the edited DOMAIN"
+    assert_not_contains "$LAST_DIR/docker.calls" 'compose' \
+        "R4: --manticore ${action} called Compose for the edited DOMAIN"
+    assert_eq "$(<"$TEST_ROOT/r4-manticore-${action}.env.before")" \
+        "$(<"$LAST_DIR/.env")" "R4: --manticore ${action} changed .env"
+done
+
+# The help says the domain does not change here.
+r4_help=$(bash "$ROOT_DIR/docker/reconfigure.sh" --help)
+assert_contains <(printf '%s\n' "$r4_help") \
+    'a DOMAIN other than the one the running' \
+    "R4: --help does not say an edited DOMAIN is refused"
+
 # Reconfiguration must preserve a saved choice and ignore an older shell.
 create_fixture cloudflare-enabled
 set_env_value "$TEST_ROOT/cloudflare-enabled" CLOUDFLARE_ENABLED true

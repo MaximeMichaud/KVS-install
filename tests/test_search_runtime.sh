@@ -63,6 +63,9 @@ case "$*" in
         done
         exit "$status" ;;
     'compose --profile manticore ps -a -q manticore') echo fixture ;;
+    # The running site, created for the domain of .env.
+    'ps --format {{.Names}}') printf '%s\n' kvs-test-php kvs-test-nginx ;;
+    'inspect --format {{range .Config.Env}}{{println .}}{{end}} kvs-test-nginx') echo DOMAIN=example.com ;;
     inspect*) echo "${TEST_CONTAINER_STATE:-0 exited}" ;;
     'compose --profile manticore ps -a manticore'|'compose --profile manticore stop manticore') exit 0 ;;
     'compose --profile manticore logs '*) exit 0 ;;
