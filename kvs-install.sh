@@ -30,6 +30,9 @@ fi
 umask 022
 
 SETUP_ARGS=()
+# The arguments the installer was started with, for the copy the update of
+# the menu runs in its place.
+INSTALLER_ARGS=()
 parse_arguments() {
   SETUP_ARGS=()
   while [[ $# -gt 0 ]]; do
@@ -68,12 +71,22 @@ alert=""
 # bash 5.2 leaves it at its default in a coprocess, where 5.3 ignores it:
 # the tee ignores it itself (-i), so what the installer prints once
 # interrupted, before it stops, still reaches the screen and the log.
+#
+# The copy the update of the menu runs in place of this one (update) is
+# the same process, and its output still goes through the tee of the first
+# run, which outlives the exec. A second tee would truncate the log while
+# the first one goes on writing at its own offset, and would itself write
+# into the first one's pipe: KVS_INSTALL_LOG_PID, set to the process that
+# runs the new copy, tells that copy to keep the tee it inherits.
 initialize_runtime_output() {
   local log_file="${1:-$LOG_FILE}"
 
-  exec 3<&1
-  coproc mytee { tee -i "$log_file" >&3; }
-  exec >&"${mytee[1]}" 2>&1
+  if [[ "${KVS_INSTALL_LOG_PID:-}" != "$$" ]]; then
+    exec 3<&1
+    coproc mytee { tee -i "$log_file" >&3; }
+    exec >&"${mytee[1]}" 2>&1
+  fi
+  unset KVS_INSTALL_LOG_PID
 
   red=$(tput setaf 1)
   green=$(tput setaf 2)
@@ -2965,7 +2978,18 @@ function update() {
   fi
   echo ""
   echo "Update Done."
-  exec bash "$script"
+  # A headless run asked for the update alone, with MENU_OPTION=4 in its
+  # environment: the new copy would inherit it and update again, without
+  # end. It ends here.
+  if [[ "${HEADLESS:-}" == "y" ]]; then
+    return 0
+  fi
+  # The new copy runs with the arguments of this run and in this process,
+  # so it keeps writing to the log through the tee of this run. It starts
+  # at its menu: a MENU_OPTION=4 of the environment would update again.
+  unset MENU_OPTION
+  export KVS_INSTALL_LOG_PID=$BASHPID
+  exec bash "$script" "${INSTALLER_ARGS[@]}"
 }
 
 function updatephpMyAdmin() {
@@ -3114,6 +3138,7 @@ function updatephpMyAdmin() {
 }
 
 main() {
+  INSTALLER_ARGS=("$@")
   parse_arguments "$@"
   initialize_runtime_defaults
   initialize_runtime_output

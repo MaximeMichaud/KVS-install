@@ -645,12 +645,181 @@ test_the_self_update_replaces_the_running_copy_or_nothing() {
 
   # A complete download replaces the copy in place and runs it.
   status=0
-  output=$(cd "$temp_dir/home" && KVS_INSTALL_SELF="$script" update 2>&1) || status=$?
+  output=$(cd "$temp_dir/home" && HEADLESS='' KVS_INSTALL_SELF="$script" update 2>&1) || status=$?
   [[ $status -eq 0 ]] || fail "the update must run the new copy, got $status: $output" || return 1
   [[ "$output" == *"Update Done."*new* ]] || fail "the new copy must run after the replacement: $output" || return 1
   assert_equal new "$(bash "$script")" "the running copy must be the new script" || return 1
   [[ -z "$(ls -A "$temp_dir/home")" ]] || fail "the download must land next to the copy, not in the current directory" || return 1
   unset -f curl
+}
+
+# The update of the menu ran the new copy with exec bash "$script". Its main
+# started a second tee on the log while the tee of the first run, still
+# alive, went on writing at its own offset: the log lost the first run, held
+# NUL bytes and every line of the second run twice. The arguments of the run
+# (--dev) were dropped as well. Both runs here are the real script with its
+# log moved into the test directory: the first answers 4 at the menu, the
+# downloaded copy reports what it was given in place of its initialCheck.
+test_the_self_update_keeps_the_log_and_the_arguments() {
+  local temp_dir script log guard nul_bytes file what
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  log="$temp_dir/kvs-install.log"
+  script="$temp_dir/kvs-install.sh"
+  sed "s|^readonly LOG_FILE=.*|readonly LOG_FILE=\"$log\"|" "$INSTALLER" >"$script"
+  grep -qxF "readonly LOG_FILE=\"$log\"" "$script" || fail "the log of the copy could not be moved" || return 1
+  # The downloaded copy is the script up to the line that starts main, then
+  # an initialCheck that reports what main gave it and ends the run.
+  # shellcheck disable=SC2016 # a line of the script, not an expansion
+  guard='if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then'
+  [[ $(grep -cxF "$guard" "$script") -eq 1 ]] || fail "the copy has no single main guard" || return 1
+  {
+    awk -v guard="$guard" '$0 == guard { exit } { print }' "$script"
+    cat <<'EOF'
+printf -v second_run_arguments '[%s]' "$@"
+echo "second run arguments: $second_run_arguments"
+initialCheck() {
+  local i
+  echo "second run setup arguments: ${SETUP_ARGS[*]}"
+  echo "second run marker: ${KVS_INSTALL_LOG_PID-none}"
+  for ((i = 1; i <= 300; i++)); do echo "second run line $i"; done
+  exit 0
+}
+main "$@"
+EOF
+  } >"$temp_dir/new.sh"
+
+  # The pipe to cat ends once every writer is gone, the tee of the log
+  # included, so the log is complete when the pipeline returns.
+  (
+    cd "$temp_dir" &&
+      HEADLESS='' TERM=dumb KVS_INSTALL_SELF="$script" NEW_COPY="$temp_dir/new.sh" bash -c '
+        source "$1"
+        shift
+        initialCheck() {
+          local i
+          for ((i = 1; i <= 300; i++)); do echo "first run line $i"; done
+        }
+        chooseInstallationType() { manageMenu; }
+        curl() {
+          local output=""
+          while [[ $# -gt 0 ]]; do
+            [[ "$1" == -o ]] && output="$2"
+            shift
+          done
+          cp "$NEW_COPY" "$output"
+        }
+        MENU_OPTION=4
+        main "$@"
+      ' _ "$script" --dev 'not a setup argument'
+  ) </dev/null 2>&1 | cat >"$temp_dir/out"
+
+  nul_bytes=$(tr -cd '\000' <"$log" | wc -c)
+  assert_equal 0 "$nul_bytes" "the log must hold no NUL bytes" || return 1
+  for file in "$log" "$temp_dir/out"; do
+    [[ $file == "$log" ]] && what=log || what=screen
+    assert_equal 300 "$(grep -acx 'first run line [0-9]*' "$file")" "every line of the first run once in the $what" || return 1
+    assert_equal 300 "$(grep -acx 'second run line [0-9]*' "$file")" "every line of the second run once in the $what" || return 1
+    assert_equal "" "$(grep -ax '\(first\|second\) run line [0-9]*' "$file" | sort | uniq -d | head -n 3)" \
+      "no line twice in the $what" || return 1
+    assert_equal 1 "$(grep -acxF 'Update Done.' "$file")" "the update said once that it was done in the $what" || return 1
+    # Every argument, each as it was given, including one the installer
+    # itself ignores and only the new copy's main can tell from --dev.
+    grep -qxF "second run arguments: [--dev][not a setup argument]" "$file" ||
+      fail "the new copy must get every argument of the run, in the $what: $(grep -a 'second run arguments' "$file")" || return 1
+    grep -qxF "second run setup arguments: --dev" "$file" ||
+      fail "the new copy must pass --dev on to setup.sh, in the $what: $(grep -a 'second run setup' "$file")" || return 1
+  done
+  # The first run comes before the second in the log.
+  [[ $(grep -anx 'first run line 300' "$log" | cut -d: -f1) -lt $(grep -anx 'second run line 1' "$log" | cut -d: -f1) ]] ||
+    fail "the log must keep the runs in order" || return 1
+  # The mark is for the new copy alone: what it runs does not inherit it.
+  grep -qxF "second run marker: none" "$log" ||
+    fail "the new copy must not pass the mark on: $(grep -a 'second run marker' "$log")" || return 1
+
+  # A mark that names another process, left in the environment, does not
+  # keep a run from starting its own log.
+  (
+    export KVS_INSTALL_LOG_PID=1
+    TERM=dumb initialize_runtime_output "$temp_dir/fresh.log"
+    echo "a fresh run"
+  ) </dev/null 2>&1 | cat >/dev/null
+  grep -qxF "a fresh run" "$temp_dir/fresh.log" ||
+    fail "a run marked for another process must write its own log" || return 1
+}
+
+# MENU_OPTION=4 from the environment, as a headless run gives it, reached
+# the new copy the update runs, which updated again, without end: every
+# round downloaded the script anew. A headless run now ends once the script
+# is updated; any other run starts the new copy at its menu. The downloaded
+# copy is the real script, its log moved into the test directory, with an
+# initialCheck that only says it started.
+test_the_self_update_runs_once_for_menu_option_4() {
+  local temp_dir script guard mode status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  script="$temp_dir/kvs-install.sh"
+  sed "s|^readonly LOG_FILE=.*|readonly LOG_FILE=\"$temp_dir/kvs-install.log\"|" "$INSTALLER" >"$script"
+  # shellcheck disable=SC2016 # a line of the script, not an expansion
+  guard='if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then'
+  [[ $(grep -cxF "$guard" "$script") -eq 1 ]] || fail "the copy has no single main guard" || return 1
+  {
+    awk -v guard="$guard" '$0 == guard { exit } { print }' "$script"
+    cat <<'EOF'
+initialCheck() { echo "a copy started"; }
+chooseInstallationType() {
+  # main runs it in place of the menu when /var/www is missing; the
+  # menu runs it for option 1.
+  if [[ -z ${menu_reached:-} ]]; then menu_reached=1 && manageMenu; else echo "an installation started"; fi
+}
+main "$@"
+EOF
+  } >"$temp_dir/new.sh"
+  # curl, found on PATH by every copy, hands out the new copy three times
+  # at most, then fails, which ends a loop.
+  mkdir -p "$temp_dir/bin"
+  cat >"$temp_dir/bin/curl" <<'EOF'
+#!/bin/bash
+output=""
+while [[ $# -gt 0 ]]; do
+  [[ "$1" == -o ]] && output="$2"
+  shift
+done
+echo download >>"$DOWNLOADS"
+[[ $(wc -l <"$DOWNLOADS") -le 3 ]] || exit 6
+cp "$NEW_COPY" "$output"
+EOF
+  chmod +x "$temp_dir/bin/curl"
+
+  for mode in headless menu; do
+    : >"$temp_dir/downloads"
+    status=0
+    (
+      cd "$temp_dir" || exit 1
+      if [[ $mode == headless ]]; then export HEADLESS=y; else unset HEADLESS; fi
+      export MENU_OPTION=4
+      # shellcheck disable=SC2016 # expanded by the inner bash
+      PATH="$temp_dir/bin:$PATH" TERM=dumb KVS_INSTALL_SELF="$script" NEW_COPY="$temp_dir/new.sh" \
+        DOWNLOADS="$temp_dir/downloads" bash -c '
+          source "$1"
+          initialCheck() { echo "a copy started"; }
+          chooseInstallationType() {
+            if [[ -z ${menu_reached:-} ]]; then menu_reached=1 && manageMenu; else echo "an installation started"; fi
+          }
+          main
+        ' _ "$script"
+    ) <<<5 >"$temp_dir/out-$mode" 2>&1 || status=$?
+    assert_equal 1 "$(wc -l <"$temp_dir/downloads")" "the $mode run must download the script once" || return 1
+    assert_equal 0 "$status" "the $mode run must end well once updated: $(tail -n 3 "$temp_dir/out-$mode")" || return 1
+    assert_equal 1 "$(grep -acxF 'Update Done.' "$temp_dir/out-$mode")" "the $mode run must update once" || return 1
+    assert_equal 0 "$(grep -acxF 'an installation started' "$temp_dir/out-$mode")" "the $mode run must not start an installation" || return 1
+  done
+  # The headless run asked for the update alone; the other one goes on in
+  # the new copy, at its menu, where it quits.
+  assert_equal 1 "$(grep -acxF 'a copy started' "$temp_dir/out-headless")" "the headless run must end after the update" || return 1
+  assert_equal 0 "$(grep -ac 'Welcome to KVS-install' "$temp_dir/out-headless")" "the headless run shows no menu" || return 1
+  assert_equal 2 "$(grep -acxF 'a copy started' "$temp_dir/out-menu")" "the other run must start the new copy" || return 1
+  assert_equal 1 "$(grep -ac 'Welcome to KVS-install' "$temp_dir/out-menu")" "the new copy must show its menu" || return 1
 }
 
 test_auto_updates_follow_upstream_repositories() {
@@ -2284,6 +2453,8 @@ run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fa
 run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
 run_test "nginx files come from the checkout or the branch" test_nginx_files_come_from_the_checkout_or_the_branch || failures=$((failures + 1))
 run_test "the self-update replaces the running copy or nothing" test_the_self_update_replaces_the_running_copy_or_nothing || failures=$((failures + 1))
+run_test "the self-update keeps the log and the arguments" test_the_self_update_keeps_the_log_and_the_arguments || failures=$((failures + 1))
+run_test "the self-update runs once for MENU_OPTION=4" test_the_self_update_runs_once_for_menu_option_4 || failures=$((failures + 1))
 run_test "auto-updates follow upstream repositories" test_auto_updates_follow_upstream_repositories || failures=$((failures + 1))
 run_test "the ionCube loader is added once and a failure stops the step" test_ioncube_loader_is_added_once_and_a_failure_stops_the_step || failures=$((failures + 1))
 run_test "KVS system settings select nginx" test_kvs_system_settings_select_nginx || failures=$((failures + 1))
