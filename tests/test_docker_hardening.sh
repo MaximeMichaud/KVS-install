@@ -1783,6 +1783,126 @@ test_port_check_covers_the_loopback_services() {
     pass "the port check covers the services published on the loopback and names the variable that moves each"
 }
 
+# D10: in multi mode Caddy publishes 80/tcp, 443/tcp and 443/udp for every
+# site, and the port check used to skip the whole list once Caddy published
+# them, the loopback ports of MariaDB, the cache and Manticore included: a
+# native MariaDB on 127.0.0.1:3306 then failed "docker compose up mariadb"
+# with "port is already allocated" after the images were built. Only Caddy's
+# three ports are expected; the others are handled as in single mode.
+test_multi_site_port_check_keeps_the_loopback_conflicts() {
+    local case_dir="$TMP_ROOT/multi-port-check"
+    local functions_file="$case_dir/functions.sh"
+    local output status
+
+    mkdir -p "$case_dir"
+    for function_name in prompt_read public_port_conflicts_exist port_conflicts_to_resolve check_configured_ports; do
+        awk -v name="$function_name" '
+            $0 == name "() {" { capture = 1 }
+            capture { print }
+            capture && /^}$/ { exit }
+        ' "$REPO_ROOT/docker/setup.sh" >> "$functions_file"
+    done
+    grep -q '^check_configured_ports() {' "$functions_file" ||
+        fail "setup.sh must check the configured ports in check_configured_ports"
+    grep -qx 'check_configured_ports || exit 1' "$REPO_ROOT/docker/setup.sh" ||
+        fail "setup.sh must stop when check_configured_ports refuses"
+
+    # run_check <mode> <caddy: yes|no> <listening> <own containers: yes|no> [STOP_EXISTING] [listening after the stop]
+    # LISTENING_FILE holds the endpoints in use; stopping this project's
+    # containers leaves only Caddy's ports in use, unless the last argument
+    # says what is still listening then. STOP_EXISTING defaults to Y; an
+    # empty one asks the question, with nothing on standard input. Each
+    # "docker compose down" is logged in DOWN_LOG.
+    # shellcheck disable=SC2016
+    run_check() {
+        printf '%s\n' "$3" > "$case_dir/listening"
+        : > "$case_dir/down.log"
+        MODE="$1" CADDY="$2" OWN="$4" STOP="${5-Y}" AFTER_DOWN="${6:-80/tcp 443/tcp 443/udp}" \
+            LISTENING_FILE="$case_dir/listening" DOWN_LOG="$case_dir/down.log" bash -c '
+            RED= GREEN= YELLOW= NC= COMPOSE_PROJECT_NAME=kvs-a-test STOP_EXISTING=$STOP
+            PUBLIC_HTTP_ENDPOINT=80 PUBLIC_HTTPS_ENDPOINT=443 ENABLE_MANTICORE=false
+            publish_endpoint_is_listening() { [[ " $(cat "$LISTENING_FILE") " == *" $1/$2 "* ]]; }
+            caddy_publishes_required_multi_site_ports() { [ "$CADDY" = yes ]; }
+            docker() {
+                case "$*" in
+                    ps*--format*Names*) [ "$OWN" = yes ] && echo kvs-a-test-mariadb ;;
+                    "compose down") echo down >> "$DOWN_LOG"; echo "$AFTER_DOWN" > "$LISTENING_FILE"; OWN=no ;;
+                esac
+                return 0
+            }
+            source "$1"
+            check_configured_ports
+        ' _ "$functions_file" < /dev/null 2>&1
+    }
+
+    output=$(run_check multi yes "80/tcp 443/tcp 443/udp" no) ||
+        fail "multi mode with only Caddy on 80 and 443 must pass: $output"
+    grep -Fq 'Caddy already publishes the required multi-site ports' <<< "$output" ||
+        fail "multi mode must say Caddy publishes the public ports: $output"
+
+    status=0
+    output=$(run_check multi yes "80/tcp 443/tcp 443/udp 127.0.0.1:3306/tcp" no) || status=$?
+    [ "$status" -ne 0 ] || fail "a native MariaDB on 127.0.0.1:3306 must stop a multi-site run: $output"
+    grep -Fq '127.0.0.1:3306/tcp (MariaDB; MARIADB_HOST_PORT=<port> publishes it elsewhere)' <<< "$output" ||
+        fail "the multi-site refusal must name the MariaDB port: $output"
+    if grep -Eq '^  - (80|443)/(tcp|udp)$' <<< "$output"; then
+        fail "the ports Caddy publishes must not be listed as conflicts: $output"
+    fi
+
+    output=$(run_check multi yes "80/tcp 443/tcp 443/udp 127.0.0.1:3306/tcp" yes) ||
+        fail "a port held by this project's own containers is freed by stopping them, as in single mode: $output"
+    grep -Fq 'Existing containers stopped' <<< "$output" || fail "the own containers must be stopped first: $output"
+
+    status=0
+    output=$(run_check multi no "80/tcp" no) || status=$?
+    [ "$status" -ne 0 ] || fail "multi mode without Caddy publishing 80 must refuse a port in use: $output"
+
+    status=0
+    output=$(run_check single no "127.0.0.1:3306/tcp" no) || status=$?
+    [ "$status" -ne 0 ] || fail "single mode must refuse a native MariaDB on the loopback: $output"
+
+    # The owner of a port is not checked while this project runs: its
+    # containers are stopped, and a port another process still holds then
+    # stops the setup, named, with the project left stopped.
+    for mode in single multi; do
+        status=0
+        if [ "$mode" = single ]; then
+            output=$(run_check single no "80/tcp 443/tcp 127.0.0.1:3306/tcp" yes Y "127.0.0.1:3306/tcp") || status=$?
+        else
+            output=$(run_check multi yes "80/tcp 443/tcp 443/udp 127.0.0.1:3306/tcp" yes Y "80/tcp 443/tcp 443/udp 127.0.0.1:3306/tcp") || status=$?
+        fi
+        [ "$status" -ne 0 ] || fail "a port still in use after stopping the project must stop a $mode run: $output"
+        [ -s "$case_dir/down.log" ] || fail "the project must be stopped before the ports are checked again ($mode): $output"
+        grep -Fq 'Configured ports are still in use after stopping this project' <<< "$output" ||
+            fail "the $mode refusal must say the ports are still in use after the project was stopped: $output"
+        grep -Fq '  - 127.0.0.1:3306/tcp (MariaDB; MARIADB_HOST_PORT=<port> publishes it elsewhere)' <<< "$output" ||
+            fail "the $mode refusal must name the port still in use: $output"
+        grep -Fq 'The containers of kvs-a-test stay stopped: free the ports listed, then run the setup again.' <<< "$output" ||
+            fail "the $mode refusal must say the project stays stopped: $output"
+        if grep -Eq '^  - (80|443)/(tcp|udp)$' <<< "$output"; then
+            fail "the ports Caddy publishes must not be listed after the stop ($mode): $output"
+        fi
+    done
+
+    # The question runs where set -e does not apply. At the end of input it
+    # stops the setup before anything is stopped, in either mode, instead of
+    # answering Y and leaving the site down for the next prompt to fail.
+    status=0
+    output=$(run_check single no "80/tcp 443/tcp" yes '') || status=$?
+    [ "$status" -ne 0 ] || fail "the end of input at the stop question must stop a single-site run: $output"
+    grep -Fq 'no answer left on standard input' <<< "$output" ||
+        fail "the end of input at the stop question must stop with the prompt_read error: $output"
+    [ ! -s "$case_dir/down.log" ] || fail "the end of input at the stop question must stop no container: $output"
+    status=0
+    output=$(run_check multi yes "80/tcp 443/tcp 443/udp 127.0.0.1:3306/tcp" yes '') || status=$?
+    [ "$status" -ne 0 ] || fail "the end of input at the stop question must stop a multi-site run: $output"
+    grep -Fq 'no answer left on standard input' <<< "$output" ||
+        fail "the end of input at the stop question must stop a multi-site run with the prompt_read error: $output"
+    [ ! -s "$case_dir/down.log" ] || fail "the end of input at the stop question must stop no multi-site container: $output"
+
+    pass "multi mode expects only Caddy's 80 and 443 and still refuses the loopback conflicts"
+}
+
 test_cache_settings_follow_small_hosts() {
     local functions_file="$TMP_ROOT/cache-settings.sh"
 
@@ -2372,6 +2492,7 @@ test_preflight_tells_a_small_host_without_swap
 test_failed_step_shows_its_last_lines_and_a_full_disk
 test_failed_build_step_shows_its_output_not_the_dockerfile_echo
 test_port_check_covers_the_loopback_services
+test_multi_site_port_check_keeps_the_loopback_conflicts
 test_a_question_with_no_answer_left_stops_the_setup
 test_two_kvs_archives_stop_the_setup
 test_init_archive_lookup_reads_the_top_level_only

@@ -5399,53 +5399,85 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     echo -e "${GREEN}Firewall ports opened${NC}"
 fi
 
+# The conflicts this run has to resolve. In multi mode Caddy publishes
+# 80/tcp, 443/tcp and 443/udp for every site, so those are expected once it
+# does; every other one, the services this stack publishes on the loopback
+# included, counts as in single mode: a MariaDB already on 127.0.0.1:3306
+# made "docker compose up mariadb" fail once the images were built.
+port_conflicts_to_resolve() {
+    local conflict
+    local -a kept=()
+
+    public_port_conflicts_exist || return 1
+    [ "${CADDY_PUBLISHES_PUBLIC_PORTS:-false}" = true ] || return 0
+    for conflict in "${PUBLIC_PORT_CONFLICTS[@]}"; do
+        case "$conflict" in
+            "${PUBLIC_HTTP_ENDPOINT}/tcp" | "${PUBLIC_HTTPS_ENDPOINT}/tcp" | 443/udp) continue ;;
+        esac
+        kept+=("$conflict")
+    done
+    PUBLIC_PORT_CONFLICTS=("${kept[@]}")
+    [ "${#PUBLIC_PORT_CONFLICTS[@]}" -gt 0 ]
+}
+
+# Every port the stack publishes must be free. When this project has running
+# containers, they are stopped (STOP_EXISTING) without checking which process
+# holds the port, and the ports are checked again: one still in use then
+# stops the setup with the project left stopped. Returns 1 when a port stays
+# in use. The caller runs it as "check_configured_ports || exit 1", where set
+# -e does not apply, so the question goes through prompt_read: at the end of
+# input the setup stops before anything is stopped.
+check_configured_ports() {
+    CADDY_PUBLISHES_PUBLIC_PORTS=false
+    if [ "$MODE" = "multi" ] && caddy_publishes_required_multi_site_ports; then
+        CADDY_PUBLISHES_PUBLIC_PORTS=true
+        echo -e "${GREEN}Caddy already publishes the required multi-site ports${NC}"
+    fi
+    port_conflicts_to_resolve || return 0
+
+    # Only manage containers from this Compose project. Name-prefix filters
+    # can accidentally stop the central proxy or another KVS site.
+    KVS_CONTAINERS=$(docker ps \
+        --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+        --format '{{.Names}}' 2>/dev/null || true)
+    if [ -z "$KVS_CONTAINERS" ]; then
+        echo -e "${RED}ERROR: Configured ports are in use by another process:${NC}"
+        printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
+        return 1
+    fi
+    echo -e "${YELLOW}Existing KVS containers detected${NC}"
+    docker ps \
+        --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+        --format "table {{.Names}}\t{{.Status}}" 2>/dev/null
+    echo ""
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$STOP_EXISTING" ]]; then
+        echo -n "Stop existing KVS containers? [Y/n]: "
+        prompt_read STOP_EXISTING
+    fi
+    if [ "$STOP_EXISTING" = "n" ] || [ "$STOP_EXISTING" = "N" ]; then
+        echo -e "${RED}ERROR: Cannot continue while the configured ports remain in use${NC}"
+        return 1
+    fi
+    echo "Stopping existing containers..."
+    docker compose down 2>/dev/null || true
+    docker ps -q \
+        --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" 2>/dev/null | \
+        xargs -r docker stop 2>/dev/null || true
+    echo -e "${GREEN}Existing containers stopped${NC}"
+
+    if port_conflicts_to_resolve; then
+        echo -e "${RED}ERROR: Configured ports are still in use after stopping this project:${NC}"
+        printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
+        echo "The containers of ${COMPOSE_PROJECT_NAME} stay stopped: free the ports listed, then run the setup again."
+        return 1
+    fi
+}
+
 # Check if configured ports are available
 echo ""
 echo -e "${CYAN}Checking configured public ports...${NC}"
-if public_port_conflicts_exist; then
-    if [ "$MODE" = "multi" ] && caddy_publishes_required_multi_site_ports; then
-        echo -e "${GREEN}Caddy already publishes the required multi-site ports${NC}"
-    else
-        # Only manage containers from this Compose project. Name-prefix filters
-        # can accidentally stop the central proxy or another KVS site.
-        KVS_CONTAINERS=$(docker ps \
-            --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-            --format '{{.Names}}' 2>/dev/null || true)
-        if [ -n "$KVS_CONTAINERS" ]; then
-            echo -e "${YELLOW}Existing KVS containers detected${NC}"
-            docker ps \
-                --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-                --format "table {{.Names}}\t{{.Status}}" 2>/dev/null
-            echo ""
-            # Skip prompt if already set (headless mode)
-            if [[ -z "$STOP_EXISTING" ]]; then
-                echo -n "Stop existing KVS containers? [Y/n]: "
-                read -r STOP_EXISTING
-            fi
-            if [ "$STOP_EXISTING" != "n" ] && [ "$STOP_EXISTING" != "N" ]; then
-                echo "Stopping existing containers..."
-                docker compose down 2>/dev/null || true
-                docker ps -q \
-                    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" 2>/dev/null | \
-                    xargs -r docker stop 2>/dev/null || true
-                echo -e "${GREEN}Existing containers stopped${NC}"
-            else
-                echo -e "${RED}ERROR: Cannot continue while the configured ports remain in use${NC}"
-                exit 1
-            fi
-
-            if public_port_conflicts_exist; then
-                echo -e "${RED}ERROR: Configured ports are still in use after stopping this project:${NC}"
-                printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
-                exit 1
-            fi
-        else
-            echo -e "${RED}ERROR: Configured ports are in use by another process:${NC}"
-            printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
-            exit 1
-        fi
-    fi
-fi
+check_configured_ports || exit 1
 
 # The public IPv4 address of this server, from the first lookup service
 # that answers with one. Empty when none does (no internet, every service
