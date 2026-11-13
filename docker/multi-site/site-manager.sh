@@ -503,16 +503,18 @@ write_caddy_site_config() {
     local alternate_host=""
     local tls_directive=""
     local temp_file
+    local write_failed=false
 
     caddy_route_hosts "$@" || return 1
 
     # Callers test this function in a condition, which turns set -e off
     # inside it: every step checks its own status, so a route that cannot be
-    # written is never reported as generated.
+    # written is never reported as generated. Each write is checked on its
+    # own, because a block of writes only reports the status of its last
+    # command (an "if" that exits 0 when the route has no www host).
     mkdir -p "$CADDY_SITES_DIR" || return 1
     temp_file=$(mktemp "${CADDY_SITES_DIR}/.${domain}.caddy.XXXXXX") || return 1
-    {
-        cat << EOF
+    cat > "$temp_file" << EOF || write_failed=true
 # KVS Site: ${domain}
 ${canonical_host} {
     reverse_proxy n.${domain}:80 {
@@ -541,23 +543,21 @@ ${tls_directive}
     }
 }
 EOF
-        if [ -n "$alternate_host" ]; then
-            cat << EOF
+    if [ -n "$alternate_host" ]; then
+        cat >> "$temp_file" << EOF || write_failed=true
 
 ${alternate_host} {
     redir https://${canonical_host}{uri} permanent
 ${tls_directive}
 }
 EOF
-        fi
-    } > "$temp_file" || {
+    fi
+    if [ "$write_failed" = true ] ||
+        ! mv -f "$temp_file" "${CADDY_SITES_DIR}/${domain}.caddy"; then
         rm -f "$temp_file"
+        log_error "Could not write the Caddy route for ${domain}"
         return 1
-    }
-    mv -f "$temp_file" "${CADDY_SITES_DIR}/${domain}.caddy" || {
-        rm -f "$temp_file"
-        return 1
-    }
+    fi
     log_success "Generated Caddy config: ${CADDY_SITES_DIR}/${domain}.caddy"
 }
 

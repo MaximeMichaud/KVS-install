@@ -1112,6 +1112,89 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "PASS: a route that cannot be written fails the add"
 fi
 
+# P1: a route write that fails halfway, as on a full disk, keeps the route
+# already in place and fails. The real cat runs under a zero file-size limit
+# with SIGXFSZ ignored, so its write fails like ENOSPC; root is bound by the
+# limit too. The output goes through a pipe, which the limit does not cover.
+# A route with no www host is the case that used to pass: its block ended in
+# an "if" that exits 0, so a failed write still installed an empty route.
+create_fixture p1_full
+full_script="${TEST_DIR}/p1_full/docker/multi-site/site-manager.sh"
+full_routes="${TEST_DIR}/p1_full/docker/multi-site/caddy/sites"
+for full_case in 'tube.example.com primary-config tube.example.com kvs-tube' \
+    'two.example proxy-config two.example public false false' \
+    'two.example proxy-config two.example'; do
+    read -r full_domain full_command full_args <<< "$full_case"
+    full_route="${full_routes}/${full_domain}.caddy"
+    # shellcheck disable=SC2086 # the arguments are fixed words
+    bash "$full_script" "$full_command" $full_args >/dev/null
+    grep -Fxq "# KVS Site: ${full_domain}" "$full_route" ||
+        fail "P1: the first ${full_command} did not write the route"
+    full_before=$(sha256sum < "$full_route")
+    set +e
+    # shellcheck disable=SC2086
+    full_output=$( (trap '' XFSZ; ulimit -f 0; exec bash "$full_script" "$full_command" $full_args) 2>&1)
+    full_status=$?
+    set -e
+    [ "$full_status" -ne 0 ] ||
+        fail "P1: ${full_case} succeeded although its route could not be written: ${full_output}"
+    ! grep -Fq 'Generated Caddy config' <<< "$full_output" ||
+        fail "P1: ${full_case} reported a route it could not write"
+    grep -Fq "Could not write the Caddy route for ${full_domain}" <<< "$full_output" ||
+        fail "P1: ${full_case} did not report the failed write: ${full_output}"
+    [ "$(sha256sum < "$full_route")" = "$full_before" ] ||
+        fail "P1: ${full_case} replaced the route with a partial one"
+    ! compgen -G "${full_routes}/.${full_domain}.caddy.*" >/dev/null ||
+        fail "P1: ${full_case} left its temporary route behind"
+done
+grep -Fxq 'SITE_PREFIX=kvs-tube' "${TEST_DIR}/p1_full/docker/multi-site/sites/.primary.env" ||
+    fail "P1: a failed primary route write dropped the existing reservation"
+
+# A route with a www host takes two writes; each one is checked. The cat
+# stand-in fails only on the call named by P1_CAT_FAIL_CALL, after copying
+# the first line of its input, as a disk that fills up and then frees space.
+# primary-config runs the write in a condition, where set -e cannot help.
+create_fixture p1_www
+www_script="${TEST_DIR}/p1_www/docker/multi-site/site-manager.sh"
+mkdir -p "${TEST_DIR}/p1_www/bin"
+cat > "${TEST_DIR}/p1_www/bin/cat" << 'EOF'
+#!/bin/bash
+calls=$(($(wc -l < "$P1_CAT_CALLS") + 1))
+echo call >> "$P1_CAT_CALLS"
+if [ "$calls" -eq "$P1_CAT_FAIL_CALL" ]; then
+    IFS= read -r line
+    printf '%s\n' "$line"
+    echo "cat: write error: No space left on device" >&2
+    exit 1
+fi
+exec "$P1_REAL_CAT" "$@"
+EOF
+chmod +x "${TEST_DIR}/p1_www/bin/cat"
+bash "$www_script" primary-config two.example kvs-two >/dev/null
+www_route="${TEST_DIR}/p1_www/docker/multi-site/caddy/sites/two.example.caddy"
+grep -Fxq 'www.two.example {' "$www_route" ||
+    fail "P1: the two-label primary route has no www block"
+www_before=$(sha256sum < "$www_route")
+for www_fail_call in 1 2; do
+    : > "${TEST_DIR}/p1_www/cat-calls"
+    set +e
+    www_output=$(P1_CAT_CALLS="${TEST_DIR}/p1_www/cat-calls" \
+        P1_CAT_FAIL_CALL="$www_fail_call" P1_REAL_CAT="$(type -P cat)" \
+        PATH="${TEST_DIR}/p1_www/bin:${PATH}" \
+        bash "$www_script" primary-config two.example kvs-two 2>&1)
+    www_status=$?
+    set -e
+    # The stand-in must have seen the write it fails. After a failed first
+    # write the route may stop or go on to the second, both are correct.
+    [ "$(wc -l < "${TEST_DIR}/p1_www/cat-calls")" -ge "$www_fail_call" ] ||
+        fail "P1: the cat stand-in did not see write ${www_fail_call} of the www route"
+    [ "$www_status" -ne 0 ] ||
+        fail "P1: a route whose write ${www_fail_call} failed was installed: ${www_output}"
+    [ "$(sha256sum < "$www_route")" = "$www_before" ] ||
+        fail "P1: a route whose write ${www_fail_call} failed replaced the previous one"
+done
+echo "PASS: a route write that fails keeps the previous route and fails"
+
 # Hand-written routes in caddy/sites may list several addresses in one block,
 # with a scheme, a port or capitals. Every one of them is a claimed host.
 create_fixture r2_multi
