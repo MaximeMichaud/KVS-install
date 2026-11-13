@@ -881,6 +881,11 @@ function check_dns_configuration() {
       echo "  2) Wait 60 seconds and check again"
       echo "  3) Exit to configure DNS first (recommended)"
 
+      # Clear any earlier choice before prompting: option 2 re-enters this
+      # function after the wait, and a lingering DNS_ACTION=2 would satisfy
+      # the loop condition, skip the prompt, and wait again without ever
+      # asking, so a still-wrong domain could only be escaped with Ctrl-C.
+      DNS_ACTION=""
       until [[ "$DNS_ACTION" =~ ^[1-3]$ ]]; do
         prompt_read -p "Select [1-3]: " DNS_ACTION
       done
