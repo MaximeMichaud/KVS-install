@@ -346,6 +346,21 @@ import_prepare_dump() {
             ;;
     esac
     {
+        # The mariadb image maps utf8mb4 and utf8mb3 to the uca1400
+        # collations (character-set-collations), so a CREATE TABLE that
+        # names a charset without COLLATE - what MySQL 5.x and MariaDB
+        # before 10.3.37 / 10.6.11 write - lands on uca1400_ai_ci instead of
+        # the general_ci the source meant. That silently changes equality,
+        # sorting and uniqueness for most KVS tables, and two spellings that
+        # collate equal under uca1400 but not general_ci (an ASCII word and
+        # its fullwidth form, say) in a UNIQUE column abort the whole replay.
+        # Reset the session to the legacy per-charset
+        # default so a charset-only table keeps its source collation. The
+        # /*M!110300 ... */ guard runs this only on MariaDB 11.3+, where the
+        # variable exists and the uca1400 mapping is; on older servers it is
+        # an inert comment (the variable is unknown and the default is already
+        # general_ci, so there is nothing to undo).
+        printf "/*M!110300 SET SESSION character_set_collations='' */;\n"
         # shellcheck disable=SC2016  # The backticks are SQL quoting inside the sed program.
         # A MySQL dump writes GTID_PURGED over several lines when the source
         # knew several servers (one UUID set per line, up to the semicolon).
