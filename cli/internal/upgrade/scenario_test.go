@@ -1390,6 +1390,77 @@ func TestUpgradeKeepsTheArchiveARollbackFallsBackTo(t *testing.T) {
 	}
 }
 
+// K4: the rollback of an upgrade run with --skip-backup falls back to the
+// newest backup of the previous version, passing over the copy a restore
+// took of the database it replaced, which holds the data the restore was
+// run to drop. The prune of a later upgrade keeps that same archive, and the
+// rollback replays it.
+func TestRollbackFallbackPassesOverTheCopyOfARestore(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0", database: migrates}, rel{version: "1.2.0"})
+	s.writeData("chosen")
+	chosen := s.backupNow("1.0.0")
+	s.writeData("rejected")
+	if err := s.restore(s.runner(), chosen); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	s.fresh()
+	if err := s.upgrade(s.runner(func(o *Options) { o.Version = "1.1.0"; o.SkipBackup = true })); err != nil {
+		t.Fatalf("upgrade to 1.1.0 with --skip-backup: %v", err)
+	}
+	if got, err := RollbackArchive(filepath.Join(s.root, "backups"), s.state()); err != nil || got != chosen {
+		t.Fatalf("a rollback of 1.1.0 falls back to %q (%v), want %s and not the copy the restore took", got, err, filepath.Base(chosen))
+	}
+	s.backupNow("1.1.0")
+	s.writeData("data-3")
+	s.f.behave(registry+"php:1.2.0-php8.1", behavior{unhealthy: true})
+	s.fresh()
+	if err := s.upgrade(s.runner(quick, func(o *Options) { o.KeepBackups = 1 })); !errors.Is(err, ErrRolledBack) {
+		t.Fatalf("upgrade to 1.2.0: %v", err)
+	}
+	if _, err := os.Stat(chosen); err != nil {
+		t.Fatalf("the prune removed the 1.0.0 archive a rollback of 1.1.0 falls back to: %v", err)
+	}
+	s.fresh()
+	if err := s.rollback(s.runner()); err != nil {
+		t.Fatalf("rollback to 1.0.0: %v", err)
+	}
+	s.back("1.0.0")
+	if db, _, _, _ := s.world(); db != "chosen" {
+		t.Errorf("the database holds %q after the rollback, want the archive the restore chose", db)
+	}
+}
+
+// K4: when the only archive of the previous version left is the copy a
+// restore took, a rollback that has to take the database back refuses as
+// it does with no backup at all, and leaves the database as it is.
+func TestRollbackRefusesTheCopyOfARestoreAsItsArchive(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0", database: migrates})
+	s.writeData("chosen")
+	chosen := s.backupNow("1.0.0")
+	s.writeData("rejected")
+	if err := s.restore(s.runner(), chosen); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	s.fresh()
+	if err := s.upgrade(s.runner(func(o *Options) { o.Version = "1.1.0"; o.SkipBackup = true })); err != nil {
+		t.Fatalf("upgrade to 1.1.0 with --skip-backup: %v", err)
+	}
+	if err := os.Remove(chosen); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := RollbackArchive(filepath.Join(s.root, "backups"), s.state()); err != nil || got != "" {
+		t.Fatalf("with only the copy of a restore left, a rollback of 1.1.0 falls back to %q (%v)", got, err)
+	}
+	s.writeData("data-3")
+	s.fresh()
+	if err := s.rollback(s.runner()); err == nil || !strings.Contains(err.Error(), "changed the database and no backup of") || !strings.Contains(err.Error(), "(copies taken before a replay are not used)") {
+		t.Fatalf("rollback with only the copy of a restore left: %v", err)
+	}
+	if db, _, _, _ := s.world(); db != "data-3" {
+		t.Errorf("the database holds %q after the refused rollback", db)
+	}
+}
+
 // RollbackArchive names what a prune must keep: the upgrade's own archive,
 // or the newest backup of the previous version when the state names none,
 // and nothing without a previous version.

@@ -224,12 +224,24 @@ type Meta struct {
 	// they were written, from 1. It orders them where the date cannot: a
 	// clock set back or ahead moves the date, never the sequence. Zero in
 	// an archive written before kvsctl numbered them.
-	Sequence        int64  `json:"sequence,omitempty"`
-	Domain          string `json:"domain,omitempty"`
+	Sequence int64  `json:"sequence,omitempty"`
+	Domain   string `json:"domain,omitempty"`
+	// Kind is empty for a backup taken as one (kvsctl backup, an upgrade),
+	// and names the copy a restore or a rollback takes of the live database
+	// before it replays another archive: KindBeforeRestore or
+	// KindBeforeRollback. restore --latest passes over those copies.
+	Kind            string `json:"kind,omitempty"`
 	DumpBytes       int64  `json:"dump_bytes"`
 	CompressedBytes int64  `json:"dump_compressed_bytes"`
 	Tool            string `json:"kvsctl"`
 }
+
+// The kinds of the copies of the live database a replay takes first (see
+// Meta.Kind).
+const (
+	KindBeforeRestore  = "before-restore"
+	KindBeforeRollback = "before-rollback"
+)
 
 // Option adds to what Create records.
 type Option func(*archiveInput)
@@ -250,6 +262,12 @@ func WithKVSVersion(version string) Option {
 // one by its name.
 func WithFiles(paths ...string) Option {
 	return func(in *archiveInput) { in.files = append(in.files, paths...) }
+}
+
+// WithKind records that the archive is the copy of the live database a
+// replay takes first (KindBeforeRestore, KindBeforeRollback).
+func WithKind(kind string) Option {
+	return func(in *archiveInput) { in.kind = kind }
 }
 
 // WrittenError is a failure of Create once the archive has its name: the
@@ -281,10 +299,11 @@ type Info struct {
 	Date    time.Time
 	Size    int64
 	Domain  string
-	// KVSVersion and Sequence come from backup.json (see Meta), empty and
-	// zero when the archive could not be read.
+	// KVSVersion, Sequence and Kind come from backup.json (see Meta),
+	// empty and zero when the archive could not be read.
 	KVSVersion string
 	Sequence   int64
+	Kind       string
 	// DumpBytes and CompressedBytes are the sizes of the dump, plain and
 	// compressed, zero when the archive could not be read.
 	DumpBytes, CompressedBytes int64
@@ -392,7 +411,7 @@ func nextSequence(dir string) (int64, error) {
 // archiveInput is what goes into one archive.
 type archiveInput struct {
 	dir, version, container, envPath, statePath string
-	kvsVersion                                  string
+	kvsVersion, kind                            string
 	historyEndYear                              int
 	files                                       []string
 	start                                       time.Time
@@ -575,6 +594,7 @@ func finishArchive(f *os.File, raw, compressed int64, in archiveInput) error {
 		Date:            in.start.UTC(),
 		Sequence:        in.sequence,
 		Domain:          domainOf(in.envPath),
+		Kind:            in.kind,
 		DumpBytes:       raw,
 		CompressedBytes: compressed,
 		Tool:            ToolVersion,
@@ -1272,7 +1292,7 @@ func List(dir string) ([]Info, error) {
 		}
 		if meta, _, err := Describe(item.Path); err == nil {
 			item.Domain, item.DumpBytes, item.CompressedBytes = meta.Domain, meta.DumpBytes, meta.CompressedBytes
-			item.KVSVersion, item.Sequence = meta.KVSVersion, meta.Sequence
+			item.KVSVersion, item.Sequence, item.Kind = meta.KVSVersion, meta.Sequence, meta.Kind
 		}
 		out = append(out, item)
 	}
@@ -1292,6 +1312,21 @@ func (b Info) newer(than Info) bool {
 		return b.Date.After(than.Date)
 	}
 	return b.Name > than.Name
+}
+
+// Newest is the newest archive of list, as List orders it, that is no copy
+// a restore or a rollback took of the live database before its replay: the
+// archive restore --latest replays. A retry of a restore that replayed its
+// archive then failed to start the stack replays that archive again, not
+// the copy of the database it replaced. ok is false when list holds no
+// other archive.
+func Newest(list []Info) (newest Info, ok bool) {
+	for _, b := range list {
+		if b.Kind == "" {
+			return b, true
+		}
+	}
+	return Info{}, false
 }
 
 // Latest is the newest backup of that version, or of any version when it

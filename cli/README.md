@@ -719,7 +719,8 @@ way, or a file of the operator where the previous version lays one of its
 own), and one that would leave compose a project it cannot read. When the
 installed release changed the database, was one way, or with
 `--restore-db`, the archive the upgrade took is replayed (the newest backup
-of the previous version when the state names none), after a backup of the
+of the previous version when the state names none, not a copy a restore or
+a rollback took of the database before its replay), after a backup of the
 live database, unless `--no-backup`. The services that write are stopped
 before that backup and stay stopped until the replay is over, so the site
 is down meanwhile. The question says which archive, from when, the KVS
@@ -857,10 +858,12 @@ of it; `.env` and `state.json`, copies of `docker/.env` and
 `docker-compose.override.yml` or the same file under another name compose
 gives one, when `docker/` has one; and `backup.json`: the stack version,
 the KVS version the site runs (`kvs_version`), the date, a sequence number,
-the domain, the sizes of the dump and the `kvsctl` build. The sequence is
-one more than the highest of the archives in `backups/`, and orders them:
-`--latest`, `--keep` and a rollback that has no archive recorded read that
-order, which a clock set wrong does not change.
+the domain, the sizes of the dump, the `kvsctl` build and, for the copy of
+the live database a restore or a rollback takes before its replay, its
+`kind` (`before-restore`, `before-rollback`). The sequence is one more than
+the highest of the archives in `backups/`, and orders them: `--latest`,
+`--keep` and a rollback that has no archive recorded read that order, which
+a clock set wrong does not change.
 
 Timestamp-based system-versioned tables retain their historical rows and
 validity periods. Their archives use format 3, which older CLI builds
@@ -891,21 +894,23 @@ older archives where they are:
 `backup interrupted once <archive> was written: the archive is kept, and the older backups were not pruned`.
 
 `kvsctl restore` replays one archive over the running stack: the one named,
-the last one written with `--latest`, or the one picked from the list it
-prints. It shows what the archive holds, refuses an archive of another site
-(its `backup.json` names another domain than `DOMAIN`) unless
-`--other-site`, and warns when the archive comes from another stack version,
-or holds the database of another KVS version than the site runs, whose
-files stay as they are; the question names that KVS version. A MariaDB that
-runs unhealthy or keeps restarting refuses the restore. Then it stops every
-service but MariaDB, takes a backup of the current database, unless
-`--no-backup`, replays the archive, empties the cache, starts the services
-again and has Manticore rebuild its indexes: the site is down until the
-replay is over. Then it waits for the services to be healthy and for the
-site to answer, the verification an upgrade ends with, Manticore given
-the time `--db-timeout` gives MariaDB to build its indexes; the services
-that were not healthy before the restore began are left out, and the log
-names them. It ends with
+the one picked from the list it prints, or with `--latest` the newest one
+that is not a copy a restore or a rollback took of the database before its
+replay. The list marks those copies, and a retry of `restore --latest`
+replays the same archive again. It shows what the archive holds, refuses an
+archive of another site (its `backup.json` names another domain than
+`DOMAIN`) unless `--other-site`, and warns when the archive comes from
+another stack version, or holds the database of another KVS version than the
+site runs, whose files stay as they are; the question names that KVS
+version. A MariaDB that runs unhealthy or keeps restarting refuses the
+restore. Then it stops every service but MariaDB, takes a backup of the
+current database, unless `--no-backup`, replays the archive, empties the
+cache, starts the services again and has Manticore rebuild its indexes: the
+site is down until the replay is over. Then it waits for the services to be
+healthy and for the site to answer, the verification an upgrade ends with,
+Manticore given the time `--db-timeout` gives MariaDB to build its indexes;
+the services that were not healthy before the restore began are left out,
+and the log names them. It ends with
 `<domain> restored from <archive> (stack <version>) in <duration>`. A
 stack that does not come up ends the restore with exit 1 and says what is
 wrong: the database is restored all the same, and `kvsctl recover` has

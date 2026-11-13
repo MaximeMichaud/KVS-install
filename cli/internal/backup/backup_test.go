@@ -173,6 +173,47 @@ func (r *randomDump) next() []byte {
 	return r.block
 }
 
+// K4: the copy a restore or a rollback takes of the live database records
+// its kind in backup.json, List reads it, and Newest passes over it; an
+// archive taken as a backup records none.
+func TestCreateRecordsTheKindOfAReplayCopy(t *testing.T) {
+	plentyOfSpace(t)
+	dir := t.TempDir()
+	backups := filepath.Join(dir, "backups")
+	env := writeEnv(t, dir)
+	state := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(state, []byte(`{"current":"0.2.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubServer(t, &server{dump: func(ctx context.Context, script string, stdout io.Writer) error {
+		_, err := io.WriteString(stdout, "-- dump\n")
+		return err
+	}})
+	plain, err := Create(context.Background(), backups, "0.2.0", "kvs-mariadb", env, state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied, err := Create(context.Background(), backups, "0.2.0", "kvs-mariadb", env, state, nil, WithKind(KindBeforeRestore))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{plain.Path: "", copied.Path: KindBeforeRestore} {
+		if meta, _, err := Describe(path); err != nil || meta.Kind != want {
+			t.Errorf("%s records kind %+v (%v), want %q", filepath.Base(path), meta, err, want)
+		}
+	}
+	list, err := List(backups)
+	if err != nil || len(list) != 2 || list[0].Path != copied.Path || list[0].Kind != KindBeforeRestore || list[1].Kind != "" {
+		t.Fatalf("List = %+v (%v), want the copy first with its kind", list, err)
+	}
+	if newest, ok := Newest(list); !ok || newest.Path != plain.Path {
+		t.Errorf("Newest = %+v (%v), want %s", newest, ok, filepath.Base(plain.Path))
+	}
+	if _, ok := Newest(list[:1]); ok {
+		t.Error("Newest found an archive among copies of a replay only")
+	}
+}
+
 // TestCreateStreamsTheDumpIntoTheArchive writes a 64 MiB dump through the
 // stub and checks that it went into the archive itself as it streamed, with
 // no other copy beside it, then that the archive holds the dump first with

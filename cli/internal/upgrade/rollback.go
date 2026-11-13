@@ -1038,7 +1038,9 @@ func (r *Runner) MissingRollbackImages(ctx context.Context, state *instance.Stat
 // replays when it takes the database back: the exact archive the upgrade to
 // that version took or, for a state that names none (an upgrade run with
 // --skip-backup, a state written before kvsctl recorded it), the newest
-// backup of the previous version in dir. It is "" with no error when the
+// backup of the previous version in dir. The copies a restore or a
+// rollback took of the database before its replay are passed over: they
+// hold what that replay was run to drop. It is "" with no error when the
 // state has no previous version or no such backup is kept. rollbackDump
 // and every prune of the backups go by this one rule, so a prune never
 // removes the archive a rollback would replay.
@@ -1051,7 +1053,16 @@ func RollbackArchive(dir string, state *instance.State) (string, error) {
 	case state.Previous == "":
 		return "", nil
 	}
-	return backup.Latest(dir, state.Previous)
+	list, err := backup.List(dir)
+	if err != nil {
+		return "", err
+	}
+	for _, b := range list {
+		if b.Version == state.Previous && b.Kind == "" {
+			return b.Path, nil
+		}
+	}
+	return "", nil
 }
 
 // rollbackDump is the archive a rollback replays, "" when the version left
@@ -1065,7 +1076,7 @@ func (r *Runner) rollbackDump(state *instance.State) (path string, taken time.Ti
 		return "", time.Time{}, err
 	}
 	if path == "" {
-		return "", time.Time{}, fmt.Errorf("%s changed the database and no backup of %s is kept in %s: the old code would run on the new schema, so take the database back by hand first", state.Label(state.Current), state.Label(state.Previous), r.Inst.BackupDir())
+		return "", time.Time{}, fmt.Errorf("%s changed the database and no backup of %s is kept in %s (copies taken before a replay are not used): the old code would run on the new schema, so take the database back by hand first", state.Label(state.Current), state.Label(state.Previous), r.Inst.BackupDir())
 	}
 	meta, _, err := backup.Describe(path)
 	if err != nil {
@@ -1115,7 +1126,7 @@ func (r *Runner) backupStopped(ctx context.Context, state *instance.State, j *in
 		r.done(StepBackup, "skipped")
 	} else {
 		r.start(StepBackup, "the live database of "+state.Label(state.Current))
-		result, err := backup.Create(ctx, r.Inst.BackupDir(), state.Current, r.mariadbContainer(), r.Inst.EnvPath, r.statePath(), r.log, backup.WithKVSVersion(r.Inst.KVSVersion()), backup.WithFiles(OverridePaths(r.Inst.DockerDir)...))
+		result, err := backup.Create(ctx, r.Inst.BackupDir(), state.Current, r.mariadbContainer(), r.Inst.EnvPath, r.statePath(), r.log, backup.WithKVSVersion(r.Inst.KVSVersion()), backup.WithFiles(OverridePaths(r.Inst.DockerDir)...), backup.WithKind(backup.KindBeforeRollback))
 		if err != nil {
 			r.failStep(StepBackup, err)
 			r.giveUp(ctx, j)

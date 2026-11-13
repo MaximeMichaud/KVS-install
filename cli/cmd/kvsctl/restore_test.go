@@ -189,6 +189,37 @@ func TestRestoreQuestion(t *testing.T) {
 	}
 }
 
+// K4: --latest passes over the copies a restore or a rollback took of the
+// database before its replay, and refuses when only those are left; one
+// named on the command line is restored, and the picker marks them.
+func TestChooseLatestPassesOverTheCopiesOfAReplay(t *testing.T) {
+	dir := t.TempDir()
+	list := sampleBackups(dir)
+	list[0].Kind = backup.KindBeforeRestore
+	s := testSession(t, newRoot(t))
+	noTerminal := ui.NewPlain(io.Discard, nil, false)
+	if path, err := chooseBackup(context.Background(), s, noTerminal, dir, "", true, list); err != nil || path != list[1].Path {
+		t.Fatalf("--latest with the copy of a restore first: %q, %v; want %q", path, err, list[1].Path)
+	}
+	for i := range list {
+		list[i].Kind = backup.KindBeforeRollback
+	}
+	if path, err := chooseBackup(context.Background(), s, noTerminal, dir, "", true, list); err == nil || !strings.Contains(err.Error(), "name the one to restore") {
+		t.Fatalf("--latest with only copies of a replay: %q, %v", path, err)
+	}
+	if path, err := chooseBackup(context.Background(), s, noTerminal, dir, list[0].Name, false, list); err != nil || path != list[0].Path {
+		t.Fatalf("a copy named on the command line: %q, %v", path, err)
+	}
+	for kind, want := range map[string]string{backup.KindBeforeRestore: "(the database before a restore)", backup.KindBeforeRollback: "(the database before a rollback)", "": ""} {
+		b := list[0]
+		b.Kind = kind
+		line := formatBackupLine(1, b)
+		if (want != "" && !strings.HasSuffix(line, want)) || (want == "" && strings.Contains(line, "(the database before")) {
+			t.Errorf("kind %q: picker line %q", kind, line)
+		}
+	}
+}
+
 func TestFormatBackupLine(t *testing.T) {
 	line := formatBackupLine(1, sampleBackups(t.TempDir())[0])
 	for _, want := range []string{"1) backup-0.2.0-20260924-033804.tar", "2026-09-24 03:38 UTC", "431 kB", "0.2.0"} {

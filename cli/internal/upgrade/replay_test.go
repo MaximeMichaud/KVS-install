@@ -447,6 +447,34 @@ func (s *stack) restore(r *Runner, archive string) error {
 	return r.Restore(context.Background(), state, archive, false, func() {})
 }
 
+// K4: the copy of the live database a restore takes before its replay is
+// written to the same directory and ranks newest. It is marked as that
+// copy, so restore --latest run again after a restore that replayed its
+// archive and then could not start the stack replays the same archive, not
+// the database that archive replaced.
+func TestRestoreLatestPassesOverTheCopyARestoreTook(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"})
+	s.backupNow("1.0.0")
+	archive := s.backupNow("1.0.0")
+	s.writeData("data-2")
+	if err := s.restore(s.runner(), archive); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	list, err := backup.List(filepath.Dir(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 3 || list[0].Path == archive || list[0].Kind != backup.KindBeforeRestore {
+		t.Fatalf("the copy the restore took is not the newest archive marked %s: %+v", backup.KindBeforeRestore, list)
+	}
+	if got := s.holds(list[0].Path); got != "data-2" {
+		t.Errorf("the copy the restore took holds %s, want the database it replaced", got)
+	}
+	if newest, ok := backup.Newest(list); !ok || newest.Path != archive || newest.Kind != "" {
+		t.Errorf("restore --latest would replay %+v (%v), want %s", newest, ok, filepath.Base(archive))
+	}
+}
+
 // K2: a restore named by a relative path records the archive absolute in
 // its journal, so recover run later from another directory, cron's or
 // /root, replays the same file instead of failing or replaying whatever

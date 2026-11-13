@@ -58,7 +58,7 @@ func restoreCmd() *cobra.Command {
 			return s.finish(restore(s, arg, restoreOptions{latest: latest, noBackup: noBackup, withEnv: withEnv, otherSite: otherSite, waits: waits}))
 		},
 	}
-	cmd.Flags().BoolVar(&latest, "latest", false, "restore the newest backup without asking which one")
+	cmd.Flags().BoolVar(&latest, "latest", false, "restore the newest backup without asking which one, passing over the copies a restore or a rollback took of the database before its replay")
 	cmd.Flags().BoolVar(&noBackup, "no-backup", false, "do not back up the current database before replacing it")
 	cmd.Flags().BoolVar(&withEnv, "env", false, "also put back the .env the archive carries, keeping the live values of the settings kvsctl manages and of DOMAIN, SITE_PREFIX and COMPOSE_PROJECT_NAME")
 	cmd.Flags().BoolVar(&otherSite, "other-site", false, "restore an archive taken on another site, whose domain is not the DOMAIN of this one")
@@ -251,7 +251,11 @@ func chooseBackup(ctx context.Context, s *session, ask *ui.Plain, dir, arg strin
 		return "", fmt.Errorf("no backup in %s (kvsctl backup takes one)", dir)
 	}
 	if latest {
-		return list[0].Path, nil
+		newest, ok := backup.Newest(list)
+		if !ok {
+			return "", fmt.Errorf("the backups in %s are all copies a restore or a rollback took of the database before its replay: name the one to restore", dir)
+		}
+		return newest.Path, nil
 	}
 	if ask.In == nil {
 		return "", fmt.Errorf("name the backup to restore, or pass --latest (%d in %s)", len(list), dir)
@@ -300,9 +304,17 @@ func resolveBackup(dir, arg string, list []backup.Info) (string, error) {
 	return "", fmt.Errorf("no backup named %s in %s", arg, dir)
 }
 
-// formatBackupLine is one line of the picker.
+// formatBackupLine is one line of the picker. A copy a restore or a
+// rollback took of the database before its replay says so.
 func formatBackupLine(n int, b backup.Info) string {
-	return fmt.Sprintf("%d) %-40s   %s UTC   %8s   %s", n, b.Name, b.Date.UTC().Format("2006-01-02 15:04"), upgrade.HumanBytes(b.Size), b.Version)
+	line := fmt.Sprintf("%d) %-40s   %s UTC   %8s   %s", n, b.Name, b.Date.UTC().Format("2006-01-02 15:04"), upgrade.HumanBytes(b.Size), b.Version)
+	switch b.Kind {
+	case backup.KindBeforeRestore:
+		line += "   (the database before a restore)"
+	case backup.KindBeforeRollback:
+		line += "   (the database before a rollback)"
+	}
+	return line
 }
 
 // describeBackup prints what the archive holds, from its backup.json, with

@@ -112,6 +112,13 @@ func TestManualRollbackReplaysTheExactArchive(t *testing.T) {
 	if got := s.holds(safety); got != "data-2" {
 		t.Errorf("the safety backup holds %s, want the live database of 1.1.0", got)
 	}
+	// K4: the copy is marked as the database before a rollback, which
+	// restore --latest passes over.
+	if list, err := backup.List(filepath.Join(s.root, "backups")); err != nil || len(list) == 0 || list[0].Path != safety || list[0].Kind != backup.KindBeforeRollback {
+		t.Errorf("the safety backup is not the newest archive marked %s: %+v (%v)", backup.KindBeforeRollback, list, err)
+	} else if newest, ok := backup.Newest(list); !ok || newest.Path == safety {
+		t.Errorf("restore --latest would replay the safety backup of the rollback: %+v", newest)
+	}
 
 	state = s.state()
 	if state.Previous != "1.1.0" || state.UpgradeBackup != "" || state.Database != "" || state.OneWay {
