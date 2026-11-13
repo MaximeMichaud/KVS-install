@@ -273,13 +273,17 @@ import_sql_like_escape() {
 
 # import_path_rewrite_sql <table prefix> <old project path> <new project path>
 # SQL that moves the storage and conversion server paths from the old
-# project path to the container path, anchored on the path prefix.
+# project path to the container path, anchored on the path prefix. A
+# project_path written with a trailing slash names the same directory; "/"
+# stays "/", which never anchors the paths of every server.
 import_path_rewrite_sql() {
     local prefix="$1"
     local old_path="$2"
     local new_path="$3"
     local old_sql new_sql old_like table
 
+    old_path=${old_path%"${old_path##*[!/]}"}
+    old_path=${old_path:-/}
     old_sql=$(import_sql_escape "$old_path")
     new_sql=$(import_sql_escape "$new_path")
     old_like=$(import_sql_like_escape "$old_path")

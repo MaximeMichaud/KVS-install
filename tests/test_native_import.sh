@@ -108,6 +108,11 @@ CHOWN_FAILS=yes prepare_fixture readable >/dev/null
 [ "$(stat -c %a "$TEST_DIR/init/readable")" = 755 ] || fail 'payload directory must stay readable without the ownership'
 [ "$(stat -c %a "$TEST_DIR/init/readable.sh")" = 644 ] || fail 'entrypoint hook must stay readable without the ownership'
 grep -Fq 'SET autocommit=1;' "$TEST_DIR/init/good/finalize.sql" || fail 'finalization does not commit'
+# A project_path written with a trailing slash moves the server paths too.
+native_import_prepare "$TEST_DIR/fixture.mariadb.tar.gz" ktvs_ 7.0.2 /srv/legacy/ /var/www/kvs \
+    "$TEST_DIR/init/slash" unit-marker new-site.example 4 >/dev/null
+grep -Fxq "UPDATE \`ktvs_admin_servers\` SET path = CONCAT('/var/www/kvs', SUBSTRING(path, CHAR_LENGTH('/srv/legacy') + 1)) WHERE path = '/srv/legacy' OR path LIKE '/srv/legacy/%';" \
+    "$TEST_DIR/init/slash/finalize.sql" || fail "a trailing slash in project_path must not stop the server path rewrite: $(grep UPDATE "$TEST_DIR/init/slash/finalize.sql")"
 tail -n 1 "$TEST_DIR/init/good/finalize.sql" | grep -Fq "'KVS_INSTALL_IMPORT', 'unit-marker'" || fail 'completion marker must be last'
 if prepare_fixture good >/dev/null 2>&1; then fail 'existing staging was overwritten'; fi
 SIMULATE_FULL_STAGE=yes

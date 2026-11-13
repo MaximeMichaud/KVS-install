@@ -304,6 +304,32 @@ test_sql_escaping_survives_quotes_and_like_wildcards() {
     pass "SQL escaping survives quotes and LIKE wildcards"
 }
 
+# KVS reads project_path with or without a trailing slash; the server paths
+# in the database are anchored on the directory either way. "/" never
+# anchors the paths of every server.
+test_a_trailing_slash_in_project_path_still_moves_the_server_paths() {
+    local dump="$TMP_ROOT/dump-slash.sql" expected content
+    make_dump "$dump" yes
+
+    expected=$(import_path_rewrite_sql ktvs_ /home/old/www /var/www/kvs)
+    grep -Fq "WHERE path = '/home/old/www' OR path LIKE '/home/old/www/%';" <<< "$expected" ||
+        fail "the reference rewrite must anchor on the directory: $expected"
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /home/old/www/ /var/www/kvs "$TMP_ROOT/prepared-slash.sql" token-slash >/dev/null ||
+        fail "a dump from a project_path with a trailing slash must be prepared"
+    content=$(cat "$TMP_ROOT/prepared-slash.sql")
+    for table in admin_servers admin_conversion_servers; do
+        grep -Fxq "$(grep -F "\`ktvs_$table\`" <<< "$expected")" <<< "$content" ||
+            fail "the $table paths must move as for the path without the slash: $(grep -F "ktvs_$table" <<< "$content")"
+    done
+    [ "$(import_path_rewrite_sql ktvs_ /home/old/www// /var/www/kvs)" = "$expected" ] ||
+        fail "several trailing slashes name the same directory"
+    [ "$(import_path_rewrite_sql ktvs_ / /var/www/kvs)" = "$(import_path_rewrite_sql ktvs_ // /var/www/kvs)" ] ||
+        fail "/ and // name the same directory"
+    grep -Fq "WHERE path = '/' OR path LIKE '//%';" <<< "$(import_path_rewrite_sql ktvs_ // /var/www/kvs)" ||
+        fail "a project at / must not anchor every server path: $(import_path_rewrite_sql ktvs_ // /var/www/kvs)"
+    pass "a trailing slash in project_path still moves the server paths"
+}
+
 test_site_placement_copies_once_and_refuses_a_used_directory() {
     local source="$TMP_ROOT/place-source"
     local destination="$TMP_ROOT/place-destination"
@@ -795,6 +821,7 @@ test_a_dump_of_several_databases_is_refused
 test_an_old_rsync_on_the_old_server_runs_one_stream
 test_prepared_dump_loads_into_the_container_database
 test_sql_escaping_survives_quotes_and_like_wildcards
+test_a_trailing_slash_in_project_path_still_moves_the_server_paths
 test_site_placement_copies_once_and_refuses_a_used_directory
 test_free_space_check_uses_the_nearest_existing_parent
 test_free_space_check_counts_what_a_resumed_copy_still_needs
