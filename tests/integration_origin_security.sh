@@ -171,6 +171,26 @@ assert_tls_rejected() {
     grep -Eiq 'alert|handshake failure' "$TEST_DIR/tls.log" || fail 'TLS failed for an unrelated reason'
 }
 
+# TLS 1.3 early data (0-RTT) can be captured and replayed, and PHP cannot
+# tell a replayed request from the original. A first handshake stores the
+# session; resuming it with a request as early data must not get that data
+# accepted.
+assert_no_early_data() {
+    local port=$1 sni=$2
+    printf 'GET /index.html HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$sni" > "$TEST_DIR/early-request"
+    rm -f "$TEST_DIR/early-session"
+    timeout 5 openssl s_client -connect "127.0.0.1:$port" -servername "$sni" -tls1_3 \
+        -sess_out "$TEST_DIR/early-session" -ign_eof < "$TEST_DIR/early-request" > "$TEST_DIR/early.log" 2>&1 || true
+    [ -s "$TEST_DIR/early-session" ] || fail "no TLS 1.3 session to resume for $sni"
+    timeout 5 openssl s_client -connect "127.0.0.1:$port" -servername "$sni" -tls1_3 \
+        -sess_in "$TEST_DIR/early-session" -early_data "$TEST_DIR/early-request" < /dev/null > "$TEST_DIR/early.log" 2>&1 || true
+    grep -q '^Reused, TLSv1.3' "$TEST_DIR/early.log" || fail "the TLS 1.3 session of $sni was not resumed: $(cat "$TEST_DIR/early.log")"
+    if grep -q 'Early data was accepted' "$TEST_DIR/early.log" ||
+        ! grep -Eq 'Early data was (not sent|rejected)' "$TEST_DIR/early.log"; then
+        fail "TLS 1.3 early data was accepted for $sni"
+    fi
+}
+
 hidden_file_failures=0
 assert_hidden_files_denied() {
     local base=$1 prefix asset path
@@ -244,6 +264,7 @@ for variant in direct www subdomain; do
         request --resolve "$canonical:$https_port:127.0.0.1" "https://$canonical:$https_port/index.html"
         [ "$http_status" = 200 ] || fail "canonical site failed: HTTP $http_status, curl $curl_status"
         grep -qx 'origin-site-sentinel' "$TEST_DIR/body" || fail 'incorrect canonical site body'
+        assert_no_early_data "$https_port" "$canonical"
         assert_hidden_files_denied "https://$canonical:$https_port" --resolve "$canonical:$https_port:127.0.0.1"
         assert_kvs_paths_protected "https://$canonical:$https_port" --resolve "$canonical:$https_port:127.0.0.1"
         request -H "Host: $domain" "http://127.0.0.1:$http_port/path"
@@ -370,6 +391,7 @@ assert_closed --http1.0 --resolve "example.test:$https_port:127.0.0.1" \
 request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$https_port/index.html"
 [ "$http_status" = 200 ] || fail 'standalone site failed'
 grep -qx origin-site-sentinel "$TEST_DIR/body" || fail 'incorrect standalone site body'
+assert_no_early_data "$https_port" example.test
 assert_hidden_files_denied "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
 assert_kvs_paths_protected "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
 request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$https_port/.well-known/proof.txt"
@@ -390,6 +412,7 @@ assert_native_redirect example.test www.example.test
 assert_native_redirect cdn.example.test www.example.test
 assert_tls_rejected "$https_port" unrelated.test
 printf 'PASS: standalone bootstrap ACME, host/SNI rejection, configured site and canonical redirect in both www modes.\n'
+printf 'PASS: TLS 1.3 early data is refused by the Docker and standalone Nginx configurations.\n'
 [ "$hidden_file_failures" -eq 0 ] || fail "$hidden_file_failures hidden-file requests bypassed access restrictions"
 printf 'PASS: hidden files are denied and public CSS/SVG assets remain available in every layout.\n'
 [ "$protected_path_failures" -eq 0 ] || fail "$protected_path_failures requests for KVS internal paths were served or misrouted"

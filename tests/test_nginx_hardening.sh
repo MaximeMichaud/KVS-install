@@ -726,6 +726,20 @@ grep -Fq 'location /phpmyadmin/ {' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
 grep -Fq 'open_basedir=/usr/share/phpmyadmin/' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
     fail "phpMyAdmin location must carry its own open_basedir (the site value sticks to FPM workers)"
 
+# TLS 1.3 early data can be replayed, and PHP cannot tell a replayed request
+# from the original: the main configs turn it off, and no site config turns it
+# back on (tests/integration_origin_security.sh replays one against nginx).
+for conf in conf/nginx/nginx.conf docker/nginx/nginx.conf; do
+    grep -Eq '^[[:space:]]*ssl_early_data[[:space:]]+off;' "$ROOT_DIR/$conf" ||
+        fail "$conf does not turn TLS 1.3 early data off"
+done
+while IFS= read -r conf; do
+    if grep -Eq '^[[:space:]]*ssl_early_data[[:space:]]+on;' "$conf"; then
+        fail "${conf#"$ROOT_DIR"/} turns TLS 1.3 early data on"
+    fi
+done < <(find "$ROOT_DIR/conf/nginx" "$ROOT_DIR/docker/nginx" "$ROOT_DIR/docker/multi-site/nginx" \
+    -type f \( -name '*.conf' -o -name '*.tpl' -o -name '*.template' \))
+
 # Let's Encrypt certificates carry no OCSP responder any more, so stapling
 # only produces a warning at every reload.
 for conf in conf/nginx/nginx.conf docker/nginx/nginx.conf; do
