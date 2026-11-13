@@ -1094,8 +1094,76 @@ reset_nginx_configuration_dirs() {
     mkdir -p "$conf_dir" "$globals_dir"
 }
 
+# The nginx files come from the checkout the script runs from, when it runs
+# from one, so a branch or a release installs the files that go with it. A
+# script that came alone (bash <(curl ...)) has none next to it and
+# downloads them from the branch KVS_INSTALL_BRANCH names, main by default.
+# A script bash reads from a pipe is no file: its BASH_SOURCE is "bash",
+# which must not pick the conf/nginx of the current directory. KVS_INSTALL_SELF
+# names the script for the tests, as in update().
+nginx_conf_source_dir() {
+  local script dir
+
+  script=${KVS_INSTALL_SELF:-$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null)}
+  [[ -n "$script" && -f "$script" ]] || return 1
+  dir="$(dirname -- "$script")/conf/nginx"
+  [[ -f "$dir/nginx.conf" ]] || return 1
+  printf '%s\n' "$dir"
+}
+
+# install_nginx_conf_file <file under conf/nginx> <destination> [checkout dir]
+# The destination is replaced only by a complete copy: a file that does not
+# come is named, and the one that was there stays.
+install_nginx_conf_file() {
+  local file="$1" dest="$2" source_dir="${3:-}" status=0
+  local url="https://raw.githubusercontent.com/MaximeMichaud/KVS-install/${KVS_INSTALL_BRANCH:-main}/conf/nginx/$file"
+
+  if [[ -n "$source_dir" ]]; then
+    cp -f -- "$source_dir/$file" "$dest.tmp" || status=$?
+  else
+    curl -fsSL "$url" -o "$dest.tmp" || status=$?
+  fi
+  if ((status == 0)) && mv -f -- "$dest.tmp" "$dest"; then
+    return 0
+  fi
+  rm -f -- "$dest.tmp"
+  echo "ERROR: could not get the nginx file $file from ${source_dir:-$url}" >&2
+  return 1
+}
+
+# stage_nginx_files <staging dir> [checkout dir]
+# The files the nginx step installs, at their place under the nginx
+# directory: nginx.conf, the globals, the DH parameters, the site vhost
+# (disabled during SSL setup and enabled after) and the sslgen server of the
+# ACME challenge, rendered for the site.
+stage_nginx_files() {
+  local staging="$1" source_dir="${2:-}" file
+
+  mkdir -p "$staging/globals" "$staging/conf.d" || return $?
+  install_nginx_conf_file nginx.conf "$staging/nginx.conf" "$source_dir" || return $?
+  for file in general security php_fastcgi letsencrypt cloudflare-ip-list; do
+    install_nginx_conf_file globals/"$file".conf "$staging/globals/$file.conf" "$source_dir" || return $?
+  done
+  openssl dhparam -out "$staging/dhparam.pem" 2048 || return $?
+  install_nginx_conf_file conf.d/domain.conf "$staging/conf.d/$DOMAIN.conf.disabled" "$source_dir" || return $?
+  render_nginx_site_config "$staging/conf.d/$DOMAIN.conf.disabled" || return $?
+  install_nginx_conf_file conf.d/sslgen.conf "$staging/conf.d/sslgen.conf" "$source_dir" || return $?
+  render_nginx_site_config "$staging/conf.d/sslgen.conf"
+}
+
+# place_staged_nginx_files <staging dir> <nginx dir>
+place_staged_nginx_files() {
+  local staging="$1" nginx_dir="$2" file
+
+  while IFS= read -r file; do
+    mv -f -- "$staging/$file" "$nginx_dir/$file" || return $?
+  done < <(cd "$staging" && find . -type f | sed 's|^\./||')
+}
+
 function aptinstall_nginx() {
     local sources_dir="${APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
+    local nginx_dir="${KVS_NGINX_DIR:-/etc/nginx}"
+    local conf_source staging
 
     check_ports
     echo "NGINX Installation"
@@ -1109,22 +1177,23 @@ function aptinstall_nginx() {
       # server that is not there.
       apt_get update && apt_install_pristine nginx || return $?
       ensure_nginx_mime_types || return $?
-      reset_nginx_configuration_dirs || return $?
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/nginx.conf -o /etc/nginx/nginx.conf
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/general.conf -o /etc/nginx/globals/general.conf
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/security.conf -o /etc/nginx/globals/security.conf
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/php_fastcgi.conf -o /etc/nginx/globals/php_fastcgi.conf
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/letsencrypt.conf -o /etc/nginx/globals/letsencrypt.conf
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/globals/cloudflare-ip-list.conf -o /etc/nginx/globals/cloudflare-ip-list.conf
+      conf_source=$(nginx_conf_source_dir) || conf_source=""
+      echo "nginx configuration from ${conf_source:-branch ${KVS_INSTALL_BRANCH:-main} of the repository}"
+      # Every file comes into a staging directory first. On a re-run over a
+      # live site, a file that does not come then leaves its configuration
+      # as it was, where resetting conf.d first left it empty.
+      staging=$(mktemp -d "$nginx_dir/.kvs-install.XXXXXX") || return $?
+      if ! stage_nginx_files "$staging" "$conf_source" ||
+          ! reset_nginx_configuration_dirs "$nginx_dir/conf.d" "$nginx_dir/globals" ||
+          ! place_staged_nginx_files "$staging" "$nginx_dir"; then
+        rm -rf -- "$staging"
+        return 1
+      fi
+      rm -rf -- "$staging"
 	  # Custom KVS NGINX conf
       #curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/kvs.conf -o /etc/nginx/globals/kvs.conf
-      openssl dhparam -out /etc/nginx/dhparam.pem 2048
-      # Download domain config (disabled during SSL setup, enabled after)
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/domain.conf -o /etc/nginx/conf.d/"$DOMAIN".conf.disabled
-      render_nginx_site_config /etc/nginx/conf.d/"$DOMAIN".conf.disabled
-      # Download sslgen config for ACME challenge
-      curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/sslgen.conf -o /etc/nginx/conf.d/sslgen.conf
-      render_nginx_site_config /etc/nginx/conf.d/sslgen.conf
+      # A restart with a configuration nginx rejects would stop it.
+      nginx -t -q || return $?
       service nginx restart
       #update CF IPV4/V6 if CF is used
       #curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -o /usr/bin/update-cloudflare-ip-list.sh
@@ -1523,6 +1592,29 @@ issue_site_certificate() {
     } >&2
 }
 
+# Turn the site vhost on in place of the challenge server, once nginx
+# accepts the result: a vhost it rejects goes back to .disabled with the
+# challenge server, and nginx keeps running, where a restart would stop it.
+enable_site_vhost() {
+    local conf_dir="${KVS_NGINX_DIR:-/etc/nginx}/conf.d"
+    local site="$conf_dir/$DOMAIN.conf"
+
+    mv -f -- "$site.disabled" "$site" || return $?
+    if [[ -e "$conf_dir/sslgen.conf" ]]; then
+        mv -f -- "$conf_dir/sslgen.conf" "$conf_dir/sslgen.conf.off" || return $?
+    fi
+    if ! nginx -t -q; then
+        mv -f -- "$site" "$site.disabled"
+        if [[ -e "$conf_dir/sslgen.conf.off" ]]; then
+            mv -f -- "$conf_dir/sslgen.conf.off" "$conf_dir/sslgen.conf"
+        fi
+        echo "${red}ERROR: nginx rejects the configuration of $DOMAIN; it stays in $site.disabled and nginx was not restarted${normal}" >&2
+        return 1
+    fi
+    rm -f -- "$conf_dir/sslgen.conf.off"
+    service nginx restart
+}
+
 function install_acme.sh() {
     mkdir -p /etc/nginx/ssl/"$DOMAIN"
 
@@ -1530,9 +1622,7 @@ function install_acme.sh() {
     if [[ "$SSL_PROVIDER" == "selfsigned" ]]; then
         CERTIFICATE_MODE=selfsigned
         generate_selfsigned_cert
-        rm -f /etc/nginx/conf.d/sslgen.conf
-        mv /etc/nginx/conf.d/"$DOMAIN".conf.disabled /etc/nginx/conf.d/"$DOMAIN".conf
-        service nginx restart
+        enable_site_vhost
         return
     fi
 
@@ -1558,9 +1648,7 @@ function install_acme.sh() {
     # shellcheck disable=SC2086  # Intentional word splitting for multiple flags
     issue_site_certificate /root/.acme.sh/acme.sh $ACME_ARGS || return $?
 
-    rm -f /etc/nginx/conf.d/sslgen.conf
-    mv /etc/nginx/conf.d/"$DOMAIN".conf.disabled /etc/nginx/conf.d/"$DOMAIN".conf
-    service nginx restart
+    enable_site_vhost
 }
 
 configure_dynamic_php_fpm() {

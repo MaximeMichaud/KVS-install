@@ -401,6 +401,206 @@ test_nginx_step_needs_a_usable_mime_types() {
   unset APT_SOURCES_DIR NGINX_MIME_TYPES
 }
 
+# The nginx step downloaded its files from main whatever copy ran, never
+# checked a download, and restarted nginx with whatever came. It must take
+# the files of the checkout it runs from, or of the branch KVS_INSTALL_BRANCH
+# names, stop on the first file it cannot get, and let nginx check the
+# result before a restart. Every stub refuses a path outside the test
+# directory, so no version of the step can touch /etc/nginx here.
+test_nginx_files_come_from_the_checkout_or_the_branch() {
+  local temp_dir nginx_dir status file
+  local -a files=(nginx.conf globals/general.conf globals/security.conf globals/php_fastcgi.conf
+    globals/letsencrypt.conf globals/cloudflare-ip-list.conf)
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  nginx_dir="$temp_dir/nginx"
+  APT_SOURCES_DIR="$temp_dir"
+  KVS_NGINX_DIR="$nginx_dir"
+  NGINX_MIME_TYPES="$temp_dir/mime.types"
+  printf 'types {\n    text/css css;\n    application/javascript js;\n}\n' >"$NGINX_MIME_TYPES"
+  VERSION_ID=13
+  OS=debian
+  DOMAIN=example.test
+  USE_WWW=false
+  PHP=8.4
+  set_site_hostnames
+  unset KVS_INSTALL_SELF KVS_INSTALL_BRANCH
+
+  check_ports() { :; }
+  gpg() { :; }
+  lsb_release() { echo trixie; }
+  apt-get() { return 0; }
+  reset_nginx_configuration_dirs() {
+    [[ "${1:-}" == "$nginx_dir/conf.d" && "${2:-}" == "$nginx_dir/globals" ]] || return 99
+    rm -rf "$1" && mkdir -p "$1" "$2"
+  }
+  openssl() {
+    [[ "$1 $2 $4" == "dhparam -out 2048" && "$3" == "$nginx_dir/"*/dhparam.pem ]] || return 97
+    [[ -z "${OPENSSL_RC:-}" ]] || return "$OPENSSL_RC"
+    : >"$3"
+  }
+  nginx() { printf 'nginx %s\n' "$*" >>"$temp_dir/calls"; return "${NGINX_RC:-0}"; }
+  service() { printf 'service %s\n' "$*" >>"$temp_dir/calls"; }
+  # curl serves the repository file of a raw URL, records the URL, and
+  # fails with 22, its HTTP error status, for the file CURL_FAIL names. It
+  # writes part of that file first, as an interrupted transfer does, so the
+  # test sees what a failure leaves behind.
+  curl() {
+    local output="" url=""
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        -o) output=$2; shift ;;
+        https://*) url=$1 ;;
+      esac
+      shift
+    done
+    printf '%s\n' "$url" >>"$temp_dir/urls"
+    [[ -n "$output" ]] || return 0
+    [[ "$output" == "$temp_dir/"* ]] || return 98
+    if [[ -n "${CURL_FAIL:-}" && "$url" == *"/conf/nginx/$CURL_FAIL" ]]; then
+      printf 'partial' >"$output"
+      return 22
+    fi
+    cp "$REPO_DIR/conf/nginx/${url#*/conf/nginx/}" "$output"
+  }
+  run_nginx_step() {
+    rm -rf "$nginx_dir" "$temp_dir/calls" "$temp_dir/urls"
+    mkdir -p "$nginx_dir"
+    aptinstall_nginx >"$temp_dir/out" 2>&1
+  }
+  same_files() {
+    [[ -f "$nginx_dir/dhparam.pem" ]] || fail "$1: no DH parameters" || return 1
+    for file in "${files[@]}"; do
+      cmp -s "$REPO_DIR/conf/nginx/$file" "$nginx_dir/$file" ||
+        fail "$1: $file is not the copy of conf/nginx/$file" || return 1
+    done
+    for file in example.test.conf.disabled sslgen.conf; do
+      [[ -s "$nginx_dir/conf.d/$file" ]] || fail "$1: conf.d/$file was not written" || return 1
+      ! grep -qE 'domain\.tld|project_url|redirect_server_name|phpX\.X' "$nginx_dir/conf.d/$file" ||
+        fail "$1: conf.d/$file kept a placeholder" || return 1
+    done
+  }
+
+  # From a checkout: its own files, nothing downloaded but the signing key.
+  run_nginx_step
+  status=$?
+  assert_equal "0" "$status" "the step from a checkout must succeed: $(cat "$temp_dir/out")" || return 1
+  same_files "from a checkout" || return 1
+  ! grep -q 'conf/nginx' "$temp_dir/urls" ||
+    fail "a checkout downloaded nginx files: $(grep conf/nginx "$temp_dir/urls")" || return 1
+  assert_equal $'nginx -t -q\nservice nginx restart' "$(cat "$temp_dir/calls")" \
+    "nginx must check the configuration before the restart" || return 1
+
+  # bash reading the script from a pipe names it "bash", which readlink -f
+  # turns into a missing file of the current directory: the conf/nginx
+  # there does not go with the script.
+  ! KVS_INSTALL_SELF="$REPO_DIR/bash" nginx_conf_source_dir >/dev/null ||
+    fail "a script read from a pipe took the files of the current directory" || return 1
+
+  # A script alone downloads from main, or from the branch it was told.
+  mkdir -p "$temp_dir/alone"
+  KVS_INSTALL_SELF="$temp_dir/alone/kvs-install.sh"
+  : >"$KVS_INSTALL_SELF"
+  run_nginx_step
+  status=$?
+  assert_equal "0" "$status" "the step from a script alone must succeed: $(cat "$temp_dir/out")" || return 1
+  same_files "from main" || return 1
+  for file in "${files[@]}" conf.d/domain.conf conf.d/sslgen.conf; do
+    assert_file_contains "$temp_dir/urls" \
+      "https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/$file" \
+      "$file was not downloaded from main" || return 1
+  done
+  KVS_INSTALL_BRANCH=fix/example
+  run_nginx_step
+  status=$?
+  assert_equal "0" "$status" "the step from a branch must succeed: $(cat "$temp_dir/out")" || return 1
+  assert_file_contains "$temp_dir/urls" \
+    "https://raw.githubusercontent.com/MaximeMichaud/KVS-install/fix/example/conf/nginx/globals/security.conf" \
+    "the files must come from the branch KVS_INSTALL_BRANCH names" || return 1
+  ! grep -q '/main/conf/nginx' "$temp_dir/urls" ||
+    fail "a branch run still downloaded from main" || return 1
+
+  # A re-run over a live site: one file that does not come, or DH
+  # parameters that fail, stop the step before anything of the site is
+  # touched. The failure names the file, the configuration nginx runs on
+  # stays as it was, nothing of the attempt is left, and nginx is neither
+  # checked nor restarted.
+  for case in download dhparam; do
+    rm -rf "$nginx_dir" "$temp_dir/calls" "$temp_dir/urls"
+    mkdir -p "$nginx_dir/globals" "$nginx_dir/conf.d"
+    for file in nginx.conf dhparam.pem globals/security.conf conf.d/example.test.conf; do
+      printf 'live %s\n' "$file" >"$nginx_dir/$file"
+    done
+    (cd "$nginx_dir" && find . -type f -exec sha256sum {} + | sort) >"$temp_dir/live"
+    if [[ "$case" == download ]]; then
+      CURL_FAIL=globals/security.conf aptinstall_nginx >"$temp_dir/out" 2>&1
+    else
+      OPENSSL_RC=1 aptinstall_nginx >"$temp_dir/out" 2>&1
+    fi
+    status=$?
+    [[ "$status" -ne 0 ]] || fail "a failed $case passed the step" || return 1
+    if [[ "$case" == download ]]; then
+      assert_file_contains "$temp_dir/out" "globals/security.conf" "the failure must name the file" || return 1
+    fi
+    assert_equal "$(cat "$temp_dir/live")" "$(cd "$nginx_dir" && find . -type f -exec sha256sum {} + | sort)" \
+      "a failed $case must leave the live configuration as it was" || return 1
+    assert_equal "" "$(find "$nginx_dir" -mindepth 1 -name '.kvs-install.*' -o -name '*.tmp')" \
+      "a failed $case left a partial file or the staging directory" || return 1
+    [[ ! -e "$temp_dir/calls" ]] || fail "nginx was touched after a failed $case: $(cat "$temp_dir/calls")" || return 1
+  done
+
+  # A step that succeeds over a live site replaces conf.d and leaves no
+  # staging directory behind.
+  run_nginx_step
+  printf 'live\n' >"$nginx_dir/conf.d/example.test.conf"
+  KVS_INSTALL_BRANCH=fix/example aptinstall_nginx >"$temp_dir/out" 2>&1 ||
+    fail "a re-run over a live site failed: $(cat "$temp_dir/out")" || return 1
+  [[ ! -e "$nginx_dir/conf.d/example.test.conf" ]] || fail "the re-run kept the enabled vhost" || return 1
+  same_files "a re-run" || return 1
+  assert_equal "" "$(find "$nginx_dir" -mindepth 1 -name '.kvs-install.*')" "the staging directory stayed" || return 1
+
+  # The check of nginx gates the restart too.
+  NGINX_RC=1
+  run_nginx_step
+  status=$?
+  [[ "$status" -ne 0 ]] || fail "a configuration nginx rejects passed the step" || return 1
+  assert_equal "nginx -t -q" "$(cat "$temp_dir/calls")" \
+    "nginx must not be restarted on a configuration it rejects" || return 1
+
+  # Enabling the site: a vhost nginx rejects goes back to .disabled with the
+  # challenge server, and nginx keeps running; one it accepts replaces it.
+  rm -f "$temp_dir/calls"
+  enable_site_vhost >"$temp_dir/out" 2>&1
+  status=$?
+  [[ "$status" -ne 0 ]] || fail "a site vhost nginx rejects was enabled" || return 1
+  [[ -f "$nginx_dir/conf.d/example.test.conf.disabled" && ! -e "$nginx_dir/conf.d/example.test.conf" ]] ||
+    fail "a rejected site vhost was not put back to .disabled" || return 1
+  [[ -f "$nginx_dir/conf.d/sslgen.conf" ]] || fail "the challenge server did not come back" || return 1
+  assert_equal "nginx -t -q" "$(cat "$temp_dir/calls")" \
+    "nginx must not be restarted on a vhost it rejects" || return 1
+  NGINX_RC=0
+  rm -f "$temp_dir/calls"
+  enable_site_vhost >"$temp_dir/out" 2>&1 || fail "an accepted site vhost failed: $(cat "$temp_dir/out")" || return 1
+  [[ -f "$nginx_dir/conf.d/example.test.conf" && ! -e "$nginx_dir/conf.d/example.test.conf.disabled" ]] ||
+    fail "the site vhost was not enabled" || return 1
+  [[ ! -e "$nginx_dir/conf.d/sslgen.conf" && ! -e "$nginx_dir/conf.d/sslgen.conf.off" ]] ||
+    fail "the challenge server stayed" || return 1
+  assert_equal $'nginx -t -q\nservice nginx restart' "$(cat "$temp_dir/calls")" \
+    "the enabled site needs a check, then a restart" || return 1
+  # Both ways install_acme.sh turns the site on go through that check.
+  assert_equal "2" "$(declare -f install_acme.sh | grep -c enable_site_vhost)" \
+    "install_acme.sh must enable the site through enable_site_vhost" || return 1
+  ! declare -f install_acme.sh | grep -q 'conf.disabled' ||
+    fail "install_acme.sh still moves the vhost itself" || return 1
+  # The README says which nginx files KVS_INSTALL_BRANCH chooses.
+  grep -q '^| .KVS_INSTALL_BRANCH. .*nginx files' <<<"$(tr -d '\r' <"$REPO_DIR/README.md")" ||
+    fail "the README must say that KVS_INSTALL_BRANCH chooses the standalone nginx files" || return 1
+
+  unset -f check_ports gpg lsb_release apt-get reset_nginx_configuration_dirs openssl nginx service curl \
+    run_nginx_step same_files
+  unset APT_SOURCES_DIR KVS_NGINX_DIR NGINX_MIME_TYPES KVS_INSTALL_SELF KVS_INSTALL_BRANCH NGINX_RC
+}
+
 # The update of the menu downloaded the script into the current directory,
 # whatever copy was running, and ran what was there even when curl brought
 # nothing: it must replace the running copy in place, and only with a
@@ -2082,6 +2282,7 @@ run_test "certificate names follow the www record" test_certificate_names_follow
 run_test "yt-dlp step is repeatable" test_yt_dlp_step_is_repeatable || failures=$((failures + 1))
 run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fails || failures=$((failures + 1))
 run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
+run_test "nginx files come from the checkout or the branch" test_nginx_files_come_from_the_checkout_or_the_branch || failures=$((failures + 1))
 run_test "the self-update replaces the running copy or nothing" test_the_self_update_replaces_the_running_copy_or_nothing || failures=$((failures + 1))
 run_test "auto-updates follow upstream repositories" test_auto_updates_follow_upstream_repositories || failures=$((failures + 1))
 run_test "the ionCube loader is added once and a failure stops the step" test_ioncube_loader_is_added_once_and_a_failure_stops_the_step || failures=$((failures + 1))
