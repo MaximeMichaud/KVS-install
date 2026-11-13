@@ -1563,6 +1563,7 @@ kvs_collect_entries() {
 kvs_probe_servers() {
     local query
     local out
+    local line
     local title
     local path
     local remote
@@ -1578,7 +1579,18 @@ kvs_probe_servers() {
         kvs_ignore_user_option_files
         "$DB_CLIENT" --connect-timeout=10 ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} -N -B -e "$query" "$DB_NAME" 2> /dev/null < /dev/null
     ) || return 0
-    while IFS=$'\t' read -r title path remote urls; do
+    # Split each row on its tabs by hand: tab is IFS whitespace, so read
+    # would merge the two tabs around an empty path, which KVS stores for
+    # an FTP or S3 server, and shift the remote flag into the path. The
+    # batch output escapes a tab inside a value.
+    while IFS= read -r line; do
+        [[ "$line" == *$'\t'*$'\t'*$'\t'* ]] || continue
+        title=${line%%$'\t'*}
+        line=${line#*$'\t'}
+        path=${line%%$'\t'*}
+        line=${line#*$'\t'}
+        remote=${line%%$'\t'*}
+        urls=${line#*$'\t'}
         [ -n "$title$path" ] || continue
         placement="outside"
         if [ -n "$PROJECT_PATH" ] && kvs_path_under "$path" "$PROJECT_PATH"; then
@@ -1586,7 +1598,11 @@ kvs_probe_servers() {
         elif kvs_path_under "$path" "$SITE_DIR"; then
             placement="inside"
         fi
-        SERVER_LINES+=("$(kvs_one_line "$title")|$(kvs_one_line "$path")|${remote:-0}|$placement|$(kvs_one_line "$urls")")
+        # A | in the title or the path would shift the fields of the line
+        # for both of its readers; the URL is the last field and keeps it.
+        title=$(kvs_one_line "$title")
+        path=$(kvs_one_line "$path")
+        SERVER_LINES+=("${title//|//}|${path//|//}|${remote:-0}|$placement|$(kvs_one_line "$urls")")
     done <<< "$out"
     return 0
 }

@@ -735,6 +735,54 @@ test_detect_reports_the_entries_and_what_stays_behind() {
     pass "detect reports the entries, what stays behind and the storage servers"
 }
 
+test_storage_servers_keep_their_columns() {
+    local site="$TMP_ROOT/servers-site"
+    local out="$TMP_ROOT/servers.out"
+    local err="$TMP_ROOT/servers.err"
+    local archive="$TMP_ROOT/servers.sql.gz"
+    local lib="$TMP_ROOT/servers-functions.sh"
+    local shown
+
+    make_site "$site"
+    # KVS stores an empty path for an FTP or S3 server, the URL can be empty
+    # too, and a title is free text. A row without its four columns is no
+    # server.
+    export STUB_SERVERS="FTP | EU\t\t1\thttps://cdn.example.com/a|b\nLocal Videos\t$site/contents/videos\t0\thttps://www.example.com/contents/videos\nS3 bucket\t\t1\t\nOdd disk\t/mnt/a|b\t0\thttps://www.example.com/odd\nTruncated\t/mnt/t\n"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    grep -Fxq 'server_1=FTP / EU||1|outside|https://cdn.example.com/a|b' "$out" ||
+        fail "an empty path must stay empty and a | must leave the title: $(grep '^server_' "$out")"
+    grep -Fxq "server_2=Local Videos|$site/contents/videos|0|inside|https://www.example.com/contents/videos" "$out" ||
+        fail "a local server inside the site: $(grep '^server_' "$out")"
+    grep -Fxq 'server_3=S3 bucket||1|outside|' "$out" || fail "a remote server without path or URL: $(grep '^server_' "$out")"
+    grep -Fxq 'server_4=Odd disk|/mnt/a/b|0|outside|https://www.example.com/odd' "$out" ||
+        fail "a | must leave the path: $(grep '^server_' "$out")"
+    [ "$(grep -c '^server_' "$out")" = 4 ] || fail "a row without its columns is no server: $(grep '^server_' "$out")"
+
+    # Both readers of these lines, the summary of the exporter and the one
+    # the setup shows from the report, call the remote servers remote.
+    run_export "$STUB_BIN:$MIN_BIN" "$TMP_ROOT/servers.dump" "$err" archive "$site" --yes --no-size --dump-only --gzip --output "$archive" ||
+        fail "the dump must succeed: $(cat "$err")"
+    grep -Fq 'FTP / EU: remote (https://cdn.example.com/a|b), stays where it is' "$err" || fail "the exporter summary: $(cat "$err")"
+    grep -Fq 'S3 bucket: remote (no URL), stays where it is' "$err" || fail "the exporter summary: $(cat "$err")"
+    grep -Eq '(FTP|S3 bucket|1|https).*OUTSIDE' "$err" && fail "no remote server is outside the site: $(cat "$err")"
+    awk '/^import_remote_show_servers\(\) \{/,/^\}/' "$REPO_ROOT/docker/setup.sh" > "$lib"
+    shown=$(
+        # shellcheck disable=SC2034  # Read by the sourced function.
+        YELLOW="" NC=""
+        # shellcheck source=/dev/null
+        source "$lib"
+        import_remote_show_servers "$out"
+    ) || fail "the setup must show the servers"
+    printf '%s\n' "$shown" | grep -Fxq '    FTP / EU: remote (https://cdn.example.com/a|b), stays where it is' || fail "the setup summary: $shown"
+    printf '%s\n' "$shown" | grep -Fxq '    S3 bucket: remote (no URL), stays where it is' || fail "the setup summary: $shown"
+    printf '%s\n' "$shown" | grep -Fxq '    Odd disk: /mnt/a/b, OUTSIDE the site directory: not transferred, and its path is not rewritten' ||
+        fail "the setup summary: $shown"
+    printf '%s\n' "$shown" | grep -Eq '(FTP|S3 bucket|1|https).*OUTSIDE' && fail "the setup calls no remote server outside: $shown"
+    unset STUB_SERVERS
+    rm -f "$archive"
+    pass "storage servers keep their columns"
+}
+
 test_excluded_and_included_paths_change_what_travels() {
     local site="$TMP_ROOT/choice-site"
     local out="$TMP_ROOT/choice.out"
@@ -3248,6 +3296,7 @@ test_the_size_walk_stops_at_its_time_budget
 test_the_size_walk_can_be_skipped
 test_a_full_temporary_directory_does_not_shrink_the_site_size
 test_detect_reports_the_entries_and_what_stays_behind
+test_storage_servers_keep_their_columns
 test_excluded_and_included_paths_change_what_travels
 test_named_paths_are_normalised_and_a_missing_one_is_reported
 test_detect_lists_the_links_leading_out_of_the_site
