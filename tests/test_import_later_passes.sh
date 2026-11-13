@@ -61,7 +61,7 @@ pass 'the exporter is asked to skip the size measure, or given the budget'
 # import_inspect_remote against a stub exporter: the budget it hands over
 # and the tools, rewrites and take-over it asks for land in calls. It runs
 # in a directory without .env by default; filter round trips provide one.
-extract remove_env_value set_env_value import_save_nginx_config import_remote_size_text import_remote_earlier_pass import_inspect_remote select_import_source import_files_only import_fetch_source > "$TEST_DIR/inspect.sh"
+extract remove_env_value set_env_value import_save_nginx_config import_remote_size_text import_remote_earlier_pass import_remote_show_links import_inspect_remote select_import_source import_files_only import_fetch_source > "$TEST_DIR/inspect.sh"
 # shellcheck source=/dev/null
 source "$TEST_DIR/inspect.sh"
 inspect() {
@@ -78,6 +78,7 @@ inspect() {
         IMPORT_SSH_KEY='' IMPORT_SSH_ACCEPT_NEW=y IMPORT_EXCLUDE=${FIXTURE_EXCLUDE:-} IMPORT_INCLUDE=${FIXTURE_INCLUDE:-}
         IMPORT_DATABASE_FORMAT=auto IMPORT_REMOTE_SUDO_ERROR='' IMPORT_EXPORTER="$ROOT_DIR/kvs-export.sh"
         IMPORT_NGINX_REWRITES=${FIXTURE_REWRITES:-} IMPORT_MODE=true IMPORT_REUSE_SITE_DIR=${FIXTURE_REUSE:-}
+        IMPORT_EXTERNAL_LINKS=${FIXTURE_EXTERNAL_LINKS:-}
         IMPORT_SOURCE=remote IMPORT_CHOICE='' IMPORT_DATABASE_FORMAT_REQUEST=auto
         PREVIOUS_DOMAIN=example.test IMPORT_LIB="$ROOT_DIR/docker/lib/import.sh"
         import_ensure_tool() { echo "tool $1" >> "$TEST_DIR/calls"; }
@@ -111,6 +112,14 @@ inspect() {
             printf '%s\0%s\0' "$5" "$6" > "$TEST_DIR/detected-filters"
             printf 'kvs_export=1\nsite_dir=/var/www/site\nproject_path=/var/www/site\nkvs_version=7.0.2\n' > "$3"
             printf 'tables_prefix=ktvs_\ndb_ok=%s\nrsync=yes\ncompressor=zstd\ndomain=example.test\n' "${FIXTURE_DB_OK:-yes}" >> "$3"
+            if [ -n "${FIXTURE_LINKS:-}" ]; then
+                printf 'external_links=2\nexternal_links_review=1\nexternal_links_special=0\nexternal_links_digest=%s\nexternal_links_complete=yes\n' \
+                    "${FIXTURE_LINKS_DIGEST:-$FIXTURE_DIGEST_A}" >> "$3"
+                printf 'external_link_1=review|file|contents/leak -> /etc/shadow\nexternal_link_2=allowed|directory|contents/videos_sources -> /mnt/disk2/sources\n' >> "$3"
+            elif [ -n "${FIXTURE_LAYOUT:-}" ]; then
+                printf 'external_links=1\nexternal_links_review=0\nexternal_links_special=0\nexternal_links_digest=\nexternal_links_complete=yes\n' >> "$3"
+                printf 'external_link_1=allowed|directory|contents/videos_sources -> /mnt/disk2/sources\n' >> "$3"
+            fi
         }
         if [ "${FIXTURE_FROM_SAVED:-no}" = yes ]; then
             # A path must never run as a command while .env is reloaded.
@@ -146,6 +155,8 @@ inspect() {
     return "$status"
 }
 budget() { sed -n 's/^budget //p' "$TEST_DIR/calls"; }
+FIXTURE_DIGEST_A=$(printf 'a%.0s' {1..64})
+FIXTURE_DIGEST_B=$(printf 'b%.0s' {1..64})
 
 # Exercise the real persistence block and loading order for the next pass.
 # The earlier inspection fixtures intentionally have no .env to update.
@@ -622,10 +633,12 @@ source "$TEST_DIR/fetch.sh"
     import_remote_dump() { echo dump >> "$TEST_DIR/calls"; }
     import_ssh_close() { return 0; }
     import_remote_files() { echo "files $2" >> "$TEST_DIR/calls"; echo video > "$2/video.mp4"; }
+    import_remote_recheck_links() { echo "links $2" >> "$TEST_DIR/calls"; }
     : > "$TEST_DIR/calls"
     import_fetch_remote > "$TEST_DIR/fetch.out" 2>&1 || fail "the pass of the files alone failed: $(cat "$TEST_DIR/fetch.out")"
     provided "$TEST_DIR/fetch.out"
-    [ "$(cat "$TEST_DIR/calls")" = "files $TEST_DIR/www/example.test" ] || fail "only the files may travel: $(cat "$TEST_DIR/calls")"
+    [ "$(paste -sd' ' "$TEST_DIR/calls")" = "files $TEST_DIR/www/example.test links $TEST_DIR/www/example.test" ] ||
+        fail "only the files may travel, and the links are searched again after them: $(cat "$TEST_DIR/calls")"
     cmp -s "$TEST_DIR/import/example.test.sql.gz" "$TEST_DIR/staged.copy" || fail 'the staged dump changed'
     [ -f "$TEST_DIR/www/example.test/video.mp4" ] || fail 'the files did not arrive'
     [ -z "$IMPORT_DB_DUMP$IMPORT_RAW_DUMP$IMPORT_SITE_DIR" ] || fail 'a pass of the files alone must not prepare a database load'
@@ -638,7 +651,13 @@ source "$TEST_DIR/fetch.sh"
     import_remote_dump() { echo dump >> "$TEST_DIR/calls"; printf 'new export\n' > "$3"; }
     import_fetch_remote > "$TEST_DIR/fetch.out" 2>&1 || fail "a full pass failed: $(cat "$TEST_DIR/fetch.out")"
     provided "$TEST_DIR/fetch.out"
-    [ "$(paste -sd' ' "$TEST_DIR/calls")" = "dump files $TEST_DIR/www/example.test" ] || fail "a full pass must dump first: $(cat "$TEST_DIR/calls")"
+    [ "$(paste -sd' ' "$TEST_DIR/calls")" = "dump files $TEST_DIR/www/example.test links $TEST_DIR/www/example.test" ] ||
+        fail "a full pass must dump first: $(cat "$TEST_DIR/calls")"
+    # Links that changed during the transfer stop the pass there.
+    import_remote_recheck_links() { echo "links $2" >> "$TEST_DIR/calls"; return 1; }
+    : > "$TEST_DIR/calls"
+    if (import_fetch_remote) > "$TEST_DIR/fetch.out" 2>&1; then fail 'changed links must stop the pass'; fi
+    if grep -q 'Site files in' "$TEST_DIR/fetch.out"; then fail "changed links must stop the pass before it reports the files in: $(cat "$TEST_DIR/fetch.out")"; fi
 )
 pass 'the transfer of a pass of the files alone receives no dump and keeps the staged one'
 
@@ -771,5 +790,59 @@ if grep -Fxq take-over "$TEST_DIR/calls"; then fail 'the take-over ran'; fi
 FIXTURE_REUSE="$TEST_DIR/www/dev.example.test" inspect || true
 grep -Fxq take-over "$TEST_DIR/calls" || fail 'a full pass must still take the site over'
 pass 'the inspection of a pass of the files alone takes nothing over, writes no rewrites and needs no database'
+
+# A link leading out of the site on the old server stops a headless pass
+# before anything is written here or transferred, on both entries, and
+# IMPORT_EXTERNAL_LINKS=copy lets it go on. The set agreed to is kept in
+# .env: the next pass, a later one into the filled directory, searches the
+# links again and goes on when they are the same, stops when they changed,
+# and forgets the set when none is left to ask about. A contents directory
+# on another disk needs nothing set. Another value stops the run before
+# the old server is asked anything.
+fresh_destination
+for links_entry in normal files-only; do
+    links_dir="$TEST_DIR/links-$links_entry"
+    mkdir -p "$links_dir"
+    printf 'DOMAIN=example.test\n' > "$links_dir/.env"
+    chmod 600 "$links_dir/.env"
+    cp "$links_dir/.env" "$TEST_DIR/expected-env"
+    rm -f "$marker"
+    rm -rf "$TEST_DIR/www/example.test"/*
+    links_status=0
+    FIXTURE_INSPECT_DIR="$links_dir" FIXTURE_ENTRY="$links_entry" FIXTURE_LINKS=yes FIXTURE_EXCLUDE=cache inspect || links_status=$?
+    [ "$links_status" = 1 ] || fail "$links_entry: a link leading out must stop a headless pass: $(cat "$TEST_DIR/inspect.out")"
+    grep -Fq 'file       contents/leak -> /etc/shadow' "$TEST_DIR/inspect.out" || fail "$links_entry: the link must be listed: $(cat "$TEST_DIR/inspect.out")"
+    grep -Fq 'directory  contents/videos_sources -> /mnt/disk2/sources (contents on another disk)' "$TEST_DIR/inspect.out" ||
+        fail "$links_entry: the accepted layout must be listed as such: $(cat "$TEST_DIR/inspect.out")"
+    grep -Fq 'IMPORT_EXTERNAL_LINKS=copy' "$TEST_DIR/inspect.out" || fail "$links_entry: the refusal must name the way to agree"
+    if grep -Eq '^(rewrites|confirmation|transfer|entry-success)$' "$TEST_DIR/calls"; then fail "$links_entry: the pass went on past the link"; fi
+    cmp -s "$TEST_DIR/expected-env" "$links_dir/.env" || fail "$links_entry: .env changed before the question"
+    FIXTURE_INSPECT_DIR="$links_dir" FIXTURE_ENTRY="$links_entry" FIXTURE_LINKS=yes FIXTURE_EXCLUDE=cache FIXTURE_EXTERNAL_LINKS=copy inspect ||
+        fail "$links_entry: IMPORT_EXTERNAL_LINKS=copy must let the pass go on: $(cat "$TEST_DIR/inspect.out")"
+    grep -Fxq transfer "$TEST_DIR/calls" || fail "$links_entry: the agreed pass must reach its transfer"
+    grep -Fxq "IMPORT_EXTERNAL_LINKS_ACCEPTED=$FIXTURE_DIGEST_A" "$links_dir/.env" || fail "$links_entry: the agreed set must be kept in .env: $(cat "$links_dir/.env")"
+    grep -q '^IMPORT_EXTERNAL_LINKS=' "$links_dir/.env" && fail "$links_entry: IMPORT_EXTERNAL_LINKS itself is never kept"
+    # The next pass, into the directory the first one filled.
+    printf '%s\n' "$A" > "$marker"
+    echo video > "$TEST_DIR/www/example.test/video.mp4"
+    FIXTURE_INSPECT_DIR="$links_dir" FIXTURE_ENTRY="$links_entry" FIXTURE_FROM_SAVED=yes FIXTURE_LINKS=yes inspect ||
+        fail "$links_entry: the same links must let the next pass go on headless: $(cat "$TEST_DIR/inspect.out")"
+    [ "$(budget)" = skip ] || fail "$links_entry: the next pass must be a later one: $(budget)"
+    grep -Fq 'The same links as an earlier pass accepted' "$TEST_DIR/inspect.out" || fail "$links_entry: the remembered set must be said: $(cat "$TEST_DIR/inspect.out")"
+    grep -Fxq transfer "$TEST_DIR/calls" || fail "$links_entry: the next pass must reach its transfer"
+    links_status=0
+    FIXTURE_INSPECT_DIR="$links_dir" FIXTURE_ENTRY="$links_entry" FIXTURE_FROM_SAVED=yes FIXTURE_LINKS=yes FIXTURE_LINKS_DIGEST="$FIXTURE_DIGEST_B" inspect || links_status=$?
+    [ "$links_status" = 1 ] || fail "$links_entry: changed links must stop the next pass: $(cat "$TEST_DIR/inspect.out")"
+    if grep -Fxq transfer "$TEST_DIR/calls"; then fail "$links_entry: changed links must stop before the transfer"; fi
+    grep -Fxq "IMPORT_EXTERNAL_LINKS_ACCEPTED=$FIXTURE_DIGEST_A" "$links_dir/.env" || fail "$links_entry: a refused pass must keep the agreed set"
+    FIXTURE_INSPECT_DIR="$links_dir" FIXTURE_ENTRY="$links_entry" FIXTURE_FROM_SAVED=yes FIXTURE_LAYOUT=yes inspect ||
+        fail "$links_entry: a contents directory on another disk must go on headless: $(cat "$TEST_DIR/inspect.out")"
+    grep -Fxq transfer "$TEST_DIR/calls" || fail "$links_entry: the layout pass must reach its transfer"
+    grep -q '^IMPORT_EXTERNAL_LINKS_ACCEPTED=' "$links_dir/.env" && fail "$links_entry: a set with nothing to ask about is forgotten: $(cat "$links_dir/.env")"
+done
+FIXTURE_EXTERNAL_LINKS=yes inspect && fail 'another IMPORT_EXTERNAL_LINKS value must be refused'
+grep -Fq 'IMPORT_EXTERNAL_LINKS takes copy or nothing' "$TEST_DIR/inspect.out" || fail "missing reason: $(cat "$TEST_DIR/inspect.out")"
+if grep -q '^budget' "$TEST_DIR/calls"; then fail 'a wrong IMPORT_EXTERNAL_LINKS must stop the run before the detection'; fi
+pass 'links leading out of the site stop a headless pass until agreed, and the agreed set carries over to the next pass'
 
 echo "All $passed tests of the later passes passed."

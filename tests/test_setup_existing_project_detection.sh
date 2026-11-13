@@ -248,6 +248,8 @@ for case in cases:
         (d / directory).mkdir(parents=True, exist_ok=True)
     for name in ['lib/import.sh', 'lib/database.sh', 'lib/native-import.sh', 'bin/resolve-bases.sh', 'images.lock', 'docker-compose.yml', 'docker-compose.multi.yml']:
         shutil.copy2(REPO / 'docker' / name, d / name)
+    # The checkout's exporter lists the links of a site directory.
+    shutil.copy2(REPO / 'kvs-export.sh', root / 'kvs-export.sh')
     initial = ('DOMAIN=example.test\nSITE_PREFIX=kvs-saved\nCOMPOSE_PROJECT_NAME=kvs-saved\n'
                'EMAIL=admin@example.test\nSSL_PROVIDER=selfsigned\n'
                'MARIADB_VERSION=12.3\nMARIADB_PASSWORD=fixture\nMARIADB_ROOT_PASSWORD=fixture-root\n'

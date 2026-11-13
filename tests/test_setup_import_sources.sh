@@ -1123,7 +1123,7 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         [ -d "$destination/tmp" ] && [ ! -e "$destination/tmp/upload.part" ] || exit 54
         [ ! -e "$destination/backup" ] && [ ! -e "$destination/.well-known" ] && [ ! -e "$destination/contents/videos_sources" ] || exit 55
         [ -f "$destination/contents/videos/1.mp4" ] || exit 56
-        grep -q "^script exec tar -C '$site' '--exclude=./tmp/\*' '--exclude=./backup' '--exclude=./.well-known' '--exclude=./contents/videos_sources' -chf - .\$" "$bin/ssh.log" || exit 57
+        grep -q "^script exec tar -C '$site' --wildcards '--exclude=./tmp/\*' --no-wildcards '--exclude=./backup' --no-wildcards '--exclude=./.well-known' --no-wildcards '--exclude=./contents/videos_sources' -chf - .\$" "$bin/ssh.log" || exit 57
         import_remote_files "$site" "$destination" no 'backup' 2>/dev/null && exit 58
         rm -rf "$site/tmp" "$site/backup" "$site/.well-known" "$site/contents/videos_sources"
 
@@ -1132,6 +1132,46 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         exit 0
     ) || fail "remote detect, dump and files must go through the ssh plumbing (case $?)"
     pass "remote detect, dump and files go through one ssh connection"
+}
+
+# An excluded name is a name, not a pattern, for rsync as for tar: what the
+# exporter reported as left behind is what stays behind, and a name a
+# wildcard reading would match comes through. A link to a FIFO, a device or
+# a socket brings nothing: rsync skips what is neither file, directory nor
+# link (--no-devices --no-specials), as it does for one inside the site.
+test_excluded_names_are_literal_and_special_files_never_arrive() {
+    local bin="$TMP_ROOT/literal-bin" site="$TMP_ROOT/literal-site" destination="$TMP_ROOT/literal-dest" name
+
+    make_fake_ssh "$bin"
+    make_site "$site" "$site"
+    mkdir -p "$TMP_ROOT/literal-outside"
+    echo "root only" > "$TMP_ROOT/literal-outside/secret"
+    chmod 600 "$TMP_ROOT/literal-outside/secret"
+    for name in '.c[1]' '.c1' 'back\x' 'backx' '.st*r' '.star'; do
+        mkdir -p "$site/$name"
+        echo kept > "$site/$name/kept.txt"
+    done
+    ln -s "$TMP_ROOT/literal-outside/secret" "$site/.c[1]/evil"
+    mkfifo "$TMP_ROOT/literal-outside/fifo" "$site/contents/pipe"
+    ln -s "$TMP_ROOT/literal-outside/fifo" "$site/contents/innocent"
+    (
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/literal-ctl" import_ssh_setup old.example.com 22 root "" yes
+        FAKE_UID=0 import_remote_privileges || exit 30
+        import_remote_files "$site" "$destination" yes '/.c[1]' '/back\x' '/.st*r/*' > "$TMP_ROOT/literal.out" 2>&1 || exit 1
+        [ -f "$destination/contents/videos/1.mp4" ] || exit 2
+        [ ! -e "$destination/.c[1]" ] || exit 3
+        [ -f "$destination/.c1/kept.txt" ] || exit 4
+        [ ! -e "$destination/back\x" ] || exit 5
+        [ -f "$destination/backx/kept.txt" ] || exit 6
+        [ -d "$destination/.st*r" ] && [ ! -e "$destination/.st*r/kept.txt" ] || exit 7
+        [ -f "$destination/.star/kept.txt" ] || exit 8
+        [ ! -e "$destination/contents/innocent" ] && [ ! -L "$destination/contents/innocent" ] || exit 9
+        [ ! -e "$destination/contents/pipe" ] || exit 10
+        import_ssh_close
+        exit 0
+    ) || fail "excluded names must stay behind literally and special files never arrive (case $?): $(cat "$TMP_ROOT/literal.out" 2>/dev/null)"
+    pass "excluded names are literal and special files never arrive"
 }
 
 test_a_user_with_sudo_runs_the_remote_side_through_it() {
@@ -1206,7 +1246,7 @@ test_password_protected_archives_are_refused_with_a_reason() {
 }
 
 test_links_leaving_the_site_are_listed_and_the_copy_follows_them() {
-    local site="$TMP_ROOT/linked-site" store="$TMP_ROOT/linked-store" destination="$TMP_ROOT/linked-dest" listed
+    local site="$TMP_ROOT/linked-site" store="$TMP_ROOT/linked-store" destination="$TMP_ROOT/linked-dest"
 
     make_site "$site" /home/old/www
     mkdir -p "$store"
@@ -1214,29 +1254,609 @@ test_links_leaving_the_site_are_listed_and_the_copy_follows_them() {
     ln -s "$store" "$site/contents/store"
     ln -s 1.mp4 "$site/contents/videos/2.mp4"
     ln -s videos "$site/contents/inside"
-    ln -s /nowhere/at/all "$site/contents/gone"
-    listed=$(import_external_links "$site" | sort)
-    [ "$listed" = "$(printf 'contents/gone -> /nowhere/at/all (dangling)\ncontents/store -> %s' "$store")" ] ||
-        fail "the links leaving the site and the dangling ones must be listed, not the ones inside (got: $listed)"
-    [ -z "$(import_external_links "$TMP_ROOT/layout-locked" 2>/dev/null)" ] || fail "a site without links lists nothing"
-
-    rm -f "$site/contents/gone"
+    # Neither a FIFO of the site nor one a link leads to is copied.
+    mkfifo "$site/contents/pipe" "$TMP_ROOT/linked-fifo"
+    ln -s "$TMP_ROOT/linked-fifo" "$store/fifo"
     (
-        # shellcheck disable=SC2034  # Read by import_marker_file.
-        IMPORT_MARKER_DIR="$TMP_ROOT/linked-markers"
+        # shellcheck disable=SC2034  # Read by import_marker_file and import_place_site.
+        IMPORT_MARKER_DIR="$TMP_ROOT/linked-markers" IMPORT_SITE_LINKS=yes
         import_place_site "$site" "$destination" >/dev/null || exit 1
         [ -d "$destination/contents/store" ] && [ ! -L "$destination/contents/store" ] || exit 2
         [ "$(cat "$destination/contents/store/big.mp4")" = stored ] || exit 3
         [ -L "$destination/contents/inside" ] || exit 4
         [ -L "$destination/contents/videos/2.mp4" ] || exit 5
+        [ ! -e "$destination/contents/pipe" ] || exit 6
+        [ ! -e "$destination/contents/store/fifo" ] && [ ! -L "$destination/contents/store/fifo" ] || exit 7
         exit 0
-    ) || fail "the copy of a directory must bring the targets of the links leaving the site and keep the inside ones (case $?)"
-    pass "links leaving the site are listed and the copy follows them"
+    ) || fail "the copy of a directory must bring the targets of the links leaving the site, keep the inside ones and no special file (case $?)"
+    pass "the copy of a directory follows the links leading out and copies no special file"
+}
+
+# A function of setup.sh, defined here as setup.sh defines it.
+setup_function() {
+    eval "$(sed -n "/^$1() {/,/^}/p" "$REPO_ROOT/docker/setup.sh")"
+}
+
+# copy_from_directory <site> <HEADLESS> <IMPORT_EXTERNAL_LINKS> <answer>
+# What setup.sh does with a site directory, from its link check to the
+# copy and the search after it, in the directory holding its .env
+# (OUT_ENV_DIR); the output lands in $TMP_ROOT/out.txt, the find calls in
+# $TMP_ROOT/out-find.log. OUT_BETWEEN, when set, runs between the check
+# and the copy, as time passes on a large site.
+copy_from_directory() {
+    rm -rf "$TMP_ROOT/out-dest" "$TMP_ROOT/out-markers"
+    : > "$TMP_ROOT/out-find.log"
+    (
+        cd "$OUT_ENV_DIR" || exit 99
+        PATH="$OUT_FIND_BIN:${OUT_EXTRA_BIN:+$OUT_EXTRA_BIN:}$PATH"
+        # shellcheck disable=SC2034  # Read by import_check_site_links, import_confirm_external_links and import_marker_file.
+        IMPORT_SOURCE=directory IMPORT_SITE_DIR=$1 DOMAIN=links.example.test IMPORT_MARKER_DIR="$TMP_ROOT/out-markers"
+        # shellcheck disable=SC2034
+        HEADLESS=$2 IMPORT_EXTERNAL_LINKS=$3 IMPORT_EXPORTER="$REPO_ROOT/kvs-export.sh"
+        # shellcheck disable=SC2034
+        IMPORT_EXTERNAL_LINKS_ACCEPTED=$(sed -n 's/^IMPORT_EXTERNAL_LINKS_ACCEPTED=//p' .env)
+        import_check_site_links
+        echo "find calls before the copy: $(wc -l < "$TMP_ROOT/out-find.log")"
+        [ -z "${OUT_BETWEEN:-}" ] || eval "$OUT_BETWEEN"
+        import_place_site "$IMPORT_SITE_DIR" "$TMP_ROOT/out-dest" > /dev/null
+        echo "find calls after the copy: $(wc -l < "$TMP_ROOT/out-find.log")"
+        import_recheck_site_links "$TMP_ROOT/out-dest"
+        [ -z "${IMPORT_LINKS_SHOWN:-}" ] || echo "the report shown was kept"
+    ) > "$TMP_ROOT/out.txt" 2>&1 <<< "$4"
+}
+
+# The transfer follows the links leading out of the site and copies what
+# they point to, read as root on the source, into files PHP owns here: a
+# link planted in the old site to a root-only file handed that file to PHP.
+# The setup lists them and asks before the copy, except for a contents
+# directory on another disk: a headless run stops unless the same set was
+# accepted before or IMPORT_EXTERNAL_LINKS=copy, an interactive one asks,
+# a "no" copies nothing, from a directory as from the old server.
+test_links_leading_out_are_confirmed_before_the_copy() {
+    local site="$TMP_ROOT/out-site" outside="$TMP_ROOT/out-secret" disk="$TMP_ROOT/out-disk"
+    local destination="$TMP_ROOT/out-dest" bin="$TMP_ROOT/ssh-bin-out" report="$TMP_ROOT/out-detect.txt"
+    local plain="$TMP_ROOT/out-plain" sources="$TMP_ROOT/out-sources" alias="$TMP_ROOT/out-alias"
+    local out status tool inspect gate load done_line block digest remember
+    # shellcheck disable=SC2034  # The colours of the setup.sh functions run here.
+    local RED="" YELLOW="" NC=""
+
+    make_site "$site" "$site"
+    mkdir -p "$outside" "$disk" "$TMP_ROOT/out-disk3/x"
+    echo "root only" > "$outside/secret"
+    chmod 600 "$outside/secret"
+    ln -s "$outside/secret" "$site/contents/videos/innocent.txt"
+    ln -s "$disk" "$site/contents/store"
+    ln -s "$outside/secret" "$disk/nested.txt"
+    echo "on the disk" > "$disk/file"
+    ln -s file "$disk/inner"
+    ln -s "$site/contents/videos/1.mp4" "$disk/back"
+    ln -s ../out-secret/missing "$disk/gone"
+    # Two links further out, as the copy follows them.
+    ln -s "$TMP_ROOT/out-disk3/x" "$disk/a"
+    ln -s "$outside/secret" "$TMP_ROOT/out-disk3/x/evil"
+
+    setup_function import_check_site_links
+    setup_function import_keep_links_report
+    setup_function import_recheck_site_links
+    setup_function set_env_value
+    setup_function remove_env_value
+    OUT_ENV_DIR="$TMP_ROOT/out-env"
+    OUT_FIND_BIN="$TMP_ROOT/out-find-bin"
+    mkdir -p "$OUT_ENV_DIR" "$OUT_FIND_BIN"
+    : > "$OUT_ENV_DIR/.env"
+    printf '#!/bin/bash\ncase " $* " in *" -type l "*) echo "find $*" >> %q ;; esac\nexec %q "$@"\n' \
+        "$TMP_ROOT/out-find.log" "$(command -v find)" > "$OUT_FIND_BIN/find"
+    chmod +x "$OUT_FIND_BIN/find"
+
+    # From a directory.
+    status=0
+    copy_from_directory "$site" y "" "" || status=$?
+    [ "$status" -eq 1 ] || fail "a headless copy must stop on links leading out (status $status): $(cat "$TMP_ROOT/out.txt")"
+    [ ! -e "$destination/contents/videos/innocent.txt" ] || fail "nothing may be copied before the operator agrees"
+    grep -Fq "file       contents/videos/innocent.txt -> $outside/secret" "$TMP_ROOT/out.txt" || fail "the refusal must list the links: $(cat "$TMP_ROOT/out.txt")"
+    grep -Fq "file       contents/store/a/evil -> $outside/secret" "$TMP_ROOT/out.txt" || fail "the links two links away must be listed: $(cat "$TMP_ROOT/out.txt")"
+    grep -Fq 'IMPORT_EXTERNAL_LINKS=copy' "$TMP_ROOT/out.txt" || fail "the refusal must name the way to agree: $(cat "$TMP_ROOT/out.txt")"
+    grep -q 'did not enter every directory' "$TMP_ROOT/out.txt" && fail "the search must have finished: $(cat "$TMP_ROOT/out.txt")"
+    status=0
+    copy_from_directory "$site" "" "" n || status=$?
+    [ "$status" -eq 0 ] || fail "a no must end the run without an error (status $status)"
+    grep -q 'Import cancelled' "$TMP_ROOT/out.txt" || fail "a no must cancel: $(cat "$TMP_ROOT/out.txt")"
+    [ ! -e "$destination/contents/videos/innocent.txt" ] || fail "a no must copy nothing"
+    status=0
+    copy_from_directory "$site" y yes "" || status=$?
+    if [ "$status" -ne 1 ] || ! grep -q 'takes copy or nothing' "$TMP_ROOT/out.txt"; then
+        fail "another value must be refused: $(cat "$TMP_ROOT/out.txt")"
+    fi
+    copy_from_directory "$site" "" "" y || fail "a yes must let the copy go on: $(cat "$TMP_ROOT/out.txt")"
+    [ "$(cat "$destination/contents/videos/innocent.txt")" = "root only" ] || fail "a yes copies what the link points to"
+    [ "$(cat "$destination/contents/store/a/evil")" = "root only" ] || fail "the agreed copy follows the links further out too"
+    # The site was searched by the exporter before the copy, which looks no
+    # more, and once again after it, to compare.
+    out=$(sed -n 's/.*find calls before the copy: //p' "$TMP_ROOT/out.txt")
+    if [ "${out:-0}" -eq 0 ] || ! grep -Fq "find calls after the copy: $out" "$TMP_ROOT/out.txt"; then
+        fail "the copy must not search the site again: $(cat "$TMP_ROOT/out.txt") $(cat "$TMP_ROOT/out-find.log")"
+    fi
+    [ "$(grep -c . "$TMP_ROOT/out-find.log")" -eq $((out * 2)) ] ||
+        fail "the same search must run once more after the copy: $(cat "$TMP_ROOT/out-find.log")"
+    # What was agreed to is remembered, and a later run of the same set
+    # goes on headless; a new link asks again.
+    digest=$(sed -n 's/^IMPORT_EXTERNAL_LINKS_ACCEPTED=//p' "$OUT_ENV_DIR/.env")
+    [[ $digest =~ ^[0-9a-f]{64}$ ]] || fail "the accepted links must be remembered in .env: $(cat "$OUT_ENV_DIR/.env")"
+    copy_from_directory "$site" y "" "" || fail "the same links as accepted before must go on headless: $(cat "$TMP_ROOT/out.txt")"
+    grep -q 'The same links as an earlier pass accepted' "$TMP_ROOT/out.txt" || fail "the remembered set must be said: $(cat "$TMP_ROOT/out.txt")"
+    ln -s "$outside" "$site/contents/videos/more"
+    status=0
+    copy_from_directory "$site" y "" "" || status=$?
+    [ "$status" -eq 1 ] || fail "a new link must stop a headless copy again (status $status): $(cat "$TMP_ROOT/out.txt")"
+    rm -f "$site/contents/videos/more"
+    copy_from_directory "$site" y copy "" || fail "IMPORT_EXTERNAL_LINKS=copy must let a headless copy go on: $(cat "$TMP_ROOT/out.txt")"
+    [ "$(sed -n 's/^IMPORT_EXTERNAL_LINKS_ACCEPTED=//p' "$OUT_ENV_DIR/.env")" = "$digest" ] || fail "the set agreed with copy is remembered too"
+
+    # Named through a link to it, the site is searched where it is: the
+    # link inside to a root-only file is listed; without one it goes on.
+    ln -s "$site" "$alias"
+    : > "$OUT_ENV_DIR/.env"
+    status=0
+    copy_from_directory "$alias" y "" "" || status=$?
+    [ "$status" -eq 1 ] || fail "a site named through a link must stop on its links (status $status): $(cat "$TMP_ROOT/out.txt")"
+    grep -Fq "file       contents/videos/innocent.txt -> $outside/secret" "$TMP_ROOT/out.txt" || fail "a site named through a link must list its links: $(cat "$TMP_ROOT/out.txt")"
+    make_site "$plain" "$plain"
+    rm -f "$alias"
+    ln -s "$plain" "$alias"
+    copy_from_directory "$alias" y "" "" || fail "a site named through a link, without links, must go on headless: $(cat "$TMP_ROOT/out.txt")"
+    [ -f "$destination/contents/videos/1.mp4" ] || fail "the site named through a link must be copied"
+
+    # contents/videos_sources on another disk, the usual layout, goes on
+    # headless with nothing set.
+    make_site "$sources" "$sources"
+    mkdir -p "$TMP_ROOT/out-disk2/src"
+    echo source > "$TMP_ROOT/out-disk2/src/s.mp4"
+    ln -s "$TMP_ROOT/out-disk2/src" "$sources/contents/videos_sources"
+    [ "$(id -u)" -ne 0 ] || chown -R 4242 "$sources" "$TMP_ROOT/out-disk2"
+    copy_from_directory "$sources" y "" "" || fail "a contents directory on another disk must go on headless: $(cat "$TMP_ROOT/out.txt")"
+    grep -Fq "a contents directory on another disk, copied with what they point to" "$TMP_ROOT/out.txt" || fail "the followed layout must be said: $(cat "$TMP_ROOT/out.txt")"
+    [ "$(cat "$destination/contents/videos_sources/s.mp4")" = source ] || fail "the sources must be copied"
+    remember=$(sed -n 's/^IMPORT_EXTERNAL_LINKS_ACCEPTED=//p' "$OUT_ENV_DIR/.env")
+    [ -z "$remember" ] || fail "nothing is remembered for links that need no question"
+
+    # A link to a FIFO stops it, whatever is set.
+    mkfifo "$TMP_ROOT/out-fifo"
+    ln -s "$TMP_ROOT/out-fifo" "$sources/contents/fifo"
+    status=0
+    copy_from_directory "$sources" y copy "" || status=$?
+    [ "$status" -eq 1 ] || fail "a link to a FIFO must stop the copy (status $status): $(cat "$TMP_ROOT/out.txt")"
+    grep -q 'a device, a FIFO or a socket' "$TMP_ROOT/out.txt" || fail "the refusal must say why: $(cat "$TMP_ROOT/out.txt")"
+    [ ! -e "$destination" ] || fail "nothing may be copied with a link to a FIFO"
+    rm -f "$sources/contents/fifo"
+    # A search that could not run stops it, nothing listed.
+    mkdir -p "$TMP_ROOT/out-nomktemp"
+    printf '#!/bin/bash\ncase "$*" in *kvs-export-links.*) exit 1 ;; esac\nexec %q "$@"\n' "$(command -v mktemp)" > "$TMP_ROOT/out-nomktemp/mktemp"
+    chmod +x "$TMP_ROOT/out-nomktemp/mktemp"
+    status=0
+    OUT_EXTRA_BIN="$TMP_ROOT/out-nomktemp" copy_from_directory "$sources" y copy "" || status=$?
+    [ "$status" -eq 1 ] || fail "a link search that could not run must stop the copy (status $status): $(cat "$TMP_ROOT/out.txt")"
+    grep -q 'could not run' "$TMP_ROOT/out.txt" || fail "the stop must say the search did not run: $(cat "$TMP_ROOT/out.txt")"
+    [ ! -e "$destination" ] || fail "nothing may be copied without the search"
+    # A link to nothing stops it too, with the list.
+    ln -s /nowhere/at/all "$sources/contents/gone"
+    status=0
+    copy_from_directory "$sources" y copy "" || status=$?
+    [ "$status" -eq 1 ] || fail "a link to nothing must stop the copy (status $status): $(cat "$TMP_ROOT/out.txt")"
+    grep -Fq "contents/gone -> /nowhere/at/all (dangling)" "$TMP_ROOT/out.txt" || fail "the dangling link must be listed: $(cat "$TMP_ROOT/out.txt")"
+    rm -f "$sources/contents/gone"
+
+    # From the old server: the exporter's report, shown and then asked about.
+    make_fake_ssh "$bin"
+    for tool in mariadb mysql mariadb-dump mysqldump; do
+        printf '#!/bin/sh\nexit 1\n' > "$bin/$tool"
+        chmod +x "$bin/$tool"
+    done
+    (
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/ctl-out" import_ssh_setup old.example.com 22 root "" yes
+        FAKE_UID=0 import_remote_privileges || exit 1
+        import_remote_detect "$REPO_ROOT/kvs-export.sh" "$site" "$report" 0 2> "$TMP_ROOT/out-detect.err" || exit 2
+    ) || fail "the detection must run (case $?): $(cat "$TMP_ROOT/out-detect.err")"
+    [ "$(import_kv "$report" external_links)" = 5 ] || fail "the report must count the links leading out: $(grep '^external' "$report")"
+    setup_function import_remote_show_links
+    out=$(IMPORT_REMOTE_PRIVILEGES=root import_remote_show_links "$report")
+    printf '%s\n' "$out" | grep -Fq 'Links leading out of the site (5, 5 to check): the copy brings what they point to, read on the old server as root, into files PHP owns here:' ||
+        fail "the summary must say what the transfer does with the links: $out"
+    printf '%s\n' "$out" | grep -Fxq "    file       contents/videos/innocent.txt -> $outside/secret" || fail "the summary must list each link: $out"
+    printf '%s\n' "$out" | grep -Fxq "    file       contents/store/nested.txt -> $outside/secret" || fail "the summary must list the links further out: $out"
+    status=0
+    (HEADLESS=y import_confirm_external_links "$report" "Way out.") > "$TMP_ROOT/out.txt" 2>&1 || status=$?
+    if [ "$status" -ne 1 ] || ! grep -Fq 'Way out. Or set IMPORT_EXTERNAL_LINKS=copy' "$TMP_ROOT/out.txt"; then
+        fail "a headless import from the old server must stop on them (status $status): $(cat "$TMP_ROOT/out.txt")"
+    fi
+    digest=$(import_kv "$report" external_links_digest)
+    (HEADLESS=y IMPORT_EXTERNAL_LINKS_ACCEPTED=$digest import_confirm_external_links "$report" "Way out.") > /dev/null 2>&1 ||
+        fail "the set accepted before must go on headless"
+    # A count past the listed links, and a search that did not finish,
+    # are said; an unfinished one is asked about with no link listed, and
+    # is never taken for a set accepted before.
+    printf 'external_links=25\nexternal_links_review=25\nexternal_links_complete=no\nexternal_links_digest=%s\nexternal_link_1=review|file|a -> /x\nexternal_link_2=review|directory|b -> /y\n' "$digest" > "$TMP_ROOT/out-many.txt"
+    out=$(IMPORT_REMOTE_PRIVILEGES=sudo import_remote_show_links "$TMP_ROOT/out-many.txt")
+    printf '%s\n' "$out" | grep -Fxq '    and 23 more' || fail "the links beyond the list must be counted: $out"
+    printf '%s\n' "$out" | grep -Fq 'the copy may follow more than listed' || fail "an unfinished search must be said: $out"
+    (HEADLESS=y IMPORT_EXTERNAL_LINKS_ACCEPTED=$digest import_confirm_external_links "$TMP_ROOT/out-many.txt" "") > /dev/null 2>&1 &&
+        fail "an unfinished search is never the set accepted before"
+    printf 'external_links=0\nexternal_links_review=0\nexternal_links_complete=no\n' > "$TMP_ROOT/out-unknown.txt"
+    out=$(import_remote_show_links "$TMP_ROOT/out-unknown.txt")
+    printf '%s\n' "$out" | grep -Fq 'could not run' || fail "a search that could not run must be said: $out"
+    printf '%s\n' "$out" | grep -q 'contents directory on another disk' && fail "a search that could not run is no layout: $out"
+    (HEADLESS=y import_confirm_external_links "$TMP_ROOT/out-unknown.txt" "") > /dev/null 2>&1 && fail "an unfinished search must be asked about"
+    (HEADLESS=y import_confirm_external_links /dev/null "") > /dev/null 2>&1 || fail "no link, nothing to ask"
+    printf 'external_links=1\nexternal_links_review=1\nexternal_links_special=1\nexternal_links_complete=yes\nexternal_link_1=refused|special|c -> /dev/sda\n' > "$TMP_ROOT/out-special.txt"
+    (HEADLESS=y IMPORT_EXTERNAL_LINKS=copy import_confirm_external_links "$TMP_ROOT/out-special.txt" "") > /dev/null 2>&1 &&
+        fail "a link to a device must stop the import whatever is set"
+    printf 'external_links=1\nexternal_links_review=0\nexternal_links_complete=yes\nexternal_link_1=allowed|directory|contents/videos_sources -> /mnt/disk2\n' > "$TMP_ROOT/out-allowed.txt"
+    (HEADLESS=y import_confirm_external_links "$TMP_ROOT/out-allowed.txt" "") > /dev/null 2>&1 ||
+        fail "a contents directory on another disk needs no question"
+    printf 'kvs_export=1\n' > "$TMP_ROOT/out-none.txt"
+    [ -z "$(import_remote_show_links "$TMP_ROOT/out-none.txt")" ] || fail "a report without links shows none"
+
+    # The setup asks after the summary and its paths to leave behind, and
+    # before anything is written or transferred.
+    inspect=$(sed -n '/^import_inspect_remote() {/,/^}/p' "$REPO_ROOT/docker/setup.sh")
+    printf '%s\n' "$inspect" | grep -Fxq '    import_remote_show_links "$IMPORT_REMOTE_REPORT"' || fail "the remote summary must show the links"
+    printf '%s\n' "$inspect" | sed -n '1,/^    import_ssh_setup "$IMPORT_REMOTE_HOST"/p' | grep -Fxq '    import_confirm_external_links /dev/null "" || exit 1' ||
+        fail "a wrong IMPORT_EXTERNAL_LINKS must stop the run before the old server is contacted"
+    gate=$(printf '%s\n' "$inspect" | grep -n '^    import_confirm_external_links "$IMPORT_REMOTE_REPORT" \\$' | cut -d: -f1) || gate=""
+    load=$(printf '%s\n' "$inspect" | grep -n '^    import_remote_load_excludes "$IMPORT_REMOTE_REPORT"$' | cut -d: -f1) || load=""
+    remember=$(printf '%s\n' "$inspect" | grep -n '^        import_remember_external_links || {$' | cut -d: -f1) || remember=""
+    [ -n "$gate" ] && [ -n "$load" ] && [ "$gate" -lt "$load" ] || fail "the question must come before the transfer is prepared"
+    [ -n "$remember" ] && [ "$gate" -lt "$remember" ] || fail "the agreed links must be remembered in .env after the question"
+    done_line=$(printf '%s\n' "$inspect" | sed -n "1,${gate}p" | grep -n '^    done$' | tail -n 1 | cut -d: -f1) || done_line=""
+    [ -n "$done_line" ] && [ $((gate - done_line)) -le 2 ] || fail "the question must come once the operator has chosen what to leave behind"
+    # That question, as setup.sh asks it, on the report of the old server.
+    block=$(printf '%s\n' "$inspect" | sed -n "${gate},/^    }\$/p")
+    run_gate() {
+        (
+            # shellcheck disable=SC2034  # Read by the evaluated block.
+            IMPORT_REMOTE_REPORT=$report HEADLESS=$1
+            eval "$block"
+            echo "went on"
+        ) <<< "$2" > "$TMP_ROOT/out.txt" 2>&1
+    }
+    status=0
+    run_gate y "" || status=$?
+    if [ "$status" -ne 1 ] || ! grep -Fq 'Leave them behind with IMPORT_EXCLUDE' "$TMP_ROOT/out.txt"; then
+        fail "a headless import from the old server must stop before the transfer (status $status): $(cat "$TMP_ROOT/out.txt")"
+    fi
+    status=0
+    run_gate "" n || status=$?
+    if [ "$status" -ne 0 ] || ! grep -q 'Import cancelled' "$TMP_ROOT/out.txt" || grep -q 'went on' "$TMP_ROOT/out.txt"; then
+        fail "a no must end the import from the old server (status $status): $(cat "$TMP_ROOT/out.txt")"
+    fi
+    run_gate "" y || fail "a yes must let the import from the old server go on: $(cat "$TMP_ROOT/out.txt")"
+    grep -q 'went on' "$TMP_ROOT/out.txt" || fail "a yes must let the import from the old server go on: $(cat "$TMP_ROOT/out.txt")"
+    pass "links leading out of the site are listed and confirmed before the copy"
 }
 
 # The tar stream is a pipeline, and setup.sh runs without pipefail: the
 # status of the remote tar must be read from the pipeline itself, or the
 # files it could not read are silently left behind.
+# import_compare_external_links on reports written by hand: each link the
+# search finds after the copy leads to something the list shown led to, of
+# the same kind, or it is named and what it brought, its own path in the
+# destination, is removed when that path names a place under the
+# destination beyond doubt; otherwise the operator is told to remove it.
+test_the_links_found_after_the_copy_are_compared_with_the_list_shown() {
+    local dir="$TMP_ROOT/cmp" dest="$TMP_ROOT/cmp/dest" outside="$TMP_ROOT/cmp-outside" status
+    # shellcheck disable=SC2034  # The colours of the messages.
+    local RED="" NC=""
+
+    mkdir -p "$dest/contents/videos/d" "$dest/a|b%c" "$outside/videos"
+    entries() {
+        local complete="$1" i=1 entry
+        shift
+        printf 'kvs_export=1\nsite_dir=%s\nexternal_links_complete=%s\n' "${CMP_SITE:-/srv/site}" "$complete"
+        for entry in "$@"; do
+            printf 'external_entry_%s=%s\n' "$i" "$entry"
+            i=$((i + 1))
+        done
+    }
+    entries yes 'allowed|directory|contents|/disk/contents' 'review|file|contents/videos/a.txt|/srv/shared/a' > "$dir/shown"
+    # The same targets, one through another path, one gone: nothing to say.
+    entries yes 'review|directory|contents|/disk/contents' 'review|file|contents/videos/b.txt|/srv/shared/a' > "$dir/after"
+    import_compare_external_links "$dir/shown" "$dir/after" "$dest" old.example.test > "$dir/out" 2>&1 ||
+        fail "the same targets must let the import go on: $(cat "$dir/out")"
+    [ ! -s "$dir/out" ] || fail "the same targets need no word: $(cat "$dir/out")"
+
+    # A new target, a target of another kind, a path written with escapes:
+    # named, and what they brought removed, nothing else.
+    echo new > "$dest/contents/videos/new.txt"
+    echo x > "$dest/contents/videos/d/f"
+    echo y > "$dest/a|b%c/z"
+    echo kept > "$dest/contents/videos/1.mp4"
+    entries yes 'allowed|directory|contents|/disk/contents' 'review|file|contents/videos/new.txt|/srv/private/s' \
+        'review|directory|contents/videos/d|/srv/shared/a' 'review|file|a%7Cb%25c/z|/srv/private/z' \
+        'review|file|contents/videos/never-copied.txt|/srv/private/n' > "$dir/after"
+    status=0
+    import_compare_external_links "$dir/shown" "$dir/after" "$dest" old.example.test > "$dir/out" 2>&1 || status=$?
+    [ "$status" -eq 1 ] || fail "new links must stop the import (status $status): $(cat "$dir/out")"
+    grep -Fq 'links leading out of the site on old.example.test changed after they were listed' "$dir/out" || fail "the change must be said: $(cat "$dir/out")"
+    grep -Fxq '    file       contents/videos/new.txt -> /srv/private/s' "$dir/out" || fail "a new link must be named: $(cat "$dir/out")"
+    grep -Fxq '    directory  contents/videos/d -> /srv/shared/a' "$dir/out" || fail "a target of another kind must be named: $(cat "$dir/out")"
+    grep -Fxq '    file       contents/videos/never-copied.txt -> /srv/private/n' "$dir/out" || fail "a link the copy missed is named too: $(cat "$dir/out")"
+    [ ! -e "$dest/contents/videos/new.txt" ] && [ ! -e "$dest/contents/videos/d" ] && [ ! -e "$dest/a|b%c/z" ] ||
+        fail "what the new links brought must leave the destination: $(find "$dest")"
+    [ -f "$dest/contents/videos/1.mp4" ] && [ -d "$dest/a|b%c" ] || fail "nothing else may leave the destination: $(find "$dest")"
+    grep -Fxq "    $dest/contents/videos/new.txt" "$dir/out" || fail "what was removed must be said: $(cat "$dir/out")"
+    grep -Fxq "    $dest/a|b%c/z" "$dir/out" || fail "what was removed must be said: $(cat "$dir/out")"
+    grep -q 'Remove yourself' "$dir/out" && fail "nothing is left to the operator: $(cat "$dir/out")"
+
+    # A path that cannot be named beyond doubt is left to the operator: a
+    # byte written %XX, a "..", a directory on the way leading out of the
+    # destination.
+    echo q > "$dest/odd"$'\n'"name"
+    echo outside > "$outside/videos/v.txt"
+    ln -s "$outside" "$dest/away"
+    entries yes 'review|file|odd%0Aname|/srv/private/o' 'review|file|../x|/srv/private/x' \
+        'review|file|away/videos/v.txt|/srv/private/v' > "$dir/after"
+    status=0
+    import_compare_external_links "$dir/shown" "$dir/after" "$dest" old.example.test > "$dir/out" 2>&1 || status=$?
+    [ "$status" -eq 1 ] || fail "links the import cannot clear must stop it (status $status): $(cat "$dir/out")"
+    [ -e "$dest/odd"$'\n'"name" ] && [ -f "$outside/videos/v.txt" ] || fail "nothing outside what can be named beyond doubt may be removed"
+    sed -n '/Remove yourself/,$p' "$dir/out" | grep -Fxq '    odd%0Aname' || fail "the escaped path is left to the operator: $(cat "$dir/out")"
+    sed -n '/Remove yourself/,$p' "$dir/out" | grep -Fxq '    ../x' || fail "the climbing path is left to the operator: $(cat "$dir/out")"
+    sed -n '/Remove yourself/,$p' "$dir/out" | grep -Fxq '    away/videos/v.txt' || fail "the path leading out is left to the operator: $(cat "$dir/out")"
+
+    # A search that could not run, ran on another directory, or no longer
+    # finished: what the copy followed is not known.
+    printf 'site_dir=/srv/site\n' > "$dir/after"
+    status=0
+    import_compare_external_links "$dir/shown" "$dir/after" "$dest" old.example.test > "$dir/out" 2>&1 || status=$?
+    [ "$status" -eq 1 ] || fail "a search that did not run must stop the import (status $status): $(cat "$dir/out")"
+    grep -q 'could not be listed again' "$dir/out" || fail "the reason must be said: $(cat "$dir/out")"
+    CMP_SITE=/srv/other entries yes 'allowed|directory|contents|/disk/contents' > "$dir/after"
+    status=0
+    import_compare_external_links "$dir/shown" "$dir/after" "$dest" old.example.test > "$dir/out" 2>&1 || status=$?
+    [ "$status" -eq 1 ] || fail "a search of another directory must stop the import (status $status): $(cat "$dir/out")"
+    grep -q 'now resolves to /srv/other' "$dir/out" || fail "the reason must be said: $(cat "$dir/out")"
+    entries no 'allowed|directory|contents|/disk/contents' > "$dir/after"
+    status=0
+    import_compare_external_links "$dir/shown" "$dir/after" "$dest" old.example.test > "$dir/out" 2>&1 || status=$?
+    [ "$status" -eq 1 ] || fail "a search that no longer finished must stop the import (status $status): $(cat "$dir/out")"
+    grep -q 'did not finish after the copy' "$dir/out" || fail "the reason must be said: $(cat "$dir/out")"
+    # An unfinished search was agreed to as such: the same one goes on.
+    entries no 'review|directory|contents/etc|/etc' > "$dir/shown"
+    entries no 'review|directory|contents/etc|/etc' > "$dir/after"
+    import_compare_external_links "$dir/shown" "$dir/after" "$dest" old.example.test > "$dir/out" 2>&1 ||
+        fail "the same unfinished search as agreed to must go on: $(cat "$dir/out")"
+    pass "the links found after the copy are compared with the list shown"
+}
+
+# The copy of a site directory follows the links it meets when it meets
+# them, long after the operator saw the list on a large site. The same
+# search after the copy finds a link planted or changed in between: the
+# import stops there, before the init hands the files to PHP, names it, and
+# what it brought leaves the copy; a name the list cannot show as it is is
+# left to the operator. A link one level below a contents directory on
+# another disk, to a directory whose name ends with a line break, stops a
+# headless copy before it starts. A site without any link leading out
+# forgets the set an earlier run agreed to, as the source over SSH does.
+test_links_are_searched_again_after_the_copy_of_a_directory() {
+    local site="$TMP_ROOT/again-site" disk="$TMP_ROOT/again-disk" other="$TMP_ROOT/again-other" secret="$TMP_ROOT/again-secret/s"
+    local destination="$TMP_ROOT/out-dest" nl_site="$TMP_ROOT/again-nl-site" plain="$TMP_ROOT/again-plain" status accepted
+    # shellcheck disable=SC2034  # The colours of the setup.sh functions run here.
+    local RED="" YELLOW="" NC="" GREEN=""
+
+    setup_function import_check_site_links
+    setup_function import_keep_links_report
+    setup_function import_recheck_site_links
+    setup_function set_env_value
+    setup_function remove_env_value
+    OUT_ENV_DIR="$TMP_ROOT/again-env"
+    OUT_FIND_BIN="$TMP_ROOT/again-find-bin"
+    mkdir -p "$OUT_ENV_DIR" "$OUT_FIND_BIN" "$disk/sources" "$other" "$(dirname "$secret")"
+    : > "$OUT_ENV_DIR/.env"
+    echo "root only" > "$secret"
+    chmod 600 "$secret"
+    make_site "$site" "$site"
+    echo source > "$disk/sources/s.mp4"
+    echo other > "$other/o.mp4"
+    ln -s "$disk/sources" "$site/contents/videos_sources"
+    [ "$(id -u)" -ne 0 ] || chown -R 4242 "$site" "$disk" "$other"
+
+    # Nothing changed: the copy goes on and the report is not kept.
+    copy_from_directory "$site" y "" "" || fail "an unchanged site must be copied: $(cat "$TMP_ROOT/out.txt")"
+    [ "$(cat "$destination/contents/videos_sources/s.mp4")" = source ] || fail "the sources must be copied"
+    grep -q 'the report shown was kept' "$TMP_ROOT/out.txt" && fail "the report must go once the copy is checked"
+
+    # A link planted between the list and the copy.
+    status=0
+    OUT_BETWEEN="ln -s '$secret' '$site/contents/videos/planted.txt'" copy_from_directory "$site" y "" "" || status=$?
+    [ "$status" -eq 1 ] || fail "a link planted before the copy must stop the import (status $status): $(cat "$TMP_ROOT/out.txt")"
+    grep -Fxq "    file       contents/videos/planted.txt -> $secret" "$TMP_ROOT/out.txt" || fail "the planted link must be named: $(cat "$TMP_ROOT/out.txt")"
+    [ ! -e "$destination/contents/videos/planted.txt" ] || fail "what the planted link brought must leave the copy"
+    [ -f "$destination/contents/videos/1.mp4" ] && [ -f "$destination/contents/videos_sources/s.mp4" ] || fail "the rest of the copy stays"
+    rm -f "$site/contents/videos/planted.txt"
+
+    # A link the operator saw, pointed elsewhere in between.
+    status=0
+    OUT_BETWEEN="ln -sfn '$other' '$site/contents/videos_sources'" copy_from_directory "$site" y "" "" || status=$?
+    [ "$status" -eq 1 ] || fail "a changed link must stop the import (status $status): $(cat "$TMP_ROOT/out.txt")"
+    grep -Fxq "    directory  contents/videos_sources -> $other" "$TMP_ROOT/out.txt" || fail "the changed link must be named: $(cat "$TMP_ROOT/out.txt")"
+    [ ! -e "$destination/contents/videos_sources" ] || fail "what the changed link brought must leave the copy"
+    ln -sfn "$disk/sources" "$site/contents/videos_sources"
+
+    # A name the list writes %0A: left to the operator, with the stop.
+    plant_odd_name() { ln -s "$secret" "$site/contents/odd"$'\n'"name"; }
+    status=0
+    OUT_BETWEEN=plant_odd_name copy_from_directory "$site" y "" "" || status=$?
+    [ "$status" -eq 1 ] || fail "a link with an odd name must stop the import (status $status): $(cat "$TMP_ROOT/out.txt")"
+    sed -n '/Remove yourself/,$p' "$TMP_ROOT/out.txt" | grep -Fxq '    contents/odd%0Aname' || fail "the odd name is left to the operator: $(cat "$TMP_ROOT/out.txt")"
+    rm -f "$site/contents/odd"$'\n'"name"
+
+    # One level below a contents directory on another disk, a link to a
+    # directory whose name ends with a line break.
+    make_site "$nl_site" "$nl_site"
+    rm -rf "$nl_site/contents"
+    mkdir -p "$TMP_ROOT/again-nl-disk/contents/videos" "$TMP_ROOT/again-nl-dir"$'\n'
+    echo data > "$TMP_ROOT/again-nl-dir"$'\n'"/data.txt"
+    ln -s "$TMP_ROOT/again-nl-disk/contents" "$nl_site/contents"
+    ln -s "$TMP_ROOT/again-nl-dir"$'\n' "$TMP_ROOT/again-nl-disk/contents/videos/x"
+    [ "$(id -u)" -ne 0 ] || chown -R 4242 "$nl_site" "$TMP_ROOT/again-nl-disk"
+    status=0
+    copy_from_directory "$nl_site" y "" "" || status=$?
+    [ "$status" -eq 1 ] || fail "a link to such a name must stop a headless copy (status $status): $(cat "$TMP_ROOT/out.txt")"
+    grep -Fq "directory  contents/videos/x -> $TMP_ROOT/again-nl-dir?" "$TMP_ROOT/out.txt" || fail "the link must be listed: $(cat "$TMP_ROOT/out.txt")"
+    [ ! -e "$destination" ] || fail "nothing may be copied before the operator agrees"
+
+    # Nothing leading out: the set an earlier run agreed to is forgotten.
+    accepted=$(printf 'a%.0s' {1..64})
+    make_site "$plain" "$plain"
+    printf 'IMPORT_EXTERNAL_LINKS_ACCEPTED=%s\n' "$accepted" > "$OUT_ENV_DIR/.env"
+    copy_from_directory "$plain" y "" "" || fail "a site without links must be copied: $(cat "$TMP_ROOT/out.txt")"
+    grep -q '^IMPORT_EXTERNAL_LINKS_ACCEPTED=' "$OUT_ENV_DIR/.env" && fail "a set with nothing to ask about must be forgotten: $(cat "$OUT_ENV_DIR/.env")"
+    # A site with no link at all when listed is searched again too.
+    status=0
+    OUT_BETWEEN="ln -s '$secret' '$plain/contents/videos/planted.txt'" copy_from_directory "$plain" y "" "" || status=$?
+    [ "$status" -eq 1 ] || fail "a link planted in a site listed without links must stop the import (status $status): $(cat "$TMP_ROOT/out.txt")"
+    [ ! -e "$destination/contents/videos/planted.txt" ] || fail "what it brought must leave the copy"
+    rm -f "$plain/contents/videos/planted.txt"
+    # The check of what came from the old server keeps it: that set is the
+    # transfer's, and the copy holds no link leading out by then.
+    printf 'IMPORT_EXTERNAL_LINKS_ACCEPTED=%s\n' "$accepted" > "$OUT_ENV_DIR/.env"
+    (
+        cd "$OUT_ENV_DIR" || exit 99
+        # shellcheck disable=SC2034  # Read by import_check_site_links.
+        IMPORT_SOURCE=remote IMPORT_SITE_DIR=$plain DOMAIN=links.example.test IMPORT_EXPORTER="$REPO_ROOT/kvs-export.sh" IMPORT_EXTERNAL_LINKS_ACCEPTED=$accepted
+        import_check_site_links
+    ) > "$TMP_ROOT/out.txt" 2>&1 || fail "the check of a transferred site must pass: $(cat "$TMP_ROOT/out.txt")"
+    grep -Fxq "IMPORT_EXTERNAL_LINKS_ACCEPTED=$accepted" "$OUT_ENV_DIR/.env" || fail "the transfer's set must stay: $(cat "$OUT_ENV_DIR/.env")"
+    pass "links are searched again after the copy of a directory"
+}
+
+# Over SSH the same: the exporter searches the old server again after the
+# transfer, with the exclusions the transfer applied, a hidden name holding
+# a space and a quote among them, which travel to it quoted on bash's
+# standard input. A link planted after the detection is named and what it
+# brought leaves the copy; one inside a part left behind brought nothing.
+test_links_are_searched_again_after_the_transfer() {
+    local bin="$TMP_ROOT/again-ssh-bin" site="$TMP_ROOT/again-remote-site" destination="$TMP_ROOT/again-remote-dest"
+    local report="$TMP_ROOT/again-detect.txt" secret="$TMP_ROOT/again-remote-secret" odd tool status
+
+    make_fake_ssh "$bin"
+    for tool in mariadb mysql mariadb-dump mysqldump; do
+        printf '#!/bin/sh\nexit 1\n' > "$bin/$tool"
+        chmod +x "$bin/$tool"
+    done
+    make_site "$site" "$site"
+    echo "root only" > "$secret"
+    chmod 600 "$secret"
+    odd=".odd 'name"
+    mkdir -p "$site/$odd" "$site/backup"
+    setup_function import_remote_load_excludes
+    (
+        PATH="$bin:$PATH"
+        IMPORT_SSH_CONTROL_DIR="$TMP_ROOT/again-ctl" import_ssh_setup old.example.com 22 root "" yes
+        FAKE_UID=0 import_remote_privileges || exit 30
+        # shellcheck disable=SC2034  # Read by import_remote_recheck_links.
+        IMPORT_EXPORTER="$REPO_ROOT/kvs-export.sh" IMPORT_REMOTE_DIR=$site
+        import_remote_detect "$IMPORT_EXPORTER" "$site" "$report" 0 backup 2> "$TMP_ROOT/again-detect.err" || exit 1
+        grep -Fxq "exclude_1=/$odd" "$report" && grep -Fxq 'exclude_2=/backup' "$report" || exit 2
+        import_remote_load_excludes "$report"
+        import_remote_files "$site" "$destination" yes "${IMPORT_EXCLUDE_PATTERNS[@]}" > "$TMP_ROOT/again-transfer.out" 2>&1 || exit 3
+        import_remote_recheck_links "$report" "$destination" > "$TMP_ROOT/again.out" 2>&1 || exit 4
+        grep -q '^command bash -s$' "$bin/ssh.log" || exit 5
+
+        # Planted after the detection, and inside the parts left behind.
+        ln -s "$secret" "$site/contents/videos/planted.txt"
+        ln -s "$secret" "$site/backup/leak.txt"
+        ln -s "$secret" "$site/$odd/leak.txt"
+        import_remote_files "$site" "$destination" yes "${IMPORT_EXCLUDE_PATTERNS[@]}" > "$TMP_ROOT/again-transfer.out" 2>&1 || exit 6
+        [ "$(cat "$destination/contents/videos/planted.txt")" = "root only" ] || exit 7
+        status=0
+        import_remote_recheck_links "$report" "$destination" > "$TMP_ROOT/again.out" 2>&1 || status=$?
+        [ "$status" -eq 1 ] || exit 8
+        grep -Fxq "    file       contents/videos/planted.txt -> $secret" "$TMP_ROOT/again.out" || exit 9
+        grep -q 'leak.txt' "$TMP_ROOT/again.out" && exit 10
+        [ ! -e "$destination/contents/videos/planted.txt" ] || exit 11
+        [ -f "$destination/contents/videos/1.mp4" ] || exit 12
+        # A search that cannot run is no pass.
+        status=0
+        FAKE_SSH_FAIL_COMMAND='bash -s' import_remote_recheck_links "$report" "$destination" > "$TMP_ROOT/again.out" 2>&1 || status=$?
+        [ "$status" -eq 1 ] && grep -q 'could not be listed again after the transfer' "$TMP_ROOT/again.out" || exit 13
+        status=0
+        FAKE_SSH_FAIL_COMMAND='bash -s' import_remote_recheck_links "$report" "$destination" best-effort > "$TMP_ROOT/again.out" 2>&1 || status=$?
+        [ "$status" -eq 1 ] && [ ! -s "$TMP_ROOT/again.out" ] || exit 14
+        import_ssh_close
+        exit 0
+    ) || fail "the links must be searched again after the transfer (case $?): $(cat "$TMP_ROOT/again.out" "$TMP_ROOT/again-detect.err" 2>/dev/null)"
+    pass "links are searched again after the transfer, with its exclusions"
+}
+
+# Where rsync is missing, the copy of a site directory uses cp -a, which
+# copies a FIFO, a device or a socket as one: it installs rsync first when
+# the site holds one, and does not copy without it.
+test_the_copy_without_rsync_installs_it_for_a_special_file() {
+    local site="$TMP_ROOT/norsync-site" fifo_site="$TMP_ROOT/norsync-fifo-site" bin="$TMP_ROOT/norsync-bin" tool
+
+    make_site "$site" "$site"
+    make_site "$fifo_site" "$fifo_site"
+    mkfifo "$fifo_site/contents/pipe"
+    mkdir -p "$bin"
+    for tool in readlink find cp rm mkdir cat dirname basename grep; do
+        ln -s "$(command -v "$tool")" "$bin/$tool"
+    done
+    (
+        PATH=$bin
+        # shellcheck disable=SC2329  # Called by import_place_site.
+        import_ensure_tool() { echo "ensure $1" >> "$TMP_ROOT/norsync.log"; return 1; }
+        # shellcheck disable=SC2034  # Read by import_marker_file and import_place_site.
+        IMPORT_MARKER_DIR="$TMP_ROOT/norsync-markers" IMPORT_SITE_LINKS=no
+        : > "$TMP_ROOT/norsync.log"
+        import_place_site "$site" "$TMP_ROOT/norsync-dest" > /dev/null || exit 1
+        [ -f "$TMP_ROOT/norsync-dest/contents/videos/1.mp4" ] || exit 2
+        [ ! -s "$TMP_ROOT/norsync.log" ] || exit 3
+        import_place_site "$fifo_site" "$TMP_ROOT/norsync-fifo-dest" > /dev/null 2>&1 && exit 4
+        grep -Fxq 'ensure rsync' "$TMP_ROOT/norsync.log" || exit 5
+        [ ! -e "$TMP_ROOT/norsync-fifo-dest/contents/pipe" ] || exit 6
+        exit 0
+    ) || fail "a copy without rsync must not bring a FIFO (case $?): $(cat "$TMP_ROOT/norsync.log")"
+
+    # The site directory is copied from where it resolves, kept whole: a
+    # name ending with a line break is not the one without it.
+    make_site "$TMP_ROOT/whole-site"$'\n' "$TMP_ROOT/whole-site"
+    make_site "$TMP_ROOT/whole-site" "$TMP_ROOT/whole-site"
+    echo real > "$TMP_ROOT/whole-site"$'\n'"/real.txt"
+    echo decoy > "$TMP_ROOT/whole-site/decoy.txt"
+    ln -s "$TMP_ROOT/whole-site"$'\n' "$TMP_ROOT/whole-link"
+    (
+        # shellcheck disable=SC2034  # Read by import_marker_file and import_place_site.
+        IMPORT_MARKER_DIR="$TMP_ROOT/whole-markers" IMPORT_SITE_LINKS=no
+        import_place_site "$TMP_ROOT/whole-link" "$TMP_ROOT/whole-dest" > /dev/null || exit 1
+        [ -f "$TMP_ROOT/whole-dest/real.txt" ] || exit 2
+        [ ! -e "$TMP_ROOT/whole-dest/decoy.txt" ] || exit 3
+        exit 0
+    ) || fail "the copy must read the directory the site resolves to (case $?)"
+    pass "the copy without rsync installs it for a special file, and reads the site where it resolves"
+}
+
+# import_fetch_source copies a site directory, then searches its links
+# again before anything else, also when the copy failed.
+test_the_copy_of_a_directory_is_followed_by_the_search_again() {
+    setup_function import_fetch_source
+    (
+        # shellcheck disable=SC2034  # Read by import_fetch_source.
+        IMPORT_MODE=true IMPORT_SOURCE=directory IMPORT_SITE_DIR=/srv/site DOMAIN=links.example.test RED="" NC=""
+        # shellcheck disable=SC2329  # Called by import_fetch_source.
+        import_place_site() { echo "copy $1 $2"; return "${FIXTURE_COPY_STATUS:-0}"; }
+        # shellcheck disable=SC2329  # Called by import_fetch_source.
+        import_recheck_site_links() { echo "search again $1"; }
+        import_fetch_source > "$TMP_ROOT/fetch-dir.out" 2>&1 || exit 1
+        [ "$(grep -v '^  Placing' "$TMP_ROOT/fetch-dir.out" | paste -sd'|')" = "copy /srv/site /var/www/links.example.test|search again /var/www/links.example.test" ] || exit 2
+        FIXTURE_COPY_STATUS=1
+        (import_fetch_source) > "$TMP_ROOT/fetch-dir.out" 2>&1 && exit 3
+        grep -Fxq 'search again /var/www/links.example.test' "$TMP_ROOT/fetch-dir.out" || exit 4
+        exit 0
+    ) || fail "the copy of a directory must be followed by the search again (case $?): $(cat "$TMP_ROOT/fetch-dir.out")"
+    pass "the copy of a directory is followed by the search again"
+}
+
 test_the_tar_stream_reports_what_the_old_server_could_not_read() {
     local bin="$TMP_ROOT/ssh-bin-tar" site destination real_tar
 
@@ -2339,9 +2959,16 @@ test_the_old_nginx_configuration_is_saved_and_its_rewrites_recovered
 test_the_rewrite_recovery_follows_the_includes_of_the_server_block
 test_the_transfer_is_counted_first_and_shown_against_the_count
 test_remote_detect_dump_and_files_go_through_one_ssh
+test_excluded_names_are_literal_and_special_files_never_arrive
 test_a_user_with_sudo_runs_the_remote_side_through_it
 test_password_protected_archives_are_refused_with_a_reason
 test_links_leaving_the_site_are_listed_and_the_copy_follows_them
+test_links_leading_out_are_confirmed_before_the_copy
+test_the_links_found_after_the_copy_are_compared_with_the_list_shown
+test_links_are_searched_again_after_the_copy_of_a_directory
+test_links_are_searched_again_after_the_transfer
+test_the_copy_without_rsync_installs_it_for_a_special_file
+test_the_copy_of_a_directory_is_followed_by_the_search_again
 test_the_tar_stream_reports_what_the_old_server_could_not_read
 test_parallel_transfers_preserve_the_mirror
 test_hard_links_arrive_as_links

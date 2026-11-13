@@ -312,6 +312,8 @@ import_remote_dump() { printf 'synthetic dump\n' > "$3"; }
 import_destination_ready() { return 0; }
 import_mark_destination() { return 0; }
 import_ssh_close() { return 0; }
+# The links are searched again after the transfer, failed or not.
+import_remote_recheck_links() { printf 'recheck %s\n' "${3:-required}" >> "$TEST_DIR/recheck-calls"; }
 import_remote_files() {
     printf 'durable fixture error\n' > "$IMPORT_TRANSFER_LOG_DIR/final-rsync.err"
     return 12
@@ -319,6 +321,7 @@ import_remote_files() {
 status=0
 (import_fetch_remote) > "$TEST_DIR/fetch-output" 2>&1 || status=$?
 [ "$status" -eq 12 ] || fail "setup discarded status 12: $status"
+[ "$(cat "$TEST_DIR/recheck-calls")" = 'recheck best-effort' ] || fail "a failed transfer must still look at the links: $(cat "$TEST_DIR/recheck-calls")"
 grep -q 'file transfer failed (status 12)' "$TEST_DIR/fetch-output" || fail 'setup omitted the failure status'
 saved=$(sed -n 's/^  Transfer diagnostics: //p' "$TEST_DIR/fetch-output")
 [[ "$saved" == "$LOG_DIR"/import-transfer.* ]] || fail 'setup omitted the diagnostics path'
@@ -326,6 +329,7 @@ bash -eu -c 'grep -Fxq "durable fixture error" "$1/final-rsync.err"' bash "$save
 [ "$(stat -c %a "$saved")" = 700 ] || fail 'diagnostics directory is not private'
 import_remote_files() { return 0; }
 import_fetch_remote > "$TEST_DIR/fetch-success"
+[ "$(sed -n 2p "$TEST_DIR/recheck-calls")" = 'recheck required' ] || fail "a transfer must be followed by the search for links: $(cat "$TEST_DIR/recheck-calls")"
 mapfile -t remaining < <(find "$LOG_DIR" -mindepth 1 -maxdepth 1 -type d)
 [ "${#remaining[@]}" -eq 1 ] && [ "${remaining[0]}" = "$saved" ] || fail 'success removed previous errors or left a new diagnostics directory'
 echo 'PASS: setup preserves failed diagnostics across processes and cleans successful attempts'

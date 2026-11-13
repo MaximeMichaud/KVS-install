@@ -222,6 +222,23 @@ ENVIRONMENT VARIABLES:
                           their own; IMPORT_INCLUDE=PATHS takes a hidden
                           entry or a mount along. Kept in .env for the next
                           pass.
+    IMPORT_EXTERNAL_LINKS=copy
+                          Copy what the symbolic links leading out of the
+                          site point to without asking. The setup lists
+                          them first, since what they point to is read as
+                          root and lands as files PHP owns. contents, or an
+                          entry right under it, linked to a directory on
+                          another disk owned by the site's owner or by the
+                          owner of its admin/data or tmp (not root) goes on
+                          without a question; any other link is asked
+                          about, and a headless run stops on it without
+                          this. The set agreed to is kept in .env, so a
+                          later pass asks again only when it changes; this
+                          setting is not. A link to a device, a FIFO or a
+                          socket always stops the import. The links are
+                          listed again once the files are copied: one that
+                          appeared meanwhile stops the import, and what it
+                          brought is removed.
     IMPORT_REUSE_SITE_DIR=DIR
                           The site directory of an earlier import of the
                           same old server under another domain (a
@@ -1604,6 +1621,9 @@ IMPORT_STAGING="$(pwd)/import"
 # shellcheck disable=SC2034  # Read by docker/lib/import.sh.
 IMPORT_MARKER_DIR="$IMPORT_STAGING"
 IMPORT_EXPORTER="$(dirname "${BASH_SOURCE[0]}")/../kvs-export.sh"
+# The links report of a site directory the operator saw, kept until the
+# copy is over (import_check_site_links, import_recheck_site_links).
+IMPORT_LINKS_SHOWN=""
 
 # A completed import recorded in .env turns a repeated command line into an
 # ordinary re-run; the database is replaced only on explicit consent.
@@ -1949,40 +1969,132 @@ import_note_external_search() {
 
 # Symbolic links that leave the site directory resolve on this server at
 # best and never in the container, which mounts the site directory alone.
-# The copy the setup makes from a directory follows them (rsync brings
-# their targets); a site already in place or extracted from an archive
-# keeps them as they are and has to be fixed first.
+# The exporter's links command looks for them, through every directory
+# they lead to (IMPORT_SITE_LINKS then tells import_place_site whether the
+# site holds any link at all). The copy the setup makes from a directory
+# follows them: rsync brings what they point to, read as root, into files
+# PHP owns here, so the layout of a contents directory on another disk
+# goes on and any other link is asked about first
+# (import_confirm_external_links); the report stays in IMPORT_LINKS_SHOWN
+# for import_recheck_site_links, which searches again once the copy is
+# over. A site already in place or extracted from an archive keeps them
+# as they are and has to be fixed first.
 import_check_site_links() {
-    local links count
+    local report count dangling total lines status copy=no
 
-    links=$(import_external_links "$IMPORT_SITE_DIR" | head -n 6)
-    [ -n "$links" ] || return 0
-    count=$(printf '%s\n' "$links" | wc -l)
-    if [ "$count" -gt 5 ]; then
-        links=$(printf '%s\n' "$links" | head -n 5; echo "...")
+    if [ ! -f "$IMPORT_EXPORTER" ]; then
+        echo -e "${RED}ERROR: $IMPORT_EXPORTER is missing; run setup.sh from a full checkout of the repository${NC}"
+        exit 1
     fi
-    if [ "$IMPORT_SOURCE" = directory ] && [ "$(readlink -f -- "$IMPORT_SITE_DIR")" != "$(readlink -f -- "/var/www/$DOMAIN" 2>/dev/null)" ] &&
-        ! printf '%s\n' "$links" | grep -q '(dangling)$'; then
-        echo "  Symbolic links leaving the site are copied with their targets:"
-        printf '%s\n' "$links" | sed 's/^/    /'
+    report=$(mktemp) || exit 1
+    if ! bash "$IMPORT_EXPORTER" links "$IMPORT_SITE_DIR" > "$report" ||
+        [ "$(import_kv "$report" kvs_export)" != 1 ]; then
+        rm -f "$report"
+        echo -e "${RED}ERROR: could not look for the symbolic links of $IMPORT_SITE_DIR${NC}"
+        exit 1
+    fi
+    total=$(import_kv "$report" links)
+    count=$(import_kv "$report" external_links)
+    dangling=$(import_kv "$report" dangling_links)
+    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    [[ "$dangling" =~ ^[0-9]+$ ]] || dangling=0
+    # shellcheck disable=SC2034  # Read by import_place_site.
+    if [ "$total" -eq 0 ]; then IMPORT_SITE_LINKS=no; else IMPORT_SITE_LINKS=yes; fi
+    if [ "$IMPORT_SOURCE" = directory ] && ! import_same_path "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
+        copy=yes
+    fi
+    rm -f "${IMPORT_LINKS_SHOWN:-}"
+    IMPORT_LINKS_SHOWN=""
+    if [ "$count" -eq 0 ] && [ "$dangling" -eq 0 ]; then
+        if [ "$(import_kv "$report" external_links_complete)" = no ]; then
+            rm -f "$report"
+            echo -e "${RED}ERROR: the search for the symbolic links of $IMPORT_SITE_DIR could not run (see the message above); free some space in ${TMPDIR:-/tmp}, then run the setup again.${NC}"
+            exit 1
+        fi
+        # Nothing to ask about: a set an earlier run agreed to is forgotten,
+        # as the source over SSH does.
+        if [ "$IMPORT_SOURCE" = directory ]; then
+            # shellcheck disable=SC2034  # Read by import_remember_external_links.
+            IMPORT_EXTERNAL_LINKS_DIGEST=""
+            import_remember_external_links || {
+                rm -f "$report"
+                echo -e "${RED}ERROR: Could not remove IMPORT_EXTERNAL_LINKS_ACCEPTED from .env; the import was stopped before the copy.${NC}"
+                exit 1
+            }
+        fi
+        if [ "$copy" = yes ]; then import_keep_links_report "$report"; else rm -f "$report"; fi
         return 0
     fi
+    if [ "$copy" = yes ] && [ "$dangling" -eq 0 ]; then
+        import_show_external_links "$report" "as root"
+        status=0
+        import_confirm_external_links "$report" \
+            "Replace them by copies of their targets (cp -a --dereference) or remove them, then run the setup again." || status=$?
+        if [ "$status" -ne 0 ]; then
+            rm -f "$report"
+            [ "$status" -ne 2 ] || exit 0
+            exit 1
+        fi
+        import_remember_external_links || {
+            rm -f "$report"
+            echo -e "${RED}ERROR: Could not save IMPORT_EXTERNAL_LINKS_ACCEPTED to .env; the import was stopped before the copy.${NC}"
+            exit 1
+        }
+        import_keep_links_report "$report"
+        return 0
+    fi
+    lines=$(sed -n -e 's/^external_link_[0-9]*=[^|]*|[^|]*|//p' -e 's/^dangling_link_[0-9]*=\(.*\)$/\1 (dangling)/p' "$report")
+    rm -f "$report"
     echo -e "${RED}ERROR: symbolic links in $IMPORT_SITE_DIR point outside the site or nowhere; the container mounts the site directory alone, so they would break there:${NC}"
-    printf '%s\n' "$links" | sed 's/^/    /'
+    printf '%s\n' "$lines" | sed 's/^/    /'
+    if [ "$((count + dangling))" -gt "$(printf '%s\n' "$lines" | wc -l)" ]; then
+        echo "    and more ($((count + dangling)) in all)"
+    fi
     echo "Replace them by copies of their targets (cp -a --dereference), remove the dangling ones, or mount the targets in docker-compose.override.yml, then run the setup again."
     exit 1
 }
 
+# import_keep_links_report <report>: IMPORT_LINKS_SHOWN, the report the
+# operator saw, kept for import_recheck_site_links in the logs next to the
+# report of an old server, or where it is when there is no log directory.
+import_keep_links_report() {
+    IMPORT_LINKS_SHOWN=$1
+    if [ -n "${LOG_DIR:-}" ] && [ -d "$LOG_DIR" ] && mv -f -- "$1" "$LOG_DIR/import-links.txt"; then
+        IMPORT_LINKS_SHOWN="$LOG_DIR/import-links.txt"
+    fi
+}
+
+# import_recheck_site_links <destination>
+# After the copy of a site directory, which may come long after its links
+# were listed: the same search again, compared with what the operator saw
+# (import_compare_external_links). A link added in between stops the
+# import here, before the init hands the files to PHP, and what it brought
+# leaves the destination.
+import_recheck_site_links() {
+    local destination="$1" after status=0
+
+    [ -n "${IMPORT_LINKS_SHOWN:-}" ] || return 0
+    after=$(mktemp) || exit 1
+    # A search that fails says nothing for sure, whatever it printed.
+    bash "$IMPORT_EXPORTER" links "$IMPORT_SITE_DIR" > "$after" || : > "$after"
+    import_compare_external_links "$IMPORT_LINKS_SHOWN" "$after" "$destination" "$IMPORT_SITE_DIR" || status=$?
+    rm -f "$after" "$IMPORT_LINKS_SHOWN"
+    IMPORT_LINKS_SHOWN=""
+    [ "$status" -eq 0 ] || exit 1
+}
+
 import_inspect_directory() {
     import_validate_local_materials
-    if [ "$(readlink -f -- "$IMPORT_SITE_DIR")" = "$(readlink -f -- "/var/www/$DOMAIN" 2>/dev/null)" ]; then
+    if import_same_path "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
         echo "  Files: already in /var/www/$DOMAIN"
     else
         if ! import_free_space_ok "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
             echo -e "${RED}ERROR: not enough free space to copy $IMPORT_SITE_DIR to /var/www/$DOMAIN${NC}"
             exit 1
         fi
-        import_destination_ready "/var/www/$DOMAIN" "$(readlink -f -- "$IMPORT_SITE_DIR")" || exit 1
+        import_resolve_path "$IMPORT_SITE_DIR" || exit 1
+        import_destination_ready "/var/www/$DOMAIN" "$IMPORT_RESOLVED" || exit 1
         echo "  Files: copied to /var/www/$DOMAIN"
     fi
 }
@@ -2128,6 +2240,20 @@ import_remote_show_servers() {
     done <<< "$lines"
 }
 
+# import_remote_show_links <report>
+# The symbolic links that lead out of the site on the old server, which
+# the transfer follows (import_show_external_links).
+import_remote_show_links() {
+    local reader
+
+    case "${IMPORT_REMOTE_PRIVILEGES:-}" in
+        root) reader="as root" ;;
+        sudo) reader="as root through sudo" ;;
+        *) reader="as ${IMPORT_REMOTE_USER:-the SSH user}" ;;
+    esac
+    import_show_external_links "$1" "on the old server $reader"
+}
+
 # import_remote_load_excludes <report>: the patterns the transfer applies.
 import_remote_load_excludes() {
     local pattern
@@ -2250,6 +2376,8 @@ import_inspect_remote() {
         echo -e "${RED}ERROR: IMPORT_EXCLUDE and IMPORT_INCLUDE take plain paths relative to the site directory, space separated (contents/videos_sources backup), got '$IMPORT_EXCLUDE' and '$IMPORT_INCLUDE'${NC}"
         exit 1
     fi
+    # Its value only, before the detection: no link is known yet.
+    import_confirm_external_links /dev/null "" || exit 1
     case "${IMPORT_SSH_ACCEPT_NEW,,}" in
         y|yes|true) accept_new=yes ;;
         *) accept_new=no ;;
@@ -2328,6 +2456,7 @@ import_inspect_remote() {
     echo "  Site directory:  $IMPORT_REMOTE_DIR ($(import_remote_size_text "$IMPORT_REMOTE_REPORT"))"
     import_remote_show_entries "$IMPORT_REMOTE_REPORT"
     import_remote_show_servers "$IMPORT_REMOTE_REPORT"
+    import_remote_show_links "$IMPORT_REMOTE_REPORT"
     echo "  Project URL:     $(import_kv "$IMPORT_REMOTE_REPORT" project_url)"
     echo "  Table prefix:    ${prefix:-unknown}"
     echo "  Database:        $(import_kv "$IMPORT_REMOTE_REPORT" db_name) on $(import_kv "$IMPORT_REMOTE_REPORT" db_host), user $(import_kv "$IMPORT_REMOTE_REPORT" db_user), password $(import_kv "$IMPORT_REMOTE_REPORT" db_password_hint)"
@@ -2376,6 +2505,12 @@ import_inspect_remote() {
     echo "  Detecting again, leaving behind: $IMPORT_EXCLUDE"
     echo ""
     done
+    # Before anything is written here or read there beyond the detection.
+    import_confirm_external_links "$IMPORT_REMOTE_REPORT" \
+        "Leave them behind with IMPORT_EXCLUDE (the paths are relative to the site directory), or remove them on the old server." || {
+        [ $? -eq 2 ] && exit 0
+        exit 1
+    }
     import_remote_load_excludes "$IMPORT_REMOTE_REPORT"
     IMPORT_SITE_IONCUBE=$(import_kv "$IMPORT_REMOTE_REPORT" ioncube)
     import_save_nginx_config "$IMPORT_REMOTE_REPORT"
@@ -2408,6 +2543,10 @@ import_inspect_remote() {
                 exit 1
             }
         fi
+        import_remember_external_links || {
+            echo "ERROR: Could not save IMPORT_EXTERNAL_LINKS_ACCEPTED to .env; the import was stopped before transfer." >&2
+            exit 1
+        }
     fi
     if [ -n "$IMPORT_EXCLUDE$IMPORT_INCLUDE" ]; then
         echo "  Left behind on request: ${IMPORT_EXCLUDE:-nothing}; taken along on request: ${IMPORT_INCLUDE:-nothing} (kept in .env for the next pass)"
@@ -2527,8 +2666,10 @@ import_fetch_source() {
             echo "  Placing the imported site files..."
             if ! import_place_site "$IMPORT_SITE_DIR" "/var/www/$DOMAIN"; then
                 echo -e "${RED}ERROR: could not place the site files${NC}"
+                import_recheck_site_links "/var/www/$DOMAIN"
                 exit 1
             fi
+            import_recheck_site_links "/var/www/$DOMAIN"
             return 0
             ;;
         *) return 0 ;;
@@ -2820,11 +2961,18 @@ import_fetch_remote() {
     reserve=$(import_kv "${IMPORT_REMOTE_REPORT:-}" db_size_mb) || reserve=0
     IMPORT_TRANSFER_LOG_DIR="$transfer_logs" IMPORT_TRANSFER_RESERVE_MB="$reserve" \
         import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}" || transfer_status=$?
+    # The transfer followed the links it met, hours after the detection on
+    # a large site: the same search again, compared with the list shown,
+    # stops the import before anything else when they changed, and takes
+    # what a new link brought back out of the copy. After a failed transfer
+    # too, when the old server still answers.
     if [ "$transfer_status" -ne 0 ]; then
+        import_remote_recheck_links "${IMPORT_REMOTE_REPORT:-}" "$destination" best-effort || true
         echo -e "${RED}ERROR: the file transfer failed (status $transfer_status); run the same command again to resume it${NC}"
         echo "  Transfer diagnostics: $transfer_logs"
         exit "$transfer_status"
     fi
+    import_remote_recheck_links "${IMPORT_REMOTE_REPORT:-}" "$destination" || exit 1
     rm -rf -- "$transfer_logs"
     echo -e "  ${GREEN}✓${NC} Site files in $destination"
     import_ssh_close

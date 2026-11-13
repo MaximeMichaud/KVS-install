@@ -272,6 +272,7 @@ pass 'source recovery is opt-in'
     import_remote_privileges() { IMPORT_REMOTE_PRIVILEGES=root; }
     import_remote_show_entries() { return 0; }
     import_remote_show_servers() { return 0; }
+    import_remote_show_links() { return 0; }
     import_remote_load_excludes() { return 0; }
     import_remote_free_space_check() { return 0; }
     import_destination_ready() { touch "$TEST_DIR/destination-reached"; }

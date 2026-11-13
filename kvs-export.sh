@@ -52,6 +52,8 @@ OPT_DUMP_ONLY="no"
 OPT_FORCE_GZIP="no"
 OPT_DATABASE_FORMAT="auto"
 OPT_ASSUME_YES="no"
+OPT_FOLLOW_EXTERNAL_LINKS="no"
+OPT_EXCLUDE_PATTERNS=()
 OPT_SIZE_TIMEOUT="${KVS_EXPORT_SIZE_TIMEOUT:-0}"
 OPT_MEASURE_SIZE="yes"
 OPT_EXCLUDES=()
@@ -122,6 +124,27 @@ TAR_EXCLUDES=()
 # The symlinks inside the site, found once by kvs_site_links.
 SITE_LINKS=()
 SITE_LINKS_READ="no"
+# The links the transfer follows out of the site, kvs_collect_external_links.
+EXTERNAL_LINKS=()
+EXTERNAL_ENTRIES=()
+KVS_FIELD=""
+KVS_RESOLVED=""
+KVS_LINK_TEXT=""
+EXTERNAL_LINKS_COUNT=0
+EXTERNAL_LINKS_REVIEW=0
+EXTERNAL_LINKS_SPECIAL=0
+EXTERNAL_LINKS_DIGEST=""
+EXTERNAL_LINKS_COMPLETE="no"
+EXTERNAL_LINKS_MAX=20
+DANGLING_LINKS=()
+DANGLING_LINKS_COUNT=0
+# Every symbolic link of the site itself, wherever it points.
+LINKS_IN_SITE=0
+# The directories searched for links and what each search left out.
+WALKED_ROOT=()
+WALKED_PRUNE=()
+WALKED_PRUNE_WALK=()
+KVS_PRUNE=()
 
 # Removed by the exit trap
 STAGING_DIR=""
@@ -129,6 +152,7 @@ NATIVE_STAGING_DIR=""
 NATIVE_DUMP_READY="no"
 TEMP_ERR_FILE=""
 UNITS_FILE=""
+LINKS_FILE=""
 # The size walk in progress: its lines arrive on descriptor 3.
 MEASURE_PID=""
 MEASURE_KB=0
@@ -148,6 +172,8 @@ Commands
             manifest (default)
   detect    Print what was found as key=value lines on stdout
   dump      Write the compressed database dump on stdout
+  links     Print the symbolic links of the site that lead out of it or
+            nowhere, as key=value lines on stdout
 
 Options
   -o, --output PATH   Archive path, or - for stdout. Default:
@@ -172,6 +198,19 @@ Options
                       Temporary files, compiled templates, hidden entries
                       and network mounts stay behind on their own
       --include PATH  Take a hidden entry or a network mount along after all
+      --exclude-pattern PATTERN
+                      links only: leave out of the search what the import
+                      transfer leaves out, a pattern as an exclude_N line of
+                      detect gives it (/PATH or /PATH/*); repeatable
+      --follow-external-links
+                      Archive what the symbolic links leading out of the
+                      site point to, after checking the list the archive
+                      stops with. Without it, only contents, or an entry
+                      right under it, linked to a directory on another
+                      disk owned by the site's owner or the user of its
+                      admin/data or tmp (not root), with no further link
+                      out of it, is followed; a link to a device, a FIFO
+                      or a socket always stops the archive
   -y, --yes           Do not ask for confirmation
   -h, --help          Show this help
 
@@ -232,6 +271,9 @@ kvs_cleanup() {
     wait 2> /dev/null || true
     if [ -n "$UNITS_FILE" ]; then
         rm -f -- "$UNITS_FILE"
+    fi
+    if [ -n "$LINKS_FILE" ]; then
+        rm -f -- "$LINKS_FILE"
     fi
     if [ -n "$TEMP_ERR_FILE" ]; then
         rm -f -- "$TEMP_ERR_FILE"
@@ -550,6 +592,44 @@ kvs_search_roots() {
     printf '%s' "${KVS_EXPORT_SEARCH_ROOTS:-$KVS_DEFAULT_SEARCH_ROOTS}"
 }
 
+# kvs_resolve <path>: KVS_RESOLVED is the path with every symbolic link
+# resolved, as readlink -f gives it, whole. A command substitution drops
+# the line breaks its output ends with, so a link to "dir<line break>"
+# would resolve to "dir": another path, or none. Status 1 when readlink
+# fails or gives nothing.
+kvs_resolve() {
+    local out nl=$'\n'
+
+    KVS_RESOLVED=""
+    out=$(readlink -f -- "$1" < /dev/null 2> /dev/null && printf x) || return 1
+    out=${out%x}
+    out=${out%"$nl"}
+    [ -n "$out" ] || return 1
+    KVS_RESOLVED=$out
+    return 0
+}
+
+# kvs_link_text <link>: KVS_LINK_TEXT is what the link holds (readlink),
+# whole, as kvs_resolve keeps a resolved path; empty when unreadable.
+kvs_link_text() {
+    local out nl=$'\n'
+
+    KVS_LINK_TEXT=""
+    out=$(readlink -- "$1" < /dev/null 2> /dev/null && printf x) || return 1
+    out=${out%x}
+    KVS_LINK_TEXT=${out%"$nl"}
+    return 0
+}
+
+# kvs_has_control_char <text>: a line break or another control character,
+# which a key=value line of the report cannot carry as it is.
+kvs_has_control_char() {
+    case $1 in
+        *[[:cntrl:]]*) return 0 ;;
+    esac
+    return 1
+}
+
 kvs_candidate_known() {
     local wanted="$1"
     local count=${#SITE_CANDIDATES[@]}
@@ -589,11 +669,17 @@ kvs_find_sites() {
         if [ -z "$root" ] || [ ! -d "$root" ]; then
             continue
         fi
-        while IFS= read -r setup; do
+        while IFS= read -r -d '' setup; do
             [ -n "$setup" ] || continue
             candidate=${setup%/admin/include/setup.php}
-            candidate=$(readlink -f -- "$candidate" < /dev/null 2> /dev/null) ||
-                candidate=${setup%/admin/include/setup.php}
+            if kvs_resolve "$candidate"; then
+                candidate=$KVS_RESOLVED
+            fi
+            # Printed as one line of the report, and named by the setup.
+            if kvs_has_control_char "$candidate"; then
+                kvs_warn "skipped $(kvs_printable "$candidate"): its path holds a line break or another control character"
+                continue
+            fi
             if kvs_candidate_known "$candidate"; then
                 continue
             fi
@@ -602,7 +688,7 @@ kvs_find_sites() {
         # (clients/client1/web1/web), DirectAdmin (user/domains/domain/
         # public_html) and Hestia (user/web/domain/public_html) put
         # admin/include/setup.php seven levels under /var/www or /home.
-        done < <(find "$root" -maxdepth 7 -name contents -prune -o -path '*/admin/include/setup.php' -print 2> /dev/null < /dev/null)
+        done < <(find "$root" -maxdepth 7 -name contents -prune -o -path '*/admin/include/setup.php' -print0 2> /dev/null < /dev/null)
     done
 }
 
@@ -622,7 +708,17 @@ kvs_resolve_site_dir() {
             kvs_error "$dir holds no KVS site (admin/include/setup.php is missing)"
             return 1
         fi
-        resolved=$(readlink -f -- "$dir" < /dev/null 2> /dev/null) || resolved=$dir
+        resolved=$dir
+        if kvs_resolve "$dir"; then
+            resolved=$KVS_RESOLVED
+        fi
+        # The report names it on one line, and the setup copies the
+        # directory it names: a path the line cannot carry would make the
+        # copy read another directory than the one searched.
+        if kvs_has_control_char "$resolved"; then
+            kvs_error "$(kvs_printable "$resolved"): the site directory resolves to a path holding a line break or another control character; give it a plain name"
+            return 1
+        fi
         SITE_DIR=$resolved
         return 0
     fi
@@ -1530,7 +1626,15 @@ kvs_path_inside_site() {
     local raw resolved link target
 
     [ -n "$SITE_DIR" ] || return 1
-    raw=$(kvs_dirname "$1")
+    # As kvs_dirname, kept whole: a directory name ending with a line
+    # break is another directory without it.
+    case $1 in
+        */*)
+            raw=${1%/*}
+            raw=${raw:-/}
+            ;;
+        *) raw=. ;;
+    esac
 
     # A name under the site, even one that resolves elsewhere through a
     # symlink the site holds (for example contents -> /data). A ".." segment
@@ -1544,8 +1648,8 @@ kvs_path_inside_site() {
             ;;
     esac
 
-    resolved=$(readlink -f -- "$raw" < /dev/null 2> /dev/null) || resolved=""
-    [ -n "$resolved" ] || return 1
+    kvs_resolve "$raw" || return 1
+    resolved=$KVS_RESOLVED
 
     # The real directory under the site.
     case "$resolved/" in
@@ -1557,8 +1661,8 @@ kvs_path_inside_site() {
     # every path.
     kvs_site_links
     for link in ${SITE_LINKS[@]+"${SITE_LINKS[@]}"}; do
-        target=$(readlink -f -- "$link" < /dev/null 2> /dev/null) || continue
-        [ -n "$target" ] || continue
+        kvs_resolve "$link" || continue
+        target=$KVS_RESOLVED
         [ "$target" != / ] || return 0
         case "$resolved/" in
             "$target"/*) return 0 ;;
@@ -2186,6 +2290,7 @@ kvs_print_detect() {
     printf 'nginx_config_source=%s\n' "$NGINX_CONFIG_SOURCE"
     printf 'nginx_config_lines=%s\n' "$NGINX_CONFIG_LINES"
     printf 'nginx_site_files=%s\n' "$NGINX_SITE_FILES"
+    kvs_print_external_links
     kvs_print_entry_lines
     kvs_print_nginx_config_lines
 }
@@ -2481,6 +2586,7 @@ kvs_command_detect() {
         return 1
     fi
     kvs_select_database_format || return 1
+    kvs_collect_external_links
     kvs_print_detect
     return 0
 }
@@ -2511,8 +2617,13 @@ kvs_archive_excludes() {
     TAR_EXCLUDES=()
     if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
         TAR_EXCLUDES=(--anchored)
+        # A name matches as it is written; only the "/*" that leaves what
+        # a directory holds behind is a wildcard, with the name escaped.
         for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
-            TAR_EXCLUDES+=("--exclude=${KVS_ARCHIVE_SITE_DIR}${pattern}")
+            case $pattern in
+                */\*) TAR_EXCLUDES+=(--wildcards "--exclude=${KVS_ARCHIVE_SITE_DIR}$(kvs_glob_escape "${pattern%/\*}")/*") ;;
+                *) TAR_EXCLUDES+=(--no-wildcards "--exclude=${KVS_ARCHIVE_SITE_DIR}${pattern}") ;;
+            esac
         done
     fi
     # The staging directory, by its unique name at any depth: tar may meet
@@ -2660,6 +2771,521 @@ kvs_refuse_dangling_links() {
     return 1
 }
 
+# A path as a find -path, tar or rsync wildcard pattern matching it alone.
+kvs_glob_escape() {
+    local rest="$1" char out=""
+
+    while [ -n "$rest" ]; do
+        char=${rest:0:1}
+        rest=${rest:1}
+        case $char in
+            '*' | '?' | '[' | ']' | "\\") out="$out\\$char" ;;
+            *) out="$out$char" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+# kvs_has_glob_char <text>: it holds a character a wildcard pattern reads
+# as one (* ? [ or a backslash).
+kvs_has_glob_char() {
+    case $1 in
+        *[\*\?\[\\]*) return 0 ;;
+    esac
+    return 1
+}
+
+# kvs_prune_paths <root> <root relative to the site, empty for the site>
+# KVS_PRUNE: the paths under root that a search reaching it through that
+# path leaves out, the excluded ones. A name holding a wildcard character
+# is kept in, so a pattern read otherwise can only make the list longer.
+kvs_prune_paths() {
+    local root="$1" shown="$2" pattern path
+
+    KVS_PRUNE=()
+    for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
+        path=${pattern#/}
+        path=${path%/\*}
+        kvs_has_glob_char "$path" && continue
+        if [ -n "$shown" ]; then
+            case $path in
+                "$shown"/*) path=${path#"$shown"/} ;;
+                *) continue ;;
+            esac
+        fi
+        KVS_PRUNE+=("$root/$path")
+    done
+}
+
+# kvs_walk_links <root> <output file>
+# The symbolic links under root, null separated in the output file, none
+# followed, without entering the paths of KVS_PRUNE (a network mount can
+# hold millions of files). There is no time limit: find reads the
+# directories, and needs no stat of every file where the filesystem
+# reports the type of its entries.
+kvs_walk_links() {
+    local root="$1" output="$2" path
+    local -a prune=()
+
+    : > "$output" || return 1
+    for path in ${KVS_PRUNE[@]+"${KVS_PRUNE[@]}"}; do
+        prune+=(-o -path "$(kvs_glob_escape "$path")")
+    done
+    if [ "${#prune[@]}" -gt 0 ]; then
+        prune=(\( "${prune[@]:1}" \) -prune -o)
+    fi
+    # A directory it cannot read is one the transfer, running as the same
+    # user, cannot read either: find's status is not the walk's.
+    find -H "$root" ${prune[@]+"${prune[@]}"} -type l -print0 > "$output" 2> /dev/null < /dev/null || true
+    return 0
+}
+
+# kvs_links_searched <directory> <its path relative to the site>
+# An earlier search already met every link the transfer finds under that
+# directory reached through that path: it walked a directory holding it
+# and left out nothing under it that this path keeps in (KVS_PRUNE, as
+# kvs_prune_paths sets it for that path). The walks are those of
+# kvs_collect_external_links, in WALKED_ROOT and WALKED_PRUNE.
+kvs_links_searched() {
+    local dir="$1" shown="$2" k=0 m pruned kept wanted
+    local -a walks=()
+
+    kvs_prune_paths "$dir" "$shown"
+    while [ "$k" -lt "${#WALKED_ROOT[@]}" ]; do
+        case "$dir/" in
+            "${WALKED_ROOT[$k]}"/*) walks+=("$k") ;;
+        esac
+        k=$((k + 1))
+    done
+    for k in ${walks[@]+"${walks[@]}"}; do
+        kept=yes
+        m=0
+        while [ "$m" -lt "${#WALKED_PRUNE[@]}" ]; do
+            if [ "${WALKED_PRUNE_WALK[$m]}" = "$k" ]; then
+                pruned=${WALKED_PRUNE[$m]}
+                # That walk never entered the directory.
+                case "$dir/" in
+                    "$pruned"/*)
+                        kept=no
+                        break
+                        ;;
+                esac
+                # It left out a part this path keeps in.
+                case "$pruned/" in
+                    "$dir"/*)
+                        kept=no
+                        for wanted in ${KVS_PRUNE[@]+"${KVS_PRUNE[@]}"}; do
+                            [ "$wanted" != "$pruned" ] || kept=yes
+                        done
+                        [ "$kept" = yes ] || break
+                        ;;
+                esac
+            fi
+            m=$((m + 1))
+        done
+        [ "$kept" = no ] || return 0
+    done
+    return 1
+}
+
+# A name as one printable line: a control character becomes "?".
+kvs_printable() {
+    printf '%s' "${1//[[:cntrl:]]/?}"
+}
+
+# kvs_entry_field <text>: KVS_FIELD is the text as a field of an
+# external_entry_N line, exact and on one line: "%", "|" and every control
+# character are written %XX (hexadecimal), anything else as it is.
+kvs_entry_field() {
+    local rest="$1" char code
+
+    case $rest in
+        *[[:cntrl:]%\|]*) ;;
+        *)
+            KVS_FIELD=$rest
+            return 0
+            ;;
+    esac
+    KVS_FIELD=""
+    while [ -n "$rest" ]; do
+        char=${rest:0:1}
+        rest=${rest:1}
+        case $char in
+            [[:cntrl:]] | % | \|)
+                printf -v code '%%%02X' "'$char"
+                KVS_FIELD="$KVS_FIELD$code"
+                ;;
+            *) KVS_FIELD="$KVS_FIELD$char" ;;
+        esac
+    done
+    return 0
+}
+
+# kvs_system_dir <resolved directory> <resolved site directory>
+# A directory no link is accepted to without asking, and that the search
+# does not enter: one holding the site (/ at worst), a system directory
+# or anything under /etc, /root, /boot, /proc, /sys, /dev and /run.
+kvs_system_dir() {
+    local dir="${1%/}" site="$2"
+
+    case "$site/" in
+        "$dir"/*) return 0 ;;
+    esac
+    case $dir in
+        '' | /home | /usr | /var | /etc | /etc/* | /root | /root/* | /boot | /boot/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/*) return 0 ;;
+    esac
+    return 1
+}
+
+# The numeric owner of a path, through the links.
+kvs_owner_uid() {
+    stat -L -c %u -- "$1" 2> /dev/null < /dev/null
+}
+
+# The symbolic links that lead out of the site, as the import transfer and
+# the archive meet them: rsync (--copy-unsafe-links) and tar (-h) follow
+# them and copy what they point to, read with the rights of the user they
+# run as, root most often, into files the PHP user owns on the new server.
+# The links inside a directory such a link leads to are followed too, and
+# so on, as are the links within the site or such a directory that lead
+# into a part an exclusion kept out of the search (an absolute one brings
+# that part back under its own path). A directory is searched again only
+# when an earlier search left out a part the new path keeps in
+# (kvs_links_searched); one holding the site or a system directory is not
+# entered at all (EXTERNAL_LINKS_COMPLETE is then "no"). A link met
+# through two paths may be listed under either. A link leads somewhere
+# when test -e follows it, as rsync and tar do; one that does to what
+# readlink -f cannot give is kind "unknown", to check, and the search is
+# then not complete either. Resolved paths are kept whole (kvs_resolve):
+# one ending with a line break is not taken for another one.
+#
+# A link is "allowed", copied without asking, when it is the layout of a
+# contents directory on another disk: contents itself or an entry right
+# under contents/, to a directory that is no system directory, whose owner
+# is the owner of the site or of its own contents, admin/data or tmp
+# directory (each where it is, not a link), root excluded, from which no
+# further link leads out, and whose path and target hold no control
+# character. A link to a device, a FIFO or a socket is "refused": the
+# import never copies those. Any other is "review": the setup asks first,
+# the archive needs --follow-external-links.
+#
+# EXTERNAL_LINKS holds the first EXTERNAL_LINKS_MAX as "state|kind|path ->
+# link text", refused first, then review; EXTERNAL_LINKS_COUNT counts them
+# all, EXTERNAL_LINKS_REVIEW the refused and review ones, of which
+# EXTERNAL_LINKS_SPECIAL are refused. EXTERNAL_LINKS_DIGEST is the sha256
+# of what those point to (kind and resolved target, each once), the same
+# whatever path the search met them through, which a later pass compares
+# with the set accepted before. EXTERNAL_ENTRIES holds every one as
+# "state|kind|path|resolved target", both written by kvs_entry_field. A
+# link to nothing copies nothing and is left out, as are those under an
+# excluded path; DANGLING_LINKS lists those of the site itself.
+kvs_collect_external_links() {
+    local site link rel target kind root owner state found line entry i=0 j k
+    local -a roots=() shown=() origin=() owners=()
+    local -a found_rel=() found_text=() found_kind=() found_target=() found_origin=() found_level=() found_state=()
+    local -a lines_refused=() lines_review=() lines_allowed=() digest_input=()
+
+    EXTERNAL_LINKS=()
+    EXTERNAL_ENTRIES=()
+    EXTERNAL_LINKS_COUNT=0
+    EXTERNAL_LINKS_REVIEW=0
+    EXTERNAL_LINKS_SPECIAL=0
+    EXTERNAL_LINKS_DIGEST=""
+    EXTERNAL_LINKS_COMPLETE="no"
+    DANGLING_LINKS=()
+    DANGLING_LINKS_COUNT=0
+    LINKS_IN_SITE=0
+    site=$SITE_DIR
+    if kvs_resolve "$SITE_DIR"; then
+        site=$KVS_RESOLVED
+    fi
+    LINKS_FILE=$(mktemp "${TMPDIR:-/tmp}/kvs-export-links.XXXXXX" 2> /dev/null) || {
+        LINKS_FILE=""
+        kvs_warn "could not create a file in ${TMPDIR:-/tmp} (full?) to look for the links leading out of the site"
+        return 0
+    }
+    EXTERNAL_LINKS_COMPLETE="yes"
+    owner=$(kvs_owner_uid "$site")
+    [ -z "$owner" ] || [ "$owner" = 0 ] || owners+=("$owner")
+    # The user PHP writes as owns admin/data and tmp, also where root owns
+    # the rest of the site. Only where they are themselves, not a link that
+    # whoever writes in the site could point at another user's directory.
+    for root in "$site/contents" "$site/admin/data" "$site/tmp"; do
+        [ -d "$root" ] || continue
+        kvs_resolve "$root" && [ "$KVS_RESOLVED" = "$root" ] || continue
+        owner=$(kvs_owner_uid "$root")
+        [ -z "$owner" ] || [ "$owner" = 0 ] || owners+=("$owner")
+    done
+    roots=("$site")
+    shown=("")
+    origin=(-1)
+    WALKED_ROOT=()
+    WALKED_PRUNE=()
+    WALKED_PRUNE_WALK=()
+    while [ "$i" -lt "${#roots[@]}" ]; do
+        # Two links met in one search may lead to the same directory.
+        if [ "$i" -gt 0 ] && kvs_links_searched "${roots[$i]}" "${shown[$i]}"; then
+            i=$((i + 1))
+            continue
+        fi
+        kvs_prune_paths "${roots[$i]}" "${shown[$i]}"
+        kvs_walk_links "${roots[$i]}" "$LINKS_FILE" || {
+            EXTERNAL_LINKS_COMPLETE="no"
+            i=$((i + 1))
+            continue
+        }
+        for root in ${KVS_PRUNE[@]+"${KVS_PRUNE[@]}"}; do
+            WALKED_PRUNE+=("$root")
+            WALKED_PRUNE_WALK+=("${#WALKED_ROOT[@]}")
+        done
+        WALKED_ROOT+=("${roots[$i]}")
+        while IFS= read -r -d '' link; do
+            [ "$i" -ne 0 ] || LINKS_IN_SITE=$((LINKS_IN_SITE + 1))
+            rel=${link#"${roots[$i]}"/}
+            [ -z "${shown[$i]}" ] || rel="${shown[$i]}/$rel"
+            # Whether it leads somewhere, as rsync and tar follow it.
+            if [ ! -e "$link" ]; then
+                if [ "$i" -eq 0 ]; then
+                    DANGLING_LINKS_COUNT=$((DANGLING_LINKS_COUNT + 1))
+                    if [ "${#DANGLING_LINKS[@]}" -lt "$EXTERNAL_LINKS_MAX" ]; then
+                        kvs_link_text "$link"
+                        DANGLING_LINKS+=("$(kvs_printable "$rel") -> $(kvs_printable "$KVS_LINK_TEXT")")
+                    fi
+                fi
+                continue
+            fi
+            # It does, to what readlink cannot tell: one to check, and the
+            # search is not complete, since it cannot go on from there.
+            if ! kvs_resolve "$link"; then
+                EXTERNAL_LINKS_COMPLETE="no"
+                kvs_link_text "$link"
+                found_rel+=("$rel")
+                found_text+=("$KVS_LINK_TEXT")
+                found_kind+=("unknown")
+                found_target+=("$link")
+                found_level+=("$i")
+                if [ "$i" -eq 0 ]; then
+                    found_origin+=("$((${#found_rel[@]} - 1))")
+                else
+                    found_origin+=("${origin[$i]}")
+                fi
+                continue
+            fi
+            target=$KVS_RESOLVED
+            # A link within the site, or within the directory searched,
+            # brings nothing new, unless it leads into a part this search
+            # left out: rsync copies an absolute one as what it points to.
+            found=no
+            case "$target/" in
+                "$site"/*) found=yes ;;
+            esac
+            if [ "$i" -gt 0 ]; then
+                case "$target/" in
+                    "${roots[$i]}"/*) found=yes ;;
+                esac
+            fi
+            if [ "$found" = yes ]; then
+                [ -d "$target" ] || continue
+                kvs_links_searched "$target" "$rel" && continue
+                roots+=("$target")
+                shown+=("$rel")
+                origin+=("${origin[$i]}")
+                continue
+            fi
+            if [ -d "$target" ]; then
+                kind="directory"
+            elif [ -f "$target" ]; then
+                kind="file"
+            else
+                kind="special"
+            fi
+            j=${#found_rel[@]}
+            kvs_link_text "$link"
+            found_rel+=("$rel")
+            found_text+=("$KVS_LINK_TEXT")
+            found_kind+=("$kind")
+            found_target+=("$target")
+            found_level+=("$i")
+            if [ "$i" -eq 0 ]; then
+                found_origin+=("$j")
+            else
+                found_origin+=("${origin[$i]}")
+            fi
+            [ "$kind" = directory ] || continue
+            if kvs_system_dir "$target" "$site"; then
+                EXTERNAL_LINKS_COMPLETE="no"
+                continue
+            fi
+            kvs_links_searched "$target" "$rel" && continue
+            roots+=("$target")
+            shown+=("$rel")
+            origin+=("${found_origin[$j]}")
+        done < "$LINKS_FILE"
+        i=$((i + 1))
+    done
+    rm -f -- "$LINKS_FILE"
+    LINKS_FILE=""
+
+    j=0
+    while [ "$j" -lt "${#found_rel[@]}" ]; do
+        state="review"
+        if [ "${found_kind[$j]}" = special ]; then
+            state="refused"
+        elif [ "${found_level[$j]}" -eq 0 ] && [ "${found_kind[$j]}" = directory ] &&
+            kvs_allowed_layout "${found_rel[$j]}" "${found_target[$j]}" "$site" ${owners[@]+"${owners[@]}"}; then
+            state="allowed"
+            k=0
+            while [ "$k" -lt "${#found_rel[@]}" ]; do
+                if [ "$k" -ne "$j" ] && [ "${found_origin[$k]}" -eq "$j" ]; then
+                    state="review"
+                    break
+                fi
+                k=$((k + 1))
+            done
+        fi
+        found_state+=("$state")
+        line="$state|${found_kind[$j]}|$(kvs_printable "${found_rel[$j]}") -> $(kvs_printable "${found_text[$j]}")"
+        kvs_entry_field "${found_rel[$j]}"
+        entry="$state|${found_kind[$j]}|$KVS_FIELD"
+        kvs_entry_field "${found_target[$j]}"
+        EXTERNAL_ENTRIES+=("$entry|$KVS_FIELD")
+        EXTERNAL_LINKS_COUNT=$((EXTERNAL_LINKS_COUNT + 1))
+        if [ "$state" = allowed ]; then
+            lines_allowed+=("$line")
+        else
+            if [ "$state" = refused ]; then
+                lines_refused+=("$line")
+            else
+                lines_review+=("$line")
+            fi
+            EXTERNAL_LINKS_REVIEW=$((EXTERNAL_LINKS_REVIEW + 1))
+            [ "$state" != refused ] || EXTERNAL_LINKS_SPECIAL=$((EXTERNAL_LINKS_SPECIAL + 1))
+            digest_input+=("${found_kind[$j]}|${found_target[$j]}")
+        fi
+        j=$((j + 1))
+    done
+    for line in ${lines_refused[@]+"${lines_refused[@]}"} ${lines_review[@]+"${lines_review[@]}"} ${lines_allowed[@]+"${lines_allowed[@]}"}; do
+        [ "${#EXTERNAL_LINKS[@]}" -lt "$EXTERNAL_LINKS_MAX" ] || break
+        EXTERNAL_LINKS+=("$line")
+    done
+    if [ "${#digest_input[@]}" -gt 0 ] && command -v sha256sum > /dev/null 2>&1; then
+        EXTERNAL_LINKS_DIGEST=$(printf '%s\0' ${digest_input[@]+"${digest_input[@]}"} | LC_ALL=C sort -zu | sha256sum)
+        EXTERNAL_LINKS_DIGEST=${EXTERNAL_LINKS_DIGEST%% *}
+    fi
+    return 0
+}
+
+# kvs_allowed_layout <path> <resolved target> <resolved site> [owner uid...]
+# The link is the layout of a contents directory on another disk.
+kvs_allowed_layout() {
+    local rel="$1" target="$2" site="$3" owner uid
+
+    shift 3
+    case $rel in
+        contents) ;;
+        contents/*/* | contents/) return 1 ;;
+        contents/*) ;;
+        *) return 1 ;;
+    esac
+    # Shown with "?" in the list: never taken without a question.
+    kvs_has_control_char "$rel$target" && return 1
+    kvs_system_dir "$target" "$site" && return 1
+    owner=$(kvs_owner_uid "$target")
+    [ -n "$owner" ] || return 1
+    for uid in "$@"; do
+        [ "$uid" != "$owner" ] || return 0
+    done
+    return 1
+}
+
+# The lines of the links leading out of the site and of the links to
+# nothing, numbered, for detect and links.
+kvs_print_external_links() {
+    local i=0
+
+    printf 'external_links=%s\n' "$EXTERNAL_LINKS_COUNT"
+    printf 'external_links_review=%s\n' "$EXTERNAL_LINKS_REVIEW"
+    printf 'external_links_special=%s\n' "$EXTERNAL_LINKS_SPECIAL"
+    printf 'external_links_digest=%s\n' "$EXTERNAL_LINKS_DIGEST"
+    printf 'external_links_complete=%s\n' "$EXTERNAL_LINKS_COMPLETE"
+    while [ "$i" -lt "${#EXTERNAL_LINKS[@]}" ]; do
+        printf 'external_link_%s=%s\n' "$((i + 1))" "${EXTERNAL_LINKS[$i]}"
+        i=$((i + 1))
+    done
+    # Every one of them, exact, for the setup to compare the links found
+    # again after the copy with the ones it showed (kvs_entry_field).
+    i=0
+    while [ "$i" -lt "${#EXTERNAL_ENTRIES[@]}" ]; do
+        printf 'external_entry_%s=%s\n' "$((i + 1))" "${EXTERNAL_ENTRIES[$i]}"
+        i=$((i + 1))
+    done
+}
+
+# links: the symbolic links of a site directory as the setup copies it,
+# whole: those leading out of it and those to nothing. --exclude-pattern
+# leaves out what the transfer from the old server leaves out, as the
+# exclude_N lines of detect name it, for the search the setup runs again
+# once the files are in.
+kvs_command_links() {
+    local i=0
+
+    kvs_resolve_site_dir || return $?
+    EXCLUDE_PATTERNS=(${OPT_EXCLUDE_PATTERNS[@]+"${OPT_EXCLUDE_PATTERNS[@]}"})
+    kvs_collect_external_links
+    printf 'kvs_export=1\n'
+    printf 'site_dir=%s\n' "$SITE_DIR"
+    printf 'links=%s\n' "$LINKS_IN_SITE"
+    kvs_print_external_links
+    printf 'dangling_links=%s\n' "$DANGLING_LINKS_COUNT"
+    while [ "$i" -lt "${#DANGLING_LINKS[@]}" ]; do
+        printf 'dangling_link_%s=%s\n' "$((i + 1))" "${DANGLING_LINKS[$i]}"
+        i=$((i + 1))
+    done
+    return 0
+}
+
+# Before tar follows them: the links leading out of the site that are not
+# the layout of a contents directory on another disk stop the archive,
+# unless --follow-external-links says they were checked; a link to a
+# device, a FIFO or a socket stops it in any case.
+kvs_refuse_external_links() {
+    local line state kind
+
+    kvs_collect_external_links
+    if [ "$EXTERNAL_LINKS_REVIEW" -eq 0 ] && [ "$EXTERNAL_LINKS_COMPLETE" = yes ]; then
+        [ "$EXTERNAL_LINKS_COUNT" -eq 0 ] || kvs_say "Following $EXTERNAL_LINKS_COUNT link(s) of a contents directory on another disk"
+        return 0
+    fi
+    # Not one listed, and the search did not finish: it could not run.
+    if [ "$EXTERNAL_LINKS_REVIEW" -eq 0 ]; then
+        if [ "$OPT_FOLLOW_EXTERNAL_LINKS" = yes ]; then
+            kvs_warn "the search for symbolic links leading out of the site could not run (see above); --follow-external-links: tar follows whatever they point to"
+            return 0
+        fi
+        kvs_error "the search for symbolic links leading out of the site could not run (see above), so what tar would follow is not known; pass --follow-external-links to archive it anyway"
+        return 1
+    fi
+    if [ "$EXTERNAL_LINKS_SPECIAL" -gt 0 ]; then
+        kvs_error "the site holds $EXTERNAL_LINKS_SPECIAL symbolic link(s) leading out of it to a device, a FIFO or a socket; remove them or leave them behind with --exclude <path>:"
+    elif [ "$OPT_FOLLOW_EXTERNAL_LINKS" = yes ]; then
+        kvs_warn "following $EXTERNAL_LINKS_REVIEW symbolic link(s) leading out of the site (--follow-external-links): tar archives what they point to, read as $(id -un 2> /dev/null || echo this user):"
+    else
+        kvs_error "the site holds $EXTERNAL_LINKS_REVIEW symbolic link(s) leading out of it, outside the layout of a contents directory on another disk: tar would archive what they point to, read as $(id -un 2> /dev/null || echo this user). Leave them behind with --exclude <path>, or pass --follow-external-links once you have checked them:"
+    fi
+    for line in ${EXTERNAL_LINKS[@]+"${EXTERNAL_LINKS[@]}"}; do
+        state=${line%%|*}
+        line=${line#*|}
+        kind=${line%%|*}
+        [ "$state" != allowed ] || continue
+        [ "$EXTERNAL_LINKS_SPECIAL" -eq 0 ] || [ "$state" = refused ] || continue
+        kvs_say "  $kind: ${line#*|}"
+    done
+    [ "$EXTERNAL_LINKS_REVIEW" -le "$EXTERNAL_LINKS_MAX" ] || kvs_say "  and more ($EXTERNAL_LINKS_REVIEW in all)"
+    [ "$EXTERNAL_LINKS_COMPLETE" = yes ] || kvs_say "  The search did not enter a directory holding the site or a system directory: tar may follow more."
+    [ "$EXTERNAL_LINKS_SPECIAL" -eq 0 ] || return 1
+    [ "$OPT_FOLLOW_EXTERNAL_LINKS" = yes ]
+}
+
 kvs_command_archive() {
     local stamp
     local output
@@ -2697,6 +3323,7 @@ kvs_command_archive() {
     fi
     if [ "$OPT_DUMP_ONLY" != "yes" ]; then
         kvs_refuse_dangling_links || return 1
+        kvs_refuse_external_links || return 1
     fi
     if ! kvs_confirm "Continue? [Y/n]"; then
         kvs_say "Aborted, nothing was written."
@@ -2918,6 +3545,26 @@ kvs_parse_arguments() {
                 OPT_ASSUME_YES="yes"
                 shift
                 ;;
+            --follow-external-links)
+                OPT_FOLLOW_EXTERNAL_LINKS="yes"
+                shift
+                ;;
+            --exclude-pattern)
+                if [ $# -lt 2 ]; then
+                    kvs_error "$1 needs a pattern as an exclude_N line of detect gives it"
+                    return 1
+                fi
+                case "$2/" in
+                    */../* | */./* | *//*) ;;
+                    /?*)
+                        OPT_EXCLUDE_PATTERNS+=("$2")
+                        shift 2
+                        continue
+                        ;;
+                esac
+                kvs_error "--exclude-pattern takes /PATH or /PATH/* under the site directory, got '$(kvs_printable "$2")'"
+                return 1
+                ;;
             -h | --help)
                 kvs_usage
                 exit 0
@@ -2964,8 +3611,12 @@ kvs_parse_arguments() {
         auto | sql | directory) ;;
         *) kvs_error "--database-format must be auto, sql or directory"; return 1 ;;
     esac
+    if [ "${#OPT_EXCLUDE_PATTERNS[@]}" -gt 0 ] && [ "$first" != links ]; then
+        kvs_error "--exclude-pattern goes with the links command"
+        return 1
+    fi
     case $first in
-        archive | detect | dump)
+        archive | detect | dump | links)
             OPT_COMMAND=$first
             OPT_SITE_DIR=$second
             ;;
@@ -2991,6 +3642,7 @@ main() {
     case $OPT_COMMAND in
         detect) kvs_command_detect ;;
         dump) kvs_command_dump ;;
+        links) kvs_command_links ;;
         archive) kvs_command_archive ;;
         *)
             kvs_error "unknown command: $OPT_COMMAND"

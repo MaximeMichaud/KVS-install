@@ -52,16 +52,30 @@ excluded() {
     rm -rf "${site:?}/$name"
 }
 
-# carried <name> <case>: an exclude of that name does not break the transfer.
-# tar reads its excludes as wildcards, where a backslash escapes the next
-# character, so such a name is not matched exactly; it must still be passed
-# intact and harm nothing.
-carried() {
-    local name="$1" dest="$TEST_DIR/dest"
-    mkdir -p "$site/$name"
-    run_fallback "$dest" "/$name" || fail "$login_shell, $2: the transfer failed: $(cat "$TEST_DIR/out")"
-    [ -f "$dest/index.php" ] || fail "$login_shell, $2: the site files did not come through: $(cat "$TEST_DIR/out")"
-    rm -rf "${site:?}/$name"
+# literal <name> <sibling> <case>: tar reads an exclude as a wildcard unless
+# told otherwise, where [1] matches the character 1 and a backslash escapes
+# the next one: the name alone stays behind, the sibling such a reading
+# would match comes through.
+literal() {
+    local name="$1" sibling="$2" dest="$TEST_DIR/dest"
+    mkdir -p "$site/$sibling"
+    printf 'kept\n' > "$site/$sibling/kept.txt"
+    excluded "$name" "$3"
+    [ -f "$dest/$sibling/kept.txt" ] || fail "$login_shell, $3: '$sibling' must not be read as matching '$name'"
+    rm -rf "${site:?}/$sibling"
+}
+
+# children <name> <sibling> <case>: what is under the name stays behind,
+# the name itself and a sibling a wildcard reading would match come through.
+children() {
+    local name="$1" sibling="$2" dest="$TEST_DIR/dest"
+    mkdir -p "$site/$name" "$site/$sibling"
+    printf 'left\n' > "$site/$name/left.txt"
+    printf 'kept\n' > "$site/$sibling/kept.txt"
+    run_fallback "$dest" "/$name/*" || fail "$login_shell, $3: the transfer failed: $(cat "$TEST_DIR/out")"
+    [ -d "$dest/$name" ] && [ ! -e "$dest/$name/left.txt" ] || fail "$login_shell, $3: what is under '$name' must stay behind, the directory must come"
+    [ -f "$dest/$sibling/kept.txt" ] || fail "$login_shell, $3: '$sibling' must not be read as matching '$name'"
+    rm -rf "${site:?}/$name" "${site:?}/$sibling"
 }
 
 shells=(bash sh)
@@ -82,8 +96,13 @@ for login_shell in "${shells[@]}"; do
     excluded '.dollar$(touch X)`id`;#!' "a name with shell expansions"
     excluded '.two  spaces	tab' "a name with spaces and a tab"
     excluded '.-dash' "a name with a dash"
-    carried '.back\slash' "a name with a backslash"
-    carried '.ends\' "a name ending in a backslash"
+    excluded '.back\slash' "a name with a backslash"
+    excluded '.ends\' "a name ending in a backslash"
+    literal '.c[1]' '.c1' "a name with brackets"
+    literal '.st*r' '.star' "a name with an asterisk"
+    literal '.q?' '.qx' "a name with a question mark"
+    literal '.b\x' '.bx' "a backslash before a plain character"
+    children '.st*r' '.star' "the entries under a name with an asterisk"
     # The login shell saw no data from the old server.
     while IFS= read -r words; do
         [ "$words" = "sh -s" ] || fail "$login_shell: the login shell was handed more than sh -s: $words"
@@ -91,4 +110,4 @@ for login_shell in "${shells[@]}"; do
     [ -s "$TEST_DIR/login-shell.log" ] || fail "$login_shell: the transfer never reached the old server"
 done
 
-echo "PASS: the tar fallback hands the old server's login shell only sh -s, and excludes every name (${shells[*]})"
+echo "PASS: the tar fallback hands the old server's login shell only sh -s, and excludes every name, literally (${shells[*]})"

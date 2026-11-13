@@ -557,37 +557,318 @@ import_external_search_host() {
     import_url_domain "$url"
 }
 
+# import_glob_escape <text>: the text as an rsync or tar wildcard pattern
+# matching it alone.
+import_glob_escape() {
+    local rest="$1" char out=""
+
+    while [ -n "$rest" ]; do
+        char=${rest:0:1}
+        rest=${rest:1}
+        case "$char" in
+            '*' | '?' | '[' | ']' | "\\") out="$out\\$char" ;;
+            *) out="$out$char" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+# import_show_external_links <report> <how the source is read>
+# The symbolic links leading out of the site that the exporter's report
+# (detect or links) lists. The copy follows them: what they point to is
+# read on the source with the rights of the copy and lands here as files
+# PHP owns. The layout of a contents directory on another disk is copied
+# without a question; the others are asked about first, and a link to a
+# device, a FIFO or a socket stops the import. The exporter lists the
+# first 20 and counts them all.
+import_show_external_links() {
+    local report="$1" reader="$2" count review complete state kind link lines listed
+
+    count=$(import_kv "$report" external_links)
+    review=$(import_kv "$report" external_links_review)
+    complete=$(import_kv "$report" external_links_complete)
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    [[ "$review" =~ ^[0-9]+$ ]] || review=0
+    if [ "$count" -eq 0 ]; then
+        [ "$complete" != no ] ||
+            echo -e "  ${YELLOW:-}The search for symbolic links leading out of the site could not run (see the messages above): what the copy would follow is not known.${NC:-}"
+        return 0
+    fi
+    if [ "$review" -gt 0 ]; then
+        echo -e "  ${YELLOW:-}Links leading out of the site ($count, $review to check): the copy brings what they point to, read $reader, into files PHP owns here:${NC:-}"
+    else
+        echo "  Links leading out of the site ($count), a contents directory on another disk, copied with what they point to:"
+    fi
+    lines=$(sed -n 's/^external_link_[0-9]*=//p' "$report")
+    listed=0
+    while IFS='|' read -r state kind link; do
+        [ -n "$link" ] || continue
+        listed=$((listed + 1))
+        case "$state" in
+            allowed) echo "    $(printf '%-10s' "$kind") $link (contents on another disk)" ;;
+            refused) echo -e "    ${RED:-}$(printf '%-10s' "$kind") $link (a device, a FIFO or a socket: never copied)${NC:-}" ;;
+            *) echo "    $(printf '%-10s' "$kind") $link" ;;
+        esac
+    done <<< "$lines"
+    if [ "$count" -gt "$listed" ]; then
+        echo "    and $((count - listed)) more"
+    fi
+    if [ "$complete" = no ]; then
+        echo "    The search for them did not enter every directory they lead to (one holding the site, a system directory, or none at all when it could not run): the copy may follow more than listed."
+    fi
+}
+
+# import_confirm_external_links <report> <way out>
+# The copy follows the symbolic links that lead out of the site and copies
+# what they point to, read with the rights it runs with on the source
+# (root most often), into files the PHP user owns here: a link to
+# /etc/shadow or to / planted in the old site would hand those to PHP.
+# The caller has listed them (import_show_external_links); this asks
+# before anything is copied, when one of them is not the layout of a
+# contents directory on another disk, or when the search did not finish.
+# The same set as an earlier pass accepted (IMPORT_EXTERNAL_LINKS_ACCEPTED,
+# kept in .env) goes on without asking; IMPORT_EXTERNAL_LINKS=copy agrees
+# to any; a headless run without either stops, naming the way out the
+# caller gives. A link to a device, a FIFO or a socket always stops it.
+# Once agreed, IMPORT_EXTERNAL_LINKS_DIGEST holds the fingerprint of the
+# set for import_remember_external_links (empty when there is nothing to
+# remember). Status 0: copy, 1: stopped, 2: declined.
+import_confirm_external_links() {
+    local report="$1" way_out="$2" answer review special complete digest
+
+    IMPORT_EXTERNAL_LINKS_DIGEST=""
+    case "${IMPORT_EXTERNAL_LINKS:-}" in
+        ''|copy) ;;
+        *)
+            echo "ERROR: IMPORT_EXTERNAL_LINKS takes copy or nothing, got '$IMPORT_EXTERNAL_LINKS'" >&2
+            return 1
+            ;;
+    esac
+    review=$(import_kv "$report" external_links_review)
+    special=$(import_kv "$report" external_links_special)
+    complete=$(import_kv "$report" external_links_complete)
+    digest=$(import_kv "$report" external_links_digest)
+    [[ "$review" =~ ^[0-9]+$ ]] || review=0
+    [[ "$special" =~ ^[0-9]+$ ]] || special=0
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || digest=""
+    if [ "$special" -gt 0 ]; then
+        echo "ERROR: $special symbolic link(s) listed above lead out of the site to a device, a FIFO or a socket, which the import never copies. Remove them, then run the setup again." >&2
+        return 1
+    fi
+    if [ "$review" -eq 0 ] && [ "$complete" != no ]; then
+        return 0
+    fi
+    # A search that did not finish may hide a link: nothing to remember.
+    [ "$complete" != no ] || digest=""
+    if [ -n "$digest" ] && [ "$digest" = "${IMPORT_EXTERNAL_LINKS_ACCEPTED:-}" ]; then
+        echo "  The same links as an earlier pass accepted (IMPORT_EXTERNAL_LINKS_ACCEPTED in .env): copied with the site."
+        IMPORT_EXTERNAL_LINKS_DIGEST=$digest
+        return 0
+    fi
+    if [ "${IMPORT_EXTERNAL_LINKS:-}" = copy ]; then
+        echo "  IMPORT_EXTERNAL_LINKS=copy: what these links point to is copied with the site."
+        IMPORT_EXTERNAL_LINKS_DIGEST=$digest
+        return 0
+    fi
+    if [ "${HEADLESS:-}" = y ]; then
+        if [ "$review" -eq 0 ]; then
+            echo "ERROR: the search for symbolic links leading out of the site did not finish on the source (see the messages above), so what the copy would follow is not known. $way_out Or set IMPORT_EXTERNAL_LINKS=copy to copy whatever they point to." >&2
+        else
+            echo "ERROR: the copy would bring what the symbolic links listed above point to, outside the site, into files PHP owns here. $way_out Or set IMPORT_EXTERNAL_LINKS=copy once you have checked them." >&2
+        fi
+        return 1
+    fi
+    echo -n "Copy what these links point to along with the site? [y/N]: "
+    read -r answer || answer=""
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+        IMPORT_EXTERNAL_LINKS_DIGEST=$digest
+        return 0
+    fi
+    echo "Import cancelled. $way_out"
+    return 2
+}
+
+# import_remember_external_links
+# Keep in .env the fingerprint of the links the operator agreed to, so a
+# later pass asks again only when they change; forget it when there is
+# none to remember.
+import_remember_external_links() {
+    [ -f .env ] || return 0
+    if [ -n "${IMPORT_EXTERNAL_LINKS_DIGEST:-}" ]; then
+        set_env_value IMPORT_EXTERNAL_LINKS_ACCEPTED "$IMPORT_EXTERNAL_LINKS_DIGEST" || return 1
+        IMPORT_EXTERNAL_LINKS_ACCEPTED=$IMPORT_EXTERNAL_LINKS_DIGEST
+    elif [ -n "${IMPORT_EXTERNAL_LINKS_ACCEPTED:-}" ]; then
+        remove_env_value IMPORT_EXTERNAL_LINKS_ACCEPTED || return 1
+        IMPORT_EXTERNAL_LINKS_ACCEPTED=""
+    fi
+    return 0
+}
+
+# import_resolve_path <path>: IMPORT_RESOLVED is the path with every
+# symbolic link resolved, as readlink -f gives it, whole: a command
+# substitution drops the line breaks it ends with, which names another
+# directory. Status 1 when readlink fails.
+import_resolve_path() {
+    local out nl=$'\n'
+
+    IMPORT_RESOLVED=""
+    out=$(readlink -f -- "$1" </dev/null 2>/dev/null && printf x) || return 1
+    out=${out%x}
+    out=${out%"$nl"}
+    [ -n "$out" ] || return 1
+    IMPORT_RESOLVED=$out
+}
+
+# import_same_path <path> <path>: both resolve to the same path, kept whole
+# (import_resolve_path); a path that does not resolve is itself.
+import_same_path() {
+    local first="$1" second="$2"
+
+    if import_resolve_path "$first"; then first=$IMPORT_RESOLVED; fi
+    if import_resolve_path "$second"; then second=$IMPORT_RESOLVED; fi
+    [ "$first" = "$second" ]
+}
+
+# import_entry_path <field> <directory>: IMPORT_ENTRY_PATH is the
+# directory joined with the path of an external_entry_N line of the
+# exporter (written by its kvs_entry_field), when that path names a place
+# under the directory beyond doubt: no byte written %XX but "%" and "|"
+# (a control character), relative, without "." or "..". Status 1
+# otherwise.
+import_entry_path() {
+    local field="$1" directory="$2" rest
+
+    IMPORT_ENTRY_PATH=""
+    rest=${field//"%25"/}
+    rest=${rest//"%7C"/}
+    case "$rest" in
+        *%*) return 1 ;;
+    esac
+    field=${field//"%7C"/|}
+    field=${field//"%25"/%}
+    case "/$field/" in
+        //* | */./* | */../* | *//*) return 1 ;;
+    esac
+    IMPORT_ENTRY_PATH="$directory/$field"
+}
+
+# import_compare_external_links <report shown> <report after the copy> <destination> <source>
+# The copy follows the links it meets when it meets them, hours after the
+# search the operator saw on a large site: a link planted in between
+# brings what it points to into files PHP owns here. The exporter has
+# searched again (the same search, on the same source, with the same
+# exclusions), and every link it found now must lead to something the
+# list shown led to, of the same kind (external_entry_N, compared by kind
+# and resolved target, as the fingerprint does). Each other one is named,
+# and what it brought into the destination, its own path there, is
+# removed when that path can be named beyond doubt and stays under the
+# destination; otherwise the operator is told to remove it. A search that
+# could not finish now when it had before is a change too. Status 0: the
+# same links, 1: changed (or not known), the import must stop.
+import_compare_external_links() {
+    local shown="$1" after="$2" destination="$3" source="$4"
+    local resolved_destination line state kind rel target path parent name changed=0 incomplete=no
+    local -a removed=() manual=()
+
+    if [ "$(import_kv "$after" kvs_export)" != 1 ]; then
+        echo "ERROR: the symbolic links of the site on $source could not be listed again after the copy (see the messages above), so what the copy followed is not known. Check what came into $destination, then run the setup again." >&2
+        return 1
+    fi
+    if [ "$(import_kv "$after" site_dir)" != "$(import_kv "$shown" site_dir)" ]; then
+        echo "ERROR: the site directory on $source now resolves to $(import_kv "$after" site_dir), not to $(import_kv "$shown" site_dir) as when its links were listed. Check what came into $destination, then run the setup again." >&2
+        return 1
+    fi
+    if [ "$(import_kv "$after" external_links_complete)" = no ] && [ "$(import_kv "$shown" external_links_complete)" != no ]; then
+        incomplete=yes
+    fi
+    import_resolve_path "$destination" || {
+        echo "ERROR: $destination cannot be resolved" >&2
+        return 1
+    }
+    resolved_destination=$IMPORT_RESOLVED
+    while IFS= read -r line; do
+        IFS='|' read -r state kind rel target <<< "$line"
+        [ -n "$rel" ] || continue
+        changed=$((changed + 1))
+        [ "$changed" -gt 1 ] || echo -e "${RED:-}ERROR: symbolic links leading out of the site on $source changed after they were listed; the copy may have brought what they point to into $destination:${NC:-}" >&2
+        echo "    $(printf '%-10s' "$kind") $rel -> $target" >&2
+        if ! import_entry_path "$rel" "$resolved_destination"; then
+            manual+=("$rel")
+            continue
+        fi
+        path=$IMPORT_ENTRY_PATH
+        parent=${path%/*}
+        name=${path##*/}
+        if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+            continue
+        fi
+        # Only under the destination: a directory on the way may be a link
+        # the copy kept, inside the site.
+        if ! import_resolve_path "$parent"; then
+            manual+=("$rel")
+            continue
+        fi
+        case "$IMPORT_RESOLVED/" in
+            "$resolved_destination"/*) ;;
+            *)
+                manual+=("$rel")
+                continue
+                ;;
+        esac
+        if rm -rf -- "${IMPORT_RESOLVED:?}/$name" && [ ! -e "$IMPORT_RESOLVED/$name" ] && [ ! -L "$IMPORT_RESOLVED/$name" ]; then
+            removed+=("$path")
+        else
+            manual+=("$rel")
+        fi
+    done < <(LC_ALL=C awk '
+        !sub(/^external_entry_[0-9]+=/, "") { next }
+        { split($0, field, "|"); key = field[2] "|" field[4] }
+        FILENAME == ARGV[1] { known[key] = 1; next }
+        !(key in known) { print }
+    ' "$shown" "$after")
+    if [ "$changed" -eq 0 ] && [ "$incomplete" = no ]; then
+        return 0
+    fi
+    if [ "$changed" -eq 0 ]; then
+        echo -e "${RED:-}ERROR: the search for symbolic links leading out of the site on $source did not finish after the copy (see the messages above), while it had when they were listed: what the copy followed is not known. Check what came into $destination, then run the setup again.${NC:-}" >&2
+        return 1
+    fi
+    if [ "$incomplete" = yes ]; then
+        echo "  The search after the copy did not finish either (see the messages above): the copy may have followed more than listed here." >&2
+    fi
+    if [ "${#removed[@]}" -gt 0 ]; then
+        echo "  Removed from $destination, what those links brought:" >&2
+        printf '    %s\n' "${removed[@]}" >&2
+    fi
+    if [ "${#manual[@]}" -gt 0 ]; then
+        echo -e "  ${RED:-}Remove yourself what these links brought under $destination (their path there, as listed above, %XX standing for a byte the list cannot show as it is):${NC:-}" >&2
+        printf '    %s\n' "${manual[@]}" >&2
+    fi
+    echo "  The import stopped before anything else. Run the setup again: it lists the links again and asks about them." >&2
+    return 1
+}
+
 # import_place_site <source> <destination>
 # Copy the site into the destination unless the source already is the
 # destination. Ownership is left to the init container, which sets the
-# whole tree to the PHP user.
-# import_external_links <directory>
-# The symbolic links of a site that lead outside it or nowhere, one per
-# line as "<link> -> <target>". The container mounts the site directory
-# alone, so such a link resolves there only once its target is copied in
-# its place (what rsync does with --copy-unsafe-links) or mounted too.
-import_external_links() {
-    local dir="$1"
-    local resolved link target
-
-    resolved=$(readlink -f -- "$dir") || return 1
-    find "$dir" -type l -print0 2>/dev/null | while IFS= read -r -d '' link; do
-        target=$(readlink -e -- "$link" 2>/dev/null) || target=""
-        case "$target" in
-            "$resolved"/*) ;;
-            "") printf '%s -> %s (dangling)\n' "${link#"$dir"/}" "$(readlink -- "$link")" ;;
-            *) printf '%s -> %s\n' "${link#"$dir"/}" "$(readlink -- "$link")" ;;
-        esac
-    done
-}
-
+# whole tree to the PHP user. A symbolic link leading out of the site, or
+# an absolute one, is copied as what it points to, which only rsync does:
+# import_check_site_links already looked for links (IMPORT_SITE_LINKS,
+# yes or no); without it, the copy looks for one itself. Devices, FIFOs
+# and sockets are never copied: rsync skips them, and cp -a, which would
+# copy them as they are, runs only where rsync is missing and none of
+# them is found first.
 import_place_site() {
     local source="$1"
     local destination="$2"
     local resolved_source resolved_destination
 
-    resolved_source=$(readlink -f -- "$source") || return 1
-    resolved_destination=$(readlink -f -- "$destination" 2>/dev/null) || resolved_destination=$destination
+    import_resolve_path "$source" || return 1
+    resolved_source=$IMPORT_RESOLVED
+    resolved_destination=$destination
+    if import_resolve_path "$destination"; then
+        resolved_destination=$IMPORT_RESOLVED
+    fi
     if [ "$resolved_source" = "$resolved_destination" ]; then
         echo "Site files already in place at $destination"
     else
@@ -596,13 +877,21 @@ import_place_site() {
             echo "Resuming the copy of $source into $destination"
         fi
         import_mark_destination "$destination" "$resolved_source" || return 1
-        # Links leaving the site are copied with their targets, which only
-        # rsync does.
-        if [ -n "$(import_external_links "$resolved_source" | head -n 1)" ]; then
+        case "${IMPORT_SITE_LINKS:-}" in
+            no) ;;
+            yes) import_ensure_tool rsync || return 1 ;;
+            *)
+                if [ -n "$(find "$resolved_source" -type l -print -quit 2>/dev/null)" ]; then
+                    import_ensure_tool rsync || return 1
+                fi
+                ;;
+        esac
+        if ! command -v rsync >/dev/null 2>&1 &&
+            [ -n "$(find "$resolved_source" \( -type p -o -type b -o -type c -o -type s \) -print -quit 2>/dev/null)" ]; then
             import_ensure_tool rsync || return 1
         fi
         if command -v rsync >/dev/null 2>&1; then
-            rsync -a --copy-unsafe-links -- "$resolved_source/" "$destination/" || return 1
+            rsync -a --no-devices --no-specials --copy-unsafe-links -- "$resolved_source/" "$destination/" || return 1
         else
             cp -a -- "$resolved_source/." "$destination/" || return 1
         fi
@@ -1763,6 +2052,50 @@ import_remote_detect() {
     else
         import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s -- "${options[@]}" detect < "$exporter" > "$output"
     fi
+}
+
+# import_remote_links <exporter script> <site directory> <output file> [pattern...]
+# Run the exporter's links command on the old server, leaving out what the
+# transfer leaves out (the exclude_N patterns of the detection), as the
+# detection searched. The patterns are names of the old server: the script
+# goes to bash -s on its standard input behind a line setting the
+# arguments, quoted for that bash (import_shquote), never as words for the
+# login shell. The key=value report lands in the output file.
+import_remote_links() {
+    local exporter="$1"
+    local dir="$2"
+    local output="$3"
+    local pattern words=""
+
+    shift 3
+    import_remote_path_check "$dir" || return 1
+    for pattern in "$@"; do
+        words+=" --exclude-pattern $(import_shquote "$pattern")"
+    done
+    { printf 'set --%s links %s\n' "$words" "$(import_shquote "$dir")"; cat -- "$exporter"; } |
+        import_ssh "${IMPORT_REMOTE_PREFIX[@]}" bash -s > "$output"
+}
+
+# import_remote_recheck_links <report shown> <destination> [best-effort]
+# After the transfer: search the old server for the links leading out of
+# the site again and compare them with the report the operator saw
+# (import_compare_external_links). best-effort, after a failed transfer,
+# says nothing when the search cannot run (the connection may be gone).
+# Status 0: the same links; 1: changed, unknown, or the search failed.
+import_remote_recheck_links() {
+    local shown="$1" destination="$2" mode="${3:-}" after status=0
+
+    after=$(mktemp) || return 1
+    if ! import_remote_links "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$after" ${IMPORT_EXCLUDE_PATTERNS[@]+"${IMPORT_EXCLUDE_PATTERNS[@]}"} ||
+        [ "$(import_kv "$after" kvs_export)" != 1 ]; then
+        rm -f "$after"
+        [ "$mode" = best-effort ] && return 1
+        echo -e "${RED:-}ERROR: the symbolic links of the site on $IMPORT_SSH_TARGET could not be listed again after the transfer (see the messages above), so what it followed is not known. Check what came into $destination, then run the setup again.${NC:-}" >&2
+        return 1
+    fi
+    import_compare_external_links "$shown" "$after" "$destination" "$IMPORT_SSH_TARGET" || status=$?
+    rm -f "$after"
+    return "$status"
 }
 
 # import_remote_dump <exporter script> <site directory> <output file>
@@ -2962,7 +3295,7 @@ import_remote_files() (
     local destination="$2"
     local use_rsync="$3"
     local status=0
-    local pattern totals count_status files=0 bytes=0 site_files site_bytes site_entries=0
+    local pattern excluded totals count_status files=0 bytes=0 site_files site_bytes site_entries=0
     local scope saved saved_files saved_bytes saved_date counted="" sampler="" owner disks="" interval="${IMPORT_DISKSTATS_INTERVAL:-0}"
     local count_flag="" skip_count=no
     local jobs="${IMPORT_TRANSFER_JOBS:-1}" chunk="${IMPORT_TRANSFER_CHUNK:-20000}" chunks
@@ -2999,8 +3332,21 @@ import_remote_files() (
                 return 1
                 ;;
         esac
-        rsync_excludes+=("--exclude=$pattern")
-        tar_excludes+=("$(import_shquote "--exclude=.$pattern")")
+        # A name matches as it is written (".c[1]" is no wildcard): only the
+        # "/*" that leaves what a directory holds behind is one. rsync
+        # matches a pattern without * ? [ as plain text, a backslash
+        # included, and reads a backslash as an escape in any other.
+        excluded=${pattern%/\*}
+        if [ "$excluded" != "$pattern" ]; then
+            rsync_excludes+=("--exclude=$(import_glob_escape "$excluded")/*")
+            tar_excludes+=(--wildcards "$(import_shquote "--exclude=.$(import_glob_escape "$excluded")/*")")
+        else
+            case "$excluded" in
+                *[\*\?\[]*) rsync_excludes+=("--exclude=$(import_glob_escape "$excluded")") ;;
+                *) rsync_excludes+=("--exclude=$excluded") ;;
+            esac
+            tar_excludes+=(--no-wildcards "$(import_shquote "--exclude=.$excluded")")
+        fi
     done
     if [ "$use_rsync" = yes ]; then
         # The chunk lists take about 55 bytes a file, 0.6 GB for ten million
@@ -3051,7 +3397,7 @@ import_remote_files() (
         # of the rsync, so the copying rsyncs run under umask 0, as -a
         # gave it that mode whole; the 077 of this transfer would make it
         # private.
-        rsync_args=(-a -H -s --no-perms --chown=1000:1000 --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
+        rsync_args=(-a -H -s --no-perms --chown=1000:1000 --no-devices --no-specials --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
             "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$rsync_host:$dir/" "$destination/")
         if [ "$jobs" -gt 1 ] && command -v setsid >/dev/null 2>&1; then
             plan=$work

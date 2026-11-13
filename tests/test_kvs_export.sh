@@ -837,6 +837,613 @@ test_named_paths_are_normalised_and_a_missing_one_is_reported() {
     pass "named paths are normalised and a missing one is reported"
 }
 
+# The import transfer follows the links leading out of the site and copies
+# what they point to, read as root on the old server, into files PHP owns
+# on the new one. detect lists them, so the setup can ask first: the links
+# of the site, those inside a directory such a link leads to, never one
+# that stays inside, leads nowhere or sits under an excluded path.
+# Lines of the links in a report, without their numbers.
+external_lines() {
+    sed -n 's/^external_link_[0-9]*=//p' "$1"
+}
+
+has_external_line() {
+    external_lines "$1" | grep -Fxq -- "$2"
+}
+
+# Fixture directories owned by root cannot stand for a site: give them a
+# plain owner when the tests run as root.
+plain_owner() {
+    [ "$(id -u)" -ne 0 ] || chown -R 4242 "$@"
+}
+
+test_detect_lists_the_links_leading_out_of_the_site() {
+    local site="$TMP_ROOT/links-site" outside="$TMP_ROOT/links-outside" disk="$TMP_ROOT/links-disk"
+    local out="$TMP_ROOT/links.out" err="$TMP_ROOT/links.err" listed expected line digest
+
+    make_site "$site"
+    mkdir -p "$outside" "$disk/contents/sub" "$site/backup" "$site/admin/smarty/template-c" "$TMP_ROOT/links-tmp" "$TMP_ROOT/links-disk3/x"
+    echo "root only" > "$outside/secret"
+    chmod 600 "$outside/secret"
+    echo "on the disk" > "$disk/contents/sub/file"
+    ln -s "$outside/secret" "$site/contents/videos/innocent.txt"
+    ln -s ../links-outside/secret "$site/up"
+    ln -s "$disk/contents" "$site/store"
+    ln -s "$outside/secret" "$disk/contents/nested.txt"
+    ln -s sub/file "$disk/contents/inner"
+    ln -s "$site/contents/videos/1.mp4" "$disk/contents/back"
+    ln -s "$outside/secret" "$disk/contents/sub/left-behind"
+    ln -s videos "$site/contents/inside"
+    ln -s /nowhere/at/all "$site/contents/gone"
+    ln -s "$outside/missing" "$site/contents/gone-too"
+    ln -s "$outside/secret" "$site/backup/leak"
+    ln -s "$outside/secret" "$site/admin/smarty/template-c/leak"
+    ln -s "$TMP_ROOT/links-tmp" "$site/tmp"
+    ln -s "$outside/secret" "$TMP_ROOT/links-tmp/leak"
+
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude backup --exclude store/sub detect "$site" ||
+        fail "detect must succeed on a site with links leading out: $(cat "$err")"
+    assert_key "$out" external_links 4
+    assert_key "$out" external_links_review 4
+    assert_key "$out" external_links_special 0
+    assert_key "$out" external_links_complete yes
+    listed=$(external_lines "$out" | LC_ALL=C sort)
+    expected=$(printf '%s\n' "review|directory|store -> $disk/contents" "review|file|contents/videos/innocent.txt -> $outside/secret" \
+        "review|file|store/nested.txt -> $outside/secret" "review|file|up -> ../links-outside/secret" | LC_ALL=C sort)
+    [ "$listed" = "$expected" ] || fail "the links leading out, and only those, must be listed: $listed"
+    digest=$(detect_value "$out" external_links_digest)
+    [[ $digest =~ ^[0-9a-f]{64}$ ]] || fail "the links to check must have a fingerprint, got '$digest'"
+
+    # The chain goes on through every directory a link leads to: a link
+    # two and three links away is listed.
+    ln -s "$TMP_ROOT/links-disk3/x" "$disk/contents/a"
+    ln -s "$outside/secret" "$TMP_ROOT/links-disk3/x/evil"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude backup --exclude store/sub detect "$site" ||
+        fail "detect must succeed with a chain of links: $(cat "$err")"
+    [ "$(detect_value "$out" external_links)" = 6 ] || fail "the chain must list six links: $(external_lines "$out")"
+    assert_key "$out" external_links_complete yes
+    has_external_line "$out" "review|directory|store/a -> $TMP_ROOT/links-disk3/x" || fail "the link two links away must be listed: $(external_lines "$out")"
+    has_external_line "$out" "review|file|store/a/evil -> $outside/secret" || fail "the link three links away must be listed: $(external_lines "$out")"
+    [ "$(detect_value "$out" external_links_digest)" != "$digest" ] || fail "new links must change the fingerprint"
+    rm -f "$disk/contents/a"
+
+    # An absolute link back into a directory searched brings back what an
+    # exclusion left out of that search, under its own path, as rsync
+    # copies it: the part is searched again through that path.
+    ln -s "$disk/contents" "$disk/contents/again"
+    ln -s "$site/backup" "$site/contents/b"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude backup --exclude store/sub detect "$site" ||
+        fail "detect must succeed with links back into excluded parts: $(cat "$err")"
+    has_external_line "$out" "review|file|store/again/sub/left-behind -> $outside/secret" ||
+        fail "an excluded part brought back by a link must be searched: $(external_lines "$out")"
+    has_external_line "$out" "review|file|contents/b/leak -> $outside/secret" ||
+        fail "an excluded part of the site brought back by a link must be searched: $(external_lines "$out")"
+    external_lines "$out" | grep -Eq '\|(store/sub|backup)/' && fail "the excluded paths themselves stay out: $(external_lines "$out")"
+    assert_key "$out" external_links_complete yes
+    rm -f "$disk/contents/again" "$site/contents/b"
+    # So does one into a directory deep inside such a part.
+    mkdir -p "$site/backup/deeper"
+    ln -s "$outside/secret" "$site/backup/deeper/leak"
+    ln -s "$site/backup/deeper" "$site/contents/c"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude backup --exclude store/sub detect "$site" ||
+        fail "detect must succeed with a link deep into an excluded part: $(cat "$err")"
+    has_external_line "$out" "review|file|contents/c/leak -> $outside/secret" ||
+        fail "a directory inside an excluded part brought back by a link must be searched: $(external_lines "$out")"
+    rm -f "$site/contents/c"
+    rm -rf "$site/backup/deeper"
+
+    # Two links to one directory, met in one search: it is searched once.
+    ln -s "$disk/contents" "$site/contents/store-again"
+    mkdir -p "$TMP_ROOT/links-find-bin"
+    printf '#!/bin/bash\ncase " $* " in *" -type l "*) echo "$*" >> %q ;; esac\nexec %q "$@"\n' "$TMP_ROOT/links-find.log" "$(command -v find)" > "$TMP_ROOT/links-find-bin/find"
+    chmod +x "$TMP_ROOT/links-find-bin/find"
+    : > "$TMP_ROOT/links-find.log"
+    run_export "$TMP_ROOT/links-find-bin:$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed with two links to one directory: $(cat "$err")"
+    [ "$(grep -c " $disk/contents " "$TMP_ROOT/links-find.log")" -eq 1 ] || fail "a directory two links lead to must be searched once: $(cat "$TMP_ROOT/links-find.log")"
+    rm -f "$site/contents/store-again"
+
+    # --no-size skips the size, not the search for links.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude backup --exclude store/sub --no-size detect "$site" ||
+        fail "detect without the size must succeed: $(cat "$err")"
+    assert_key "$out" external_links 4
+    assert_key "$out" external_links_complete yes
+    assert_key "$out" external_links_digest "$digest"
+
+    # A directory holding the site (/ at worst) is listed, not walked.
+    make_site "$TMP_ROOT/links-holder/site"
+    ln -s "$outside/secret" "$TMP_ROOT/links-holder/beside"
+    ln -s .. "$TMP_ROOT/links-holder/site/up-there"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/links-holder/site" ||
+        fail "detect must succeed with a link to a directory holding the site: $(cat "$err")"
+    assert_key "$out" external_links 1
+    assert_key "$out" external_link_1 "review|directory|up-there -> .."
+    assert_key "$out" external_links_complete no
+
+    # A path holding a wildcard character is never taken for a pattern:
+    # the hidden .c[1] stays behind as a literal name, and the search does
+    # not skip it, so the link inside is listed.
+    mkdir -p "$site/.c[1]"
+    ln -s "$outside/secret" "$site/.c[1]/evil"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude backup --exclude store/sub detect "$site" ||
+        fail "detect must succeed on a name holding brackets: $(cat "$err")"
+    grep -Fxq 'exclude_1=/.c[1]' "$out" || fail "the hidden directory must stay behind: $(grep '^exclude_' "$out")"
+    has_external_line "$out" "review|file|.c[1]/evil -> $outside/secret" || fail "a link under a name holding brackets must be listed: $(external_lines "$out")"
+    rm -rf "$site/.c[1]"
+
+    # A control character in a name cannot break the report into new keys.
+    ln -s "$outside/secret" "$site/bad"$'\n'"external_links=0"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude backup --exclude store/sub --no-size detect "$site" ||
+        fail "detect must succeed on a name holding a line break: $(cat "$err")"
+    while IFS= read -r line; do
+        [[ $line =~ ^[a-z_0-9]+= ]] || fail "detect may only print key=value lines, got '$line'"
+    done < "$out"
+    assert_key "$out" external_links 5
+    [ "$(sed -n '/^external_links=/p' "$out" | wc -l)" -eq 1 ] || fail "a name must not add a key: $(cat "$out")"
+    rm -f "$site/bad"$'\n'"external_links=0"
+    pass "detect lists the links leading out of the site"
+}
+
+test_a_contents_directory_on_another_disk_needs_no_question() {
+    local site="$TMP_ROOT/allow-site" whole="$TMP_ROOT/allow-whole" disk="$TMP_ROOT/allow-disk"
+    local out="$TMP_ROOT/allow.out" err="$TMP_ROOT/allow.err" owner="$TMP_ROOT/allow-bin" real_stat digest plain_uid
+    local root_owned="$TMP_ROOT/allow-root-owned" other_owned="$TMP_ROOT/allow-other-owned" root_site="$TMP_ROOT/allow-root-site"
+
+    make_site "$site"
+    make_site "$whole"
+    mkdir -p "$disk/sources/0" "$disk/whole/videos" "$disk/other" "$disk/other2" "$site/contents/a" "$root_owned" "$other_owned"
+    echo source > "$disk/sources/0/s.mp4"
+    rm -rf "$whole/contents"
+    ln -s "$disk/whole" "$whole/contents"
+    ln -s "$disk/sources" "$site/contents/videos_sources"
+    plain_owner "$site" "$whole" "$disk" "$root_owned" "$other_owned"
+
+    # contents/videos_sources on another disk, the standard layout.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links 1
+    assert_key "$out" external_links_review 0
+    assert_key "$out" external_links_digest ""
+    assert_key "$out" external_links_complete yes
+    assert_key "$out" external_link_1 "allowed|directory|contents/videos_sources -> $disk/sources"
+
+    # contents itself on another disk.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$whole" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links_review 0
+    assert_key "$out" external_link_1 "allowed|directory|contents -> $disk/whole"
+
+    # A further link leading out of it makes both links ones to check.
+    ln -s "$disk/sources" "$disk/whole/videos_sources"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$whole" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links 2
+    assert_key "$out" external_links_review 2
+    has_external_line "$out" "review|directory|contents -> $disk/whole" || fail "contents leading further must be checked: $(external_lines "$out")"
+    has_external_line "$out" "review|directory|contents/videos_sources -> $disk/sources" || fail "the further link must be checked: $(external_lines "$out")"
+    rm -f "$disk/whole/videos_sources"
+
+    # Each condition, alone: deeper than one level, a file, outside
+    # contents, a system directory (not walked), root, another user.
+    real_stat=$(command -v stat)
+    plain_uid=$(id -u)
+    [ "$plain_uid" -ne 0 ] || plain_uid=4242
+    mkdir -p "$owner"
+    cat > "$owner/stat" <<STAT
+#!/bin/bash
+case " \$* " in
+    *" %u "*)
+        for arg; do
+            case \$arg in
+                "$root_owned" | "$root_site") echo 0; exit 0 ;;
+                "$other_owned") echo 4343; exit 0 ;;
+                /dev/shm) echo "$plain_uid"; exit 0 ;;
+            esac
+        done
+        ;;
+esac
+exec "$real_stat" "\$@"
+STAT
+    chmod +x "$owner/stat"
+    ln -s "$disk/other" "$site/contents/a/deep"
+    ln -s "$disk/sources/0/s.mp4" "$site/contents/one-file"
+    ln -s "$disk/other" "$site/top"
+    ln -s /etc "$site/contents/etc"
+    ln -s "$root_owned" "$site/contents/root-owned"
+    ln -s "$other_owned" "$site/contents/other-owned"
+    # A system directory the site's owner owns is no layout either: the
+    # search does not enter it, so nothing tells what lies further.
+    ln -s /dev/shm "$site/contents/shm"
+    run_export "$owner:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links 8
+    assert_key "$out" external_links_review 7
+    assert_key "$out" external_links_special 0
+    assert_key "$out" external_links_complete no
+    has_external_line "$out" "allowed|directory|contents/videos_sources -> $disk/sources" || fail "the layout must stay accepted: $(external_lines "$out")"
+    has_external_line "$out" "review|directory|contents/a/deep -> $disk/other" || fail "a deeper link must be checked: $(external_lines "$out")"
+    has_external_line "$out" "review|file|contents/one-file -> $disk/sources/0/s.mp4" || fail "a link to a file must be checked: $(external_lines "$out")"
+    has_external_line "$out" "review|directory|top -> $disk/other" || fail "a link outside contents must be checked: $(external_lines "$out")"
+    has_external_line "$out" "review|directory|contents/etc -> /etc" || fail "a system directory must be checked: $(external_lines "$out")"
+    has_external_line "$out" "review|directory|contents/root-owned -> $root_owned" || fail "a directory root owns must be checked: $(external_lines "$out")"
+    has_external_line "$out" "review|directory|contents/other-owned -> $other_owned" || fail "a directory of another user must be checked: $(external_lines "$out")"
+    has_external_line "$out" "review|directory|contents/shm -> /dev/shm" || fail "a system directory of the owner must be checked: $(external_lines "$out")"
+    external_lines "$out" | head -n 7 | grep -q '^allowed|' && fail "the links to check come first: $(external_lines "$out")"
+
+    # The fingerprint covers the links to check: the same set gives the
+    # same one, a changed target or a new link another, an accepted link
+    # changes nothing.
+    digest=$(detect_value "$out" external_links_digest)
+    run_export "$owner:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links_digest "$digest"
+    ln -s "$disk/other2" "$site/contents/also-sources"
+    run_export "$owner:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links_review 7
+    assert_key "$out" external_links_digest "$digest"
+    # The same target through another path is the same set.
+    mv "$site/top" "$site/top-renamed"
+    run_export "$owner:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links_digest "$digest"
+    rm -f "$site/top-renamed"
+    ln -s "$disk/other2" "$site/top"
+    run_export "$owner:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    [ "$(detect_value "$out" external_links_digest)" != "$digest" ] || fail "a changed target must change the fingerprint"
+
+    # Nor does a site root owns make one of a directory root owns.
+    make_site "$root_site"
+    ln -s "$root_owned" "$root_site/contents/videos_sources"
+    run_export "$owner:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$root_site" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_link_1 "review|directory|contents/videos_sources -> $root_owned"
+
+    # A link to a FIFO is refused, whatever its place.
+    mkfifo "$disk/fifo"
+    ln -s "$disk/fifo" "$site/contents/fifo"
+    run_export "$owner:$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links_special 1
+    assert_key "$out" external_link_1 "refused|special|contents/fifo -> $disk/fifo"
+    pass "a contents directory on another disk needs no question, any other link does"
+}
+
+test_the_link_search_has_no_deadline() {
+    local site="$TMP_ROOT/deadline-site" disk="$TMP_ROOT/deadline-disk" bare="$TMP_ROOT/deadline-bare"
+    local out="$TMP_ROOT/deadline.out" err="$TMP_ROOT/deadline.err" slow="$TMP_ROOT/deadline-bin" start
+
+    make_site "$site"
+    make_site "$bare"
+    mkdir -p "$disk/data" "$slow"
+    echo "root only" > "$disk/secret"
+    chmod 600 "$disk/secret"
+    ln -s "$disk/data" "$site/store"
+    ln -s "$disk/secret" "$disk/data/nested.txt"
+    # A size walk that never ends, a link search slower than the budget.
+    printf '#!/bin/bash\nexec sleep 60\n' > "$slow/du"
+    printf '#!/bin/bash\ncase " $* " in *" -type l "*) sleep 3 ;; esac\nexec %q "$@"\n' "$(command -v find)" > "$slow/find"
+    chmod +x "$slow/du" "$slow/find"
+    start=$SECONDS
+    run_export "$slow:$STUB_BIN:$MIN_BIN" "$out" "$err" --size-timeout 1 detect "$site" ||
+        fail "detect must succeed when the size runs out of time: $(cat "$err")"
+    [ $((SECONDS - start)) -lt 40 ] || fail "the size walk must still stop at its budget"
+    assert_key "$out" external_links 2
+    assert_key "$out" external_links_complete yes
+    has_external_line "$out" "review|file|store/nested.txt -> $disk/secret" || fail "the search must reach the link behind the first: $(external_lines "$out")"
+    grep -q "cut short" "$err" && grep -qi "link" <<< "$(grep "cut short" "$err")" && fail "the link search must not be cut: $(cat "$err")"
+
+    # A site without links: nothing listed and nothing left unknown, so a
+    # headless import goes on whatever the size walk took.
+    run_export "$slow:$STUB_BIN:$MIN_BIN" "$out" "$err" --size-timeout 1 detect "$bare" ||
+        fail "detect must succeed on a site without links: $(cat "$err")"
+    assert_key "$out" external_links 0
+    assert_key "$out" external_links_complete yes
+    pass "the link search keeps out of the size budget and has no deadline"
+}
+
+test_links_reports_every_link_of_a_site_directory() {
+    local site="$TMP_ROOT/linkscmd/real/site" outside="$TMP_ROOT/linkscmd/outside" alias="$TMP_ROOT/linkscmd/site-link"
+    local out="$TMP_ROOT/linkscmd.out" err="$TMP_ROOT/linkscmd.err"
+
+    make_site "$site"
+    mkdir -p "$outside" "$site/tmp"
+    echo "root only" > "$outside/secret"
+    chmod 600 "$outside/secret"
+    ln -s "$outside/secret" "$site/contents/videos/innocent.txt"
+    ln -s "$outside/secret" "$site/tmp/leak"
+    ln -s videos "$site/contents/inside"
+    ln -s /nowhere/at/all "$site/contents/gone"
+    ln -s "$site" "$alias"
+    # Named through a link to it, the site is searched where it is, and
+    # whole: the copy of a site directory leaves nothing behind.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$alias" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" kvs_export 1
+    assert_key "$out" site_dir "$site"
+    assert_key "$out" links 4
+    assert_key "$out" external_links 2
+    assert_key "$out" external_links_complete yes
+    has_external_line "$out" "review|file|contents/videos/innocent.txt -> $outside/secret" || fail "the link of the site must be listed: $(external_lines "$out")"
+    has_external_line "$out" "review|file|tmp/leak -> $outside/secret" || fail "nothing is left behind: $(external_lines "$out")"
+    assert_key "$out" dangling_links 1
+    assert_key "$out" dangling_link_1 "contents/gone -> /nowhere/at/all"
+
+    rm -f "$site/contents/videos/innocent.txt" "$site/tmp/leak" "$site/contents/inside" "$site/contents/gone"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$alias" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" links 0
+    assert_key "$out" external_links 0
+    assert_key "$out" external_links_complete yes
+    assert_key "$out" dangling_links 0
+    pass "links reports every link of a site directory"
+}
+
+# readlink -f prints a path that may end with a line break, and a command
+# substitution drops it: a link to the directory "dir<line break>" was
+# resolved to "dir", which does not exist, and taken for a link to nothing,
+# neither listed nor searched, while rsync and tar follow it. detect (what
+# the setup runs over SSH), links (a site directory) and archive see it
+# now, and the entry of the report names it exactly.
+test_a_name_ending_with_a_line_break_is_followed_as_the_copy_follows_it() {
+    local base="$TMP_ROOT/nl" dir site disk out="$TMP_ROOT/nl.out" err="$TMP_ROOT/nl.err" archive="$TMP_ROOT/nl.tar"
+    local stub="$TMP_ROOT/nl-bin" real_readlink status pattern
+
+    dir="$base/dir"$'\n'
+    mkdir -p "$dir" "$base/outside" "$base/disk/contents/videos"
+    echo data > "$dir/data.txt"
+    echo "root only" > "$base/outside/secret"
+    chmod 600 "$base/outside/secret"
+
+    # At the site level.
+    site="$base/site-a"
+    make_site "$site"
+    ln -s "$dir" "$site/contents/videos/x"
+    plain_owner "$site" "$base/disk"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --no-size detect "$site" || fail "detect must succeed: $(cat "$err")"
+    assert_key "$out" external_links 1
+    assert_key "$out" external_links_review 1
+    assert_key "$out" external_links_complete yes
+    assert_key "$out" external_link_1 "review|directory|contents/videos/x -> $base/dir?"
+    assert_key "$out" external_entry_1 "review|directory|contents/videos/x|$base/dir%0A"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_links 1
+    assert_key "$out" dangling_links 0
+    assert_key "$out" external_link_1 "review|directory|contents/videos/x -> $base/dir?"
+
+    # Searched like any directory a link leads to.
+    ln -s "$base/outside/secret" "$dir/inner"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_links 2
+    has_external_line "$out" "review|file|contents/videos/x/inner -> $base/outside/secret" ||
+        fail "the directory such a link leads to must be searched: $(external_lines "$out")"
+    rm -f "$dir/inner"
+
+    # One level below a contents directory on another disk, which the
+    # setup of a site directory takes without a question otherwise.
+    site="$base/site-b"
+    make_site "$site"
+    rm -rf "$site/contents"
+    ln -s "$base/disk/contents" "$site/contents"
+    ln -s "$dir" "$base/disk/contents/videos/x"
+    plain_owner "$site" "$base/disk"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_links 2
+    assert_key "$out" external_links_review 2
+    has_external_line "$out" "review|directory|contents -> $base/disk/contents" || fail "contents leading further must be checked: $(external_lines "$out")"
+    has_external_line "$out" "review|directory|contents/videos/x -> $base/dir?" || fail "the link below it must be listed: $(external_lines "$out")"
+
+    # Never the layout of a contents directory on another disk without a
+    # question: the list shows "?" for the line break. The entry writes
+    # "%", "|" and the line break %XX, and nothing else.
+    site="$base/site-e"
+    make_site "$site"
+    mkdir -p "$base/src"$'\n'
+    ln -s "$base/src"$'\n' "$site/contents/videos_sources"
+    plain_owner "$site" "$base/src"$'\n'
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_links_review 1
+    assert_key "$out" external_link_1 "review|directory|contents/videos_sources -> $base/src?"
+    ln -s "$base/outside/secret" "$site/contents/videos/a|b%c"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    grep -Fxq "external_entry_2=review|file|contents/videos/a%7Cb%25c|$base/outside/secret" "$out" ||
+        grep -Fxq "external_entry_1=review|file|contents/videos/a%7Cb%25c|$base/outside/secret" "$out" ||
+        fail "the entry must write % and | escaped: $(grep '^external_entry' "$out")"
+
+    # --exclude-pattern leaves out of links what the transfer leaves out,
+    # as detect names it; nothing but a path under the site, and links only.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude-pattern /contents/videos links "$base/site-a" ||
+        fail "links must take --exclude-pattern: $(cat "$err")"
+    assert_key "$out" external_links 0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude-pattern '/contents/videos/*' links "$base/site-a" ||
+        fail "links must take a /PATH/* pattern: $(cat "$err")"
+    assert_key "$out" external_links 0
+    for pattern in ../contents / //contents /contents/../.. contents; do
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude-pattern "$pattern" links "$base/site-a" &&
+            fail "--exclude-pattern $pattern must be refused"
+        grep -q 'takes /PATH or /PATH/\*' "$err" || fail "the refusal must say what it takes: $(cat "$err")"
+    done
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude-pattern /contents --no-size detect "$base/site-a" &&
+        fail "--exclude-pattern goes with links only"
+    grep -q 'goes with the links command' "$err" || fail "the refusal must say why: $(cat "$err")"
+
+    # The archive stops on it.
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o "$archive" archive "$base/site-a" || status=$?
+    [ "$status" -eq 1 ] || fail "the archive must stop on a link to such a name, got $status: $(cat "$err")"
+    grep -Fq "directory: contents/videos/x -> $base/dir?" "$err" || fail "the refusal must name the link: $(cat "$err")"
+    [ ! -e "$archive" ] || fail "no archive may be written"
+
+    # A link that leads somewhere readlink -f cannot tell is one to check,
+    # and the search is not complete: it cannot go on from there.
+    real_readlink=$(command -v readlink)
+    mkdir -p "$stub"
+    cat > "$stub/readlink" <<STUB
+#!/bin/bash
+case " \$* " in
+    *" -f "*) case \${@: -1} in */contents/videos/x) exit 1 ;; esac ;;
+esac
+exec "$real_readlink" "\$@"
+STUB
+    chmod +x "$stub/readlink"
+    run_export "$stub:$STUB_BIN:$MIN_BIN" "$out" "$err" links "$base/site-a" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_links 1
+    assert_key "$out" external_links_review 1
+    assert_key "$out" dangling_links 0
+    assert_key "$out" external_links_complete no
+    assert_key "$out" external_link_1 "review|unknown|contents/videos/x -> $base/dir?"
+
+    # The search for the site skips a directory whose path holds one.
+    make_site "$base/roots/good"
+    make_site "$base/roots/bad"$'\n'
+    KVS_EXPORT_SEARCH_ROOTS="$base/roots" run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --no-size detect ||
+        fail "the search must find the one site it can name: $(cat "$err") $(cat "$out")"
+    assert_key "$out" site_dir "$base/roots/good"
+    grep -q 'skipped .*control character' "$err" || fail "the skipped directory must be said: $(cat "$err")"
+
+    # A site directory that resolves to such a name is refused: the report
+    # names it on one line, and the copy would read another directory.
+    make_site "$base/site-c"$'\n'
+    ln -s "$base/site-c"$'\n' "$base/site-c-link"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$base/site-c-link" || status=$?
+    [ "$status" -ne 0 ] || fail "a site directory resolving to a name with a line break must be refused: $(cat "$out")"
+    grep -q 'control character' "$err" || fail "the refusal must say why: $(cat "$err")"
+
+    # The archive's output next to the directory a link of the site leads
+    # to, under the same name without the line break, is not inside the
+    # site; under that directory itself, it is.
+    site="$base/site-d"
+    make_site "$site"
+    mkdir -p "$base/out"$'\n' "$base/out"
+    ln -s "$base/out"$'\n' "$site/contents/store"
+    plain_owner "$site"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --follow-external-links -o "$base/out/a.tar" archive "$site" ||
+        fail "an output beside the target of a link of the site must be accepted: $(cat "$err")"
+    [ -s "$base/out/a.tar" ] || fail "the archive must be written"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --follow-external-links -o "$base/out"$'\n'"/a.tar" archive "$site" || status=$?
+    [ "$status" -ne 0 ] || fail "an output under the target of a link of the site must be refused"
+    grep -q 'is inside the site' "$err" || fail "the refusal must say why: $(cat "$err")"
+    pass "a link to a name ending with a line break is listed and followed as the copy follows it"
+}
+
+# A site root owns, PHP writing in its own admin/data or tmp, and contents
+# linked to a disk of that user: the standard layout of a contents
+# directory on another disk. The owner of admin/data or tmp counts as the
+# site's when the directory is where it seems, not reached through a link
+# whoever writes in the site could point at another user's directory.
+test_the_owner_of_admin_data_or_tmp_stands_for_the_site() {
+    local site="$TMP_ROOT/rootsite" disk="$TMP_ROOT/rootsite-disk" other="$TMP_ROOT/rootsite-other" moved="$TMP_ROOT/rootsite-moved"
+    local bin="$TMP_ROOT/rootsite-bin" out="$TMP_ROOT/rootsite.out" err="$TMP_ROOT/rootsite.err" real_stat
+
+    make_site "$site"
+    mkdir -p "$site/admin/data" "$site/tmp" "$disk/contents/videos" "$other" "$moved" "$bin"
+    rm -rf "$site/contents"
+    ln -s "$disk/contents" "$site/contents"
+    real_stat=$(command -v stat)
+    cat > "$bin/stat" <<STAT
+#!/bin/bash
+case " \$* " in
+    *" %u "*)
+        for arg; do
+            case \$arg in
+                "$site/admin/data") echo "\${FIXTURE_DATA_UID:-0}"; exit 0 ;;
+                "$site/tmp") echo "\${FIXTURE_TMP_UID:-0}"; exit 0 ;;
+                "$disk/contents" | "$other" | "$moved"/*) echo 4343; exit 0 ;;
+                "$site" | "$site"/*) echo 0; exit 0 ;;
+            esac
+        done
+        ;;
+esac
+exec "$real_stat" "\$@"
+STAT
+    chmod +x "$bin/stat"
+
+    # Root everywhere in the site: nothing stands for its owner.
+    run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_link_1 "review|directory|contents -> $disk/contents"
+    # admin/data, or tmp, of the user who owns the disk.
+    FIXTURE_DATA_UID=4343 run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_links_review 0
+    assert_key "$out" external_link_1 "allowed|directory|contents -> $disk/contents"
+    FIXTURE_TMP_UID=4343 run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_link_1 "allowed|directory|contents -> $disk/contents"
+    # Not when admin/data is a link to that user's directory.
+    rmdir "$site/admin/data"
+    ln -s "$other" "$site/admin/data"
+    FIXTURE_DATA_UID=4343 run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    assert_key "$out" external_link_1 "review|directory|contents -> $disk/contents"
+    # Nor when admin itself leads elsewhere.
+    rm -f "$site/admin/data"
+    mv "$site/admin" "$moved/admin"
+    mkdir -p "$moved/admin/data"
+    ln -s "$moved/admin" "$site/admin"
+    FIXTURE_DATA_UID=4343 run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
+    has_external_line "$out" "review|directory|contents -> $disk/contents" || fail "admin/data through a link must not count: $(external_lines "$out")"
+    pass "the owner of admin/data or tmp stands for the site's, where they are themselves"
+}
+
+test_the_archive_follows_links_out_only_when_told() {
+    local site="$TMP_ROOT/archlinks-site" disk="$TMP_ROOT/archlinks-disk" outside="$TMP_ROOT/archlinks-outside"
+    local archive="$TMP_ROOT/archlinks.tar" out="$TMP_ROOT/archlinks.out" err="$TMP_ROOT/archlinks.err" status
+
+    make_site "$site"
+    mkdir -p "$disk/sources/0" "$outside"
+    echo source > "$disk/sources/0/s.mp4"
+    echo "root only" > "$outside/secret"
+    chmod 600 "$outside/secret"
+    ln -s "$disk/sources" "$site/contents/videos_sources"
+    plain_owner "$site" "$disk"
+
+    # The standard layout needs no option.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o "$archive" archive "$site" ||
+        fail "the archive of a contents directory on another disk must be written: $(cat "$err")"
+    tar -tf "$archive" | grep -Fxq "www/contents/videos_sources/0/s.mp4" || fail "the sources must travel: $(tar -tf "$archive")"
+    grep -q "Following 1 link(s) of a contents directory on another disk" "$err" || fail "the followed link must be said: $(cat "$err")"
+    rm -f "$archive"
+
+    # Any other link stops it, before the dump, with the list.
+    ln -s "$outside/secret" "$site/contents/videos/leak.txt"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o "$archive" archive "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a link leading out must stop the archive, got $status"
+    grep -Fq "file: contents/videos/leak.txt -> $outside/secret" "$err" || fail "the refusal must name the link: $(cat "$err")"
+    grep -Fq -- "--follow-external-links" "$err" || fail "the refusal must give the way on: $(cat "$err")"
+    grep -Fq "directory: contents/videos_sources" "$err" && fail "the accepted link is not one to check: $(cat "$err")"
+    [ ! -e "$archive" ] || fail "no archive may be written"
+    grep -q "Dumping" "$err" && fail "the refusal must come before the dump: $(cat "$err")"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o - archive "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a link leading out must stop the archive on stdout, got $status"
+    [ ! -s "$out" ] || fail "nothing may reach stdout"
+
+    # Left behind, or followed once checked.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --exclude contents/videos/leak.txt -o "$archive" archive "$site" ||
+        fail "an excluded link must not stop the archive: $(cat "$err")"
+    tar -tf "$archive" | grep -Fq "www/contents/videos/leak.txt" && fail "the excluded link must stay behind"
+    rm -f "$archive"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --follow-external-links -o "$archive" archive "$site" ||
+        fail "--follow-external-links must let the archive go on: $(cat "$err")"
+    grep -q "^WARNING: following 1 symbolic link(s) leading out of the site" "$err" || fail "following them must be said: $(cat "$err")"
+    tar -tf "$archive" | grep -Fxq "www/contents/videos/leak.txt" || fail "the followed link must travel: $(tar -tf "$archive")"
+    rm -f "$archive"
+
+    # A search that could not run (no room for its list) stops it too,
+    # unless the option says to follow whatever is there.
+    mkdir -p "$TMP_ROOT/archlinks-bin"
+    printf '#!/bin/bash\ncase "$*" in *kvs-export-links.*) exit 1 ;; esac\nexec %q "$@"\n' "$(command -v mktemp)" > "$TMP_ROOT/archlinks-bin/mktemp"
+    chmod +x "$TMP_ROOT/archlinks-bin/mktemp"
+    status=0
+    run_export "$TMP_ROOT/archlinks-bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o "$archive" archive "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a search that could not run must stop the archive, got $status: $(cat "$err")"
+    grep -q "search for symbolic links leading out of the site could not run" "$err" || fail "the refusal must say the search did not run: $(cat "$err")"
+    [ ! -e "$archive" ] || fail "no archive may be written"
+    run_export "$TMP_ROOT/archlinks-bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --follow-external-links -o "$archive" archive "$site" ||
+        fail "--follow-external-links must let an archive without a search go on: $(cat "$err")"
+    rm -f "$archive"
+
+    # A link to a FIFO stops it, the option or not.
+    mkfifo "$outside/fifo"
+    ln -s "$outside/fifo" "$site/contents/fifo"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --follow-external-links -o "$archive" archive "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a link to a FIFO must stop the archive, got $status"
+    grep -Fq "special: contents/fifo -> $outside/fifo" "$err" || fail "the refusal must name the FIFO link: $(cat "$err")"
+    grep -Fq "leak.txt" "$err" && fail "only the refused link is listed: $(cat "$err")"
+    [ ! -e "$archive" ] || fail "no archive may be written"
+    rm -f "$site/contents/fifo" "$site/contents/videos/leak.txt"
+    pass "the archive follows links leading out only when told"
+}
+
 test_the_size_walk_can_be_skipped() {
     local site="$TMP_ROOT/nosize-site"
     local out="$TMP_ROOT/nosize.out"
@@ -1818,7 +2425,9 @@ test_the_archive_never_takes_in_its_own_staging_directory() {
     # it), a bind mount, or a TMPDIR under a followed target for the stdout
     # archive. tar itself must leave its staging directory out, or it
     # recurses through the staging www link until the disk is full. Bounded,
-    # since that recursion only ends when tar crashes.
+    # since that recursion only ends when tar crashes. A link leading out
+    # of the directory contents leads to is no plain layout of a contents
+    # directory on another disk: --follow-external-links says it was checked.
     make_site "$site"
     mkdir -p "$vol/data" "$vol/disk2"
     mv "$site/contents"/* "$vol/data/" && rmdir "$site/contents"
@@ -1826,7 +2435,7 @@ test_the_archive_never_takes_in_its_own_staging_directory() {
     ln -s "$vol/disk2" "$vol/data/videos_sources"
     status=0
     PATH="$STUB_BIN:$MIN_BIN" "$(command -v timeout)" 60 "$BASH" "$EXPORT_SCRIPT" \
-        -y --no-size -o "$vol/disk2/export.tar" archive "$site" > "$out" 2> "$err" < /dev/null || status=$?
+        -y --no-size --follow-external-links -o "$vol/disk2/export.tar" archive "$site" > "$out" 2> "$err" < /dev/null || status=$?
     [ "$status" -eq 0 ] || fail "an output reached through a nested symlink must not recurse, got $status: $(tail -c 300 "$err")"
     listing=$(tar -tf "$vol/disk2/export.tar")
     grep -Fxq "www/contents/videos/1.mp4" <<< "$listing" || fail "the site must be archived: $listing"
@@ -1839,7 +2448,7 @@ test_the_archive_never_takes_in_its_own_staging_directory() {
     ln -s "$vol" "$site/bigdata"
     status=0
     TMPDIR="$vol/tmp" PATH="$STUB_BIN:$MIN_BIN" "$(command -v timeout)" 60 "$BASH" "$EXPORT_SCRIPT" \
-        -y --no-size -o - archive "$site" > "$out" 2> "$err" < /dev/null || status=$?
+        -y --no-size --follow-external-links -o - archive "$site" > "$out" 2> "$err" < /dev/null || status=$?
     [ "$status" -eq 0 ] || fail "a stdout archive staged under a followed target must not recurse, got $status: $(tail -c 300 "$err")"
     listing=$(tar -tf "$out")
     grep -Fxq "www/admin/include/setup.php" <<< "$listing" || fail "the site must be on stdout: $listing"
@@ -1850,7 +2459,7 @@ test_the_archive_never_takes_in_its_own_staging_directory() {
     # An output next to the site, named through the site path and "..", is
     # outside it and accepted.
     status=0
-    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o "$site/../self-next.tar" archive "$site" || status=$?
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --follow-external-links -o "$site/../self-next.tar" archive "$site" || status=$?
     [ "$status" -eq 0 ] || fail "an output beside the site named with .. must be accepted: $(cat "$err")"
     [ -s "$TMP_ROOT/self-next.tar" ] || fail "the output beside the site must be written"
 
@@ -2405,6 +3014,12 @@ test_a_full_temporary_directory_does_not_shrink_the_site_size
 test_detect_reports_the_entries_and_what_stays_behind
 test_excluded_and_included_paths_change_what_travels
 test_named_paths_are_normalised_and_a_missing_one_is_reported
+test_detect_lists_the_links_leading_out_of_the_site
+test_a_contents_directory_on_another_disk_needs_no_question
+test_the_link_search_has_no_deadline
+test_links_reports_every_link_of_a_site_directory
+test_a_name_ending_with_a_line_break_is_followed_as_the_copy_follows_it
+test_the_owner_of_admin_data_or_tmp_stands_for_the_site
 test_the_password_reaches_the_client_only_through_the_environment
 test_the_connection_follows_the_host_written_in_setup_db
 test_setup_db_parsing_ignores_comments_and_accepts_php_forms
@@ -2421,6 +3036,7 @@ test_the_archive_holds_the_site_the_dump_and_the_manifest
 test_the_archive_can_be_written_on_stdout
 test_a_file_changing_under_the_site_is_a_warning_not_a_failure
 test_a_symlink_to_nothing_stops_the_archive
+test_the_archive_follows_links_out_only_when_told
 test_a_fatal_tar_error_fails_the_archive
 test_dump_only_writes_a_dump_next_to_the_archive
 test_the_dump_is_staged_next_to_the_archive_and_outside_the_site
