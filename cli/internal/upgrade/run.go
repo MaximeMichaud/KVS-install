@@ -29,6 +29,9 @@ const mariadbVersionKey = "MARIADB_VERSION"
 // compose to its default files.
 const composeFileKey = "COMPOSE_FILE"
 
+// composeProfilesKey is COMPOSE_PROFILES, the profiles the stack turns on.
+const composeProfilesKey = "COMPOSE_PROFILES"
+
 // phpKeys are the .env settings that name the PHP series of the site. A run
 // records them with the images: a re-apply to another series is asked for
 // by changing them, and its rollback puts them back.
@@ -102,6 +105,20 @@ func (r *Runner) change(ctx context.Context, state *instance.State, plan *Plan, 
 		return r.untouched(plan, err)
 	}
 	want := variantEnv(plan)
+	// A stack adopted from before acme moved behind the direct-tls profile
+	// (66e90fb) ran acme without a profile; the target gates it, and the
+	// stack's COMPOSE_PROFILES, which an upgrade otherwise keeps verbatim,
+	// does not turn it on. Left alone the run would drop acme and the
+	// certificate would stop renewing, with nothing said. Add the profile
+	// the way setup.sh does for a single-site Let's Encrypt or ZeroSSL
+	// stack, carried with the other .env settings so a rollback undoes it.
+	if profiles := directTLSProfiles(r.Inst.Env); profiles != "" {
+		if want == nil {
+			want = map[string]string{}
+		}
+		want[composeProfilesKey] = profiles
+		r.log("COMPOSE_PROFILES gains direct-tls so acme keeps renewing the certificate")
+	}
 	before, after := r.runSettings(state, plan, want)
 	services, containers := r.composeView(ctx)
 	cacheChange, err := r.cacheChange(ctx, target.CacheRouting, services)
@@ -699,6 +716,35 @@ func (r *Runner) prune(keep ...string) {
 		}
 		r.log(fmt.Sprintf("removed %d older backups (--keep %d; this one and the one a rollback replays always stay): %s", len(removed), n, strings.Join(names, ", ")))
 	}
+}
+
+// directTLSProfiles returns COMPOSE_PROFILES with direct-tls added when the
+// stack serves its own TLS, the single-site Let's Encrypt or ZeroSSL layout
+// whose acme container renews the certificate, and the profile is not on
+// yet. It returns "" when the profile is already there or the stack is not
+// one that runs acme, so only a stack that needs the profile is changed.
+// This mirrors configure_direct_tls_profile in docker/setup.sh, the one
+// place that turns the profile on, which an adopted pre-66e90fb .env never
+// went through.
+func directTLSProfiles(env map[string]string) string {
+	if mode := strings.ToLower(strings.TrimSpace(env["MODE"])); mode != "" && mode != "single" {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(env["SSL_PROVIDER"])) {
+	case "letsencrypt", "zerossl":
+	default:
+		return ""
+	}
+	var profiles []string
+	for _, p := range strings.Split(env[composeProfilesKey], ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			if p == "direct-tls" {
+				return ""
+			}
+			profiles = append(profiles, p)
+		}
+	}
+	return strings.Join(append(profiles, "direct-tls"), ",")
 }
 
 // variantEnv is what a run writes to .env: the variant images and, on a
