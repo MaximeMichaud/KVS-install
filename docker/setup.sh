@@ -79,7 +79,8 @@ KVS_INSTALL_VERSION=$(kvs_install_version)
 #################################################################
 # Dev mode flag parsing
 # Usage: ./setup.sh --dev
-# Enables: no-cache builds, self-signed SSL, skip GeoIP, auto-cleanup
+# Enables: no-cache builds, self-signed SSL, skip GeoIP, and deletes the
+# database volume of an existing installation (VOLUME_CHOICE=1)
 DEV_MODE=false
 RESUME_IMPORT=false
 DOCKER_BUILD_FLAGS=""
@@ -111,10 +112,13 @@ USAGE:
 
 OPTIONS:
     --dev       Development mode (fast iteration)
+                - Deletes the database volume of an existing installation:
+                  the site starts again with an empty database
+                - Keeps the domain and email saved in .env; a first run
+                  needs DOMAIN (DOMAIN=mysite.test ./setup.sh --dev)
                 - Docker builds without cache
                 - Self-signed SSL (no Let's Encrypt wait)
                 - Skip GeoIP download
-                - Auto-cleanup volumes
                 - Skip Manticore (faster startup)
                 - Bypass pre-flight warnings (disk space, internet)
 
@@ -241,8 +245,11 @@ EXAMPLES:
     # Production installation
     ./setup.sh
 
-    # Development mode (fast testing)
+    # Development mode (fast testing). On an installed site it deletes the
+    # database volume and starts again with an empty database.
     ./setup.sh --dev
+    # Development mode, first run
+    DOMAIN=mysite.test ./setup.sh --dev
 
     # Headless production (CI/CD)
     HEADLESS=y DOMAIN=mysite.com EMAIL=admin@mysite.com ./setup.sh
@@ -1385,7 +1392,8 @@ if [ "$DEV_MODE" = true ]; then
     echo "  • Docker builds without cache (force fresh build)"
     echo "  • Intelligent SSL: reuse Let's Encrypt if exists, else self-signed"
     echo "  • Skip GeoIP database download"
-    echo "  • Auto-cleanup existing containers/volumes"
+    echo "  • Stops existing containers and deletes the database volume of an"
+    echo "    existing installation (the site starts with an empty database)"
     echo "  • Manticore defaults to disabled; explicit and saved choices are kept"
     echo ""
 
@@ -1398,8 +1406,10 @@ if [ "$DEV_MODE" = true ]; then
     export DNS_CHOICE=2              # Continue anyway (localhost testing)
     # The headless search selector defaults to disabled, while preserving
     # an explicit choice or an enabled search service from .env.
-    export DOMAIN="${DOMAIN:-example.com}"  # Default test domain
-    export EMAIL="${EMAIL:-dev@localhost.local}"
+    # DOMAIN and EMAIL are not given defaults here: an exported default
+    # counts as an explicit override and replaced the saved domain and
+    # address. The saved ones are kept; the dev address only fills in where
+    # none was given or saved (after .env is read).
 
     # Docker build flags
     DOCKER_BUILD_FLAGS="--no-cache"
@@ -3707,10 +3717,26 @@ if [ "$KVS_EMAIL_OVERRIDE_SET" = true ]; then
     EMAIL="$KVS_EMAIL_OVERRIDE"
 fi
 
+# --dev: a development address where none was given or saved: no EMAIL, no
+# legacy KVS_EMAIL (which the ACME check below falls back to), and nothing in
+# .env but an empty value or the .env.example placeholder ACME providers
+# refuse. It is kept as an override so the later reads of .env do not bring
+# the placeholder back.
+if [ "$DEV_MODE" = true ] && [ -z "${KVS_EMAIL:-}" ] &&
+    { [ -z "${EMAIL:-}" ] || [ "$EMAIL" = "admin@example.com" ]; }; then
+    EMAIL="dev@localhost.local"
+    KVS_EMAIL_OVERRIDE_SET=true
+    KVS_EMAIL_OVERRIDE="$EMAIL"
+fi
+
 # Prompt for domain
 if [ "$DOMAIN" = "example.com" ]; then
     if [ "${HEADLESS:-}" = "y" ]; then
         echo -e "${RED}ERROR: Set DOMAIN to a real domain in headless mode${NC}"
+        if [ "$DEV_MODE" = true ]; then
+            echo "  --dev keeps the domain saved in .env; a first run needs one:"
+            echo "    DOMAIN=mysite.test ./setup.sh --dev"
+        fi
         exit 1
     fi
 
