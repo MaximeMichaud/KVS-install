@@ -78,8 +78,9 @@ func TestComposeRunsUnderTheNameOfTheProjectDirectory(t *testing.T) {
 }
 
 // The real docker compose, on a project whose .env pins an image, with an
-// older pin and an older domain exported: compose resolves what kvsctl
-// reads from the .env, through the environment kvsctl gives it. It runs
+// older pin and an older domain exported, and kvsctl started in another
+// directory: compose resolves what kvsctl reads from the .env, ${PWD}
+// included, through the environment kvsctl gives it. It runs
 // "docker compose config", which needs no engine, and only when
 // KVSCTL_COMPOSE_PARITY=1, since it needs the compose plugin.
 func TestComposeResolvesWhatKvsctlReads(t *testing.T) {
@@ -94,10 +95,11 @@ func TestComposeResolvesWhatKvsctlReads(t *testing.T) {
 	if err := os.Symlink(real, dir); err != nil {
 		t.Fatal(err)
 	}
-	compose := "name: kvsctltest-files-parity\nservices:\n  php-fpm:\n    image: \"${KVS_PHP_FPM_IMAGE:?set}\"\n    environment:\n      - SITE=${DOMAIN}\n      - WEB=${WEB_ROOT}\n    volumes:\n      - ./conf:/conf\n"
+	compose := "name: kvsctltest-files-parity\nservices:\n  php-fpm:\n    image: \"${KVS_PHP_FPM_IMAGE:?set}\"\n    environment:\n      - SITE=${DOMAIN}\n      - WEB=${WEB_ROOT}\n      - DATA=${DATA_DIR}\n    volumes:\n      - ./conf:/conf\n"
 	env := "export DOMAIN=example.com # the site\n" +
 		"KVS_PHP_FPM_IMAGE=registry.example/php:1.1.0@" + digestA + "\n" +
 		"WEB_ROOT=/var/www/${DOMAIN}\n" +
+		"DATA_DIR=${PWD}/data\n" +
 		"FROM_SHELL\n"
 	for name, content := range map[string]string{"docker-compose.yml": compose, ".env": env, ".env.example": "NEW_SETTING=1\n"} {
 		if err := os.WriteFile(filepath.Join(real, name), []byte(content), 0o644); err != nil {
@@ -107,13 +109,14 @@ func TestComposeResolvesWhatKvsctlReads(t *testing.T) {
 	t.Setenv("DOMAIN", "old.example")
 	t.Setenv("KVS_PHP_FPM_IMAGE", "registry.example/php:1.0.0@"+digestB)
 	t.Setenv("FROM_SHELL", "kept")
+	t.Setenv("PWD", t.TempDir())
 	images, err := composeConfig(context.Background(), dir, "config", "--images")
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(filepath.Join(real, ".env"))
 	example, _ := os.ReadFile(filepath.Join(real, ".env.example"))
-	read, err := dotenv.Parse(data, dotenv.Lookup(os.Environ(), data, example))
+	read, err := dotenv.Parse(data, dotenv.Lookup(os.Environ(), dir, data, example))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +141,9 @@ func TestComposeResolvesWhatKvsctlReads(t *testing.T) {
 	php := project.Services["php-fpm"]
 	if php.Environment["SITE"] != read["DOMAIN"] || php.Environment["WEB"] != read["WEB_ROOT"] || read["DOMAIN"] != "example.com" {
 		t.Errorf("compose reads SITE=%q WEB=%q, kvsctl reads DOMAIN=%q WEB_ROOT=%q", php.Environment["SITE"], php.Environment["WEB"], read["DOMAIN"], read["WEB_ROOT"])
+	}
+	if php.Environment["DATA"] != read["DATA_DIR"] || read["DATA_DIR"] != filepath.Join(dir, "data") {
+		t.Errorf("compose reads DATA=%q, kvsctl reads DATA_DIR=%q, want %q", php.Environment["DATA"], read["DATA_DIR"], filepath.Join(dir, "data"))
 	}
 	if len(php.Volumes) != 1 || php.Volumes[0].Source != filepath.Join(dir, "conf") {
 		t.Errorf("compose mounts %+v, want %s: the name the installation was reached by", php.Volumes, filepath.Join(dir, "conf"))

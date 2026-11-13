@@ -161,6 +161,50 @@ func TestEnvEditsCanBeTakenBack(t *testing.T) {
 	}
 }
 
+// kvsctl runs its compose commands with PWD naming the docker directory as
+// it was reached, a link kept (dockerx.composeEnv), and compose expands
+// ${PWD} in the .env from that PWD. kvsctl reads the .env with the same one,
+// whatever directory it was started in, and with none in its environment.
+func TestReadEnvExpandsPWDAsComposeDoes(t *testing.T) {
+	const env = "DOMAIN=example.com\nCOMPOSE_FILE=${PWD}/docker-compose.yml\n"
+	real := newInstance(t, env)
+	link := filepath.Join(t.TempDir(), "kvs")
+	if err := os.Symlink(real.Root, link); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+	t.Chdir(elsewhere)
+	if os.Getenv("PWD") != elsewhere {
+		t.Fatalf("PWD = %q, want the directory the test runs in, %q", os.Getenv("PWD"), elsewhere)
+	}
+	check := func(when string) {
+		t.Helper()
+		for _, root := range []string{real.Root, link} {
+			inst, err := Detect(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := filepath.Join(root, "docker", "docker-compose.yml")
+			if got := inst.Env["COMPOSE_FILE"]; got != want {
+				t.Errorf("%s, from %s: COMPOSE_FILE = %q, compose reads %q", when, root, got, want)
+			}
+			// A .env kvsctl writes is read again the same way.
+			if err := inst.SetEnv("KVS_STACK_VERSION", "26.10.0"); err != nil {
+				t.Fatal(err)
+			}
+			if got := inst.Env["COMPOSE_FILE"]; got != want {
+				t.Errorf("%s, from %s, once written: COMPOSE_FILE = %q, compose reads %q", when, root, got, want)
+			}
+		}
+	}
+	check("PWD elsewhere")
+	t.Setenv("PWD", "")
+	if err := os.Unsetenv("PWD"); err != nil {
+		t.Fatal(err)
+	}
+	check("no PWD")
+}
+
 // MergeEnv reads both files like compose: a key the live file sets in any
 // form is not added again, which would override it, being the last one.
 func TestMergeEnvReadsBothFilesLikeCompose(t *testing.T) {

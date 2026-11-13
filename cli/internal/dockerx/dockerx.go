@@ -532,25 +532,23 @@ func ByService(states []ContainerState, service string) *ContainerState {
 // (dotenv.Isolate). A shell that sourced an older .env, which is what the
 // scripts do, exports all of them, and compose prefers an inherited value
 // to the file: compose must take each from the file, as kvsctl reads it.
-// PWD names dir as given, which is how compose, like the shell of the
-// scripts, keeps an installation reached through a link under the name it
-// was reached by: the bind mounts compose records, and the project it
-// recognises, then do not change with the way kvsctl was started. An empty
-// dir is a command on no project.
+// PWD names dir as given (dotenv.Project), which is how compose, like the
+// shell of the scripts, keeps an installation reached through a link under
+// the name it was reached by: the bind mounts compose records, and the
+// project it recognises, then do not change with the way kvsctl was
+// started. kvsctl reads the .env with the same PWD (instance.ReadEnv). An
+// empty dir is a command on no project.
 func composeEnv(dir string) []string {
 	var env, example []byte
+	project := ""
 	if dir != "" {
 		env, _ = os.ReadFile(filepath.Join(dir, ".env"))
 		example, _ = os.ReadFile(filepath.Join(dir, ".env.example"))
-	}
-	out := dotenv.Isolate(os.Environ(), env, example)
-	if dir != "" {
 		if abs, err := filepath.Abs(dir); err == nil {
-			out = slices.DeleteFunc(out, func(entry string) bool { return strings.HasPrefix(entry, "PWD=") })
-			out = append(out, "PWD="+abs)
+			project = abs
 		}
 	}
-	return append(out, "COMPOSE_PROGRESS=plain")
+	return append(dotenv.Project(os.Environ(), project, env, example), "COMPOSE_PROGRESS=plain")
 }
 
 // ComposeVersion is the version of the compose plugin, "2.29.7" without

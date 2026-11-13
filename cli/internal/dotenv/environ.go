@@ -1,6 +1,9 @@
 package dotenv
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // owned reports whether kvsctl owns a key of the project .env: the compose
 // settings that say which project to read, and the settings an upgrade
@@ -51,11 +54,28 @@ func Isolate(environ []string, env, example []byte) []string {
 	return out
 }
 
-// Lookup is the environment Isolate leaves, as the lookup Parse expands a
-// .env with: what compose itself sees when it reads the file.
-func Lookup(environ []string, env, example []byte) func(string) (string, bool) {
+// Project is the environment of a docker compose command run on the
+// project in dir, an absolute path: environ as Isolate leaves it, with PWD
+// naming dir as given. Compose takes it for the directory it runs in, which
+// keeps an installation reached through a link under the name it was
+// reached by, and expands ${PWD} in the .env from it, whatever the .env
+// sets PWD to. An empty dir is a command on no project, which keeps the PWD
+// of environ.
+func Project(environ []string, dir string, env, example []byte) []string {
+	out := Isolate(environ, env, example)
+	if dir == "" {
+		return out
+	}
+	out = slices.DeleteFunc(out, func(entry string) bool { return strings.HasPrefix(entry, "PWD=") })
+	return append(out, "PWD="+dir)
+}
+
+// Lookup is the environment Project leaves for the project in dir, as the
+// lookup Parse expands its .env with: what compose itself sees when kvsctl
+// runs it on that project and it reads the file.
+func Lookup(environ []string, dir string, env, example []byte) func(string) (string, bool) {
 	values := map[string]string{}
-	for _, entry := range Isolate(environ, env, example) {
+	for _, entry := range Project(environ, dir, env, example) {
 		key, value, _ := strings.Cut(entry, "=")
 		if _, seen := values[key]; !seen {
 			values[key] = value

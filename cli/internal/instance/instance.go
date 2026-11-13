@@ -208,9 +208,9 @@ func Detect(root string) (*Instance, error) {
 // ReadEnv reads a .env the way docker compose reads it (package dotenv):
 // export lines, quotes and their escapes, inline comments, CRLF line ends
 // and references to other settings, which are expanded with the
-// environment kvsctl gives its compose commands (dotenv.Isolate), so a
-// value read here is the value compose runs the stack with. A file compose
-// refuses is refused.
+// environment kvsctl gives its compose commands (dotenv.Project), PWD
+// naming the directory of the .env, so a value read here is the value
+// compose runs the stack with. A file compose refuses is refused.
 func ReadEnv(path string) (map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -223,9 +223,15 @@ func ReadEnv(path string) (map[string]string, error) {
 	return env, nil
 }
 
-// parseEnv reads data as the .env at path holds it (ReadEnv).
+// parseEnv reads data as the .env at path holds it (ReadEnv), ${PWD}
+// included: kvsctl runs compose with PWD naming the directory of the .env
+// (dockerx), not the one kvsctl was started in.
 func parseEnv(path string, data []byte) (map[string]string, error) {
-	return dotenv.Parse(data, dotenv.Lookup(os.Environ(), data, exampleBeside(path)))
+	dir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		dir = ""
+	}
+	return dotenv.Parse(data, dotenv.Lookup(os.Environ(), dir, data, exampleBeside(path)))
 }
 
 // exampleBeside is the .env.example next to a .env, nil when there is none:

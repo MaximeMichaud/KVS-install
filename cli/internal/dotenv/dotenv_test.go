@@ -204,7 +204,7 @@ var parityErrors = []struct{ name, data string }{
 
 func TestParseReadsWhatComposeReads(t *testing.T) {
 	for _, tc := range parityCases {
-		got, err := Parse([]byte(tc.data), Lookup(parityEnviron, []byte(tc.data), nil))
+		got, err := Parse([]byte(tc.data), Lookup(parityEnviron, "", []byte(tc.data), nil))
 		if err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 			continue
@@ -279,7 +279,7 @@ func compareWithCompose(t *testing.T, data []byte, base []string) (read, want ma
 	if err != nil {
 		return nil, nil, fmt.Errorf("compose refused it: %w", err)
 	}
-	got, err := Parse(data, Lookup(base, data, nil))
+	got, err := Parse(data, Lookup(base, "", data, nil))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -390,7 +390,7 @@ func TestAssignedAndIsolate(t *testing.T) {
 	if !slices.Equal(kept, want) {
 		t.Errorf("Isolate kept %q, want %q", kept, want)
 	}
-	lookup := Lookup(environ, env, example)
+	lookup := Lookup(environ, "", env, example)
 	if v, ok := lookup("SECRET_FROM_ENV"); !ok || v != "s" {
 		t.Errorf("a key the .env leaves to the environment: %q %v", v, ok)
 	}
@@ -400,6 +400,27 @@ func TestAssignedAndIsolate(t *testing.T) {
 	// A key alone on its line that kvsctl owns is still kvsctl's.
 	if got := Isolate([]string{"COMPOSE_FILE=old.yml"}, []byte("COMPOSE_FILE\n"), nil); len(got) != 0 {
 		t.Errorf("Isolate kept %q", got)
+	}
+}
+
+// A compose command kvsctl runs on a project has PWD name the project
+// directory, and compose expands ${PWD} in the .env from it rather than from
+// a PWD the .env sets (compose 5.7.0 does). The PWD of the shell kvsctl was
+// started from reaches neither; a command on no project keeps it.
+func TestProjectNamesTheDirectoryInPWD(t *testing.T) {
+	environ := []string{"PATH=/usr/bin", "PWD=/root", "DOMAIN=old.example.com"}
+	for _, env := range []string{"DOMAIN=example.com\nDATA_DIR=${PWD}/data\n", "PWD=/elsewhere\nDOMAIN=example.com\nDATA_DIR=${PWD}/data\n"} {
+		got := Project(environ, "/opt/kvs/docker", []byte(env), nil)
+		if want := []string{"PATH=/usr/bin", "PWD=/opt/kvs/docker"}; !slices.Equal(got, want) {
+			t.Errorf("%q: Project = %q, want %q", env, got, want)
+		}
+		read, err := Parse([]byte(env), Lookup(environ, "/opt/kvs/docker", []byte(env), nil))
+		if err != nil || read["DATA_DIR"] != "/opt/kvs/docker/data" || read["DOMAIN"] != "example.com" {
+			t.Errorf("%q reads as %q, %v", env, read, err)
+		}
+	}
+	if got := Project(environ, "", nil, nil); !slices.Equal(got, environ) {
+		t.Errorf("Project on no project = %q, want %q", got, environ)
 	}
 }
 
