@@ -236,6 +236,21 @@ for arg in "$@"; do
             done
             exit 0
             ;;
+        *"table_type = 'VIEW'"*)
+            # The views, one per line in hex, for the exact listing query.
+            [ "$arg" = "SELECT HEX(table_name) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'VIEW' ORDER BY table_name" ] || exit 98
+            if [ "${STUB_VIEWS_FAIL:-no}" = yes ]; then
+                echo "ERROR 1142 (42000): SELECT command denied to user 'kvs'" >&2
+                exit 1
+            fi
+            LC_ALL=C
+            while IFS= read -r view; do
+                [ -n "$view" ] || continue
+                for ((i = 0; i < ${#view}; i++)); do printf '%02X' "'${view:i:1}"; done
+                printf '\n'
+            done <<< "${STUB_VIEWS:-}"
+            exit 0
+            ;;
         *admin_servers*)
             # The storage server rows, tab separated, as the batch mode prints them.
             printf '%b' "${STUB_SERVERS:-}"
@@ -299,6 +314,11 @@ if [ "${STUB_DUMP_FAIL:-no}" = yes ]; then
     printf -- '-- partial dump\n'
     echo 'mariadb-dump: interrupted after partial output' >&2
     exit 42
+fi
+if [ "${STUB_VIEW_DUMP_FAIL:-no}" = yes ] && [[ " $* " == *' --skip-lock-tables '* ]]; then
+    printf -- '-- partial view dump\n'
+    echo 'mariadb-dump: interrupted in the view pass' >&2
+    exit 43
 fi
 printf -- '-- MariaDB dump 10.19\n'
 printf 'CREATE TABLE `ktvs_options` (`variable` varchar(255) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`variable`));\n'
@@ -2247,6 +2267,75 @@ test_routines_or_events_the_server_cannot_list_stay_behind_with_a_warning() {
     pass "routines or events the server cannot list stay behind with a warning"
 }
 
+test_views_are_dumped_apart_when_the_tables_are_locked() {
+    local site="$TMP_ROOT/views-site"
+    local out="$TMP_ROOT/views.out"
+    local err="$TMP_ROOT/views.err"
+    local archive="$TMP_ROOT/views.sql.gz"
+    local odd=$'ktvs_odd name \xc3\xa9'
+    local passes first second
+
+    make_site "$site"
+    export STUB_VIEWS="$odd"$'\nktvs_stats_view'
+    # InnoDB alone: the transaction covers the views, nothing changes.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "an InnoDB dump with views must succeed"
+    [ "$(dump_argv | wc -l)" = 1 ] || fail "InnoDB tables need one pass: $(dump_argv)"
+    dump_argv | grep -Fq -- '[--ignore-table=' && fail "no view is left out of a transaction: $(dump_argv)"
+    grep -Fq "table_type = 'VIEW'" "$STUB_LOG" && fail "the views need no listing without a table lock"
+
+    # MyISAM: the locked pass leaves the views out, the second writes them
+    # unlocked with the same layout and nothing else.
+    export STUB_NON_TRANSACTIONAL=1 STUB_ROUTINES=1 STUB_EVENTS=1
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "a locked dump with views must succeed: $(cat "$err")"
+    passes=$(dump_argv)
+    [ "$(printf '%s\n' "$passes" | wc -l)" = 2 ] || fail "views under a table lock need a second pass: $passes"
+    first=$(printf '%s\n' "$passes" | sed -n 1p)
+    second=$(printf '%s\n' "$passes" | sed -n 2p)
+    [[ "$first" == *'[--lock-tables]'* ]] || fail "the tables stay locked: $first"
+    [[ "$first" == *"[--ignore-table=oldsite.$odd] [--ignore-table=oldsite.ktvs_stats_view]"* ]] ||
+        fail "the locked pass must leave every view out, by its exact name: $first"
+    [[ "$first" == *'[--routines] [--events] [-u] [kvs] [oldsite]' ]] || fail "routines and events stay in the locked pass: $first"
+    [[ "$second" == *'[--skip-lock-tables] [--quick]'* && "$second" != *'[--lock-tables]'* ]] ||
+        fail "the view pass must take no lock: $second"
+    [[ "$second" == *'[--hex-blob]'* && "$second" == *'[--max-allowed-packet=512M]'* ]] ||
+        fail "the view pass keeps the layout options: $second"
+    [[ "$second" != *'[--routines]'* && "$second" != *'[--events]'* && "$second" != *'[--ignore-table='* ]] ||
+        fail "the view pass writes the views alone: $second"
+    [[ "$second" == *"[-u] [kvs] [oldsite] [$odd] [ktvs_stats_view]" ]] || fail "the view pass must name every view: $second"
+    [ "$(gzip -dc < "$out" | grep -c -- '-- Dump completed')" = 2 ] || fail "both passes must reach the dump"
+
+    # MyISAM without views: one locked pass, as before.
+    export STUB_VIEWS=''
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" || fail "a locked dump without views must succeed"
+    [ "$(dump_argv | wc -l)" = 1 ] || fail "no view, no second pass: $(dump_argv)"
+    dump_argv | grep -Fq -- '[--lock-tables]' || fail "the tables stay locked: $(dump_argv)"
+
+    # The views cannot be listed: nothing is dumped.
+    export STUB_VIEWS=ktvs_stats_view STUB_VIEWS_FAIL=yes
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" && fail "an unlisted view must stop the dump"
+    [ -z "$(dump_argv)" ] || fail "the dump tool must not run when the views are unknown: $(dump_argv)"
+    grep -Fq 'the views of oldsite could not be listed' "$err" || fail "the failure must be explained: $(cat "$err")"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" archive "$site" --yes --dump-only --gzip --output "$archive" &&
+        fail "an unlisted view must stop the archive"
+    [ -z "$(dump_argv)" ] || fail "the archive must not dump when the views are unknown: $(dump_argv)"
+    [ ! -e "$archive" ] || fail "an unlisted view must not publish a dump"
+    unset STUB_VIEWS_FAIL
+
+    # Either pass fails: so does the export, the view pass never runs after
+    # a failed table pass, and no output is published.
+    export STUB_DUMP_FAIL=yes
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" && fail "a failed table pass must fail the dump"
+    [ "$(dump_argv | wc -l)" = 1 ] || fail "the view pass must not run after a failed table pass: $(dump_argv)"
+    unset STUB_DUMP_FAIL
+    export STUB_VIEW_DUMP_FAIL=yes
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" dump "$site" && fail "a failed view pass must fail the dump"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" archive "$site" --yes --dump-only --gzip --output "$archive" &&
+        fail "a failed view pass must fail the archive"
+    [ ! -e "$archive" ] || fail "a failed view pass must not publish a dump"
+    unset STUB_VIEWS STUB_VIEW_DUMP_FAIL STUB_NON_TRANSACTIONAL STUB_ROUTINES STUB_EVENTS
+    pass "views are dumped apart when the tables are locked"
+}
+
 test_versioned_tables_are_refused_before_any_export_is_written() {
     local site="$TMP_ROOT/history-site"
     local out="$TMP_ROOT/history.out"
@@ -3179,6 +3268,7 @@ test_gtid_state_is_left_out_by_a_tool_that_records_it
 test_non_transactional_tables_switch_the_dump_to_table_locks
 test_stored_routines_and_events_travel_with_the_dump
 test_routines_or_events_the_server_cannot_list_stay_behind_with_a_warning
+test_views_are_dumped_apart_when_the_tables_are_locked
 test_versioned_tables_are_refused_before_any_export_is_written
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent
 test_the_archive_holds_the_site_the_dump_and_the_manifest

@@ -124,6 +124,9 @@ NGINX_SITE_FILES=""
 SITE_CANDIDATES=()
 DB_CONN_ARGS=()
 DUMP_ARGS=()
+# The second, unlocked pass that dumps the views when the tables are locked.
+VIEW_DUMP_ARGS=()
+DB_VIEWS=()
 COMPRESS_CMD=()
 TAR_EXCLUDES=()
 # The symlinks inside the site, found once by kvs_site_links.
@@ -1862,8 +1865,33 @@ kvs_tool_advertises() {
     esac
 }
 
+# The views of the database. Their names travel in hex, which the batch
+# output leaves alone where it would escape a tab, a newline or a
+# backslash in them.
+kvs_list_views() {
+    local out
+    local hex
+
+    DB_VIEWS=()
+    out=$(
+        # shellcheck disable=SC2030,SC2031  # Same deliberate subshell as the probe.
+        export MYSQL_PWD="$DB_PASSWORD"
+        kvs_ignore_user_option_files
+        "$DB_CLIENT" --connect-timeout=10 ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} -N -B \
+            -e "SELECT HEX(table_name) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'VIEW' ORDER BY table_name" \
+            "$DB_NAME" < /dev/null
+    ) || return 1
+    while IFS= read -r hex; do
+        [ -n "$hex" ] || continue
+        [[ "$hex" != *[!A-Fa-f0-9]* && $((${#hex} % 2)) = 0 ]] || return 1
+        DB_VIEWS+=("$(printf '%b' "$(printf '%s' "$hex" | sed 's/../\\x&/g')")")
+    done <<< "$out"
+    return 0
+}
+
 kvs_build_dump_args() {
     local charset
+    local view
 
     # A single transaction gives a consistent dump of InnoDB tables without
     # blocking the site. It does nothing for MyISAM or Aria tables: those
@@ -1909,6 +1937,27 @@ kvs_build_dump_args() {
     if kvs_tool_advertises "$DB_DUMP_TOOL" "set-gtid-purged"; then
         DUMP_ARGS+=(--set-gtid-purged=OFF)
     fi
+    # The table lock takes in the views too, and locking a view whose
+    # DEFINER no longer exists fails ("Access denied ... when using LOCK
+    # TABLES", or error 1449 for root): the whole export stopped on what
+    # looked like a wrong password. Views hold no rows, so the locked pass
+    # leaves them out and a second pass, without a lock but with the same
+    # layout options (all but the lock option at the head of DUMP_ARGS),
+    # writes them after the tables and routines they read.
+    VIEW_DUMP_ARGS=()
+    if [ "$DB_NON_TRANSACTIONAL" -gt 0 ]; then
+        if ! kvs_list_views; then
+            kvs_error "the views of $DB_NAME could not be listed"
+            return 1
+        fi
+        if [ "${#DB_VIEWS[@]}" -gt 0 ]; then
+            VIEW_DUMP_ARGS=(--skip-lock-tables ${DUMP_ARGS[@]+"${DUMP_ARGS[@]:1}"}
+                ${DB_CONN_ARGS[@]+"${DB_CONN_ARGS[@]}"} "$DB_NAME" ${DB_VIEWS[@]+"${DB_VIEWS[@]}"})
+            for view in ${DB_VIEWS[@]+"${DB_VIEWS[@]}"}; do
+                DUMP_ARGS+=("--ignore-table=$DB_NAME.$view")
+            done
+        fi
+    fi
     # Stock KVS defines no stored routine or event, but a customised site
     # can, and a view or trigger using a routine left behind breaks on the
     # new server. Each option is passed only when the database holds such
@@ -1935,7 +1984,10 @@ kvs_stream_dump() {
         # shellcheck disable=SC2030,SC2031  # Same deliberate subshell as the probe.
         export MYSQL_PWD="$DB_PASSWORD"
         kvs_ignore_user_option_files
-        "$DB_DUMP_TOOL" ${DUMP_ARGS[@]+"${DUMP_ARGS[@]}"} < /dev/null
+        "$DB_DUMP_TOOL" ${DUMP_ARGS[@]+"${DUMP_ARGS[@]}"} < /dev/null || exit $?
+        if [ "${#VIEW_DUMP_ARGS[@]}" -gt 0 ]; then
+            "$DB_DUMP_TOOL" ${VIEW_DUMP_ARGS[@]+"${VIEW_DUMP_ARGS[@]}"} < /dev/null
+        fi
     ) | ${COMPRESS_CMD[@]+"${COMPRESS_CMD[@]}"}
 }
 
@@ -2731,7 +2783,7 @@ kvs_command_dump() {
     kvs_require_dump_tool || return $?
     kvs_select_database_format || return 1
     if [ "$DB_DUMP_FORMAT" = sql ]; then
-        kvs_build_dump_args
+        kvs_build_dump_args || return 1
     fi
     kvs_compressor_args
     kvs_say "Dumping ${DB_NAME} with ${DB_DUMP_TOOL}, compressed with ${COMPRESSOR}"
@@ -3479,7 +3531,7 @@ kvs_command_archive() {
         kvs_check_free_space "$needed" "$output" || return 1
     fi
     if [ "$DB_DUMP_FORMAT" = sql ]; then
-        kvs_build_dump_args
+        kvs_build_dump_args || return 1
     fi
     kvs_compressor_args
 

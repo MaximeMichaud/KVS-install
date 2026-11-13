@@ -318,6 +318,68 @@ import_dump_write() {
     esac
 }
 
+# import_view_database_qualifier: copy a dump from stdin to stdout with the
+# name of the old database dropped from the bodies of its views. The
+# server writes the body of a view whose DEFINER no longer exists with
+# each column qualified by that name (select `old`.`table`.`column` ...),
+# where it leaves the database out of the others, and the replay into the
+# database named after the domain stopped on such a view ("Unknown column
+# 'old.table.column'"). The name comes from the header the dump tools
+# write ("-- Host: ...    Database: <name>"), backticks doubled as in a
+# quoted name; a dump without it (--skip-comments) or of several
+# databases (no name there, and refused before this runs) is copied as it
+# is. The body is the line that starts "/*!50001 VIEW ". A qualifier right
+# after a dot or a backtick is part of a longer name (a table named like
+# the database, `old`.`old`.`column`), and other databases (`mysql`.`db`)
+# are kept. A body that also takes the database name as a table alias
+# (`table` `old`) is left whole: there `old`.`column` may name the alias,
+# and dropping it could bind the column to another table.
+import_view_database_qualifier() {
+    awk '
+        function aliased(line,    ident, pos, i, after, before) {
+            ident = "`" name "`"
+            pos = 1
+            while ((i = index(substr(line, pos), ident)) > 0) {
+                i += pos - 1
+                after = substr(line, i + length(ident), 1)
+                before = (i > 2) ? substr(line, i - 2, 2) : ""
+                if (after != "." && (before == "` " || before == ") ")) {
+                    return 1
+                }
+                pos = i + length(ident)
+            }
+            return 0
+        }
+        function unqualify(line,    out, pos, i, previous) {
+            out = ""
+            pos = 1
+            while ((i = index(substr(line, pos), qualifier)) > 0) {
+                i += pos - 1
+                previous = (i > 1) ? substr(line, i - 1, 1) : ""
+                out = out substr(line, pos, i - pos)
+                if (previous == "." || previous == "`") {
+                    out = out qualifier
+                }
+                pos = i + length(qualifier)
+            }
+            return out substr(line, pos)
+        }
+        !header && /^-- Host: / {
+            header = 1
+            i = index($0, "    Database: ")
+            if (i > 0) {
+                name = substr($0, i + 14)
+                gsub(/`/, "``", name)
+                if (name != "") {
+                    qualifier = "`" name "`."
+                }
+            }
+        }
+        qualifier != "" && /^\/\*!50001 VIEW / && !aliased($0) { $0 = unqualify($0) }
+        { print }
+    '
+}
+
 # import_prepare_dump <dump> <table prefix> <KVS version> <old project path> <new project path> <output> <token>
 # Write the dump the MariaDB init directory will replay: CREATE DATABASE,
 # ALTER DATABASE and USE statements dropped (the init runs inside the
@@ -326,7 +388,9 @@ import_dump_write() {
 # (MariaDB knows no GTID_PURGED and would stop the replay there),
 # INITIAL_VERSION added when the old site never recorded it, server paths
 # rewritten to the container path, DEFINER clauses of views, triggers,
-# routines and events dropped (their user does not exist here), and a completion marker row
+# routines and events dropped (their user does not exist here), the old
+# database name dropped from the view bodies the server qualified with it,
+# and a completion marker row
 # KVS_INSTALL_IMPORT=<token> as the very last statement: the MariaDB image
 # restarts on a failed init file and would serve the partial database, so
 # the caller checks the marker before touching anything.
@@ -397,7 +461,7 @@ import_prepare_dump() {
             # knew several servers (one UUID set per line, up to the semicolon).
             # The caller checks this function conditionally, disabling errexit.
             # Stop on read/filter failures before appending a completion marker.
-            import_dump_cat "$dump" | sed -E -e '/^(CREATE DATABASE|ALTER DATABASE|USE )/d' \
+            import_dump_cat "$dump" | import_view_database_qualifier | sed -E -e '/^(CREATE DATABASE|ALTER DATABASE|USE )/d' \
                 -e '/^SET @@(GLOBAL|SESSION)\.GTID_PURGED/{' -e ':gtid' -e '/;[[:space:]]*$/!{' -e 'N' -e 'b gtid' -e '}' -e 'd' -e '}' \
                 -e '/^SET @@(GLOBAL|SESSION)\.SQL_LOG_BIN/d' -e '/^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
                 import_innodb_row_format - || exit 1

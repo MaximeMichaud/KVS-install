@@ -885,6 +885,77 @@ test_the_setup_says_when_imported_events_do_not_run() {
     pass "the setup says when imported events do not run"
 }
 
+# The server writes the body of a view whose DEFINER no longer exists with
+# its columns qualified by the old database name; the replay runs in the
+# database named after the domain, so the prepared dump drops that name,
+# read from the header of the dump, and nothing else.
+test_view_bodies_lose_the_old_database_name() {
+    local dump="$TMP_ROOT/qualified-views.sql"
+    local prepared="$TMP_ROOT/qualified-views-prepared.sql"
+    local view
+
+    {
+        echo '-- MariaDB dump 10.19-11.4.13-MariaDB, for debian-linux-gnu (x86_64)'
+        echo '--'
+        echo '-- Host: localhost    Database: oldsite'
+        echo '-- ------------------------------------------------------'
+        echo 'CREATE TABLE `ktvs_options` (`variable` varchar(255) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`variable`));'
+        echo "INSERT INTO \`ktvs_options\` VALUES ('NOTE','select \`oldsite\`.\`ktvs_stats\`.\`hits\`');"
+        echo '/*!50001 CREATE VIEW `ktvs_stats_view` AS SELECT'
+        echo ' 1 AS `video_id` */;'
+        echo '/*!50001 CREATE ALGORITHM=UNDEFINED */'
+        echo '/*!50013 DEFINER=`ghost`@`%` SQL SECURITY DEFINER */'
+        echo '/*!50001 VIEW `ktvs_stats_view` AS select `oldsite`.`ktvs_stats`.`video_id` AS `video_id`,`oldsite`.`ktvs_stats`.`hits` AS `hits` from `oldsite`.`ktvs_stats` */;'
+        echo '/*!50001 VIEW `ktvs_mixed` AS select `oldsite`.`oldsite`.`id` AS `id`,`mysql`.`db`.`User` AS `oldsite`,`x``oldsite`.`y` AS `y` from (`oldsite`.`oldsite` join `mysql`.`db`) */;'
+        echo '/*!50001 VIEW `ktvs_aliased` AS select `oldsite`.`id` AS `id` from `oldsite`.`ktvs_stats` `oldsite` */;'
+        echo '/*!50001 VIEW `ktvs_derived` AS select `oldsite`.`id` AS `id` from (select `oldsite`.`ktvs_stats`.`video_id` AS `id` from `oldsite`.`ktvs_stats`) `oldsite` */;'
+        echo 'CREATE TRIGGER `t` AFTER INSERT ON `ktvs_options` FOR EACH ROW INSERT INTO `oldsite`.`ktvs_log` VALUES (1) ;;'
+        # The second pass of a locked dump repeats the header.
+        echo '-- Host: localhost    Database: oldsite'
+        echo '/*!50001 VIEW `ktvs_late` AS select `oldsite`.`ktvs_stats`.`hits` AS `hits` from `oldsite`.`ktvs_stats` */;'
+    } > "$dump"
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$prepared" token-8 >/dev/null ||
+        fail "a dump with qualified views must be prepared"
+    grep -Fxq '/*!50001 VIEW `ktvs_stats_view` AS select `ktvs_stats`.`video_id` AS `video_id`,`ktvs_stats`.`hits` AS `hits` from `ktvs_stats` */;' "$prepared" ||
+        fail "the old database name must leave the view body: $(grep -F 'VIEW `ktvs_stats_view`' "$prepared")"
+    grep -Fxq '/*!50001 VIEW `ktvs_late` AS select `ktvs_stats`.`hits` AS `hits` from `ktvs_stats` */;' "$prepared" ||
+        fail "every view body loses the name: $(grep -F 'VIEW `ktvs_late`' "$prepared")"
+    # A table named like the database keeps its own name, another database
+    # keeps its qualifier, a longer name ending like the database stays.
+    grep -Fxq '/*!50001 VIEW `ktvs_mixed` AS select `oldsite`.`id` AS `id`,`mysql`.`db`.`User` AS `oldsite`,`x``oldsite`.`y` AS `y` from (`oldsite` join `mysql`.`db`) */;' "$prepared" ||
+        fail "only the database qualifier may go: $(grep -F 'VIEW `ktvs_mixed`' "$prepared")"
+    # The database name as a table alias: the body stays as it is.
+    for view in ktvs_aliased ktvs_derived; do
+        grep -Fxq "$(grep -F "VIEW \`$view\`" "$dump")" "$prepared" ||
+            fail "a body using the database name as an alias must stay whole: $(grep -F "VIEW \`$view\`" "$prepared")"
+    done
+    grep -Fq "('NOTE','select \`oldsite\`.\`ktvs_stats\`.\`hits\`')" "$prepared" || fail "row data must never be rewritten"
+    grep -Fq 'INTO `oldsite`.`ktvs_log`' "$prepared" || fail "only view bodies are rewritten"
+    grep -Fxq ' 1 AS `video_id` */;' "$prepared" || fail "the placeholder view must stay"
+
+    # A name holding a backtick, doubled in the body as in any quoted name.
+    printf '%s\n' '-- Host: db.example.com    Database: old`site' \
+        'CREATE TABLE `ktvs_options` (`variable` varchar(255) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`variable`));' \
+        '/*!50001 VIEW `v` AS select `old``site`.`t`.`c` AS `c` from `old``site`.`t` */;' > "$dump"
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$prepared" token-8 >/dev/null ||
+        fail "a dump of a database with a backtick in its name must be prepared"
+    grep -Fxq '/*!50001 VIEW `v` AS select `t`.`c` AS `c` from `t` */;' "$prepared" ||
+        fail "a name with a backtick must leave the view body: $(grep -F 'VIEW `v`' "$prepared")"
+
+    # Without a database in the header (or without a header), nothing is
+    # known to drop.
+    for header in '-- Host: localhost    Database: ' '-- MariaDB dump'; do
+        printf '%s\n' "$header" \
+            'CREATE TABLE `ktvs_options` (`variable` varchar(255) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`variable`));' \
+            '/*!50001 VIEW `v` AS select `oldsite`.`t`.`c` AS `c` from `oldsite`.`t` */;' > "$dump"
+        import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$prepared" token-8 >/dev/null ||
+            fail "a dump whose header names no database must be prepared"
+        grep -Fxq '/*!50001 VIEW `v` AS select `oldsite`.`t`.`c` AS `c` from `oldsite`.`t` */;' "$prepared" ||
+            fail "without a database name the body stays: $(grep -F 'VIEW `v`' "$prepared")"
+    done
+    pass "view bodies lose the old database name"
+}
+
 test_php_config_values_are_read_as_kvs_writes_them
 test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip
@@ -904,5 +975,6 @@ test_dump_preparation_stops_after_a_decompression_failure
 test_corrupt_or_truncated_compressed_dumps_are_refused
 test_the_staged_dump_is_readable_by_the_database_group_only
 test_the_setup_says_when_imported_events_do_not_run
+test_view_bodies_lose_the_old_database_name
 
 echo "All $TESTS_RUN import tests passed."

@@ -9,8 +9,10 @@
 # server cannot list (the events an account without the EVENT privilege
 # cannot see, or that a DISABLED event scheduler refuses to list, the
 # routines of a stale mysql.proc) stays behind with a warning, and the
-# export goes on. The servers run from the images docker/images.lock pins,
-# with no network.
+# export goes on. Once a MyISAM table locks the dump, a view whose DEFINER
+# no longer exists must not stop it, and must work on the new server in a
+# database named otherwise, as the setup names it after the domain. The
+# servers run from the images docker/images.lock pins, with no network.
 # shellcheck disable=SC2016  # PHP and SQL fixtures hold literal dollar signs.
 set -euo pipefail
 
@@ -91,7 +93,12 @@ wait_ready() {
 # export_dump <container> <login> <password> <output>: the real exporter, on
 # the source server, against a KVS site whose setup_db.php names the login.
 export_dump() {
-    local container=$1 login=$2 password=$3 output=$4 site="$test_dir/site-$2"
+    local container=$1 login=$2 password=$3 output=$4 name
+    local site
+
+    name=${4##*/}
+    name=${name%%.*}
+    site="$test_dir/site-$name"
 
     mkdir -p "$site/admin/include" "$site/contents/videos"
     cat > "$site/admin/include/setup.php" <<'PHP'
@@ -108,10 +115,10 @@ define('DB_LOGIN','$login');
 define('DB_PASS','$password');
 define('DB_DEVICE','oldsite');
 PHP
-    docker cp "$site" "$container:/tmp/site-$login"
+    docker cp "$site" "$container:/tmp/site-$name"
     docker cp "$root/kvs-export.sh" "$container:/tmp/kvs-export.sh"
     timeout 120 docker exec "$container" bash /tmp/kvs-export.sh --no-size --gzip --database-format sql \
-        dump "/tmp/site-$login" > "$output" 2> "$output.err"
+        dump "/tmp/site-$name" > "$output" 2> "$output.err"
 }
 
 # replay <dump> <name>: prepare the dump as the setup does and let the
@@ -266,3 +273,39 @@ grep -Fq '2 of the 2 stored routines of oldsite' "$test_dir/refused.sql.gz.err" 
     { cat "$test_dir/refused.sql.gz.err" >&2; fail "the refusal must name the routines it cannot read"; }
 [ ! -s "$test_dir/refused.sql.gz" ] || fail "the refused export must not write a dump"
 echo "PASS: an account that may not read the routine bodies is refused before the dump"
+
+# A MyISAM table makes the dump lock the tables, and the lock took in every
+# view: one whose DEFINER no longer exists stopped the export with "Access
+# denied ... when using LOCK TABLES", as if the password were wrong.
+sql "$source_container" root oldsite <<'SQL'
+CREATE TABLE ktvs_stats (video_id INT NOT NULL PRIMARY KEY, hits INT NOT NULL) ENGINE=MyISAM;
+INSERT INTO ktvs_stats VALUES (1, 10), (2, 20);
+CREATE DEFINER=`ghost`@`%` VIEW ktvs_stats_view AS SELECT video_id, hits FROM ktvs_stats;
+CREATE VIEW ktvs_other_database AS SELECT user FROM mysql.db LIMIT 0;
+SQL
+export_dump "$source_container" kvs "$site_password" "$test_dir/locked.sql.gz" ||
+    { cat "$test_dir/locked.sql.gz.err" >&2; fail "the locked export stopped on the view whose DEFINER is gone"; }
+grep -Fq 'tables use MyISAM or Aria' "$test_dir/locked.sql.gz.err" || fail "the export did not lock the tables"
+# The server writes the body of the view whose DEFINER is gone with its
+# columns qualified by the old database name, which the replay into the
+# database named after the domain (kvs here) does not know.
+grep -Fq 'VIEW `ktvs_stats_view` AS select `oldsite`.`ktvs_stats`.`video_id`' <(gzip -dc "$test_dir/locked.sql.gz") ||
+    fail "the source no longer qualifies the body of a view whose DEFINER is gone; this test needs a server that does"
+# The views come last, after the tables and routines they read.
+gzip -dc "$test_dir/locked.sql.gz" | awk '
+    /^CREATE TABLE `ktvs_stats`/ { table = NR }
+    /FUNCTION `kvs_double`/ && !function_line { function_line = NR }
+    /VIEW `ktvs_stats_view` AS select/ { view = NR }
+    END { exit !(table && function_line && view > table && view > function_line) }' ||
+    fail "the locked dump must hold the view after the tables and routines"
+replay "$test_dir/locked.sql.gz" "$prefix-locked"
+locked=$prefix-locked
+[ "$(sql "$locked" root kvs -e 'SELECT SUM(hits) FROM ktvs_stats_view')" = 30 ] ||
+    fail "the view whose DEFINER was gone does not answer on the new server"
+[ "$(sql "$locked" root kvs -e 'SELECT twice FROM ktvs_videos_doubled WHERE video_id = 1')" = 2 ] ||
+    fail "the view using the stored function does not answer after a locked dump"
+[ "$(sql "$locked" root kvs -e 'SELECT COUNT(*) FROM ktvs_other_database')" = 0 ] ||
+    fail "the view reading another database does not answer"
+[ "$(sql "$locked" root kvs -e "SELECT engine FROM information_schema.tables WHERE table_schema = 'kvs' AND table_name = 'ktvs_stats'")" = MyISAM ] ||
+    fail "the MyISAM table changed engine"
+echo "PASS: a locked dump carries a view whose DEFINER is gone, after the tables and routines it may read, into a database of another name"
