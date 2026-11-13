@@ -677,6 +677,14 @@ else
     fi
 fi
 # A real sshd hands the command line to the login shell, which splits it.
+# The tar fallback sends its command as a script to sh -s: log it too.
+case "\$*" in
+    'sh -s'|'sudo -n sh -s')
+        script=\$(cat)
+        echo "script \$script" >> "\$log"
+        exec bash -c "\$*" <<< "\$script"
+        ;;
+esac
 exec bash -c "\$*"
 EOF
     chmod +x "$bin/ssh"
@@ -1093,7 +1101,8 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         rm -rf "$destination"
         import_remote_files "$site" "$destination" no || exit 19
         [ -f "$destination/admin/include/setup.php" ] || exit 20
-        grep -q '^command tar -C ' "$bin/ssh.log" || exit 21
+        grep -q '^command sh -s$' "$bin/ssh.log" || exit 21
+        grep -q "^script exec tar -C '$site' -chf - .\$" "$bin/ssh.log" || exit 21
         [ -f "$destination/contents/store/big.mp4" ] && [ ! -L "$destination/contents/store" ] || exit 36
 
         # What the exporter reports as staying behind stays behind: the
@@ -1114,7 +1123,7 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         [ -d "$destination/tmp" ] && [ ! -e "$destination/tmp/upload.part" ] || exit 54
         [ ! -e "$destination/backup" ] && [ ! -e "$destination/.well-known" ] && [ ! -e "$destination/contents/videos_sources" ] || exit 55
         [ -f "$destination/contents/videos/1.mp4" ] || exit 56
-        grep -q "^command tar -C $site '--exclude=./tmp/\*' '--exclude=./backup' '--exclude=./.well-known' '--exclude=./contents/videos_sources' -chf - .\$" "$bin/ssh.log" || exit 57
+        grep -q "^script exec tar -C '$site' '--exclude=./tmp/\*' '--exclude=./backup' '--exclude=./.well-known' '--exclude=./contents/videos_sources' -chf - .\$" "$bin/ssh.log" || exit 57
         import_remote_files "$site" "$destination" no 'backup' 2>/dev/null && exit 58
         rm -rf "$site/tmp" "$site/backup" "$site/.well-known" "$site/contents/videos_sources"
 
@@ -1150,7 +1159,8 @@ test_a_user_with_sudo_runs_the_remote_side_through_it() {
         [ -f "$destination/contents/videos/1.mp4" ] || exit 12
         rm -rf "$destination"
         import_remote_files "$site" "$destination" no || exit 13
-        grep -q '^command sudo -n tar -C ' "$bin/ssh.log" || exit 14
+        grep -q '^command sudo -n sh -s$' "$bin/ssh.log" || exit 14
+        grep -q "^script exec tar -C '$site' -chf - .\$" "$bin/ssh.log" || exit 14
         [ -f "$destination/contents/videos/1.mp4" ] || exit 15
 
         FAKE_UID=1000 FAKE_SUDO_FAIL=1 import_remote_privileges || exit 16

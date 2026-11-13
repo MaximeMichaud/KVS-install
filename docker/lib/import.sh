@@ -1586,6 +1586,19 @@ import_ssh() {
     "${IMPORT_SSH_COMMAND[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" "$@"
 }
 
+# import_shquote <string>: the string as one token a POSIX shell parses back to
+# its literal value: single quotes, each embedded quote written '\'', hold any
+# byte but NUL there. ssh joins the words of a remote command with spaces and
+# the SSH user's login shell splits them again, and that shell need not be
+# POSIX (fish reads \' inside single quotes as a quote). A command built from
+# data on the old server (a directory name in a tar --exclude) is therefore
+# quoted with this and sent as a script on the standard input of sh -s, never
+# as words for the login shell, or a name like .a\';rm -rf /;# runs there.
+import_shquote() {
+    local quoted=${1//\'/\'\\\'\'}
+    printf "'%s'" "$quoted"
+}
+
 # import_ssh_close: end the multiplexed connection.
 import_ssh_close() {
     [ -n "$IMPORT_SSH_TARGET" ] || return 0
@@ -2948,7 +2961,7 @@ import_remote_files() (
                 ;;
         esac
         rsync_excludes+=("--exclude=$pattern")
-        tar_excludes+=("'--exclude=.$pattern'")
+        tar_excludes+=("$(import_shquote "--exclude=.$pattern")")
     done
     if [ "$use_rsync" = yes ]; then
         # The chunk lists take about 55 bytes a file, 0.6 GB for ten million
@@ -3249,8 +3262,17 @@ import_remote_files() (
     # runs without pipefail. 1 is what a live site does (files changed or
     # removed while they were read), anything else is a file it could not
     # read or a connection that broke.
+    # The login shell of the SSH user reads only "sh -s": the command, with
+    # the site path and the excludes quoted for sh (import_shquote), is the
+    # script on its standard input.
     local -a pipe_status=()
-    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" tar -C "$dir" "${tar_excludes[@]}" -chf - . | tar -xf - --no-same-owner -C "$destination"
+    local remote_tar
+    remote_tar="exec tar -C $(import_shquote "$dir")"
+    for pattern in ${tar_excludes[@]+"${tar_excludes[@]}"}; do
+        remote_tar+=" $pattern"
+    done
+    remote_tar+=" -chf - ."
+    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" sh -s <<< "$remote_tar" | tar -xf - --no-same-owner -C "$destination"
     pipe_status=("${PIPESTATUS[@]}")
     case "${pipe_status[0]}" in
         0) ;;
