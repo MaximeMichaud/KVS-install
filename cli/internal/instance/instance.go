@@ -125,7 +125,11 @@ type State struct {
 	// commit would take the checkout's files back.
 	AdoptedCommit     string    `json:"adopted_commit,omitempty"`
 	AdoptedCommitDate time.Time `json:"adopted_commit_date,omitzero"`
-	History           []Entry   `json:"history,omitempty"`
+	// SiteHandedOver is when an upgrade last gave uid 1000 every entry of
+	// the site that another user owned, the files a KVS cron task run as
+	// root left; zero until one did.
+	SiteHandedOver time.Time `json:"site_handed_over,omitzero"`
+	History        []Entry   `json:"history,omitempty"`
 }
 
 // CacheChange records only the literal host, never the site's PHP source

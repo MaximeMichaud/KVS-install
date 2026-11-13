@@ -542,6 +542,22 @@ manifest, queries GitHub releases or writes the update reminder cache.
    project gives MariaDB a longer grace period than its container has, it
    comes up alone first too, with
    `docker compose up -d --timeout <seconds> mariadb`, and the log says so.
+   A checkout adopted from before the KVS task ran unprivileged ran it as
+   root, and the files and directories it created in the site would stay
+   out of reach of the task once it runs as www-data. So when the release
+   runs the task as www-data, and either no upgrade has handed the site
+   over yet (the state records it) or the crontab of the running version
+   runs the task as another user, a one-off PHP-FPM container run as root,
+   once the old cron container is gone, gives uid and gid 1000 every entry
+   of the site another user owns, links themselves and never what they
+   point to, as `kvs-init` does on each `setup.sh` run. Every stack goes
+   through this walk of the whole site once, on its first upgrade by a
+   kvsctl that does it, whatever version it came from. An entry the site
+   removes during the walk is no error. When the mount refuses part of it
+   (NFS with `root_squash`, for instance), the upgrade goes on, those
+   entries keep their owner, a notice gives the command to finish by hand,
+   and the next upgrade tries again. A rollback leaves the new owner in
+   place, which the root task of the older version still writes.
 7. **Verify.** Only the containers of the services compose runs here are
    judged, and Docker's health state decides: running and healthy, or
    running without a health check, passes. A container still starting gets

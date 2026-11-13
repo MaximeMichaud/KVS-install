@@ -32,6 +32,25 @@ const composeFileKey = "COMPOSE_FILE"
 // composeProfilesKey is COMPOSE_PROFILES, the profiles the stack turns on.
 const composeProfilesKey = "COMPOSE_PROFILES"
 
+// kvsCrontab is the release file the cron image installs the KVS task
+// from.
+const kvsCrontab = "docker/cron/crontab"
+
+// handOverArgs are what a root PHP-FPM container runs to hand the site to
+// uid and gid 1000, www-data of the PHP and cron images, the final step of
+// kvs-init's 60-permissions.sh: the entries owned by anyone else only, and
+// chown -h, which changes a link itself and never what it points to. The
+// site keeps running while find walks it: an entry removed after find read
+// its directory is no error (-ignore_readdir_race).
+var handOverArgs = []string{"run", "--rm", "-T", "--no-deps", "--user", "0:0", "--entrypoint", "find", "php-fpm", "/var/www/kvs", "-ignore_readdir_race", "(", "!", "-uid", "1000", "-o", "!", "-gid", "1000", ")", "-exec", "chown", "-h", "1000:1000", "{}", "+"}
+
+// handOverLeftArgs print the first entry of the site another user still
+// owns, nothing when none is left. Under -ignore_readdir_race, -uid and -gid
+// are false on an entry the site removed before find could read its owner,
+// so "! -uid 1000" would print it: the check compares both ways instead,
+// which no vanished entry matches.
+var handOverLeftArgs = []string{"run", "--rm", "-T", "--no-deps", "--user", "0:0", "--entrypoint", "find", "php-fpm", "/var/www/kvs", "-ignore_readdir_race", "(", "-uid", "-1000", "-o", "-uid", "+1000", "-o", "-gid", "-1000", "-o", "-gid", "+1000", ")", "-print", "-quit"}
+
 // phpKeys are the .env settings that name the PHP series of the site. A run
 // records them with the images: a re-apply to another series is asked for
 // by changing them, and its rollback puts them back.
@@ -105,6 +124,8 @@ func (r *Runner) change(ctx context.Context, state *instance.State, plan *Plan, 
 		return r.untouched(plan, err)
 	}
 	want := variantEnv(plan)
+	// Read before the lay replaces the crontab of the running version.
+	handOver := r.cronHandOver(state, dir)
 	// A stack adopted from before acme moved behind the direct-tls profile
 	// (66e90fb) ran acme without a profile; the target gates it, and the
 	// stack's COMPOSE_PROFILES, which an upgrade otherwise keeps verbatim,
@@ -181,6 +202,12 @@ func (r *Runner) change(ctx context.Context, state *instance.State, plan *Plan, 
 	budget := r.dbBudget(plan.MariaDBUpgrade)
 	if err := r.restart(ctx, j, plan.MariaDBImageChanges, budget); err != nil {
 		return fail(StepRestart, err)
+	}
+	// Compose has replaced the cron container of the old version: from now
+	// on no task creates a file root owns. The state records a hand-over
+	// that changed every entry, and only then.
+	if handOver && r.handOverSite(ctx) {
+		state.SiteHandedOver = time.Now().UTC()
 	}
 	r.done(StepRestart, "services restarted")
 
@@ -750,6 +777,81 @@ func directTLSProfiles(env map[string]string) string {
 		}
 	}
 	return strings.Join(append(profiles, "direct-tls"), ",")
+}
+
+// cronHandOver reports whether this run hands the site to uid 1000: the
+// crontab staged in dir runs the KVS task as www-data, and either no
+// upgrade has handed the site over yet or the crontab of the running
+// version runs the task as another user. A checkout before e3a1dd3 loaded
+// its crontab into root's own table: cron.php created its files and
+// directories in the site as root, and the task, now uid 1000, could
+// neither rewrite nor remove them, nor create files in those directories.
+// kvs-init hands the site to uid 1000 on every setup.sh run, but an upgrade
+// never runs kvs-init. The first trigger reaches a stack an earlier kvsctl
+// already upgraded from such a checkout, whose crontab says www-data now;
+// the second a version a rollback laid back. A staged crontab that cannot
+// be read gives false.
+func (r *Runner) cronHandOver(state *instance.State, dir string) bool {
+	after, err := os.ReadFile(filepath.Join(dir, kvsCrontab))
+	if err != nil {
+		return false
+	}
+	if _, site := kvsTaskUser(after); !site {
+		return false
+	}
+	if state.SiteHandedOver.IsZero() {
+		return true
+	}
+	before, err := os.ReadFile(filepath.Join(r.Inst.Root, kvsCrontab))
+	if err != nil {
+		return false
+	}
+	task, site := kvsTaskUser(before)
+	return task && !site
+}
+
+// kvsTaskUser reads a crontab: task reports whether a line that is neither
+// a comment nor a setting runs cron.php, and site whether the first such
+// line names www-data as its user, the sixth field of an /etc/cron.d file.
+// The crontab of a release before e3a1dd3 went to root's own table, whose
+// lines have no user field: its sixth field starts the command.
+func kvsTaskUser(data []byte) (task, site bool) {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") || strings.Contains(fields[0], "=") {
+			continue
+		}
+		if strings.Contains(line, "cron.php") {
+			return true, len(fields) > 6 && fields[5] == "www-data"
+		}
+	}
+	return false, false
+}
+
+// handOverSite gives uid and gid 1000 the entries of the site another user
+// owns, in a one-off PHP-FPM container that mounts the site as the stack
+// does, run as root, and reports whether every one of them changed. chown
+// also fails on an entry the site removed after find matched it, which
+// -ignore_readdir_race does not cover: after a failed walk, what decides is
+// whether an entry of another owner is left. A change the mount refuses
+// (NFS with root_squash) does not fail the run: the entries it could not
+// change keep the owner they had, a notice says how to finish by hand, and
+// the next upgrade tries again.
+func (r *Runner) handOverSite(ctx context.Context) bool {
+	r.log("handing uid 1000 the files of the site another user owns, which the KVS cron task, www-data, could not rewrite")
+	_, err := dockerx.ComposeOutput(ctx, r.Inst.DockerDir, handOverArgs...)
+	if err != nil && ctx.Err() == nil {
+		if left, lerr := dockerx.ComposeOutput(ctx, r.Inst.DockerDir, handOverLeftArgs...); lerr == nil && strings.TrimSpace(left) == "" {
+			r.log("the walk reported entries the site removed meanwhile; none of another owner is left")
+			err = nil
+		}
+	}
+	if err != nil {
+		r.notice(fmt.Sprintf("some files of the site may keep an owner other than uid 1000, which the KVS cron task cannot rewrite: %s; run 'find %s \\( ! -uid 1000 -o ! -gid 1000 \\) -exec chown -h 1000:1000 {} +' as root", errLine(err), r.Inst.WebRoot))
+		return false
+	}
+	r.log("every file of the site belongs to uid 1000")
+	return true
 }
 
 // variantEnv is what a run writes to .env: the variant images and, on a
