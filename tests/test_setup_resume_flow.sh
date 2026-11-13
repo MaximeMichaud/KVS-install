@@ -75,6 +75,7 @@ SH
 cat > "$fixture/bin/gum" <<'SH'
 #!/bin/bash
 case "$1" in
+    --version) echo 'gum version v2.0.2 (test)' ;;
     style) exit 0 ;;
     spin)
         while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done

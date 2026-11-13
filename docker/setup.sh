@@ -341,6 +341,15 @@ prompt_read() {
 }
 PROGRESS_TOTAL=12
 PROGRESS_CURRENT=0
+# The gum run_step and the progress boxes draw with, or empty for plain
+# text. Only a gum that runs counts: the helpers used to take any gum
+# command -v found, and a broken one crashed the first step it drew.
+# install_gum sets it again once it has installed or replaced one; a
+# --resume-import run installs nothing and keeps this one.
+GUM_BIN=$(command -v gum 2>/dev/null) || true
+if [ -n "$GUM_BIN" ] && ! "$GUM_BIN" --version >/dev/null 2>&1; then
+    GUM_BIN=
+fi
 
 log_command() {
     local logfile="/tmp/log_cmd_$$.log"
@@ -400,11 +409,11 @@ run_step() {
     local logfile="/tmp/run_step_$$.log"
     local result=0
 
-    if command -v gum &>/dev/null; then
+    if [ -n "${GUM_BIN:-}" ]; then
         # With gum: show spinner, log output to file
         # Note: $@ and $0 must be expanded by sh -c, not the parent shell
         # shellcheck disable=SC2016
-        if gum spin --spinner dot --title "$title" -- sh -c '"$@" >"$0" 2>&1' "$logfile" "$@"; then
+        if "$GUM_BIN" spin --spinner dot --title "$title" -- sh -c '"$@" >"$0" 2>&1' "$logfile" "$@"; then
             echo -e "  ${GREEN}✓${NC} $title"
             result=0
         else
@@ -452,8 +461,8 @@ progress_bar() {
     done
 
     echo ""
-    if command -v gum &>/dev/null; then
-        gum style --foreground 212 --border-foreground 99 --border rounded --width 50 --padding "0 1" \
+    if [ -n "${GUM_BIN:-}" ]; then
+        "$GUM_BIN" style --foreground 212 --border-foreground 99 --border rounded --width 50 --padding "0 1" \
             "[$bar] $pct% ($PROGRESS_CURRENT/$PROGRESS_TOTAL)" "→ $title"
     else
         echo -e "${CYAN}[$bar] $pct% ($PROGRESS_CURRENT/$PROGRESS_TOTAL)${NC}"
@@ -465,11 +474,11 @@ progress_header() {
     local title="$1"
     local subtitle="${2:-}"
     echo ""
-    if command -v gum &>/dev/null; then
+    if [ -n "${GUM_BIN:-}" ]; then
         if [[ -n "$subtitle" ]]; then
-            gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title" "$subtitle"
+            "$GUM_BIN" style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title" "$subtitle"
         else
-            gum style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title"
+            "$GUM_BIN" style --foreground 212 --border-foreground 99 --border double --align center --width 60 --margin "1 2" --padding "1 2" "$title"
         fi
     else
         echo "========================================"
@@ -482,8 +491,8 @@ progress_header() {
 progress_success() {
     local msg="${1:-Setup Complete!}"
     echo ""
-    if command -v gum &>/dev/null; then
-        gum style --foreground 82 --border-foreground 82 --border double --align center --width 50 --padding "1 2" \
+    if [ -n "${GUM_BIN:-}" ]; then
+        "$GUM_BIN" style --foreground 82 --border-foreground 82 --border double --align center --width 50 --padding "1 2" \
             "✓ $msg" "All $PROGRESS_TOTAL steps finished"
     else
         echo -e "${GREEN}========================================"
@@ -3299,29 +3308,61 @@ preflight_checks() {
     fi
 }
 
-# Install gum for better UX (if not present)
+# gum only draws the progress (spinners and boxes); without it the steps
+# print plain text. Its release is pinned with the sha256 of each tarball
+# (checksums.txt of the release). The "latest" tarball used to be piped from
+# curl straight into tar in /usr/local/bin, unverified: an interrupted
+# download left a truncated gum there, every later run found it with
+# command -v and kept it, and the first step it drew crashed the setup.
+GUM_VERSION=2.0.2
+GUM_SHA256_X86_64=d842e06d93dbed90af48cb8dd10698db6f22e331fc40346bb37bbc753109edc2
+GUM_SHA256_ARM64=8ebf8b54ec1e8c81f2bb58b59ff9b70998186a4d11375f0cf357b80e0ccfa1d5
+
+# install_gum [directory]: install gum when no working one is on the PATH,
+# into /usr/local/bin; only the tests name another directory. The tarball
+# is downloaded into a temporary directory and checked against its pinned
+# sha256; its gum is copied next to its final place, must run there, and is
+# then renamed into place. Nothing runs from TMPDIR, which may be mounted
+# noexec. The download gives up after a bounded time instead of stalling
+# the setup in silence. A gum that does not run in the install directory,
+# the truncated one an older release left, is replaced; one installed
+# elsewhere is not this script's to touch, and GUM_BIN stays empty then, so
+# the helpers print plain text instead of calling it.
 install_gum() {
-    if command -v gum &>/dev/null; then
-        return 0
+    local install_dir=${1:-/usr/local/bin}
+    local existing arch sha256 work
+
+    GUM_BIN=
+    if existing=$(command -v gum 2>/dev/null); then
+        if "$existing" --version >/dev/null 2>&1; then
+            GUM_BIN=$existing
+            return 0
+        fi
+        [ "$existing" = "$install_dir/gum" ] || return 1
+        rm -f -- "$existing" || return 1
     fi
 
-    GUM_VERSION=$(curl -fsSL https://api.github.com/repos/charmbracelet/gum/releases/latest 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
-
-    if [ -z "$GUM_VERSION" ]; then
-        return 1
-    fi
-
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64) ARCH="x86_64" ;;
-        aarch64|arm64) ARCH="arm64" ;;
+    case $(uname -m) in
+        x86_64|amd64) arch=x86_64 sha256=$GUM_SHA256_X86_64 ;;
+        aarch64|arm64) arch=arm64 sha256=$GUM_SHA256_ARM64 ;;
         *) return 1 ;;
     esac
 
-    curl -fsSL "https://github.com/charmbracelet/gum/releases/download/${GUM_VERSION}/gum_${GUM_VERSION#v}_Linux_${ARCH}.tar.gz" \
-        | tar -xzf - --strip-components=1 -C /usr/local/bin --wildcards '*/gum' 2>/dev/null
-
-    chmod +x /usr/local/bin/gum 2>/dev/null
+    work=$(mktemp -d) || return 1
+    if curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-max-time 60 -o "$work/gum.tar.gz" \
+        "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz" &&
+        printf '%s  %s\n' "$sha256" "$work/gum.tar.gz" | sha256sum -c --status - &&
+        tar -xzf "$work/gum.tar.gz" -C "$work" --strip-components=1 --wildcards '*/gum' &&
+        install -D -m 0755 "$work/gum" "$install_dir/.gum.partial" &&
+        "$install_dir/.gum.partial" --version >/dev/null 2>&1 &&
+        mv -f -- "$install_dir/.gum.partial" "$install_dir/gum"; then
+        rm -rf -- "$work"
+        GUM_BIN=$install_dir/gum
+        return 0
+    fi
+    rm -rf -- "$work"
+    rm -f -- "$install_dir/.gum.partial"
+    return 1
 }
 
 # Log a command's output without showing it to the user

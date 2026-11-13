@@ -58,7 +58,10 @@ exec "$@"
 SH
     fi
     chmod +x "$bin"/*
-    (cd "$CASE_DIR/docker" && PATH="$bin:/usr/bin:/bin" bash -e "$block") > "$CASE_DIR/output.log" 2>&1
+    # GUM_BIN is what the setup sets once it has found a gum that runs.
+    local gum_bin=
+    [ "$mode" = gum ] && gum_bin="$bin/gum"
+    (cd "$CASE_DIR/docker" && PATH="$bin:/usr/bin:/bin" GUM_BIN="$gum_bin" bash -e "$block") > "$CASE_DIR/output.log" 2>&1
 }
 
 # new_case <name>: a docker directory with an empty nginx directory.

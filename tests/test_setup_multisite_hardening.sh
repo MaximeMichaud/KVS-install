@@ -976,7 +976,7 @@ cat > "$TEST_DIR/caddy-runner" <<EOF
 printf '%s %s\n' "\$ACME_EMAIL" "\$1" > "$TEST_DIR/caddy-run-step-result"
 EOF
 chmod +x "$TEST_DIR/bin/gum" "$TEST_DIR/caddy-runner"
-PATH="$TEST_DIR/bin:$PATH" run_step "Starting Caddy reverse proxy" \
+PATH="$TEST_DIR/bin:$PATH" GUM_BIN="$TEST_DIR/bin/gum" run_step "Starting Caddy reverse proxy" \
     env ACME_EMAIL=ops@example.com "$TEST_DIR/caddy-runner" caddy-start >/dev/null
 grep -Fxq 'ops@example.com caddy-start' "$TEST_DIR/caddy-run-step-result" ||
     fail "run_step did not execute the Caddy command with Gum present"
