@@ -2258,6 +2258,47 @@ function dockerInstall() {
   ./setup.sh "${SETUP_ARGS[@]}"
 }
 
+# Resolve the installation directory the Docker install uses, honouring
+# KVS_INSTALL_DIR the same way dockerInstall does and dropping any trailing
+# slashes so the path reads cleanly.
+function resolve_install_dir() {
+  local install_dir="${KVS_INSTALL_DIR:-/opt/kvs}"
+  while [[ $install_dir == ?*/ ]]; do
+    install_dir=${install_dir%/}
+  done
+  printf '%s\n' "$install_dir"
+}
+
+# A Docker installation keeps its Compose project under that directory. Menu
+# option 2 runs the native install_KVS, which re-owns /var/www away from the
+# container user, loosens the site's setup_db.php and rewrites its setup.php
+# paths: on a Docker host it silently breaks the running stack. Detect that
+# layout so the menu can refuse and point at the Docker multi-site tool, and
+# print the docker directory found.
+#
+# A later run that does not repeat the KVS_INSTALL_DIR given at install time
+# looks at the default directory only, so the stack's containers are asked
+# too: Compose labels each one with the directory it was started from, the
+# docker directory itself or a site under its multi-site/sites.
+function docker_install_dir() {
+  local docker_dir working_dir
+  docker_dir="$(resolve_install_dir)/docker"
+  if [[ -f "$docker_dir/docker-compose.yml" ]]; then
+    printf '%s\n' "$docker_dir"
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 || return 1
+  while IFS= read -r working_dir; do
+    [[ $working_dir == */multi-site/sites/* ]] && working_dir=${working_dir%%/multi-site/sites/*}
+    if [[ -n $working_dir && -f $working_dir/setup.sh && -f $working_dir/multi-site/site-manager.sh ]]; then
+      printf '%s\n' "$working_dir"
+      return 0
+    fi
+  done < <(docker ps -a --filter label=com.docker.compose.project.working_dir \
+    --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null)
+  return 1
+}
+
 function manageMenu() {
   # Skip menu display if already set via headless mode
   if [[ ! "$MENU_OPTION" =~ ^[1-5]$ ]]; then
@@ -2282,6 +2323,15 @@ function manageMenu() {
     chooseInstallationType
     ;;
   2)
+    local docker_dir
+    if docker_dir=$(docker_install_dir); then
+      echo "${red}This host runs KVS with Docker.${normal}"
+      echo "Adding a site with the native installer would re-own the web root,"
+      echo "loosen the database password file and rewrite the running site's paths."
+      echo "Add a Docker site with the multi-site tool instead:"
+      echo "  $docker_dir/multi-site/site-manager.sh add <domain>"
+      exit 1
+    fi
     whatisdomain
     install_KVS
     ;;

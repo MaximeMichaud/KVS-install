@@ -1275,6 +1275,64 @@ test_the_wrapper_installs_the_requested_branch() {
   ) || fail "the wrapper must install and update the requested branch (case $?)"
 }
 
+# Menu option 2 ("Add another KVS website") runs the native install_KVS. On a
+# Docker host that re-owns /var/www away from the container user, loosens the
+# running site's setup_db.php and rewrites its setup.php paths, silently
+# breaking the stack. It must refuse there and point at the multi-site tool,
+# while a native host still reaches install_KVS.
+test_menu_add_site_refuses_on_a_docker_host() {
+  local temp_dir docker_dir native_dir out status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+
+  # Stand in for the destructive native install path.
+  whatisdomain() { : >"$temp_dir/native-ran"; }
+  install_KVS() { : >"$temp_dir/native-ran"; }
+
+  # The containers' Compose labels, or none: never the real Docker daemon.
+  export TEST_WORKING_DIRS=""
+  docker() {
+    [[ $1 == ps ]] || return 1
+    [[ -z $TEST_WORKING_DIRS ]] || tr ' ' '\n' <<<"$TEST_WORKING_DIRS"
+  }
+
+  # A Docker host keeps its Compose project under the install directory.
+  docker_dir="$temp_dir/docker-host"
+  mkdir -p "$docker_dir/docker"
+  : >"$docker_dir/docker/docker-compose.yml"
+
+  out=$(KVS_INSTALL_DIR="$docker_dir" MENU_OPTION=2 manageMenu 2>&1)
+  status=$?
+
+  [[ $status -ne 0 ]] || fail "menu option 2 should refuse on a Docker host" || return 1
+  [[ ! -e "$temp_dir/native-ran" ]] || fail "menu option 2 ran the native install on a Docker host" || return 1
+  grep -Fq "$docker_dir/docker/multi-site/site-manager.sh" <<<"$out" ||
+    fail "the refusal should point to the Docker multi-site tool" || return 1
+
+  # Installed under a KVS_INSTALL_DIR this run does not repeat: the stack is
+  # found from its containers' working_dir label, the primary's or a site's.
+  native_dir="$temp_dir/native-host"
+  mkdir -p "$native_dir" "$docker_dir/docker/multi-site/sites/b.example"
+  : >"$docker_dir/docker/setup.sh"
+  : >"$docker_dir/docker/multi-site/site-manager.sh"
+  for TEST_WORKING_DIRS in "/srv/other-project $docker_dir/docker" "$docker_dir/docker/multi-site/sites/b.example"; do
+    out=$(KVS_INSTALL_DIR="$native_dir" MENU_OPTION=2 manageMenu 2>&1)
+    status=$?
+    [[ $status -ne 0 ]] || fail "menu option 2 should refuse a Docker stack found from its containers" || return 1
+    [[ ! -e "$temp_dir/native-ran" ]] || fail "menu option 2 ran the native install over a running Docker stack" || return 1
+    grep -Fq "$docker_dir/docker/multi-site/site-manager.sh" <<<"$out" ||
+      fail "the refusal should name the multi-site tool of the stack found" || return 1
+  done
+
+  # A native host has no Compose project: option 2 still reaches install_KVS,
+  # unrelated Compose projects included.
+  TEST_WORKING_DIRS="/srv/other-project"
+  KVS_INSTALL_DIR="$native_dir" MENU_OPTION=2 manageMenu >/dev/null 2>&1
+  [[ -e "$temp_dir/native-ran" ]] || fail "menu option 2 should still install natively off a Docker host" || return 1
+  unset -f docker
+  unset TEST_WORKING_DIRS
+}
+
 run_test "installation failures stop the pipeline" test_install_failure_stops_pipeline || failures=$((failures + 1))
 run_test "gum repository leaves with its key" test_gum_repository_leaves_with_its_key || failures=$((failures + 1))
 run_test "visual progress failures are non-fatal" test_visual_progress_failure_is_nonfatal || failures=$((failures + 1))
@@ -1290,6 +1348,7 @@ run_test "KVS system settings select nginx" test_kvs_system_settings_select_ngin
 run_test "archive extraction skips an installed site" test_archive_extraction_skips_an_installed_site || failures=$((failures + 1))
 run_test "database file configuration is anchored" test_database_file_configuration_is_anchored || failures=$((failures + 1))
 run_test "setup_db.php is restricted to the PHP user" test_setup_db_file_is_restricted_to_the_php_user || failures=$((failures + 1))
+run_test "menu add-site refuses on a Docker host" test_menu_add_site_refuses_on_a_docker_host || failures=$((failures + 1))
 run_test "acme issue reuses a valid certificate" test_acme_issue_reuses_a_valid_certificate || failures=$((failures + 1))
 run_test "port check accepts the installer nginx" test_port_check_accepts_the_installer_nginx || failures=$((failures + 1))
 run_test "KVS servers follow the site URL" test_kvs_servers_follow_the_site_url || failures=$((failures + 1))

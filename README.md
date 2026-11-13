@@ -256,7 +256,7 @@ MODE_CHOICE=1 \
 | -------- | ------ | ------- | ----------- |
 | `HEADLESS` | `y` | - | Enable headless mode (required) |
 | `INSTALL_TYPE` | `1`/`2` | `1` | 1=Docker, 2=Standalone |
-| `MENU_OPTION` | `1-5` | `1` | 1=Install, 2=Add site, 3=Update PMA, 4=Update script, 5=Quit |
+| `MENU_OPTION` | `1-5` | `1` | 1=Install, 2=Add site (work in progress, not working yet; refused when a Docker install is found, which adds sites with docker/multi-site/site-manager.sh), 3=Update PMA, 4=Update script, 5=Quit |
 | `KVS_EMAIL` | email | - | Email for SSL certificates (required for Let's Encrypt/ZeroSSL) |
 | `PREFIX_CHOICE` | `1-3` | `1` | 1=Auto (kvs-domain), 2=Legacy (kvs), 3=Custom. Used only when a prefix is chosen (first install, import under a new domain); an installed site keeps its prefix |
 | `SSL_CHOICE` | `1-3` | `1`, or the saved provider on a re-run | 1=Let's Encrypt, 2=ZeroSSL, 3=Self-signed |
