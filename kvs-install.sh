@@ -378,6 +378,102 @@ find_kvs_archive() {
   printf '%s\n' "${archives[0]}"
 }
 
+# A KVS archive is a large zip. scp and sftp create it at its final name and
+# then grow it, so a copy started too early captures a truncated file. unzip -t
+# reads the central directory and every entry's CRC, so it fails on a
+# half-written or corrupt archive and passes only on a complete one. Quiet: the
+# caller decides what to report.
+archive_is_valid() {
+  local file=$1
+  [[ -f "$file" ]] && unzip -tq "$file" > /dev/null 2>&1
+}
+
+# Print the path of the one complete KVS archive in a directory, waiting for an
+# upload in progress to finish first: unzip must accept the file and its size
+# must hold still across the check, so one still being written is never used.
+# A file whose size has not changed for KVS_ARCHIVE_SETTLE_SECONDS (60 by
+# default) and that unzip still refuses is not an upload in progress but a
+# broken file, and ends the wait. Two archives are refused, as the Docker setup
+# refuses them in kvs-archive/: whichever sorts first would be the one used.
+# Messages go to standard error, keeping the path alone on standard output for
+# capture; the caller's CTRL + C ends the wait.
+wait_for_complete_kvs_archive() {
+  local dir="${1:-/root}" settle="${KVS_ARCHIVE_SETTLE_SECONDS:-60}"
+  local candidate file size recheck last_size="" stable_since=$SECONDS announced=0
+  local -a archives
+
+  if ! command -v unzip > /dev/null 2>&1; then
+    echo "Error: unzip is required to check the KVS archive in $dir" >&2
+    return 1
+  fi
+  while :; do
+    archives=()
+    for candidate in "$dir"/KVS_*.zip; do
+      [[ -f "$candidate" ]] && archives+=("$candidate")
+    done
+    if ((${#archives[@]} > 1)); then
+      echo "Error: Multiple KVS archives found in $dir; keep exactly one archive:" >&2
+      printf '  %s\n' "${archives[@]}" >&2
+      return 1
+    fi
+    if ((${#archives[@]} == 1)); then
+      file=${archives[0]}
+      size=$(stat -c %s "$file" 2> /dev/null || echo 0)
+      if [[ "$size" != "$last_size" ]]; then
+        last_size=$size
+        stable_since=$SECONDS
+      fi
+      if [[ "$size" -gt 0 ]] && archive_is_valid "$file"; then
+        sleep 1
+        recheck=$(stat -c %s "$file" 2> /dev/null || echo 0)
+        if [[ "$size" == "$recheck" ]] && archive_is_valid "$file"; then
+          printf '%s\n' "$file"
+          return 0
+        fi
+      elif ((SECONDS - stable_since >= settle)); then
+        echo "Error: $file is not a complete zip archive: unzip cannot read it and its size has not changed for ${settle}s. Upload it again." >&2
+        return 1
+      fi
+    fi
+    if ((announced == 0)); then
+      echo "Waiting for a complete KVS .ZIP upload in $dir..." >&2
+      echo "Press CTRL + C to exit" >&2
+      announced=1
+    fi
+    sleep "${KVS_ARCHIVE_POLL_SECONDS:-2}"
+  done
+}
+
+# Copy the one complete KVS archive from a source directory into a destination,
+# waiting for its upload to finish. The copy is written under a name the
+# KVS_*.zip globs do not match and takes the archive's name only once it is
+# checked, so a copy cut short (a full disk) is never staged where later runs
+# would prefer and keep failing on it.
+copy_complete_archive() {
+  local src=$1 dest=$2 file base partial
+  file=$(wait_for_complete_kvs_archive "$src") || return 1
+  base=${file##*/}
+  partial="$dest/.partial.$base"
+  rm -f "$partial"
+  if ! cp "$file" "$partial" || ! archive_is_valid "$partial" || ! mv -f "$partial" "$dest/$base"; then
+    rm -f "$partial"
+    return 1
+  fi
+}
+
+# unzip checks an uploaded archive before the installer uses it. A minimal
+# Debian ships without it, and the attended upload wait comes before the base
+# packages are installed, so it is installed first when it is missing.
+ensure_unzip() {
+  command -v unzip > /dev/null 2>&1 && return 0
+  if ! command -v apt-get > /dev/null 2>&1; then
+    echo "${red}unzip is required to check the KVS archive; install it and run the installer again${normal}" >&2
+    return 1
+  fi
+  echo "Installing unzip to check the KVS archive..."
+  apt_get update -qq && apt_install -qq unzip
+}
+
 # PHP releases the standalone installer can set up from the Sury repository.
 SUPPORTED_PHP_VERSIONS="7.4 8.1 8.2 8.3 8.4"
 
@@ -609,15 +705,10 @@ function installQuestions() {
       USE_WWW="true"
       ;;
     esac
-    echo "Upload KVS Archive File in /root"
+    echo "Upload KVS Archive File in ${KVS_ARCHIVE_DIR:-/root}"
     echo "Ex : KVS_X.X.X_[domain.tld].zip"
-    # shellcheck disable=SC2144
-    while [ ! -f /root/KVS_*.zip ]; do
-      sleep 2
-      echo "Waiting for KVS .ZIP file in /root"
-      echo "Press CTRL + C for exiting"
-    done
-    file=$(find_kvs_archive "${KVS_ARCHIVE_DIR:-/root}") || return $?
+    ensure_unzip || return $?
+    file=$(wait_for_complete_kvs_archive "${KVS_ARCHIVE_DIR:-/root}") || return $?
     ls -l "$file"
     configure_php_for_kvs_archive "$file" || return $?
 
@@ -2101,6 +2192,7 @@ function dockerInstall() {
   local INSTALL_DIR
   local BACKUP_DIR
   local clone_status
+  local staged_archive
 
   echo ""
   echo "${cyan}=== Docker Installation ===${normal}"
@@ -2206,13 +2298,24 @@ function dockerInstall() {
   echo "Checking for KVS archive..."
   mkdir -p kvs-archive
 
-  # First check if archive already exists in kvs-archive
+  # First check if archive already exists in kvs-archive. It is preferred over
+  # /root, so a broken one (cut short by an older installer, or uploaded there
+  # by hand) would fail every run in the init container: check it here.
   if ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
+    staged_archive=$(find_kvs_archive kvs-archive) || return 1
+    if ! archive_is_valid "$staged_archive"; then
+      echo "${red}$INSTALL_DIR/docker/$staged_archive is not a complete zip archive (unzip cannot read it).${normal}" >&2
+      echo "${red}Remove it and run the installer again; an archive in /root is then staged in its place.${normal}" >&2
+      return 1
+    fi
     echo "${green}KVS archive found in kvs-archive/${normal}"
   # Then check /root
   elif ls /root/KVS_*.zip 1>/dev/null 2>&1; then
     echo "Found KVS archive in /root, copying to kvs-archive/..."
-    cp /root/KVS_*.zip kvs-archive/
+    copy_complete_archive /root kvs-archive || {
+      echo "${red}The KVS archive in /root is incomplete or could not be copied${normal}" >&2
+      return 1
+    }
     echo "${green}KVS archive copied${normal}"
   elif import_source_given; then
     echo "No KVS archive found; none is needed to import an existing site (its version, its encoding and its nginx rewrites come from the site)"
@@ -2221,13 +2324,10 @@ function dockerInstall() {
   else
     echo "${red}No KVS archive found${normal}"
     echo "Please upload your KVS_X.X.X_[domain.tld].zip file to /root"
-    # shellcheck disable=SC2144
-    while [ ! -f /root/KVS_*.zip ]; do
-      sleep 2
-      echo "Waiting for KVS .ZIP file in /root..."
-      echo "Press CTRL + C to exit"
-    done
-    cp /root/KVS_*.zip kvs-archive/
+    copy_complete_archive /root kvs-archive || {
+      echo "${red}The KVS archive in /root is incomplete or could not be copied${normal}" >&2
+      return 1
+    }
     echo "${green}KVS archive copied${normal}"
   fi
 

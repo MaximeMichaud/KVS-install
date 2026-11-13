@@ -38,7 +38,9 @@ seed_installation() {
   mkdir -p "$install_dir/.git" "$install_dir/docker/kvs-archive" "$install_dir/docker/import"
   printf 'services: {}\n' >"$install_dir/docker/docker-compose.yml"
   printf 'MARIADB_PASSWORD=secret\n' >"$install_dir/docker/.env"
-  printf 'archive\n' >"$install_dir/docker/kvs-archive/KVS_7.0.2_[example.com].zip"
+  # A real zip: the installer checks a staged archive before it uses it.
+  python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.php", "archive\n"); z.close()' \
+    "$install_dir/docker/kvs-archive/KVS_7.0.2_[example.com].zip"
   printf 'staged\n' >"$install_dir/docker/import/site.tar"
 }
 
@@ -111,6 +113,31 @@ test_successful_reclone_replaces_the_copy_and_restores_user_data() {
   grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run after the re-clone" || return 1
   [[ ! -e "$KVS_INSTALL_DIR.clone" ]] || fail "the staging directory was left behind" || return 1
   [[ ! -e "$KVS_BACKUP_DIR" ]] || fail "the temporary backup was not removed after the restore" || return 1
+}
+
+# The staged archive is preferred over /root, so a broken one (cut short by an
+# older installer) failed every run in the init container until it was found
+# and deleted by hand. It is checked and named before the setup runs.
+test_a_broken_staged_archive_is_refused() {
+  local temp_dir
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  command -v unzip >/dev/null 2>&1 || { echo "skip: unzip is not installed here"; return 0; }
+  export KVS_INSTALL_DIR="$temp_dir/install"
+  export KVS_BACKUP_DIR="$temp_dir/backup"
+  seed_installation "$KVS_INSTALL_DIR"
+  head -c 30 "$KVS_INSTALL_DIR/docker/kvs-archive/KVS_7.0.2_[example.com].zip" >"$temp_dir/cut"
+  mv "$temp_dir/cut" "$KVS_INSTALL_DIR/docker/kvs-archive/KVS_7.0.2_[example.com].zip"
+  git() { git_that_clones_only "$@"; }
+
+  (dockerInstall) >"$temp_dir/out" 2>&1
+  status=$?
+
+  [[ $status -ne 0 ]] || fail "a broken staged archive must stop the install" || return 1
+  grep -q 'not a complete zip archive' "$temp_dir/out" ||
+    fail "the broken staged archive must be named: $(tail -n 3 "$temp_dir/out")" || return 1
+  ! grep -q 'setup-ran' "$temp_dir/out" || fail "the setup must not run over a broken archive" || return 1
 }
 
 # kvsctl backup and kvsctl restore need no adoption: on a stack kvsctl does
@@ -705,7 +732,8 @@ rewritten_branch_case() {
   # What the first pass of a migration leaves in the copy.
   mkdir -p "$KVS_INSTALL_DIR/docker/kvs-archive" "$KVS_INSTALL_DIR/docker/import" "$KVS_INSTALL_DIR/logs"
   printf 'MARIADB_PASSWORD=secret\n' >"$KVS_INSTALL_DIR/docker/.env"
-  printf 'archive\n' >"$KVS_INSTALL_DIR/docker/kvs-archive/KVS_7.0.2_[example.com].zip"
+  python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.php", "archive\n"); z.close()' \
+    "$KVS_INSTALL_DIR/docker/kvs-archive/KVS_7.0.2_[example.com].zip"
   printf 'ssh://root@old.example.com:22/var/www/website\n' >"$KVS_INSTALL_DIR/docker/import/example.com.source"
   printf 'server {}\n' >"$KVS_INSTALL_DIR/docker/import/example.com.old-nginx.conf"
   printf 'rows\n' >"$KVS_INSTALL_DIR/logs/import-rows.txt"
@@ -994,6 +1022,7 @@ failures=0
 run_test "unreachable remote keeps the installed copy" test_unreachable_remote_keeps_the_installed_copy || failures=$((failures + 1))
 run_test "successful re-clone replaces the copy and restores user data" test_successful_reclone_replaces_the_copy_and_restores_user_data || failures=$((failures + 1))
 run_test "rewritten branch keeps the files the setup wrote" test_rewritten_branch_keeps_the_files_the_setup_wrote || failures=$((failures + 1))
+run_test "a broken staged archive is refused" test_a_broken_staged_archive_is_refused || failures=$((failures + 1))
 run_test "an installation kvsctl manages is refused" test_kvsctl_managed_install_is_refused || failures=$((failures + 1))
 run_test "a kvsctl run in progress or cut short is refused" test_a_kvsctl_run_is_refused || failures=$((failures + 1))
 run_test "a new clone keeps the backups and the logs of kvsctl" test_reclone_keeps_the_backups_and_logs_of_kvsctl || failures=$((failures + 1))
