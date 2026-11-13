@@ -528,8 +528,9 @@ database_configure_resources() {
     if [ "$pool" = auto ]; then
         pool=$(database_buffer_pool_for_host "$available") || return 1
     fi
-    if ! pool_mb=$(database_size_mb "$pool") || [ "$pool_mb" -lt 5 ]; then
-        echo "ERROR: MARIADB_BUFFER_POOL_SIZE must be auto or a size of at least 5M, for example 512M or 2G." >&2
+    # With its 16 KiB pages, InnoDB refuses to start under 6 MiB.
+    if ! pool_mb=$(database_size_mb "$pool") || [ "$pool_mb" -lt 6 ]; then
+        echo "ERROR: MARIADB_BUFFER_POOL_SIZE must be auto or a size of at least 6M, for example 512M or 2G." >&2
         return 1
     fi
     # Saved pools already consume memory and must not be compared with free

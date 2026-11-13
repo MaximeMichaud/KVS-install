@@ -119,6 +119,20 @@ assert_unchanged_failure 'oversized numeric pool'
 echo 'PASS: invalid sizing cannot partially rewrite env settings'
 
 reset_case
+# MariaDB aborts at startup with a buffer pool under 6 MiB ("innodb_page_size=
+# 16384 requires innodb_buffer_pool_size >= 6 MiB"), and every rerun would
+# reuse the saved size: 5M is refused before .env changes, 6M is saved.
+MARIADB_BUFFER_POOL_SIZE_REQUEST=5M
+assert_unchanged_failure '5M pool (below the 6 MiB MariaDB minimum)'
+grep -Fq 'at least 6M' failure.log ||
+    fail "the refusal of a 5M pool does not name the minimum: $(cat failure.log)"
+MARIADB_BUFFER_POOL_SIZE_REQUEST=6M
+database_configure_resources > minimum.log 2>&1 ||
+    fail "the smallest pool MariaDB starts with was refused: $(cat minimum.log)"
+[ "$(read_saved)" = '6M 128M' ] || fail "a 6M pool was saved as $(read_saved)"
+echo 'PASS: the smallest buffer pool accepted is the smallest MariaDB starts with'
+
+reset_case
 cat > command.yml <<'YAML'
 services:
   mariadb:
