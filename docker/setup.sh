@@ -5765,14 +5765,29 @@ if [ "$IMPORT_MODE" = true ] && declare -F import_writeback_dying >/dev/null; th
     IMPORT_WRITEBACK_DYING=$(import_writeback_dying) || IMPORT_WRITEBACK_DYING=""
 fi
 
+# announce_generated_admin_password shows the one-time admin password of a
+# fresh install. It prints nothing for a supplied or a kept password.
+announce_generated_admin_password() {
+    if [ "${KVS_ADMIN_PASSWORD_GENERATED:-false}" != true ]; then
+        return 0
+    fi
+    echo -e "  ${CYAN}Admin login:${NC} admin"
+    echo -e "  ${CYAN}One-time admin password:${NC} $KVS_ADMIN_PASSWORD"
+    echo -e "  ${YELLOW}Save it now. It is set during initialization and is not written to .env or the setup log.${NC}"
+}
+
+# Show the one-time password before kvs-init runs. 35-harden sets it early,
+# but a later init script that fails (80-manticore when its sources are
+# unreachable, for instance) ends the setup under set -e before any line
+# after the run_step, and a password shown only on success would be lost
+# with no way to recover it. A supplied password is not at risk, so it
+# stays a confirmation after a successful run.
+announce_generated_admin_password
+
 progress_bar "Initializing KVS"
 run_step "Initializing KVS" \
     docker compose --profile setup run --rm --no-deps "${SETUP_RUN_FLAGS[@]}" kvs-init
-if [ "$KVS_ADMIN_PASSWORD_GENERATED" = true ]; then
-    echo -e "  ${CYAN}Admin login:${NC} admin"
-    echo -e "  ${CYAN}One-time admin password:${NC} $KVS_ADMIN_PASSWORD"
-    echo -e "  ${YELLOW}Save it now. It is not written to .env or the setup log.${NC}"
-elif [ "$KVS_ADMIN_PASSWORD_PROVIDED" = true ]; then
+if [ "$KVS_ADMIN_PASSWORD_PROVIDED" = true ]; then
     echo -e "  ${GREEN}The password supplied through KVS_ADMIN_PASSWORD was applied.${NC}"
 fi
 unset KVS_ADMIN_PASSWORD
@@ -6138,9 +6153,9 @@ echo ""
 echo -e "${CYAN}Admin account:${NC}"
 if [ "$KVS_ADMIN_PASSWORD_GENERATED" = true ] ||
     [ "$KVS_ADMIN_PASSWORD_PROVIDED" = true ]; then
-    echo "  Non-default password applied and reported after initialization."
+    echo "  Non-default password applied and reported before initialization."
 else
-    echo "  Existing non-default password preserved and verified."
+    echo "  Existing database kept; this run did not change the admin password."
 fi
 if [ "$DISABLE_KVS_SUPPORT_ACCESS" = "true" ]; then
     echo "  KVS support access disabled (ENABLE_KVS_SUPPORT_ACCESS=0); the admin dashboard can re-enable it."
