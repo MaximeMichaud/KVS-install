@@ -30,6 +30,8 @@ functions_file="$TEST_DIR/functions.sh"
     extract_function include_www_for_domain
     extract_function get_configured_acme_api
     extract_function acme_api_matches_provider
+    extract_function setup_certificate_pair
+    extract_function setup_restore_certificate_pair
     extract_function configure_direct_acme_certificate
 } > "$functions_file"
 # shellcheck source=/dev/null
@@ -143,6 +145,14 @@ docker() {
                 ;;
         esac
     fi
+    # The pair Nginx serves, saved before --install-cert and put back
+    # when the new certificate is rejected.
+    if [ "${1:-}" = compose ] && [ "${2:-}" = exec ] &&
+        [ "${4:-}" = acme ] && [ "${5:-}" = sh ] && [ "${8:-}" = sh ] &&
+        [ "${10:-}" = "/etc/nginx/ssl/${DOMAIN}" ]; then
+        printf 'certificate-pair %s\n' "$9" >> "$MOCK_CALLS"
+        return 0
+    fi
     if [ "${1:-}" = compose ] && [ "${2:-}" = exec ] &&
         [ "${4:-}" = acme ] && [ "${5:-}" = sh ]; then
         count=0
@@ -215,6 +225,13 @@ grep -Fq 'compose exec -T acme acme.sh --install-cert -d example.com' \
     "$TEST_DIR/apex.calls" || fail "the issued apex certificate was not installed"
 grep -Fq 'compose exec -T nginx nginx -s reload' "$TEST_DIR/apex.calls" ||
     fail "Nginx was not reloaded after certificate validation"
+if ! grep -Fxq 'certificate-pair save' "$TEST_DIR/apex.calls" ||
+    ! grep -Fxq 'certificate-pair discard' "$TEST_DIR/apex.calls"; then
+    fail "the pair Nginx served was not saved before the install, or its copy was kept"
+fi
+if grep -Fxq 'certificate-pair restore' "$TEST_DIR/apex.calls"; then
+    fail "an accepted certificate was undone"
+fi
 
 RESUME_IMPORT=true run_case resume example.com letsencrypt
 grep -Fxq 'compose up -d --no-deps --no-recreate --no-build --pull missing acme' "$TEST_DIR/resume.calls" ||
@@ -284,6 +301,8 @@ if configure_direct_acme_certificate > "$TEST_DIR/install-failure.output" 2>&1; 
 fi
 [ "$(grep -Fc validate-certificate "$MOCK_CALLS")" -eq 1 ] ||
     fail "certificate validation ran again after installation failed"
+grep -Fxq 'certificate-pair restore' "$MOCK_CALLS" ||
+    fail "a failed installation did not put back the pair Nginx served"
 unset MOCK_INSTALL_STATUS
 
 MOCK_CALLS="$TEST_DIR/validation-failure.calls"
@@ -299,7 +318,23 @@ fi
 if grep -Fq 'compose exec -T nginx nginx -s reload' "$MOCK_CALLS"; then
     fail "Nginx reloaded an invalid installed certificate"
 fi
+grep -Fxq 'certificate-pair restore' "$MOCK_CALLS" ||
+    fail "an invalid installed certificate was left in place of the pair Nginx served"
 unset MOCK_CERT_VALID
+
+MOCK_CALLS="$TEST_DIR/reload-failure.calls"
+MOCK_ACME_API_STATE="$TEST_DIR/reload-failure.api-state"
+: > "$MOCK_CALLS"
+rm -f "$MOCK_ACME_API_STATE"
+export MOCK_CALLS MOCK_ACME_API_STATE
+MOCK_RELOAD_STATUS=1
+export MOCK_RELOAD_STATUS
+if configure_direct_acme_certificate > "$TEST_DIR/reload-failure.output" 2>&1; then
+    fail "a refused Nginx reload returned success"
+fi
+grep -Fxq 'certificate-pair restore' "$MOCK_CALLS" ||
+    fail "a certificate Nginx refused to reload was left in place of the pair it served"
+unset MOCK_RELOAD_STATUS
 
 MOCK_ISSUE_STATUS=2
 MOCK_ISSUE_OUTPUT='Domains not changed. Skipping, Next renewal time is later.'

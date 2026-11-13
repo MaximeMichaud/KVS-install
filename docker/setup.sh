@@ -6190,6 +6190,55 @@ acme_api_matches_provider() {
     esac
 }
 
+# acme.sh --install-cert writes the new pair over the one Nginx serves,
+# key first. Saving that pair first lets a rejected or half-written
+# install be undone, so Nginx keeps (and reloads) the certificate it had.
+# The copy stays inside the acme container, never in the volume or on the
+# host, and is removed once the new certificate is in place.
+setup_certificate_pair() {
+    # shellcheck disable=SC2016  # Expanded inside the container.
+    docker compose exec -T acme sh -c '
+        set -eu
+        umask 077
+        action=$1 live=$2 saved=$3
+        case "$action" in
+            save)
+                rm -rf "$saved"
+                mkdir -p "$saved"
+                for name in cert.pem key.pem; do
+                    if [ -e "$live/$name" ]; then cp -p "$live/$name" "$saved/$name"; fi
+                done
+                : > "$saved/.complete"
+                ;;
+            restore)
+                [ -e "$saved/.complete" ] || exit 1
+                for name in key.pem cert.pem; do
+                    if [ -e "$saved/$name" ]; then
+                        cp -p "$saved/$name" "$live/.$name.previous"
+                        mv -f "$live/.$name.previous" "$live/$name"
+                    else
+                        rm -f "$live/$name"
+                    fi
+                done
+                rm -rf "$saved"
+                ;;
+            discard) rm -rf "$saved" ;;
+            *) exit 2 ;;
+        esac
+    ' sh "$1" "/etc/nginx/ssl/${DOMAIN}" /tmp/kvs-setup-previous-certificate </dev/null
+}
+
+# Puts back the pair saved before --install-cert after the new one was
+# rejected; SETUP_ACME_PAIR_LOST says whether that failed.
+setup_restore_certificate_pair() {
+    if setup_certificate_pair restore; then
+        echo "  The certificate Nginx had is back in /etc/nginx/ssl/${DOMAIN}"
+    else
+        SETUP_ACME_PAIR_LOST=true
+        echo -e "${RED}Could not put back the certificate Nginx had in /etc/nginx/ssl/${DOMAIN}${NC}"
+    fi
+}
+
 configure_direct_acme_certificate() {
     local acme_output
     local acme_status=0
@@ -6235,6 +6284,7 @@ configure_direct_acme_certificate() {
         acme_args+=( --force )
     fi
 
+    SETUP_ACME_STAGE=issue
     if acme_output=$(docker compose exec -T acme "${acme_args[@]}" 2>&1); then
         acme_status=0
     else
@@ -6248,9 +6298,14 @@ configure_direct_acme_certificate() {
         printf '%s\n' "$acme_output"
         return 1
     fi
+    SETUP_ACME_STAGE=install
     if ! configured_acme_api=$(get_configured_acme_api) ||
         ! acme_api_matches_provider "$configured_acme_api"; then
         echo -e "${RED}ACME did not persist the requested certificate provider${NC}"
+        return 1
+    fi
+    if ! setup_certificate_pair save; then
+        echo -e "${RED}Could not save the certificate Nginx serves before installing the new one${NC}"
         return 1
     fi
     if ! docker compose exec -T acme acme.sh --install-cert \
@@ -6260,14 +6315,20 @@ configure_direct_acme_certificate() {
         --fullchain-file "/etc/nginx/ssl/${DOMAIN}/cert.pem" \
         --reloadcmd true; then
         echo -e "${RED}SSL certificate installation failed${NC}"
+        setup_restore_certificate_pair
         return 1
     fi
     if ! nginx_has_public_certificate "$SSL_PROVIDER"; then
         echo -e "${RED}Installed SSL certificate was not issued by the requested provider${NC}"
+        setup_restore_certificate_pair
         return 1
     fi
-    run_step "Reloading Nginx after certificate installation" \
-        docker compose exec -T nginx nginx -s reload || return $?
+    if ! run_step "Reloading Nginx after certificate installation" \
+        docker compose exec -T nginx nginx -s reload; then
+        setup_restore_certificate_pair
+        return 1
+    fi
+    setup_certificate_pair discard || true
     echo -e "${GREEN}SSL certificate installed and validated${NC}"
 }
 
@@ -6288,12 +6349,29 @@ if [ "$RESUME_IMPORT" != true ] && [ "${DEV_SSL_INTELLIGENT:-false}" = "true" ];
     echo ""
 fi
 
+# A refused issuance (DNS still on the old server during a migration, a CA
+# outage, a rate limit) leaves Nginx on the certificate it already had,
+# self-signed on a new site. Stopping here left the cache, Manticore and cron
+# down and an import unfinished; the run finishes the start instead, and
+# ends with an error and the command that issues the certificate later.
+# A certificate issued but then rejected (wrong provider, Nginx refusing
+# it, a half-written install) is undone the same way.
+SETUP_ACME_FAILED=false
+# How far the certificate step got: start (ACME container and its saved
+# provider), issue (the CA was asked), install (the CA issued it).
+SETUP_ACME_STAGE=start
+SETUP_ACME_PAIR_LOST=false
 if [ "$MODE" = "multi" ]; then
     echo -e "  ${GREEN}✓${NC} Caddy manages TLS for the multi-site stack"
 elif [ "$SSL_PROVIDER" = "selfsigned" ]; then
     echo -e "  ${GREEN}✓${NC} Using self-signed certificate"
-else
-    configure_direct_acme_certificate || exit $?
+elif ! configure_direct_acme_certificate; then
+    SETUP_ACME_FAILED=true
+    if [ "$SETUP_ACME_PAIR_LOST" = true ]; then
+        echo -e "${YELLOW}WARNING: the ${SSL_PROVIDER} certificate for ${DOMAIN} was rejected and the certificate Nginx had could not be put back; the setup goes on and ends with an error.${NC}"
+    else
+        echo -e "${YELLOW}WARNING: the ${SSL_PROVIDER} certificate for ${DOMAIN} was not installed. Nginx keeps the certificate it had (self-signed on a new site); the setup goes on and ends with an error.${NC}"
+    fi
 fi
 
 # The indexes the manticore-data volume kept were built from another
@@ -6358,7 +6436,20 @@ else
 fi
 
 progress_bar "Reloading Nginx"
-run_step "Reloading Nginx" docker compose exec -T nginx nginx -s reload </dev/null
+# When a rejected certificate could not be undone, the pair on disk can be
+# one Nginx refuses (a half-written install whose restore failed too). The
+# reload then fails as well, and the run still finishes the import and cron
+# and ends with the error and the retry command it announced. Whenever the
+# pair on disk is the one Nginx had (no certificate failure, a refused
+# issuance, a pair put back), a refused reload is a real Nginx error and
+# stops the setup as before.
+SETUP_NGINX_RELOAD_FAILED=false
+if [ "$SETUP_ACME_PAIR_LOST" != true ]; then
+    run_step "Reloading Nginx" docker compose exec -T nginx nginx -s reload </dev/null
+elif ! run_step "Reloading Nginx" docker compose exec -T nginx nginx -s reload </dev/null; then
+    SETUP_NGINX_RELOAD_FAILED=true
+    echo -e "${YELLOW}WARNING: Nginx could not be reloaded; the setup goes on and ends with an error.${NC}"
+fi
 
 if [ "$RESUME_IMPORT" = true ]; then
     setup_resume_assert_database
@@ -6368,7 +6459,12 @@ import_finish
 setup_start_cron
 
 # Done
-progress_success "KVS Docker Setup Complete!"
+if [ "$SETUP_ACME_FAILED" = true ]; then
+    echo ""
+    echo -e "${YELLOW}KVS Docker Setup finished without the ${SSL_PROVIDER} certificate: see the end of this output.${NC}"
+else
+    progress_success "KVS Docker Setup Complete!"
+fi
 echo ""
 PUBLIC_HTTPS_PORT_SUFFIX=""
 if [ "$PUBLIC_HTTPS_PORT" != "443" ]; then
@@ -6445,6 +6541,36 @@ fi
 # Mark end of installation in logs
 {
     echo "========================================"
-    echo "KVS Docker Setup Completed - $(date '+%Y-%m-%d %H:%M:%S')"
+    if [ "$SETUP_ACME_FAILED" = true ]; then
+        echo "KVS Docker Setup Completed without the ${SSL_PROVIDER} certificate - $(date '+%Y-%m-%d %H:%M:%S')"
+    else
+        echo "KVS Docker Setup Completed - $(date '+%Y-%m-%d %H:%M:%S')"
+    fi
     echo "========================================"
 } >> "$DEBUG_LOG" 2>/dev/null || true
+
+if [ "$SETUP_ACME_FAILED" = true ]; then
+    echo ""
+    if [ "$SETUP_ACME_PAIR_LOST" = true ]; then
+        echo -e "${RED}ERROR: no ${SSL_PROVIDER} certificate was installed for ${DOMAIN}, and the pair in /etc/nginx/ssl/${DOMAIN} (acme-certs volume) may be the rejected one.${NC}"
+        echo "./reconfigure.sh recreates Nginx, which replaces a missing or mismatched pair with a self-signed one, then issues the certificate again."
+    else
+        echo -e "${RED}ERROR: no ${SSL_PROVIDER} certificate was installed for ${DOMAIN}; the site answers with the certificate Nginx already had (self-signed on a new site).${NC}"
+    fi
+    if [ "$SETUP_NGINX_RELOAD_FAILED" = true ]; then
+        echo -e "${RED}Nginx could not be reloaded at the end of the setup either: docker compose logs nginx${NC}"
+    fi
+    case "$SETUP_ACME_STAGE" in
+        install)
+            echo "The certificate authority issued it, but setup could not put it in place (see the error above). Once that is fixed, install it with:"
+            ;;
+        issue)
+            echo "Once ${DOMAIN} points to this server, or the certificate authority answers again, issue it with:"
+            ;;
+        *)
+            echo "The ACME container could not be started or read (see the error above). Once that is fixed, issue it with:"
+            ;;
+    esac
+    printf '  cd %q && ./reconfigure.sh\n' "$PWD"
+    exit 1
+fi
