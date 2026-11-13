@@ -262,6 +262,7 @@ MODE_CHOICE=1 \
 | Variable | Values | Default | Description |
 | -------- | ------ | ------- | ----------- |
 | `HEADLESS` | `y` | - | Enable headless mode (required) |
+| `PREFLIGHT_BYPASS` | `y` | - | Continue past the pre-flight warnings (no internet connection, under 10 GB free). Without it a headless run stops at such a warning, and an interactive run asks |
 | `INSTALL_TYPE` | `1`/`2` | `1` | 1=Docker, 2=Standalone |
 | `MENU_OPTION` | `1-5` | `1` | 1=Install, 2=Add site (work in progress, not working yet; refused when a Docker install is found, which adds sites with docker/multi-site/site-manager.sh), 3=Update PMA, 4=Update script, 5=Quit |
 | `KVS_EMAIL` | email | - | Email for SSL certificates (required for Let's Encrypt/ZeroSSL) |

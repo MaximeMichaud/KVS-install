@@ -3288,10 +3288,17 @@ preflight_checks() {
             echo "for development/testing or sites with minimal content, but may become"
             echo "problematic for production sites with many videos and high traffic."
             echo ""
-            # Skip prompt if headless mode
+            # PREFLIGHT_BYPASS answers the question beforehand. A headless run
+            # without it cannot be asked: it stops with the reason instead of
+            # waiting on a terminal, or exiting with no message at the end of
+            # its input as a plain read under set -e did.
             if [[ -z "$PREFLIGHT_BYPASS" ]]; then
+                if [ "${HEADLESS:-}" = "y" ]; then
+                    echo -e "${RED}ERROR: the pre-flight checks above have warnings, and a headless run cannot ask whether to continue. Fix them, or set PREFLIGHT_BYPASS=y to continue anyway.${NC}" >&2
+                    exit 1
+                fi
                 echo -n "Continue anyway? [y/N]: "
-                read -r PREFLIGHT_BYPASS
+                prompt_read PREFLIGHT_BYPASS
             fi
 
             if [[ "$PREFLIGHT_BYPASS" =~ ^[Yy]$ ]]; then
