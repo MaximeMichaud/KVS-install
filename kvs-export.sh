@@ -340,17 +340,61 @@ kvs_config_value() {
     printf '%s' "${value%%$'\n'*}"
 }
 
-# The first define('<name>','<value>'); of setup_db.php. PHP single quoted
-# strings escape the quote and the backslash, so the value pattern accepts
-# \' and \\ inside and the caller unescapes what it gets back.
-kvs_define_value() {
-    local file="$1"
-    local name="$2"
-    local value
+# Emit the PHP source in $1 with its // , # and /* */ comments removed and its
+# single and double quoted strings kept intact, so a value that itself holds a
+# #, a // or a /* is never mistaken for a comment.
+kvs_php_strip_comments() {
+    local src="$1"
+    local n=${#src}
+    local out="" i=0 c d
+    local state="code"
 
-    [ -f "$file" ] || return 1
-    value=$(sed -n -E "s/^.*define\\([[:space:]]*'${name}'[[:space:]]*,[[:space:]]*'((\\\\.|[^'\\\\])*)'.*/\\1/p" "$file" 2> /dev/null)
-    printf '%s' "${value%%$'\n'*}"
+    while [ "$i" -lt "$n" ]; do
+        c=${src:i:1}
+        d=${src:i+1:1}
+        case $state in
+            code)
+                if { [ "$c" = "/" ] && [ "$d" = "/" ]; } || [ "$c" = "#" ]; then
+                    while [ "$i" -lt "$n" ] && [ "${src:i:1}" != $'\n' ]; do
+                        i=$((i + 1))
+                    done
+                elif [ "$c" = "/" ] && [ "$d" = "*" ]; then
+                    state="block"
+                    i=$((i + 2))
+                elif [ "$c" = "'" ] || [ "$c" = '"' ]; then
+                    state="string:$c"
+                    out=$out$c
+                    i=$((i + 1))
+                else
+                    out=$out$c
+                    i=$((i + 1))
+                fi
+                ;;
+            block)
+                if [ "$c" = "*" ] && [ "$d" = "/" ]; then
+                    state="code"
+                    i=$((i + 2))
+                else
+                    i=$((i + 1))
+                fi
+                ;;
+            *)
+                # Inside a string: copy verbatim, honour the backslash escape,
+                # end on the matching quote (state is "string:'" or 'string:"').
+                out=$out$c
+                if [ "$c" = "\\" ]; then
+                    out=$out$d
+                    i=$((i + 2))
+                else
+                    if [ "$c" = "${state#string:}" ]; then
+                        state="code"
+                    fi
+                    i=$((i + 1))
+                fi
+                ;;
+        esac
+    done
+    printf '%s' "$out"
 }
 
 # Undo the escaping of a PHP single quoted string. Only \' and \\ are
@@ -378,6 +422,95 @@ kvs_php_unescape() {
         fi
     done
     printf '%s' "$out"
+}
+
+# Undo the escaping of a PHP double quoted string for the three sequences
+# that stand for one character: \" \\ and \$. Anything else PHP would expand
+# there (\t, \x41, an octal or unicode escape, a $name or {$...}) returns 1
+# with nothing printed: the caller refuses the value rather than hand a
+# guess to the database client.
+kvs_php_unescape_double() {
+    local value="${1:-}"
+    local out=""
+    local c
+
+    while [ -n "$value" ]; do
+        c=${value:0:1}
+        if [ "$c" = "\\" ]; then
+            case ${value:1:1} in
+                '"' | "\\" | '$') out=$out${value:1:1} ;;
+                *) return 1 ;;
+            esac
+            value=${value:2}
+        elif [ "$c" = '$' ]; then
+            return 1
+        else
+            out=$out$c
+            value=${value:1}
+        fi
+    done
+    printf '%s' "$out"
+}
+
+# The value of the first define('<name>',...) of setup_db.php, with PHP's
+# comment and quoting rules for the forms a credential takes: comments are
+# ignored, define may be any case with spaces or line breaks around the
+# paren, several defines may share a line, the name and the value may each
+# be single or double quoted, and the first definition wins (a later one
+# only warns). The value is returned already unescaped. A double quoted
+# value PHP would expand (an escape other than \" \\ \$, or a variable)
+# and an unterminated one are refused: status 1 with the reason on stderr.
+kvs_define_value() {
+    local file="$1"
+    local name="$2"
+    local code rest q value c re
+
+    [ -f "$file" ] || return 1
+    code=$(kvs_php_strip_comments "$(cat "$file")")
+
+    # The first definition of NAME in the clean code: define in any case,
+    # spaces allowed around the paren, NAME single or double quoted. PHP uses
+    # the first definition, and the leftmost match is that one even when
+    # several defines share a line. No grep: this script carries only sed
+    # and the shell builtins.
+    re="[Dd][Ee][Ff][Ii][Nn][Ee][[:space:]]*\([[:space:]]*['\"]${name}['\"][[:space:]]*,"
+    [[ $code =~ $re ]] || return 0
+
+    # The value argument starts right after the match. Left-trim, then the
+    # value opens with its quote.
+    rest=${code#*"${BASH_REMATCH[0]}"}
+    rest=${rest#"${rest%%[^[:space:]]*}"}
+    q=${rest:0:1}
+    case $q in
+        "'" | '"') ;;
+        *) return 0 ;;
+    esac
+    rest=${rest:1}
+
+    value=""
+    while :; do
+        if [ -z "$rest" ]; then
+            kvs_error "$file: the value of $name has no closing quote"
+            return 1
+        fi
+        c=${rest:0:1}
+        if [ "$c" = "\\" ]; then
+            value=$value${rest:0:2}
+            rest=${rest:2}
+        elif [ "$c" = "$q" ]; then
+            break
+        else
+            value=$value$c
+            rest=${rest:1}
+        fi
+    done
+
+    if [ "$q" = "'" ]; then
+        kvs_php_unescape "$value"
+    elif ! kvs_php_unescape_double "$value"; then
+        kvs_error "$file: the double quoted value of $name holds an escape sequence or a \$ that PHP would expand; write it in single quotes"
+        return 1
+    fi
 }
 
 # What the summary and the detect output show instead of the password.
@@ -2289,7 +2422,6 @@ kvs_collect() {
     local setup="$SITE_DIR/admin/include/setup.php"
     local setup_db="$SITE_DIR/admin/include/setup_db.php"
     local version_file="$SITE_DIR/admin/include/version.php"
-    local raw
 
     PROJECT_PATH=$(kvs_config_value "$setup" project_path)
     PROJECT_URL=$(kvs_config_value "$setup" project_url)
@@ -2315,11 +2447,10 @@ kvs_collect() {
         kvs_error "$setup_db is not readable by $(id -un), run this as root or give this user passwordless sudo"
         return 1
     fi
-    DB_HOST_RAW=$(kvs_define_value "$setup_db" DB_HOST)
-    DB_USER=$(kvs_define_value "$setup_db" DB_LOGIN)
-    DB_NAME=$(kvs_define_value "$setup_db" DB_DEVICE)
-    raw=$(kvs_define_value "$setup_db" DB_PASS)
-    DB_PASSWORD=$(kvs_php_unescape "$raw")
+    DB_HOST_RAW=$(kvs_define_value "$setup_db" DB_HOST) || return 1
+    DB_USER=$(kvs_define_value "$setup_db" DB_LOGIN) || return 1
+    DB_NAME=$(kvs_define_value "$setup_db" DB_DEVICE) || return 1
+    DB_PASSWORD=$(kvs_define_value "$setup_db" DB_PASS) || return 1
     DB_PASSWORD_HINT=$(kvs_mask_password "$DB_PASSWORD")
     HOST_NAME=$(kvs_hostname)
     kvs_detect_tools

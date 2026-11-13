@@ -925,6 +925,117 @@ test_the_connection_follows_the_host_written_in_setup_db() {
     pass "the connection follows the host written in setup_db.php"
 }
 
+test_setup_db_parsing_ignores_comments_and_accepts_php_forms() {
+    local site="$TMP_ROOT/parse-site"
+    local out="$TMP_ROOT/parse.out"
+    local err="$TMP_ROOT/parse.err"
+
+    # A define commented out above the real one must be ignored (otherwise the
+    # wrong database is dumped). define may be any case, with a space before
+    # the paren, and its value single or double quoted; a value may hold a #
+    # or a // that is not a comment, and a double quoted value may escape its
+    # quote.
+    make_site "$site"
+    cat > "$site/admin/include/setup_db.php" <<'EOF'
+<?php
+//define('DB_DEVICE','wrong_db');
+# define('DB_HOST','wrong_host');
+/* define('DB_LOGIN','wrong_user'); */
+DEFINE ('DB_HOST', "db.example.com");
+define('DB_LOGIN','realuser');
+define("DB_PASS","pa#ss//w\"d");
+define('DB_DEVICE','right_db');
+EOF
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+        fail "detect must read a varied setup_db.php: $(cat "$err")"
+    assert_key "$out" db_host "db.example.com"
+    assert_key "$out" db_name "right_db"
+    assert_key "$out" db_user "realuser"
+    grep -Fq 'env: MYSQL_PWD=[pa#ss//w"d]' "$STUB_LOG" ||
+        fail "a password with # // and an escaped quote must survive: $(cat "$STUB_LOG")"
+
+    # A define hidden inside a multi-line block comment must not be read.
+    make_site "$TMP_ROOT/parse-block"
+    cat > "$TMP_ROOT/parse-block/admin/include/setup_db.php" <<'EOF'
+<?php
+define('DB_HOST','localhost');
+define('DB_LOGIN','kvs');
+define('DB_PASS','p');
+/*
+define('DB_DEVICE','hidden_db');
+*/
+define('DB_DEVICE','visible_db');
+EOF
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/parse-block" ||
+        fail "detect must skip a block comment: $(cat "$err")"
+    assert_key "$out" db_name "visible_db"
+
+    # The first of several uncommented definitions wins, as PHP itself uses it.
+    make_site "$TMP_ROOT/parse-first"
+    cat > "$TMP_ROOT/parse-first/admin/include/setup_db.php" <<'EOF'
+<?php
+define('DB_HOST','localhost');
+define('DB_LOGIN','kvs');
+define('DB_PASS','p');
+define('DB_DEVICE','first_db');
+define('DB_DEVICE','second_db');
+EOF
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/parse-first" ||
+        fail "detect must succeed with repeated defines: $(cat "$err")"
+    assert_key "$out" db_name "first_db"
+
+    # Several defines on one line, a block comment that runs over a line
+    # break between two of them, and a define split over several lines:
+    # each name keeps its own value.
+    make_site "$TMP_ROOT/parse-oneline"
+    cat > "$TMP_ROOT/parse-oneline/admin/include/setup_db.php" <<'EOF'
+<?php
+define('DB_HOST','localhost'); /* the user
+follows */ define('DB_LOGIN','joined_user'); define('DB_PASS','p'); define(
+    'DB_DEVICE',
+    'split_db'
+);
+EOF
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/parse-oneline" ||
+        fail "detect must read defines that share a line: $(cat "$err")"
+    assert_key "$out" db_host "localhost"
+    assert_key "$out" db_user "joined_user"
+    assert_key "$out" db_name "split_db"
+    grep -Fq 'env: MYSQL_PWD=[p]' "$STUB_LOG" ||
+        fail "the password on a shared line must be its own: $(cat "$STUB_LOG")"
+
+    # A double quoted value: \$ is a literal dollar sign, as PHP reads it.
+    make_site "$TMP_ROOT/parse-dollar"
+    cat > "$TMP_ROOT/parse-dollar/admin/include/setup_db.php" <<'EOF'
+<?php
+define('DB_HOST','localhost');
+define('DB_LOGIN','kvs');
+define("DB_PASS","pa\$wo\\rd");
+define('DB_DEVICE','oldsite');
+EOF
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/parse-dollar" ||
+        fail "detect must decode an escaped dollar sign: $(cat "$err")"
+    grep -Fq 'env: MYSQL_PWD=[pa$wo\rd]' "$STUB_LOG" ||
+        fail "a double quoted password with \\\$ and \\\\ must reach the client decoded: $(cat "$STUB_LOG")"
+
+    # What PHP would expand differently (another escape, a variable) is
+    # refused with a reason, never handed over as a guess.
+    local refused
+    for refused in '"Qz9Kq\tQz9Kq"' '"Qz9Kq$word"' '"Qz9Kq\x41Qz9Kq"'; do
+        make_site "$TMP_ROOT/parse-refused"
+        printf "<?php\ndefine('DB_HOST','localhost');\ndefine('DB_LOGIN','kvs');\ndefine('DB_PASS',%s);\ndefine('DB_DEVICE','oldsite');\n" \
+            "$refused" > "$TMP_ROOT/parse-refused/admin/include/setup_db.php"
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/parse-refused" &&
+            fail "a double quoted password PHP would expand must be refused: $refused"
+        grep -q "DB_PASS .*single quotes" "$err" || fail "the refusal must name the define and the remedy: $(cat "$err")"
+        grep -Fq "Qz9Kq" "$err" && fail "the refusal must not show the password: $(cat "$err")"
+        grep -q "MYSQL_PWD" "$STUB_LOG" && fail "no client may run with a refused password: $(cat "$STUB_LOG")"
+        rm -rf "$TMP_ROOT/parse-refused"
+    done
+
+    pass "setup_db.php parsing ignores comments and accepts PHP define forms"
+}
+
 test_an_unreachable_database_is_reported_without_stopping_detect() {
     local site="$TMP_ROOT/unreachable-site"
     local out="$TMP_ROOT/unreachable.out"
@@ -2296,6 +2407,7 @@ test_excluded_and_included_paths_change_what_travels
 test_named_paths_are_normalised_and_a_missing_one_is_reported
 test_the_password_reaches_the_client_only_through_the_environment
 test_the_connection_follows_the_host_written_in_setup_db
+test_setup_db_parsing_ignores_comments_and_accepts_php_forms
 test_an_unreachable_database_is_reported_without_stopping_detect
 test_the_dump_uses_the_compressor_that_is_installed
 test_a_server_without_utf8mb4_is_dumped_as_utf8
