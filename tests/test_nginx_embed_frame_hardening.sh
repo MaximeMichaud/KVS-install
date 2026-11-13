@@ -79,8 +79,18 @@ run_rendered_template_case() {
         bash "${case_dir}/docker-entrypoint.sh" true >/dev/null
 
     assert_embed_player_not_frame_restricted "$generated_config"
-    [ "$(grep -Fc "$HEADER_RULE" "$generated_config")" -eq 1 ] ||
+    # A location with its own add_header inherits none of the server's, so
+    # the SVG and font location repeats the header: each response gets it
+    # once, from the server or from that location.
+    [ "$(grep -Fc "$HEADER_RULE" "$generated_config")" -eq 2 ] ||
         fail "the rendered config does not send X-Frame-Options exactly once per response"
+    [ "$(HEADER_RULE="$HEADER_RULE" awk '
+        /location ~\* \\\.\(\?:svgz\?\|ttf\|ttc\|otf\|eot\|woff2\?\)\$ \{/ { inside = 1; next }
+        inside && /^[[:space:]]*\}/ { inside = 0 }
+        inside && index($0, ENVIRON["HEADER_RULE"]) { count++ }
+        END { print count + 0 }
+    ' "$generated_config")" -eq 1 ] ||
+        fail "the SVG and font location does not send X-Frame-Options exactly once"
 }
 
 assert_embed_player_not_frame_restricted \

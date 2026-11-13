@@ -39,6 +39,7 @@ for root in "$TEST_DIR/site" "$TEST_DIR/phpmyadmin"; do
     done
     printf 'public-asset-sentinel\n' > "$root/proof.css"
     printf 'public-asset-sentinel\n' > "$root/proof.svg"
+    printf 'public-asset-sentinel\n' > "$root/proof.woff2"
 done
 mkdir -p "$TEST_DIR/site/.well-known"
 printf 'well-known-sentinel\n' > "$TEST_DIR/site/.well-known/proof.txt"
@@ -212,6 +213,38 @@ assert_hidden_files_denied() {
     done
 }
 
+# A location with its own add_header inherits none of the server's: the SVG
+# and font location, which adds Access-Control-Allow-Origin, must still send
+# every security header a CSS file gets from the server.
+asset_header_failures=0
+security_headers() {
+    tr -d '\r' < "$TEST_DIR/headers" |
+        grep -iE '^(x-frame-options|x-content-type-options|x-xss-protection|referrer-policy|strict-transport-security|permissions-policy):' |
+        tr '[:upper:]' '[:lower:]' | sort
+}
+assert_asset_security_headers() {
+    local base=$1 expected asset
+    shift
+    request "$@" "$base/proof.css"
+    [ "$http_status" = 200 ] || fail "public asset $base/proof.css failed: HTTP $http_status"
+    expected=$(security_headers)
+    grep -q '^x-content-type-options: nosniff$' <<< "$expected" ||
+        fail "$base/proof.css lacks the server security headers: $expected"
+    if grep -qi '^access-control-allow-origin:' "$TEST_DIR/headers"; then
+        fail "$base/proof.css got the CORS header of the SVG and font location"
+    fi
+    for asset in proof.svg proof.woff2; do
+        request "$@" "$base/$asset"
+        [ "$http_status" = 200 ] || fail "public asset $base/$asset failed: HTTP $http_status"
+        if [ "$(security_headers)" != "$expected" ] ||
+            ! tr -d '\r' < "$TEST_DIR/headers" | grep -qix 'access-control-allow-origin: \*'; then
+            printf 'FAIL: %s does not send the security headers of %s/proof.css with its CORS header: %s\n' \
+                "$base/$asset" "$base" "$(security_headers | tr '\n' ' ')" >&2
+            asset_header_failures=$((asset_header_failures + 1))
+        fi
+    done
+}
+
 protected_path_failures=0
 assert_kvs_paths_protected() {
     local base=$1 path
@@ -266,6 +299,7 @@ for variant in direct www subdomain; do
         grep -qx 'origin-site-sentinel' "$TEST_DIR/body" || fail 'incorrect canonical site body'
         assert_no_early_data "$https_port" "$canonical"
         assert_hidden_files_denied "https://$canonical:$https_port" --resolve "$canonical:$https_port:127.0.0.1"
+        assert_asset_security_headers "https://$canonical:$https_port" --resolve "$canonical:$https_port:127.0.0.1"
         assert_kvs_paths_protected "https://$canonical:$https_port" --resolve "$canonical:$https_port:127.0.0.1"
         request -H "Host: $domain" "http://127.0.0.1:$http_port/path"
         [ "$http_status" = 301 ] || fail 'domain redirect failed'
@@ -292,6 +326,7 @@ assert_closed "http://127.0.0.1:$http_port/"
 request -H 'Host: example.test' "http://127.0.0.1:$http_port/health"
 [ "$http_status" = 200 ] || fail 'named health check failed'
 assert_hidden_files_denied "http://127.0.0.1:$http_port" -H 'Host: example.test'
+assert_asset_security_headers "http://127.0.0.1:$http_port" -H 'Host: example.test'
 assert_kvs_paths_protected "http://127.0.0.1:$http_port" -H 'Host: example.test'
 # Run the actual additional-site Compose health check against this upstream.
 env DOMAIN=example.test SITE_PREFIX=origin-test MARIADB_ROOT_PASSWORD=test-root MARIADB_PASSWORD=test-user \
@@ -393,6 +428,7 @@ request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$ht
 grep -qx origin-site-sentinel "$TEST_DIR/body" || fail 'incorrect standalone site body'
 assert_no_early_data "$https_port" example.test
 assert_hidden_files_denied "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
+assert_asset_security_headers "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
 assert_kvs_paths_protected "https://example.test:$https_port" --resolve "example.test:$https_port:127.0.0.1"
 request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$https_port/.well-known/proof.txt"
 [ "$http_status" = 200 ] || fail 'standalone well-known directory failed'
@@ -415,5 +451,7 @@ printf 'PASS: standalone bootstrap ACME, host/SNI rejection, configured site and
 printf 'PASS: TLS 1.3 early data is refused by the Docker and standalone Nginx configurations.\n'
 [ "$hidden_file_failures" -eq 0 ] || fail "$hidden_file_failures hidden-file requests bypassed access restrictions"
 printf 'PASS: hidden files are denied and public CSS/SVG assets remain available in every layout.\n'
+[ "$asset_header_failures" -eq 0 ] || fail "$asset_header_failures SVG or font responses lost the security headers"
+printf 'PASS: SVG and font responses keep the security headers in every layout.\n'
 [ "$protected_path_failures" -eq 0 ] || fail "$protected_path_failures requests for KVS internal paths were served or misrouted"
 printf 'PASS: KVS internal directories are denied in every layout, and their allowed scripts reach PHP.\n'

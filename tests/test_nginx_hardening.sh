@@ -726,6 +726,66 @@ grep -Fq 'location /phpmyadmin/ {' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
 grep -Fq 'open_basedir=/usr/share/phpmyadmin/' "$ROOT_DIR/conf/nginx/conf.d/domain.conf" ||
     fail "phpMyAdmin location must carry its own open_basedir (the site value sticks to FPM workers)"
 
+# The add_header lines of a file, one a line with their whitespace collapsed:
+# "server" those directly in a server block, outside any location (or, with
+# no server block, at the top of an included file); "assets" those of the SVG
+# and font location, without its Access-Control-Allow-Origin.
+add_header_lines() {
+    local file="$1" scope="$2"
+
+    SCOPE="$scope" awk '
+        function depth_change(line,    i, c, d) {
+            d = 0
+            for (i = 1; i <= length(line); i++) {
+                c = substr(line, i, 1)
+                if (c == "{") d++
+                else if (c == "}") d--
+            }
+            return d
+        }
+        {
+            line = $0
+            sub(/#.*/, "", line)
+            if (line ~ /^[[:space:]]*server[[:space:]]*\{/) { has_server = 1; server_depth = depth + 1 }
+            if (line ~ /location ~\* \\\.\(\?:svgz\?\|ttf\|ttc\|otf\|eot\|woff2\?\)\$ \{/) { assets_depth = depth + 1 }
+            if (line ~ /^[[:space:]]*add_header[[:space:]]/) {
+                gsub(/[[:space:]]+/, " ", line)
+                sub(/^ /, "", line)
+                sub(/ $/, "", line)
+                if (ENVIRON["SCOPE"] == "assets" && assets_depth && depth == assets_depth &&
+                    line !~ /^add_header Access-Control-Allow-Origin /) print line
+                if (ENVIRON["SCOPE"] == "server" && !assets_depth && depth == (has_server ? server_depth : 0)) server_lines = server_lines line "\n"
+            }
+            depth += depth_change(line)
+            if (assets_depth && depth < assets_depth) assets_depth = 0
+        }
+        END { if (ENVIRON["SCOPE"] == "server") printf "%s", server_lines }
+    ' "$file" | sort
+}
+
+# A location with its own add_header inherits none of the server's. The SVG
+# and font location adds Access-Control-Allow-Origin, so it must repeat every
+# security header of the server, or uploaded SVGs and the fonts are served
+# without them (tests/integration_origin_security.sh checks the responses).
+assert_asset_headers_repeat_server() {
+    local server_file="$1" assets_file="$2" server assets
+
+    server=$(add_header_lines "$server_file" server)
+    assets=$(add_header_lines "$assets_file" assets)
+    grep -q 'X-Content-Type-Options' <<< "$server" ||
+        fail "no server security header found in ${server_file#"$ROOT_DIR"/}"
+    [ "$assets" = "$server" ] ||
+        fail "the SVG and font location of ${assets_file#"$ROOT_DIR"/} sends '${assets}' instead of the server headers '${server}'"
+    grep -Fq 'add_header Access-Control-Allow-Origin "*";' "$assets_file" ||
+        fail "the SVG and font location of ${assets_file#"$ROOT_DIR"/} lost its CORS header"
+}
+assert_asset_headers_repeat_server "$ROOT_DIR/conf/nginx/templates/kvs.conf.tpl" \
+    "$ROOT_DIR/conf/nginx/templates/kvs.conf.tpl"
+assert_asset_headers_repeat_server "$ROOT_DIR/docker/multi-site/nginx/kvs-caddy.conf.template" \
+    "$ROOT_DIR/docker/multi-site/nginx/kvs-caddy.conf.template"
+assert_asset_headers_repeat_server "$ROOT_DIR/conf/nginx/globals/security.conf" \
+    "$ROOT_DIR/conf/nginx/globals/general.conf"
+
 # TLS 1.3 early data can be replayed, and PHP cannot tell a replayed request
 # from the original: the main configs turn it off, and no site config turns it
 # back on (tests/integration_origin_security.sh replays one against nginx).

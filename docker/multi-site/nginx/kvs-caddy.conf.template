@@ -76,8 +76,11 @@ server {
         access_log off;
     }
 
-    # SVG, fonts
+    # SVG, fonts. A location with its own add_header inherits none of the
+    # server's, so this one repeats the security headers above.
     location ~* \.(?:svgz?|ttf|ttc|otf|eot|woff2?)$ {
+        add_header X-Frame-Options $kvs_frame_options always;
+        add_header X-Content-Type-Options "nosniff" always;
         add_header Access-Control-Allow-Origin "*";
         expires 180d;
         access_log off;
