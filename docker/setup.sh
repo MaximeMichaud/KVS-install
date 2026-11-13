@@ -4000,18 +4000,29 @@ else
 fi
 export EMAIL
 
+# A DB_CHOICE names a series of MARIADB_LTS_VERSIONS by its place in the
+# list, from 1. Three digits at most: bash arithmetic wraps a longer number
+# without a word (18446744073709551617 reads as 1).
+mariadb_choice_is_valid() {
+    [[ "$1" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$1))" -ge 1 ] && [ "$((10#$1))" -le "${#MARIADB_LTS_VERSIONS[@]}" ]
+}
+
 # MariaDB version selection with endoflife.date API
 select_mariadb_version() {
+    # The series offered are MARIADB_LTS_VERSIONS: endoflife.date only adds
+    # their support status, so DB_CHOICE applies whether it answers or not.
+    local given=${DB_CHOICE:+yes} count=${#MARIADB_LTS_VERSIONS[@]}
+
     echo ""
     echo -e "${CYAN}Fetching MariaDB LTS versions from endoflife.date...${NC}"
 
     # Fetch data from API. A lookup that times out must not end the setup
-    # (set -e would exit on the failed assignment): the defaults apply.
+    # (set -e would exit on the failed assignment): the list is shown
+    # without the support status.
     MARIADB_DATA=$(curl -s --connect-timeout 5 "https://endoflife.date/api/mariadb.json" 2>/dev/null) || MARIADB_DATA=""
 
     if [ -z "$MARIADB_DATA" ]; then
-        echo -e "${YELLOW}Could not fetch version data. Using defaults.${NC}"
-        return
+        echo -e "${YELLOW}Could not fetch version data; the support status of each series is not shown.${NC}"
     fi
 
     echo ""
@@ -4027,44 +4038,52 @@ select_mariadb_version() {
 
     # Check each LTS version
     for version in "${MARIADB_LTS_VERSIONS[@]}"; do
-        # Get EOL and support dates for this version
-        EOL=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"eol":"[^"]*"' | cut -d'"' -f4)
-        SUPPORT=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"support":"[^"]*"' | cut -d'"' -f4)
+        STATUS=""
+        if [ -n "$MARIADB_DATA" ]; then
+            # Get EOL and support dates for this version
+            EOL=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"eol":"[^"]*"' | cut -d'"' -f4)
+            SUPPORT=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"support":"[^"]*"' | cut -d'"' -f4)
 
-        # Determine status color
-        if [ -n "$EOL" ] && [ "$EOL" != "false" ]; then
-            if [[ "$TODAY" > "$EOL" ]]; then
-                STATUS="${RED}[EOL]${NC}"
-            elif [ -n "$SUPPORT" ] && [[ "$TODAY" > "$SUPPORT" ]]; then
-                STATUS="${YELLOW}[Security Only]${NC}"
+            # Determine status color
+            if [ -n "$EOL" ] && [ "$EOL" != "false" ]; then
+                if [[ "$TODAY" > "$EOL" ]]; then
+                    STATUS=" ${RED}[EOL]${NC}"
+                elif [ -n "$SUPPORT" ] && [[ "$TODAY" > "$SUPPORT" ]]; then
+                    STATUS=" ${YELLOW}[Security Only]${NC}"
+                else
+                    STATUS=" ${GREEN}[Active]${NC}"
+                fi
             else
-                STATUS="${GREEN}[Active]${NC}"
+                STATUS=" ${GREEN}[Active]${NC}"
             fi
-        else
-            STATUS="${GREEN}[Active]${NC}"
         fi
 
-        echo -e "  $i) MariaDB $version $STATUS"
+        echo -e "  $i) MariaDB ${version}${STATUS}"
         VERSIONS+=("$version")
         i=$((i + 1))
     done
 
-    # Skip prompt if already set (headless mode)
-    if [[ -z "$DB_CHOICE" ]]; then
-        echo ""
-        echo -n "Select MariaDB version [1-${#VERSIONS[@]}] (default: 1): "
-        read -r DB_CHOICE
-    fi
+    # A DB_CHOICE given in the environment (always set in headless mode) is
+    # used as it is, and stops the setup when it names no offered series. An
+    # answer typed at the prompt is asked again.
+    while :; do
+        if [ -z "$given" ]; then
+            echo ""
+            echo -n "Select MariaDB version [1-${count}] (default: 1): "
+            prompt_read DB_CHOICE
+            DB_CHOICE=${DB_CHOICE:-1}
+        fi
+        mariadb_choice_is_valid "$DB_CHOICE" && break
+        if [ -n "$given" ]; then
+            echo -e "${RED}ERROR: DB_CHOICE=${DB_CHOICE} is not a choice from 1 to ${count}${NC}" >&2
+            return 1
+        fi
+        echo -e "${RED}${DB_CHOICE} is not a choice from 1 to ${count}${NC}"
+    done
 
-    if [ -z "$DB_CHOICE" ]; then
-        DB_CHOICE=1
-    fi
-
-    if [ "$DB_CHOICE" -ge 1 ] && [ "$DB_CHOICE" -le "${#VERSIONS[@]}" ]; then
-        SELECTED_VERSION="${VERSIONS[$((DB_CHOICE-1))]}"
-        set_env_value MARIADB_VERSION "$SELECTED_VERSION" || return $?
-        echo -e "${GREEN}Selected MariaDB $SELECTED_VERSION${NC}"
-    fi
+    SELECTED_VERSION="${VERSIONS[$((10#$DB_CHOICE - 1))]}"
+    set_env_value MARIADB_VERSION "$SELECTED_VERSION" || return $?
+    echo -e "${GREEN}Selected MariaDB $SELECTED_VERSION${NC}"
 }
 
 # Auto-detect IonCube encoding in KVS archive
@@ -4354,6 +4373,15 @@ kvsctl_keep_mariadb_series() {
 # Run version selections
 # Always ask for MariaDB version in interactive mode (allow changing from previous install)
 choose_mariadb_version() {
+    # A DB_CHOICE from the environment (headless mode always has one) that
+    # names no offered series stops the setup here, whichever way the series
+    # is then settled: kept from .env, kept by kvsctl or selected. It stops
+    # before MARIADB_VERSION changes in .env; the domain, email, site prefix
+    # and SSL provider asked earlier are already saved there.
+    if [ -n "${DB_CHOICE:-}" ] && ! mariadb_choice_is_valid "$DB_CHOICE"; then
+        echo -e "${RED}ERROR: DB_CHOICE=${DB_CHOICE} is not a choice from 1 to ${#MARIADB_LTS_VERSIONS[@]}${NC}" >&2
+        return 1
+    fi
     if kvsctl_manages_stack; then
         kvsctl_keep_mariadb_series || return 1
         return 0
