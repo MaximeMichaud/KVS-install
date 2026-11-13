@@ -1812,17 +1812,50 @@ kvs_documented_php_version() {
     fi
 }
 
+# The PHP series the site in place runs, as an earlier run of this script
+# selected it and saved it in .env (PHP_VERSION). It is printed only on a
+# re-run outside an import, with a site in place under /var/www/<domain>:
+# an import selects for the site it brings. A run saves the build base of
+# the series it selected right after (set_php_bases), so PHP_FPM_BASE must
+# name the same series: the PHP_VERSION of a .env copied from .env.example
+# (by setup.sh or kvs-install.sh), whose PHP_FPM_BASE is empty, is a
+# fallback no run selected, as is one changed by hand since. A .env of a
+# release before 26.10.0 has no PHP_FPM_BASE either: the series is selected
+# as before, and saved with its base for the next run. Prints nothing and
+# fails otherwise, or when the saved series is not one this stack builds.
+saved_php_version() {
+    local saved base
+
+    [ "${IMPORT_MODE:-false}" != true ] || return 1
+    [ -f "/var/www/${DOMAIN:-}/admin/include/setup.php" ] || return 1
+    [ -f .env ] || return 1
+    # .env is read as setup.sh reads it, in a subshell: a PHP_VERSION of the
+    # shell is not the one saved.
+    # shellcheck disable=SC1091
+    saved=$(PHP_VERSION='' PHP_FPM_BASE=''; source ./.env > /dev/null 2>&1; printf '%s\t%s' "${PHP_VERSION:-}" "${PHP_FPM_BASE:-}") || return 1
+    base=${saved#*$'\t'}
+    saved=${saved%%$'\t'*}
+    php_version_is_supported "$saved" || return 1
+    case "$base" in
+        "php:${saved}-"*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$saved"
+}
+
 # KVS 6.2.0 and older documents PHP 7.4, which this stack does not build:
 # the php:7.4 images are Debian 11, which lacks packages the PHP-FPM and cron
 # images install, and PHP 7.4 no longer receives security fixes. Such a site
 # is refused before anything is stopped or built, unless KVS_PHP_VERSION
-# names a version this stack builds, which only unencoded files can run on.
-# It runs once the version of the site can be known (the site in place, the
-# archive, or the site of an import) and again when the PHP version is
-# selected, since the archive may be copied in meanwhile. Fails with the
-# reason printed; succeeds for any other site, or when no version is known.
-# A site in place that decided is named: kvs-init does not extract an
-# archive over it, so a newer archive in kvs-archive/ changes nothing.
+# names a version this stack builds, which only unencoded files can run on,
+# or a re-run finds the site in place on such a version (saved_php_version):
+# only KVS_PHP_VERSION could have put it there. It runs once the version of
+# the site can be known (the site in place, the archive, or the site of an
+# import) and again when the PHP version is selected, since the archive may
+# be copied in meanwhile. Fails with the reason printed; succeeds for any
+# other site, or when no version is known. A site in place that decided is
+# named: kvs-init does not extract an archive over it, so a newer archive in
+# kvs-archive/ changes nothing.
 refuse_unbuildable_kvs_php() {
     local marker kvs_version documented source
 
@@ -1835,6 +1868,7 @@ refuse_unbuildable_kvs_php() {
     marker=$(kvs_documented_php_version) || return 0
     IFS=$'\t' read -r kvs_version documented source <<< "$marker"
     php_version_is_supported "$documented" && return 0
+    saved_php_version > /dev/null && return 0
     echo -e "${RED}ERROR: KVS ${kvs_version} needs PHP ${documented}, which this Docker installation does not build.${NC}"
     echo "The php:${documented} images are based on Debian 11, which lacks packages the PHP-FPM and cron"
     echo "images install, and PHP ${documented} no longer receives security fixes. Nothing was stopped or built."
@@ -4428,12 +4462,19 @@ detect_ioncube() {
 # Use the recommended runtime for encoded archives. IonCube encoding can
 # support several PHP versions; an explicit override is honored with a
 # compatibility warning. Unencoded archives also offer a version prompt.
+# On a re-run, the series the site in place runs (saved_php_version) is kept
+# unless KVS_PHP_VERSION or the prompt names another one: as the default of
+# an unencoded site, and for an encoded one while the documented series is
+# not newer. A newer documented series wins for encoded files, whose
+# encoding an older PHP may not run (Issue #33).
 select_php_version() {
     local marker
     local kvs_version
     local documented
     local requested
     local choice
+    local saved
+    local default
 
     # KVS_PHP_VERSION is the operator override. It carries the KVS_ prefix
     # every environment input uses, which also keeps `source .env` from
@@ -4454,8 +4495,9 @@ select_php_version() {
 
     # An unsupported KVS_PHP_VERSION, or a KVS that needs PHP 7.4 without
     # one, stops here; past this point the documented version is one this
-    # stack builds, or KVS_PHP_VERSION names one.
+    # stack builds, or KVS_PHP_VERSION or the saved series names one.
     refuse_unbuildable_kvs_php || exit 1
+    saved=$(saved_php_version) || saved=""
 
     if [ "${IONCUBE:-YES}" = "YES" ]; then
         if [ -n "$requested" ] &&
@@ -4470,6 +4512,19 @@ select_php_version() {
             return
         fi
 
+        if [ -z "$requested" ] && [ -n "$saved" ] && [ "$saved" != "$documented" ]; then
+            if version_at_least "$saved" "$documented"; then
+                echo -e "${YELLOW}The site runs PHP $saved (PHP_VERSION in .env), which stays.${NC}"
+                echo -e "${YELLOW}PHP $documented is recommended for KVS ${kvs_version:-this release}. PHP $saved must be compatible${NC}"
+                echo -e "${YELLOW}with the encoding of its files and their ionCube Loader. KVS_PHP_VERSION=$documented selects it.${NC}"
+                set_env_value PHP_VERSION "$saved"
+                PHP_VERSION=$saved
+                echo "Kept PHP version $saved"
+                return
+            fi
+            echo "The site ran PHP $saved: KVS ${kvs_version:-this release} needs PHP $documented for its encoded files."
+        fi
+
         echo "KVS ${kvs_version:-archive}: selecting recommended PHP $documented"
         set_env_value PHP_VERSION "$documented"
         PHP_VERSION=$documented
@@ -4481,14 +4536,20 @@ select_php_version() {
     echo ""
     echo -e "${CYAN}PHP Version${NC}"
     echo "The archive is not IonCube encoded, so you can choose another supported PHP release."
-    echo "The default for KVS ${kvs_version:-archive} is PHP $documented."
+    default=$documented
+    if [ -n "$saved" ]; then
+        default=$saved
+        echo "KVS ${kvs_version:-archive} documents PHP $documented. The site runs PHP $saved (PHP_VERSION in .env), the default."
+    else
+        echo "The default for KVS ${kvs_version:-archive} is PHP $documented."
+    fi
 
     choice="$requested"
     if [ -z "$choice" ] && [ "${HEADLESS:-}" != "y" ]; then
-        echo -n "PHP version to build [$SUPPORTED_PHP_VERSIONS] (default: $documented): "
+        echo -n "PHP version to build [$SUPPORTED_PHP_VERSIONS] (default: $default): "
         read -r choice
     fi
-    choice=${choice:-$documented}
+    choice=${choice:-$default}
 
     if ! php_version_is_supported "$choice"; then
         echo -e "${RED}ERROR: Unsupported PHP version: $choice${NC}"

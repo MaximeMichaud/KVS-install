@@ -29,6 +29,8 @@ functions_file="$TEST_DIR/functions.sh"
 {
     grep -m1 '^readonly SUPPORTED_PHP_VERSIONS=' "$ROOT_DIR/docker/setup.sh"
     extract_function php_version_is_supported
+    extract_function version_at_least
+    extract_function saved_php_version
     extract_function kvs_documented_php_version
     extract_function refuse_unbuildable_kvs_php
     extract_function select_php_version
@@ -44,9 +46,14 @@ YELLOW=''
 CYAN=''
 NC=''
 
-# The production function persists through set_env_value; record instead.
+# The production function persists through set_env_value; record instead,
+# or append to .env where a case reads back what a run saves.
 set_env_value() {
-    printf '%s=%s\n' "$1" "$2" > "$TEST_DIR/applied"
+    if [ "${APPEND_TO_ENV:-}" = yes ]; then
+        printf '%s=%s\n' "$1" "$2" >> .env
+    else
+        printf '%s=%s\n' "$1" "$2" > "$TEST_DIR/applied"
+    fi
 }
 
 applied_version() {
@@ -226,7 +233,7 @@ kvs_documented_php_version "$TEST_DIR/site" > /dev/null 2>&1 &&
 # the site, since that archive is never extracted over it.
 # The functions read /var/www/<domain>; these copies read a fixture instead.
 # shellcheck source=/dev/null
-source <(for name in kvs_documented_php_version refuse_unbuildable_kvs_php select_php_version; do
+source <(for name in saved_php_version kvs_documented_php_version refuse_unbuildable_kvs_php select_php_version; do
     extract_function "$name"
 done | sed "s|/var/www/|$TEST_DIR/www/|g")
 DOMAIN=site.example
@@ -280,10 +287,221 @@ IMPORT_MODE=true IMPORT_SITE_VERSION=''
 refused "import of a copied 6.2.0 site" 6.2.0 select_php_version
 grep -Fq 'Use an archive, or for an import a site, of KVS 6.2.1 or newer' "$TEST_DIR/out" ||
     fail "an import must be told to import a newer site: $(cat "$TEST_DIR/out")"
+
+# 1e. U4: a re-run keeps the series the site in place runs, saved in .env,
+# unless KVS_PHP_VERSION or the prompt names another one. A headless re-run
+# used to write the documented series back (8.4 to 8.1 for an unencoded
+# 7.0.2 site, 8.2 to 8.1 for an encoded one installed with KVS_PHP_VERSION),
+# and an unencoded 6.1 site moved to PHP 8.2 was refused on every re-run.
+# For encoded files a newer documented series still wins (Issue #33). A run
+# saves the base of the series it selected beside it (set_php_bases): a
+# PHP_VERSION without the PHP_FPM_BASE of its series was not selected by a
+# run, and is not kept.
+# seed_rerun <site version> <.env content>: a site in place, installed by an
+# earlier run whose .env this run reads.
+seed_rerun() {
+    seed_site '' "$1"
+    : > "$TEST_DIR/www/$DOMAIN/admin/include/setup.php"
+    printf '%b' "$2" > .env
+}
+# saved <series>: the lines a run that selected the series leaves in .env.
+saved() {
+    printf 'PHP_VERSION=%s\nPHP_FPM_BASE=%s\n' "$1" "$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get php-fpm "$1")"
+}
+# setup.sh reads .env again right before the selection, so PHP_VERSION holds
+# the saved value there (or nothing).
+setup_selects() {
+    PHP_VERSION=
+    # shellcheck source=/dev/null
+    source ./.env
+    select_php_version
+}
+IMPORT_MODE=false IMPORT_SITE_VERSION='' KVS_PHP_VERSION='' HEADLESS=y
+IONCUBE=NO
+seed_rerun 7.0.2 "$(saved 8.4)\nIONCUBE=NO\n"
+run_case "re-run of an unencoded 7.0.2 site on PHP 8.4" 8.4 setup_selects
+grep -Fq 'The site runs PHP 8.4 (PHP_VERSION in .env), the default.' "$TEST_DIR/out" ||
+    fail "the kept series must be named: $(cat "$TEST_DIR/out")"
+HEADLESS=''
+run_case "Enter on a re-run of an unencoded site on PHP 8.4" 8.4 setup_selects <<< ""
+grep -Fq '(default: 8.4)' "$TEST_DIR/out" ||
+    fail "the prompt must offer the saved series as its default: $(cat "$TEST_DIR/out")"
+run_case "an answer on a re-run of an unencoded site" 8.2 setup_selects <<< "8.2"
+HEADLESS=y KVS_PHP_VERSION=8.3
+run_case "KVS_PHP_VERSION on a re-run of an unencoded site" 8.3 setup_selects
+KVS_PHP_VERSION=''
+# The value saved in .env decides, quoted as .env may write it, not a
+# PHP_VERSION of the shell: the early refusal runs before setup.sh reads
+# .env again.
+seed_rerun 7.0.2 "PHP_VERSION=\"8.2\"\nPHP_FPM_BASE=\"$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get php-fpm 8.2)\"\n"
+run_case "a quoted saved series" 8.2 setup_selects
+PHP_VERSION=8.4 run_case "a shell PHP_VERSION is not the saved series" 8.2 select_php_version
+seed_rerun 7.0.2 'IONCUBE=NO\n'
+PHP_VERSION=8.4 run_case "a .env without PHP_VERSION saves no series" 8.1 select_php_version
+seed_rerun 6.1.2 'IONCUBE=NO\n'
+PHP_VERSION=8.2 refused "a 6.1.2 site with no saved series" 6.1.2 refuse_unbuildable_kvs_php
+seed_rerun 7.0.2 'PHP_VERSION=7.4\nPHP_FPM_BASE=php:7.4-fpm\n'
+run_case "a saved series this stack does not build" 8.1 setup_selects
+# A PHP_VERSION no run selected: the fallback of .env.example, copied by
+# setup.sh or by kvs-install.sh before it starts setup.sh (its PHP_FPM_BASE
+# is empty), one changed by hand since the base was saved, or a .env of a
+# release before 26.10.0, which saved no base.
+grep -qx 'PHP_FPM_BASE=' "$ROOT_DIR/docker/.env.example" ||
+    fail ".env.example must leave PHP_FPM_BASE empty: no run selected its PHP_VERSION"
+seed_rerun 7.0.3 ''
+sed "s/^DOMAIN=.*/DOMAIN=$DOMAIN/" "$ROOT_DIR/docker/.env.example" > .env
+run_case "a .env copied from .env.example" 8.3 setup_selects
+seed_rerun 7.0.2 "PHP_VERSION=8.4\nPHP_FPM_BASE=$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get php-fpm 8.1)\n"
+run_case "a PHP_VERSION changed by hand since" 8.1 setup_selects
+# A PHP_FPM_BASE of the shell is not the one saved either.
+seed_rerun 7.0.2 'PHP_VERSION=8.4\nIONCUBE=NO\n'
+PHP_FPM_BASE=$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get php-fpm 8.4) \
+    run_case "a .env from a release before 26.10.0" 8.1 setup_selects
+# Only a re-run on a site in place: a new installation, or an import,
+# selects as before.
+seed_rerun 7.0.3 "$(saved 8.1)\n"
+rm -f "$TEST_DIR/www/$DOMAIN/admin/include/setup.php"
+run_case "no site in place" 8.3 setup_selects
+seed_rerun 7.0.3 "$(saved 8.1)\n"
+IMPORT_MODE=true IMPORT_SITE_VERSION=7.0.3
+run_case "an import" 8.3 setup_selects
+IMPORT_MODE=false IMPORT_SITE_VERSION=''
+# 6.1 needs PHP 7.4: a site an earlier run moved to 8.2 with KVS_PHP_VERSION
+# stays there, before and inside the selection; without that run it is
+# refused as before.
+seed_rerun 6.1.2 "$(saved 8.2)\nIONCUBE=NO\n"
+( refuse_unbuildable_kvs_php ) > "$TEST_DIR/out" 2>&1 ||
+    fail "an unencoded 6.1.2 site on PHP 8.2 was refused on a re-run: $(cat "$TEST_DIR/out")"
+run_case "re-run of an unencoded 6.1.2 site on PHP 8.2" 8.2 setup_selects
+seed_rerun 6.1.2 ''
+sed "s/^DOMAIN=.*/DOMAIN=$DOMAIN/" "$ROOT_DIR/docker/.env.example" > .env
+refused "a 6.1.2 site with a .env copied from .env.example" 6.1.2 setup_selects
+seed_rerun 6.1.2 'PHP_VERSION=8.2\n'
+refused "a 6.1.2 site whose PHP_VERSION no run selected" 6.1.2 setup_selects
+seed_rerun 6.1.2 "$(saved 8.2)\n"
+rm -f "$TEST_DIR/www/$DOMAIN/admin/include/setup.php"
+refused "a 6.1.2 archive with no site in place" 6.1.2 setup_selects
+# Encoded files: the saved series stays while the documented one is not
+# newer, with the warning of an explicit override; a newer one wins.
+IONCUBE=YES
+seed_rerun 7.0.2 "$(saved 8.2)\nIONCUBE=YES\n"
+run_case "re-run of an encoded 7.0.2 site on PHP 8.2" 8.2 setup_selects
+grep -Fq 'PHP 8.2 must be compatible' "$TEST_DIR/out" ||
+    fail "keeping a series for encoded files must warn about the loader: $(cat "$TEST_DIR/out")"
+seed_rerun 7.0.3 "$(saved 8.4)\n"
+run_case "re-run of an encoded 7.0.3 site on PHP 8.4" 8.4 setup_selects
+seed_rerun 7.0.3 "$(saved 8.1)\n"
+run_case "an encoded site updated to 7.0.3 leaves PHP 8.1" 8.3 setup_selects
+grep -Fq 'The site ran PHP 8.1: KVS 7.0.3 needs PHP 8.3 for its encoded files.' "$TEST_DIR/out" ||
+    fail "leaving the saved series must be said: $(cat "$TEST_DIR/out")"
+seed_rerun 7.0.3 "$(saved 8.2)\n"
+run_case "an encoded site updated to 7.0.3 leaves PHP 8.2" 8.3 setup_selects
+seed_rerun 7.0.2 "$(saved 8.4)\n"
+KVS_PHP_VERSION=8.1
+run_case "KVS_PHP_VERSION on a re-run of an encoded site" 8.1 setup_selects
+KVS_PHP_VERSION=''
+seed_rerun 6.1.2 ''
+sed "s/^DOMAIN=.*/DOMAIN=$DOMAIN/" "$ROOT_DIR/docker/.env.example" > .env
+refused "an encoded 6.1.2 site with a .env copied from .env.example" 6.1.2 setup_selects
+rm -f .env
+
+# 1f. What saved_php_version reads is what a run writes: set_php_bases, run
+# as written with the resolver of the repository, saves for every series
+# setup.sh offers a base saved_php_version takes for that series, right
+# after the selection.
+# shellcheck source=/dev/null disable=SC2016  # The literal text of setup.sh.
+source <(extract_function set_php_bases |
+    sed 's|"$(dirname "${BASH_SOURCE\[0\]}")/bin/resolve-bases.sh"|"$ROOT_DIR/docker/bin/resolve-bases.sh"|')
+grep -Fq "\"\$ROOT_DIR/docker/bin/resolve-bases.sh\"" <(declare -f set_php_bases) ||
+    fail "set_php_bases must run the resolver of the repository"
+DOMAIN=site.example
+for series in $SUPPORTED_PHP_VERSIONS; do
+    seed_rerun 7.0.2 "PHP_VERSION=$series\n"
+    PHP_VERSION=$series
+    ( APPEND_TO_ENV=yes set_php_bases ) > "$TEST_DIR/out" 2>&1 || fail "set_php_bases failed for PHP $series: $(cat "$TEST_DIR/out")"
+    [ "$(saved_php_version)" = "$series" ] ||
+        fail "the base set_php_bases saves for PHP $series is not taken for that series: $(cat .env)"
+done
+rm -f .env
+selection=$(grep -nx 'select_php_version' "$ROOT_DIR/docker/setup.sh" | cut -d: -f1)
+[ "$(sed -n "$((selection + 1)),$((selection + 2))p" "$ROOT_DIR/docker/setup.sh")" = $'kvsctl_note_php_change "$PHP_VERSION_BEFORE_SETUP" || exit 1\nset_php_bases' ] ||
+    fail "setup.sh must save the base of the series right after the selection"
+
+# 1g. Through kvs-install.sh, which copies .env.example to .env before it
+# starts setup.sh when there is none: its PHP_VERSION is not a series a run
+# selected. The setup.sh it starts here runs the selection of setup.sh on the
+# .env it finds, with the site in place under the domain of the archive name.
+if command -v unzip > /dev/null 2>&1 && command -v python3 > /dev/null 2>&1; then
+    {
+        echo "source \"$ROOT_DIR/docker/lib/import.sh\""
+        grep -m1 '^readonly SUPPORTED_PHP_VERSIONS=' "$ROOT_DIR/docker/setup.sh"
+        for name in php_version_is_supported version_at_least saved_php_version kvs_documented_php_version \
+            refuse_unbuildable_kvs_php select_php_version; do
+            extract_function "$name"
+        done | sed "s|/var/www/|$TEST_DIR/www/|g"
+        cat <<'SH'
+RED='' GREEN='' YELLOW='' CYAN='' NC=''
+set_env_value() { printf '%s=%s\n' "$1" "$2" > "$APPLIED"; }
+KVS_PHP_VERSION=${KVS_PHP_VERSION:-}
+PHP_VERSION=
+source .env
+IONCUBE=$SITE_IONCUBE
+select_php_version
+SH
+    } > "$TEST_DIR/installer-setup.sh"
+    # installer <IONCUBE> <site version> <.env or ''>: kvs-install.sh on an
+    # installation whose site is in place; prints the series selected.
+    installer() {
+        local work="$TEST_DIR/installer"
+
+        rm -rf "$work" "$TEST_DIR/www" "$TEST_DIR/applied"
+        mkdir -p "$work/kvs/.git" "$work/kvs/docker/kvs-archive" "$work/backup" "$TEST_DIR/www/site.example/admin/include"
+        : > "$TEST_DIR/www/site.example/admin/include/setup.php"
+        printf '%s\n' '<?php' "\$config['project_version'] = \"$2\";" > "$TEST_DIR/www/site.example/admin/include/version.php"
+        cp "$ROOT_DIR/docker/.env.example" "$work/kvs/docker/.env.example"
+        [ -z "$3" ] || printf '%b' "$3" > "$work/kvs/docker/.env"
+        python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.php", "x\n"); z.close()' \
+            "$work/kvs/docker/kvs-archive/KVS_${2}_[site.example].zip"
+        cp "$TEST_DIR/installer-setup.sh" "$work/kvs/docker/setup.sh"
+        # A shell of its own: this one holds the readonly variables of
+        # setup.sh that kvs-install.sh sets too.
+        # shellcheck disable=SC2016  # The script expands its own arguments.
+        env -u DOMAIN -u PHP_VERSION -u KVS_PHP_VERSION KVS_INSTALL_DIR="$work/kvs" KVS_BACKUP_DIR="$work/backup" \
+            HEADLESS=y SITE_IONCUBE="$1" APPLIED="$TEST_DIR/applied" bash -c '
+                # shellcheck source=/dev/null
+                source "$1"
+                docker() { return 0; }
+                refuse_during_kvsctl_run() { return 0; }
+                recover_kvsctl_data() { return 0; }
+                refuse_kvsctl_managed_install() { return 0; }
+                ensure_docker_prerequisites() { return 0; }
+                update_kvs_install() { return 0; }
+                dockerInstall
+            ' _ "$ROOT_DIR/kvs-install.sh" > "$TEST_DIR/out" 2>&1
+    }
+    installer NO 7.0.3 '' || fail "kvs-install.sh on an unencoded 7.0.3 site failed: $(cat "$TEST_DIR/out")"
+    grep -Fq 'Created .env from .env.example' "$TEST_DIR/out" || fail "kvs-install.sh must have created .env: $(cat "$TEST_DIR/out")"
+    [ "$(applied_version)" = 8.3 ] ||
+        fail "kvs-install.sh on an unencoded 7.0.3 site must select PHP 8.3, not the 8.1 of .env.example: $(cat "$TEST_DIR/out")"
+    if installer YES 6.1.2 ''; then
+        fail "kvs-install.sh on an encoded 6.1.2 site was not refused: $(cat "$TEST_DIR/out")"
+    fi
+    grep -Fq 'ERROR: KVS 6.1.2 needs PHP 7.4, which this Docker installation does not build.' "$TEST_DIR/out" ||
+        fail "kvs-install.sh on an encoded 6.1.2 site must be refused for PHP 7.4: $(cat "$TEST_DIR/out")"
+    [ ! -f "$TEST_DIR/applied" ] || fail "a PHP version was written for an encoded 6.1.2 site: $(cat "$TEST_DIR/applied")"
+    installer NO 7.0.2 "DOMAIN=site.example\n$(saved 8.4)\n" ||
+        fail "kvs-install.sh on a saved series failed: $(cat "$TEST_DIR/out")"
+    [ "$(applied_version)" = 8.4 ] ||
+        fail "kvs-install.sh must keep the series an earlier run saved: $(cat "$TEST_DIR/out")"
+    rm -rf "$TEST_DIR/installer" "$TEST_DIR/www" "$TEST_DIR/applied"
+else
+    echo "ok - unzip or python3 is not installed here, the kvs-install.sh case is left to the CI runner"
+fi
+
 IMPORT_MODE='' IMPORT_SITE_VERSION='' DOMAIN=''
 rm -rf "$TEST_DIR/www"
 # shellcheck source=/dev/null
-source <(for name in kvs_documented_php_version refuse_unbuildable_kvs_php select_php_version; do
+source <(for name in saved_php_version kvs_documented_php_version refuse_unbuildable_kvs_php select_php_version; do
     extract_function "$name"
 done)
 

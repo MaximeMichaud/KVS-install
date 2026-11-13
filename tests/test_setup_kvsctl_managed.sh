@@ -26,6 +26,7 @@ awk '
         $0 == "kvsctl_keep_mariadb_series() {" || $0 == "choose_mariadb_version() {" ||
         $0 == "kvsctl_note_php_change() {" || $0 == "preflight_kernel_writeback_status() {" ||
         $0 == "php_version_is_supported() {" || $0 == "kvs_documented_php_version() {" ||
+        $0 == "saved_php_version() {" || $0 == "version_at_least() {" ||
         $0 == "refuse_unbuildable_kvs_php() {" || $0 == "select_php_version() {" || $0 == "set_php_bases() {" ||
         $0 == "set_env_value() {" || $0 == "remove_env_value() {" { capture = 1 }
     capture { print }
