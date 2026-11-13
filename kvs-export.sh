@@ -2402,6 +2402,101 @@ kvs_publish_export() {
     fi
 }
 
+# GNU tar exits 1 when a file under a live site changes, is removed, or shrinks
+# while it reads it (the site is not frozen: uploads, admin/logs), so status 1
+# is a warning, not a failure; only status 2 or more is a real error. Status 1
+# is no promise of a complete archive, though: a file removed before tar read
+# it is missing, and one that shrank is padded with zeros. tar's lines name
+# them, and the archive is called complete only when every line is a plain
+# change. $1 is tar's exit status and $2 a file holding its standard error.
+kvs_archive_tar_ok() {
+    local status="$1" errfile="$2" line member
+    local removed="" shrank="" other="no"
+
+    if [ -s "$errfile" ]; then
+        while IFS= read -r line; do
+            kvs_say "  $line"
+            case $line in
+                *": file changed as we read it") ;;
+                *": File removed before we read it")
+                    member=${line%": File removed before we read it"}
+                    removed="$removed ${member#tar: }"
+                    ;;
+                *": File shrank by "*)
+                    member=${line%%": File shrank by "*}
+                    shrank="$shrank ${member#tar: }"
+                    ;;
+                *) other="yes" ;;
+            esac
+        done < "$errfile"
+    fi
+    [ "$status" -eq 0 ] && return 0
+    [ "$status" -eq 1 ] || return 1
+    kvs_warn "files changed, were removed, or shrank under the site while the archive was read"
+    [ -z "$removed" ] || kvs_warn "missing from the archive, removed before tar read them:$removed"
+    [ -z "$shrank" ] || kvs_warn "padded with zeros in the archive, they shrank while tar read them:$shrank"
+    if [ -n "$removed$shrank" ]; then
+        kvs_warn "the archive is not complete; a re-run captures these files"
+    elif [ ! -s "$errfile" ]; then
+        kvs_warn "tar named nothing; check the archive before trusting it"
+    elif [ "$other" = "yes" ]; then
+        kvs_warn "tar's lines above say what is missing or changed; check them before trusting the archive"
+    else
+        kvs_warn "the archive holds every file, a changed one as tar read it; a re-run captures their current state"
+    fi
+    return 0
+}
+
+# kvs_path_excluded <relative path>: the path is left out of the archive by
+# one of the exclusion patterns ("/X" leaves X behind, "/X/*" its contents).
+kvs_path_excluded() {
+    local rel="$1" pattern base
+
+    for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
+        base=${pattern#/}
+        case $base in
+            */\*)
+                base=${base%/\*}
+                case $rel in
+                    "$base"/*) return 0 ;;
+                esac
+                ;;
+            *)
+                case $rel in
+                    "$base" | "$base"/*) return 0 ;;
+                esac
+                ;;
+        esac
+    done
+    return 1
+}
+
+# A symlink of the site whose target is missing (a storage disk that is not
+# mounted, a deleted directory) is dropped by tar -h with status 1, exactly
+# like a file deleted during the run: the archive would leave that part of
+# the site behind, contents and all, under a mere warning. Refuse before the
+# dump instead, naming each one, unless it is left behind anyway.
+kvs_refuse_dangling_links() {
+    local link rel count=0
+    local -a found=()
+
+    kvs_site_links
+    for link in ${SITE_LINKS[@]+"${SITE_LINKS[@]}"}; do
+        [ -e "$link" ] && continue
+        rel=${link#"$SITE_DIR"/}
+        kvs_path_excluded "$rel" && continue
+        count=$((count + 1))
+        [ "$count" -gt 10 ] || found+=("  $rel -> $(readlink -- "$link" 2> /dev/null)")
+    done
+    [ "$count" -gt 0 ] || return 0
+    kvs_error "the site holds $count symlink(s) to nothing (a disk that is not mounted?): tar would leave them, and what they should hold, out of the archive. Mount their target, or leave them behind with --exclude <path>:"
+    for link in ${found[@]+"${found[@]}"}; do
+        kvs_say "$link"
+    done
+    [ "$count" -le 10 ] || kvs_say "  and $((count - 10)) more"
+    return 1
+}
+
 kvs_command_archive() {
     local stamp
     local output
@@ -2436,6 +2531,9 @@ kvs_command_archive() {
             return 1
         fi
         kvs_say "Output: $output"
+    fi
+    if [ "$OPT_DUMP_ONLY" != "yes" ]; then
+        kvs_refuse_dangling_links || return 1
     fi
     if ! kvs_confirm "Continue? [Y/n]"; then
         kvs_say "Aborted, nothing was written."
@@ -2511,14 +2609,22 @@ kvs_command_archive() {
     kvs_write_manifest "$STAGING_DIR/$KVS_MANIFEST_NAME" "$dump_name" "$bytes" || return 1
     kvs_say "Writing the archive, this takes as long as reading the site files..."
     kvs_archive_excludes
+    # Created first: when the redirection below cannot create it, bash never
+    # runs tar and reports status 1, which would pass for files changing.
+    if ! : > "$STAGING_DIR/tar-stderr"; then
+        kvs_error "cannot create a file in $STAGING_DIR, the archive was not written"
+        return 1
+    fi
     if [ "$output" = "-" ]; then
-        if ! tar -chf - ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
+        tar -chf - ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null 2> "$STAGING_DIR/tar-stderr"
+        if ! kvs_archive_tar_ok "$?" "$STAGING_DIR/tar-stderr"; then
             kvs_error "tar failed, the archive on stdout is incomplete"
             return 1
         fi
         return 0
     fi
-    if ! tar -chf "$STAGING_DIR/export" ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null; then
+    tar -chf "$STAGING_DIR/export" ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null 2> "$STAGING_DIR/tar-stderr"
+    if ! kvs_archive_tar_ok "$?" "$STAGING_DIR/tar-stderr"; then
         kvs_error "tar failed"
         return 1
     fi

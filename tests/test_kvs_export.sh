@@ -14,6 +14,7 @@ TESTS_RUN=0
 STUB_BIN="$TMP_ROOT/bin-stub"
 MIN_BIN="$TMP_ROOT/bin-minimal"
 EXTRA_BIN="$TMP_ROOT/bin-extra"
+TAR_BIN="$TMP_ROOT/bin-tar"
 STUB_LOG="$TMP_ROOT/stub.log"
 export STUB_LOG
 # Keep the staging directory of the archive inside the fixtures.
@@ -381,6 +382,23 @@ EOF
 exit 0
 EOF
     chmod +x "$EXTRA_BIN/zstd" "$EXTRA_BIN/rsync"
+}
+
+# A tar that writes the real archive, then reports a chosen exit status and
+# message. GNU tar exits 1 with a complete archive when a file changes under
+# it, and 2 or more on a genuine failure; this reproduces both without having
+# to race a real file change during the test.
+make_tar_stub() {
+    local real_tar
+    real_tar=$(command -v tar) || fail "the test needs tar"
+    mkdir -p "$TAR_BIN"
+    cat > "$TAR_BIN/tar" <<EOF
+#!/bin/bash
+"$real_tar" "\$@"
+printf '%s\n' "\${STUB_TAR_MESSAGE:-tar: a file changed as we read it}" >&2
+exit "\${STUB_TAR_EXIT:-0}"
+EOF
+    chmod +x "$TAR_BIN/tar"
 }
 
 #################################################################
@@ -1382,6 +1400,135 @@ test_the_archive_can_be_written_on_stdout() {
     pass "the archive can be written on stdout"
 }
 
+test_a_file_changing_under_the_site_is_a_warning_not_a_failure() {
+    local site="$TMP_ROOT/tarwarn-site"
+    local archive="$TMP_ROOT/tarwarn.tar"
+    local out="$TMP_ROOT/tarwarn.out"
+    local err="$TMP_ROOT/tarwarn.err"
+
+    make_site "$site"
+    # tar exits 1 after writing a complete archive: a file changed, was
+    # removed, or shrank under the live site while it was read.
+    STUB_TAR_EXIT=1 STUB_TAR_MESSAGE='tar: www/contents/videos/1.mp4: file changed as we read it' \
+        run_export "$TAR_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" archive "$site" ||
+        fail "a file changing under the site must not fail the export: $(cat "$err")"
+    [ -s "$archive" ] || fail "the archive must still be published"
+    tar -tf "$archive" | grep -Fxq "www/admin/include/setup.php" ||
+        fail "the published archive must hold the site"
+    grep -q "^WARNING: files changed, were removed, or shrank" "$err" ||
+        fail "the change must be reported as a warning: $(cat "$err")"
+    grep -Fq "file changed as we read it" "$err" ||
+        fail "tar's own message must be shown: $(cat "$err")"
+    grep -q "Archive written: $archive" "$err" ||
+        fail "the archive path must still be reported: $(cat "$err")"
+    grep -q "holds every file" "$err" || fail "a change alone leaves every file in the archive: $(cat "$err")"
+
+    # A file removed before tar read it is missing from the archive, and one
+    # that shrank is padded with zeros: still published, but never called
+    # complete, and each one named.
+    rm -f "$archive"
+    STUB_TAR_EXIT=1 STUB_TAR_MESSAGE=$'tar: www/contents/videos/1.mp4: File removed before we read it\ntar: www/admin/include/version.php: File shrank by 10 bytes; padding with zeros\ntar: www/admin/include/setup.php: file changed as we read it' \
+        run_export "$TAR_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" archive "$site" ||
+        fail "removed and shrunk files must not fail the export: $(cat "$err")"
+    [ -s "$archive" ] || fail "the archive must still be published"
+    grep -q "^WARNING: missing from the archive.*: www/contents/videos/1.mp4$" "$err" ||
+        fail "a removed file must be named as missing: $(cat "$err")"
+    grep -q "^WARNING: padded with zeros.*: www/admin/include/version.php$" "$err" ||
+        fail "a shrunk file must be named as padded: $(cat "$err")"
+    grep -q "not complete" "$err" || fail "the archive must not be called complete: $(cat "$err")"
+    grep -q "holds every file" "$err" && fail "the archive must not be called complete: $(cat "$err")"
+
+    # A line it does not know (another reason, another language) is no proof
+    # of a complete archive either.
+    STUB_TAR_EXIT=1 STUB_TAR_MESSAGE='tar: www/contents/videos/1.mp4: Datei gelöscht, bevor sie gelesen wurde' \
+        run_export "$TAR_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" archive "$site" ||
+        fail "an unknown tar warning must not fail the export: $(cat "$err")"
+    grep -q "holds every file" "$err" && fail "an unknown tar line must not be read as a complete archive: $(cat "$err")"
+    grep -q "check them" "$err" || fail "an unknown tar line must be pointed at: $(cat "$err")"
+    pass "a file that changes while the archive is read is a warning, not a failure"
+}
+
+test_a_symlink_to_nothing_stops_the_archive() {
+    local site="$TMP_ROOT/dangling-site" archive="$TMP_ROOT/dangling.tar"
+    local out="$TMP_ROOT/dangling.out" err="$TMP_ROOT/dangling.err"
+    local status small got
+
+    # contents on a storage disk that is not mounted: tar -h drops the link
+    # with "File removed before we read it" and status 1, the same as a file
+    # deleted during the run, and the archive would leave the whole media
+    # tree behind. The exporter refuses before the dump and names the link.
+    make_site "$site"
+    rm -rf "$site/contents"
+    mkdir -p "$TMP_ROOT/dangling-mnt"
+    ln -s "$TMP_ROOT/dangling-mnt/contents" "$site/contents"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o "$archive" archive "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a symlink to nothing must stop the archive, got $status"
+    grep -q "symlink(s) to nothing" "$err" || fail "the refusal must explain: $(cat "$err")"
+    grep -Fq "contents -> $TMP_ROOT/dangling-mnt/contents" "$err" || fail "the refusal must name the link: $(cat "$err")"
+    grep -Fq -- "--exclude" "$err" || fail "the refusal must give the way out: $(cat "$err")"
+    [ ! -e "$archive" ] || fail "no archive may be written"
+    grep -q "Dumping" "$err" && fail "the refusal must come before the dump: $(cat "$err")"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o - archive "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a symlink to nothing must stop the archive on stdout, got $status"
+    [ ! -s "$out" ] || fail "nothing may reach stdout"
+
+    # Left behind on purpose, or with no site files at all, it is no reason
+    # to stop.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --exclude contents -o "$archive" archive "$site" ||
+        fail "an excluded symlink to nothing must not stop the archive: $(cat "$err")"
+    tar -tf "$archive" | grep -q "^www/contents" && fail "the excluded link must stay behind"
+    rm -f "$archive"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --dump-only -o "$TMP_ROOT/dangling.sql.gz" "$site" ||
+        fail "a dump alone must not look at the site files: $(cat "$err")"
+
+    # tar's standard error goes to a file in the staging directory; when that
+    # file cannot be created, bash never runs tar and reports status 1, which
+    # must not pass for "files changed" over an empty stream. A tmpfs with
+    # five inodes fills up just before that file (stage, dump, site link,
+    # manifest); a user and mount namespace stands in for root.
+    if ! unshare --map-root-user --mount true 2> /dev/null; then
+        pass "a symlink to nothing stops the archive (tar stderr case skipped: no user namespace)"
+        return 0
+    fi
+    rm -f "$site/contents"
+    mkdir -p "$site/contents/videos" "$TMP_ROOT/dangling-small"
+    echo video > "$site/contents/videos/1.mp4"
+    small="$TMP_ROOT/dangling-small"
+    got=$(EXPORT_PATH="$STUB_BIN:$MIN_BIN" unshare --map-root-user --mount "$BASH" -c '
+        mount -t tmpfs -o size=100m,nr_inodes=5 tmpfs "$1" || exit 90
+        status=0
+        TMPDIR=$1 PATH=$EXPORT_PATH "$BASH" "$0" -y --no-size -o - archive "$2" > "$3" 2> "$4" < /dev/null || status=$?
+        echo "$status"
+    ' "$EXPORT_SCRIPT" "$small" "$site" "$out" "$err")
+    [ "$got" != 90 ] || fail "the small tmpfs could not be mounted"
+    [ "$got" -ne 0 ] || fail "an archive whose tar never ran must fail, got 0 with $(wc -c < "$out") bytes: $(cat "$err")"
+    grep -q "files changed" "$err" && fail "a tar that never ran is not a file change: $(cat "$err")"
+    grep -Fq "tar-stderr" "$err" || fail "the failure must be the file tar writes its errors to: $(tail -n 3 "$err")"
+    pass "a symlink to nothing stops the archive"
+}
+
+test_a_fatal_tar_error_fails_the_archive() {
+    local site="$TMP_ROOT/tarfail-site"
+    local archive="$TMP_ROOT/tarfail.tar"
+    local out="$TMP_ROOT/tarfail.out"
+    local err="$TMP_ROOT/tarfail.err"
+    local status=0
+
+    make_site "$site"
+    # tar exits 2 on a real failure; the archive it leaves is not trustworthy.
+    STUB_TAR_EXIT=2 STUB_TAR_MESSAGE='tar: /dev/st0: Cannot write: No space left on device' \
+        run_export "$TAR_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" archive "$site" || status=$?
+    [ "$status" -ne 0 ] || fail "a fatal tar error must fail the export"
+    [ ! -e "$archive" ] || fail "no archive must be published when tar fails"
+    grep -q "^ERROR: tar failed" "$err" ||
+        fail "the failure must be reported: $(cat "$err")"
+    grep -Fq "No space left on device" "$err" ||
+        fail "tar's own error must be shown: $(cat "$err")"
+    pass "a fatal tar error fails the archive and publishes nothing"
+}
+
 test_dump_only_writes_a_dump_next_to_the_archive() {
     local site="$TMP_ROOT/dumponly-site"
     local work="$TMP_ROOT/dumponly-work"
@@ -2047,6 +2194,7 @@ test_the_usage_is_available_and_bad_options_are_refused() {
 make_stubs
 make_min_bin
 make_extra_bin
+make_tar_stub
 
 test_detect_reports_the_installation_as_key_value_lines
 test_detect_reports_the_encoding_and_the_web_server_configuration
@@ -2068,6 +2216,9 @@ test_versioned_tables_are_refused_before_any_export_is_written
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent
 test_the_archive_holds_the_site_the_dump_and_the_manifest
 test_the_archive_can_be_written_on_stdout
+test_a_file_changing_under_the_site_is_a_warning_not_a_failure
+test_a_symlink_to_nothing_stops_the_archive
+test_a_fatal_tar_error_fails_the_archive
 test_dump_only_writes_a_dump_next_to_the_archive
 test_the_dump_is_staged_next_to_the_archive_and_outside_the_site
 test_the_archive_never_takes_in_its_own_staging_directory
