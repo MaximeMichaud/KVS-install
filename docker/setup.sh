@@ -6788,14 +6788,27 @@ else
     run_step "Starting Nginx" docker compose up -d --force-recreate nginx
 fi
 
+# EMAIL as it is, empty when there is none: caddy-start refuses a missing
+# or unusable address while a route needs an ACME certificate, rather than
+# give Caddy the admin@example.com placeholder Let's Encrypt refuses. A
+# self-signed primary needs no EMAIL, but a site added later gets a public
+# route by default. Stopping there would leave the cache, Manticore and cron
+# of the stack this run stopped down: the run leaves the Caddy that runs as
+# it is, finishes the start, and ends with an error and the command that
+# starts Caddy once EMAIL is set. The resume path does not recreate a
+# running Caddy.
+SETUP_CADDY_EMAIL_MISSING=false
 if [ "$MODE" = "multi" ]; then
     progress_bar "Starting Caddy"
     if [ "$RESUME_IMPORT" = true ]; then
-        (cd multi-site && env ACME_EMAIL="${EMAIL:-admin@example.com}" \
+        (cd multi-site && env ACME_EMAIL="${EMAIL:-}" \
             docker compose -p multi-site -f docker-compose.caddy.yml up -d --no-deps --no-recreate --no-build --pull missing caddy)
+    elif ! env ACME_EMAIL="${EMAIL:-}" ./multi-site/site-manager.sh caddy-acme-check; then
+        SETUP_CADDY_EMAIL_MISSING=true
+        echo -e "${YELLOW}WARNING: Caddy was not started or recreated: a route needs a certificate from Let's Encrypt and EMAIL has no usable address. The setup goes on and ends with an error.${NC}"
     else
         run_step "Starting Caddy reverse proxy" \
-            env ACME_EMAIL="${EMAIL:-admin@example.com}" \
+            env ACME_EMAIL="${EMAIL:-}" \
             ./multi-site/site-manager.sh caddy-start
     fi
 fi
@@ -7190,6 +7203,9 @@ fi
 if [ "$SETUP_ACME_FAILED" = true ]; then
     echo ""
     echo -e "${YELLOW}KVS Docker Setup finished without the ${SSL_PROVIDER} certificate: see the end of this output.${NC}"
+elif [ "$SETUP_CADDY_EMAIL_MISSING" = true ]; then
+    echo ""
+    echo -e "${YELLOW}KVS Docker Setup finished without starting Caddy: see the end of this output.${NC}"
 else
     progress_success "KVS Docker Setup Complete!"
 fi
@@ -7271,6 +7287,8 @@ fi
     echo "========================================"
     if [ "$SETUP_ACME_FAILED" = true ]; then
         echo "KVS Docker Setup Completed without the ${SSL_PROVIDER} certificate - $(date '+%Y-%m-%d %H:%M:%S')"
+    elif [ "$SETUP_CADDY_EMAIL_MISSING" = true ]; then
+        echo "KVS Docker Setup Completed without starting Caddy - $(date '+%Y-%m-%d %H:%M:%S')"
     else
         echo "KVS Docker Setup Completed - $(date '+%Y-%m-%d %H:%M:%S')"
     fi
@@ -7300,5 +7318,12 @@ if [ "$SETUP_ACME_FAILED" = true ]; then
             ;;
     esac
     printf '  cd %q && ./reconfigure.sh\n' "$PWD"
+    exit 1
+fi
+if [ "$SETUP_CADDY_EMAIL_MISSING" = true ]; then
+    echo ""
+    echo -e "${RED}ERROR: Caddy was not started or recreated: a route in multi-site/caddy/sites needs a certificate from Let's Encrypt, and EMAIL is missing, the admin@example.com placeholder or invalid, which Let's Encrypt refuses. A Caddy that was running keeps its configuration.${NC}"
+    echo "Set EMAIL to a valid address in $PWD/.env, then start Caddy with:"
+    printf '  cd %q && ./multi-site/site-manager.sh caddy-start\n' "$PWD"
     exit 1
 fi

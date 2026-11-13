@@ -172,6 +172,14 @@ docker() {
                     jq -r '[.services["php-fpm"].environment.IONCUBE, .services.cron.environment.IONCUBE] | join(" ")' \
                         >> "$MOCK_COMPOSE_IONCUBE_LOG"
             fi
+            # R6: what Compose would hand Caddy, rendered by the real Compose
+            # from the caddy compose file and the environment of this call.
+            if [ -n "${MOCK_CADDY_CONFIG_LOG:-}" ] &&
+                [[ " $* " == *' -f docker-compose.caddy.yml up -d '* ]]; then
+                "$MOCK_REAL_DOCKER" compose -p multi-site -f docker-compose.caddy.yml config \
+                    > "$MOCK_CADDY_CONFIG_LOG" 2>&1 || return 1
+                return 0
+            fi
             if [[ " $* " == *' down -v '* ]]; then
                 # MOCK_COMPOSE_RENDER=<prefix>: what the real Compose loads
                 # with those options in this directory, from the same
@@ -845,6 +853,7 @@ if grep -Fq 'Site reload.example started' "${TEST_DIR}/valid/reload-output.log";
 fi
 
 caddy_start_log="${TEST_DIR}/valid/caddy-start.log"
+ACME_EMAIL=ops@example.com \
 MOCK_NETWORK_EXISTS=false \
 MOCK_DOCKER_LOG="$caddy_start_log" \
 KVS_WEBROOT_BASE="$valid_webroot" \
@@ -2090,5 +2099,210 @@ done
     done
 )
 echo "PASS: add takes the PHP series and IonCube setting from the archive, as setup.sh does"
+
+# R6: setup.sh passes ACME_EMAIL to caddy-start; run by hand (the README
+# asks for it to apply the log cap), it passed nothing and Compose recreated
+# Caddy with admin@example.com, which Let's Encrypt refuses as a contact.
+# caddy-start now takes the EMAIL of docker/.env, as Compose reads it, and
+# refuses to start Caddy without a usable one while a route needs an ACME
+# certificate. The mock renders the real compose file with the environment
+# caddy-start gives Compose.
+create_fixture r6
+r6_multi="${TEST_DIR}/r6/docker/multi-site"
+cp "${ROOT_DIR}/docker/multi-site/docker-compose.caddy.yml" "$r6_multi/"
+r6_script="${r6_multi}/site-manager.sh"
+r6_rendered="${TEST_DIR}/r6/rendered.yml"
+r6_docker_log="${TEST_DIR}/r6/docker.log"
+# r6_start <expected exit: 0|1> [env assignments...]: caddy-start, with
+# ACME_EMAIL unset unless one of the assignments sets it.
+r6_start() {
+    local expected=$1 status
+    shift
+    rm -f "$r6_rendered"
+    : > "$r6_docker_log"
+    set +e
+    env -u ACME_EMAIL "$@" MOCK_REAL_DOCKER="$REAL_DOCKER" MOCK_CADDY_CONFIG_LOG="$r6_rendered" \
+        MOCK_DOCKER_LOG="$r6_docker_log" bash "$r6_script" caddy-start > "${TEST_DIR}/r6/out" 2>&1
+    status=$?
+    set -e
+    if [ "$expected" -eq 0 ]; then
+        [ "$status" -eq 0 ] || fail "R6: caddy-start failed ($*): $(cat "${TEST_DIR}/r6/out")"
+    else
+        [ "$status" -ne 0 ] || fail "R6: caddy-start went on without a usable ACME email ($*)"
+        ! grep -Fq 'docker-compose.caddy.yml up' "$r6_docker_log" ||
+            fail "R6: a refused caddy-start still recreated Caddy"
+        grep -Fq 'No ACME email for Caddy' "${TEST_DIR}/r6/out" ||
+            fail "R6: the refusal does not say why: $(cat "${TEST_DIR}/r6/out")"
+    fi
+}
+r6_rendered_email() {
+    sed -n 's/^ *ACME_EMAIL: *//p' "$r6_rendered" | tr -d '"'
+}
+# A public route, as add and primary-config write it without tls internal.
+bash "$r6_script" proxy-config tube.example.com >/dev/null
+for r6_env in 'EMAIL=ops@example.com' \
+    $'EMAIL=admin@example.com\nexport EMAIL="ops@example.com"' \
+    $'EMAIL=ops@example.com\r' \
+    "EMAIL='ops@example.com' # the contact" \
+    'EMAIL=ops@example.com   # the contact'; do
+    printf '%s\n' "$r6_env" > "${TEST_DIR}/r6/docker/.env"
+    r6_start 0
+    [ "$(r6_rendered_email)" = ops@example.com ] ||
+        fail "R6: Caddy got '$(r6_rendered_email)' instead of the EMAIL of docker/.env: $(printf '%q' "$r6_env")"
+done
+# An exported ACME_EMAIL, as setup.sh passes it, wins over docker/.env.
+r6_start 0 ACME_EMAIL=team@example.com
+[ "$(r6_rendered_email)" = team@example.com ] ||
+    fail "R6: an explicit ACME_EMAIL was not passed to Caddy: $(r6_rendered_email)"
+# No usable address and a route that needs an ACME certificate: refused.
+for r6_env in 'EMAIL=admin@example.com' 'EMAIL=' 'EMAIL=not-an-address' 'DOMAIN=tube.example.com'; do
+    printf '%s\n' "$r6_env" > "${TEST_DIR}/r6/docker/.env"
+    r6_start 1
+done
+rm -f "${TEST_DIR}/r6/docker/.env"
+r6_start 1
+# An explicit ACME_EMAIL is checked the same way: the placeholder or a
+# malformed one is refused, whatever docker/.env holds, and says so.
+printf 'EMAIL=ops@example.com\n' > "${TEST_DIR}/r6/docker/.env"
+for r6_explicit in admin@example.com not-an-address; do
+    r6_start 1 ACME_EMAIL="$r6_explicit"
+    grep -Fq "ACME_EMAIL (${r6_explicit})" "${TEST_DIR}/r6/out" ||
+        fail "R6: the refusal does not name the ACME_EMAIL it refused: $(cat "${TEST_DIR}/r6/out")"
+done
+
+# A setup re-run starts Caddy, then the runtime services, the import and
+# cron of the stack it stopped earlier. That part of setup.sh, from the Caddy
+# step to its end, runs here as setup.sh holds it, under set -e, with the
+# steps it calls stubbed. A self-signed primary needs no EMAIL, but a site
+# added later gets a public route (add defaults to CADDY_TLS_MODE=public). A
+# re-run used to pass the admin@example.com placeholder as ACME_EMAIL, so
+# Caddy was recreated with it; stopping at the Caddy step instead would
+# leave the cache, Manticore and cron down.
+python3 - "${ROOT_DIR}/docker/setup.sh" > "${TEST_DIR}/r6/setup-tail.sh" <<'PY'
+import sys
+source = open(sys.argv[1]).read()
+start = 'if [ "$MODE" = "multi" ]; then\n    progress_bar "Starting Caddy"\n'
+assert source.count(start) == 1, 'the Caddy start of setup.sh is not one block'
+print(source[source.index(start):], end='')
+PY
+# The resume path runs "env ... docker compose", which looks docker up in
+# PATH, past the mock function: this stand-in hands it back to the mock, so
+# no call reaches the Docker daemon.
+mkdir -p "${TEST_DIR}/r6/bin"
+cat > "${TEST_DIR}/r6/bin/docker" <<'EOF'
+#!/bin/bash
+declare -F docker >/dev/null || { echo 'the docker mock is not exported' >&2; exit 97; }
+docker "$@"
+EOF
+chmod +x "${TEST_DIR}/r6/bin/docker"
+# r6_setup <expected: started|refused> <RESUME_IMPORT> [EMAIL]: that part of
+# setup.sh, run in the installation directory, with EMAIL set only when
+# given. Either way the run must finish the start of the stack; a refused
+# Caddy ends it with status 1 and the command that starts Caddy later.
+r6_setup() {
+    local expected=$1 resume=$2 status steps
+    shift 2
+    steps='runtime import-finish start-cron verify'
+    if [ "$resume" = true ]; then steps='runtime resume-assert import-finish start-cron verify'; fi
+    rm -f "$r6_rendered" "${TEST_DIR}/r6/steps" "${TEST_DIR}/r6/debug.log"
+    : > "$r6_docker_log"
+    set +e
+    (
+        # The shell options of setup.sh.
+        set -e +u +o pipefail
+        cd "${TEST_DIR}/r6/docker" || exit 97
+        unset EMAIL ACME_EMAIL SETUP_CADDY_EMAIL_MISSING
+        if [ "$#" -gt 0 ]; then export EMAIL="$1"; fi
+        # shellcheck disable=SC2034 # read by setup.sh
+        MODE=multi RESUME_IMPORT=$resume SSL_PROVIDER=selfsigned DOMAIN=tube.example.com \
+            PUBLIC_HTTPS_PORT=443 USE_WWW=false IMPORT_MODE=false \
+            DEBUG_LOG="${TEST_DIR}/r6/debug.log" RED='' GREEN='' YELLOW='' CYAN='' NC=''
+        # shellcheck disable=SC2329 # called by setup.sh
+        progress_bar() { :; }
+        # shellcheck disable=SC2329 # called by setup.sh
+        progress_success() { printf '%s\n' "$1"; }
+        # shellcheck disable=SC2329 # called by setup.sh
+        run_step() { shift; "$@"; }
+        # shellcheck disable=SC2329 # called by setup.sh
+        log_command() { "$@"; }
+        # shellcheck disable=SC2329 # called by setup.sh
+        setup_start_runtime_services() { echo runtime >> "${TEST_DIR}/r6/steps"; }
+        # shellcheck disable=SC2329 # called by setup.sh
+        setup_resume_assert_database() { echo resume-assert >> "${TEST_DIR}/r6/steps"; }
+        # shellcheck disable=SC2329 # called by setup.sh
+        import_finish() { echo import-finish >> "${TEST_DIR}/r6/steps"; }
+        # shellcheck disable=SC2329 # called by setup.sh
+        setup_start_cron() { echo start-cron >> "${TEST_DIR}/r6/steps"; }
+        # shellcheck disable=SC2329 # called by setup.sh
+        setup_verify_runtime_services() { echo verify >> "${TEST_DIR}/r6/steps"; }
+        export PATH="${TEST_DIR}/r6/bin:${PATH}" MOCK_REAL_DOCKER="$REAL_DOCKER" MOCK_CADDY_CONFIG_LOG="$r6_rendered" \
+            MOCK_DOCKER_LOG="$r6_docker_log"
+        # shellcheck source=/dev/null
+        . "${TEST_DIR}/r6/setup-tail.sh"
+    ) > "${TEST_DIR}/r6/out" 2>&1
+    status=$?
+    set -e
+    [ "$(tr '\n' ' ' < "${TEST_DIR}/r6/steps" 2>/dev/null)" = "${steps} " ] ||
+        fail "R6: setup (EMAIL=${1-unset}) did not finish the start of the stack: $(tr '\n' ' ' < "${TEST_DIR}/r6/steps" 2>/dev/null): $(cat "${TEST_DIR}/r6/out")"
+    if [ "$expected" = started ]; then
+        [ "$status" -eq 0 ] || fail "R6: setup did not start Caddy (EMAIL=${1-unset}): $(cat "${TEST_DIR}/r6/out")"
+        ! grep -Fq 'ERROR: Caddy was not started' "${TEST_DIR}/r6/out" ||
+            fail "R6: setup reported a Caddy it started as not started"
+    else
+        [ "$status" -eq 1 ] ||
+            fail "R6: setup ended with status ${status} without a usable ACME email (EMAIL=${1-unset}): $(r6_rendered_email)"
+        ! grep -Fq 'docker-compose.caddy.yml up' "$r6_docker_log" ||
+            fail "R6: setup recreated Caddy without a usable ACME email"
+        local line
+        for line in 'No ACME email for Caddy' 'KVS Docker Setup finished without starting Caddy' \
+            'ERROR: Caddy was not started or recreated' "Set EMAIL to a valid address in ${TEST_DIR}/r6/docker/.env" \
+            "cd ${TEST_DIR}/r6/docker && ./multi-site/site-manager.sh caddy-start"; do
+            grep -Fq "$line" "${TEST_DIR}/r6/out" ||
+                fail "R6: setup without a usable ACME email does not report '${line}': $(cat "${TEST_DIR}/r6/out")"
+        done
+        grep -Fq 'KVS Docker Setup Completed without starting Caddy' "${TEST_DIR}/r6/debug.log" ||
+            fail "R6: the debug log does not record that Caddy was not started"
+    fi
+}
+# The self-signed primary saves an empty EMAIL. caddy-start then reads
+# docker/.env itself, and its refusal names that file, not an ACME_EMAIL the
+# operator never set.
+printf 'EMAIL=\n' > "${TEST_DIR}/r6/docker/.env"
+for r6_email in unset ''; do
+    if [ "$r6_email" = unset ]; then r6_setup refused false; else r6_setup refused false "$r6_email"; fi
+    grep -Fq "No ACME email for Caddy: EMAIL in ${TEST_DIR}/r6/docker/.env is missing" "${TEST_DIR}/r6/out" ||
+        fail "R6: setup handed caddy-start an address instead of none: $(cat "${TEST_DIR}/r6/out")"
+done
+# The placeholder of .env.example, which a self-signed setup accepts.
+printf 'EMAIL=admin@example.com\n' > "${TEST_DIR}/r6/docker/.env"
+r6_setup refused false admin@example.com
+# The EMAIL setup.sh holds reaches Caddy, through caddy-start and through
+# the resume path, which starts Caddy without recreating it, ahead of the
+# one docker/.env holds. With none, setup hands caddy-start none, not the
+# placeholder, and caddy-start takes the one of docker/.env.
+printf 'EMAIL=ops@example.com\n' > "${TEST_DIR}/r6/docker/.env"
+r6_setup started false
+[ "$(r6_rendered_email)" = ops@example.com ] ||
+    fail "R6: setup with no EMAIL gave Caddy '$(r6_rendered_email)' instead of the EMAIL of docker/.env"
+for r6_resume in false true; do
+    r6_setup started "$r6_resume" team@example.com
+    [ "$(r6_rendered_email)" = team@example.com ] ||
+        fail "R6: setup (RESUME_IMPORT=${r6_resume}) gave Caddy '$(r6_rendered_email)' instead of its EMAIL"
+done
+rm -f "${TEST_DIR}/r6/docker/.env"
+# Routes on Caddy's internal CA need no ACME account: Caddy starts as before.
+bash "$r6_script" proxy-config tube.example.com internal >/dev/null
+r6_start 0
+[ "$(r6_rendered_email)" = admin@example.com ] ||
+    fail "R6: an internal-only Caddy got '$(r6_rendered_email)' instead of the compose default"
+# An unusable ACME_EMAIL is not needed there either: the compose default.
+for r6_explicit in admin@example.com not-an-address; do
+    r6_start 0 ACME_EMAIL="$r6_explicit"
+    [ "$(r6_rendered_email)" = admin@example.com ] ||
+        fail "R6: an internal-only Caddy got '$(r6_rendered_email)' instead of the compose default"
+done
+rm -f "${r6_multi}/caddy/sites/tube.example.com.caddy"
+r6_start 0
+echo "PASS: caddy-start passes the installation's ACME email to Caddy, and refuses none for public routes"
 
 echo "PASS: Multi-site manager hardening"

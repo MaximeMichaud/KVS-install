@@ -35,6 +35,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SITES_DIR="${SCRIPT_DIR}/sites"
 CADDY_SITES_DIR="${SCRIPT_DIR}/caddy/sites"
 PRIMARY_SITE_FILE="${SITES_DIR}/.primary.env"
+# The .env setup.sh writes for the installation, beside multi-site/.
+INSTALLATION_ENV_FILE="$(dirname -- "$SCRIPT_DIR")/.env"
 KVS_ARCHIVE_DIR="${KVS_ARCHIVE_DIR:-${SCRIPT_DIR}/../kvs-archive}"
 WEBROOT_BASE="${KVS_WEBROOT_BASE:-/var/www}"
 MAX_DOMAIN_LENGTH=64
@@ -1345,14 +1347,94 @@ show_status() {
 # Start Caddy
 # =============================================================================
 
+# installation_email prints the EMAIL of the installation's docker/.env, the
+# one setup.sh saves: the last EMAIL line, as Compose and the shell take it,
+# with an optional "export " prefix, quotes, an inline comment or a CRLF line
+# ending. Nothing when the file or the line is missing.
+installation_email() {
+    local value
+
+    [ -f "$INSTALLATION_ENV_FILE" ] || return 0
+    value=$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?EMAIL=//p' "$INSTALLATION_ENV_FILE" | tail -n 1)
+    # A quoted value ends at its closing quote; an unquoted one at an inline
+    # comment, without the trailing blanks (a CRLF line's carriage return).
+    case "$value" in
+        \"*)
+            value=${value#\"}
+            value=${value%%\"*}
+            ;;
+        \'*)
+            value=${value#\'}
+            value=${value%%\'*}
+            ;;
+        *)
+            value=${value%%[[:space:]]#*}
+            value=${value%"${value##*[![:space:]]}"}
+            ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+# An address an ACME CA takes as the contact of an account, as setup.sh
+# checks it; the .env.example placeholder is well formed, but Let's Encrypt
+# refuses example.com.
+usable_acme_email() {
+    [ "$1" != "admin@example.com" ] &&
+        [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.([a-zA-Z]{2,}|xn--[a-zA-Z0-9-]+)$ ]]
+}
+
+# caddy_routes_use_acme: whether a route in caddy/sites gets its certificate
+# through Caddy's automatic HTTPS, from an ACME CA: a route file with no tls
+# directive. "tls internal" and a certificate of its own need no account.
+caddy_routes_use_acme() {
+    local file
+
+    [ -d "$CADDY_SITES_DIR" ] || return 1
+    for file in "$CADDY_SITES_DIR"/*.caddy; do
+        [ -e "$file" ] || continue
+        grep -Eq '^[[:space:]]*tls[[:space:]]' "$file" || return 0
+    done
+    return 1
+}
+
+# resolve_caddy_acme_email sets CADDY_ACME_EMAIL to the contact caddy-start
+# gives Caddy. setup.sh passes its EMAIL as ACME_EMAIL, empty when it has
+# none. Run by hand, caddy-start had none, and Compose recreated Caddy with
+# admin@example.com, which Let's Encrypt refuses: no new certificate, no
+# renewal. Without ACME_EMAIL, the installation's EMAIL is used. An address
+# from either that is not usable counts as none: CADDY_ACME_EMAIL is then
+# empty (the compose file default) when no route needs an ACME certificate,
+# and the function fails, saying what to set, when one does.
+resolve_caddy_acme_email() {
+    CADDY_ACME_EMAIL="${ACME_EMAIL:-}"
+    if [ -z "$CADDY_ACME_EMAIL" ]; then
+        CADDY_ACME_EMAIL=$(installation_email)
+    fi
+    usable_acme_email "$CADDY_ACME_EMAIL" && return 0
+    CADDY_ACME_EMAIL=""
+    caddy_routes_use_acme || return 0
+    if [ -n "${ACME_EMAIL:-}" ]; then
+        log_error "No ACME email for Caddy: ACME_EMAIL (${ACME_EMAIL}) is the admin@example.com placeholder or invalid, and the routes in ${CADDY_SITES_DIR} need certificates from Let's Encrypt, which refuses that contact"
+        echo "  Set a valid EMAIL in ${INSTALLATION_ENV_FILE} (setup.sh passes it as ACME_EMAIL), or export a valid ACME_EMAIL, then run: cd ${SCRIPT_DIR} && ./site-manager.sh caddy-start"
+    else
+        log_error "No ACME email for Caddy: EMAIL in ${INSTALLATION_ENV_FILE} is missing, the admin@example.com placeholder or invalid, and the routes in ${CADDY_SITES_DIR} need certificates from Let's Encrypt, which refuses that contact"
+        echo "  Set EMAIL there (or export ACME_EMAIL), then run: cd ${SCRIPT_DIR} && ./site-manager.sh caddy-start"
+    fi
+    return 1
+}
+
 start_caddy() {
+    resolve_caddy_acme_email || return 1
+
     log_info "Starting Caddy proxy..."
     mkdir -p "$CADDY_SITES_DIR"
     ensure_proxy_network
     cd "$SCRIPT_DIR"
     # Preserve the historical implicit Compose project and its certificate
     # volumes while still using the externally managed kvs-proxy network.
-    docker compose -p multi-site -f docker-compose.caddy.yml up -d
+    # An empty ACME_EMAIL leaves the compose file default, for routes that
+    # need no ACME account.
+    ACME_EMAIL="$CADDY_ACME_EMAIL" docker compose -p multi-site -f docker-compose.caddy.yml up -d
     wait_for_caddy
     reload_caddy
     log_success "Caddy proxy started"
@@ -1393,6 +1475,7 @@ usage() {
     echo "                     Remove the primary route after Caddy is stopped"
     echo "  proxy-network      Create the shared proxy network"
     echo "  caddy-start        Start Caddy proxy"
+    echo "  caddy-acme-check   Check that Caddy has the ACME email its routes need"
     echo "  caddy-stop         Stop Caddy proxy"
     echo ""
     echo "Examples:"
@@ -1453,6 +1536,9 @@ case "${1:-}" in
         ;;
     caddy-start)
         start_caddy
+        ;;
+    caddy-acme-check)
+        resolve_caddy_acme_email
         ;;
     caddy-stop)
         stop_caddy

@@ -237,7 +237,7 @@ end=$(grep -n '^    progress_success "KVS Docker Setup Complete!"$' "$SETUP" | c
 [ -n "$start" ] && [ -n "$end" ] && [ "$start" -lt "$end" ] || fail "setup.sh has no final block"
 sed -n "${start},$((end + 1))p" "$SETUP" > "$TEST_DIR/final.sh"
 final() (
-    RED='' GREEN='' YELLOW='' CYAN='' NC='' DEBUG_LOG=/dev/null SETUP_ACME_FAILED=false SSL_PROVIDER=letsencrypt
+    RED='' GREEN='' YELLOW='' CYAN='' NC='' DEBUG_LOG=/dev/null SETUP_ACME_FAILED=false SETUP_CADDY_EMAIL_MISSING=false SSL_PROVIDER=letsencrypt
     progress_bar() { :; }
     progress_success() { echo "$1"; }
     import_finish() { echo import_finish; }
