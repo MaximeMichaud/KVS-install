@@ -23,8 +23,12 @@ fail() {
 
 [ -n "$REAL_OPENSSL" ] || fail "OpenSSL is required"
 
-KVS_INTERNAL_DIRECTORIES_REGEX='^/(admin/(include(?!/(uploader|get_upload_status)\.php$)|data|logs|plugins|smarty|stamp|template|tools)|tmp)/'
-KVS_INTERNAL_DIRECTORIES_RULE="location ~ ${KVS_INTERNAL_DIRECTORIES_REGEX} {"
+KVS_INTERNAL_PRE_REGEX='^/(admin/(data|logs|smarty|stamp|template|tools)|tmp)/'
+KVS_INTERNAL_PRE_RULE="location ~ ${KVS_INTERNAL_PRE_REGEX} {"
+KVS_INTERNAL_POST_REGEX='^/admin/(include(?!/(uploader|get_upload_status)\.php$)|plugins)/'
+KVS_INTERNAL_POST_RULE="location ~ ${KVS_INTERNAL_POST_REGEX} {"
+# The first asset regex, which the server-only deny must precede.
+KVS_ASSET_RULE='location ~* \.(?:css(\.map)?|js(\.map)?|jpe?g|'
 # Uploads land under contents/: no PHP may run there, a .phar or a PATH_INFO
 # path through one (up.phar/x.php) included.
 KVS_CONTENTS_PHP_REGEX='^/contents/.*\.(?:php|phar)(?:/|$)'
@@ -53,7 +57,8 @@ assert_protected_locations_precede_php() {
         'location ~* /template/.*\.php$ {' \
         'location ~* /tmp/.*\.php$ {' \
         'location ~ /\. {' \
-        "$KVS_INTERNAL_DIRECTORIES_RULE"
+        "$KVS_INTERNAL_PRE_RULE" \
+        "$KVS_INTERNAL_POST_RULE"
     do
         protected_line=$(line_number "$file" "$rule")
         [ "$protected_line" -lt "$php_line" ] ||
@@ -62,50 +67,69 @@ assert_protected_locations_precede_php() {
 }
 
 # The KVS nginx_config.txt shipped with every release marks admin/data,
-# admin/logs, admin/plugins, admin/smarty, admin/stamp, admin/template and
-# admin/tools internal with plain prefix locations. A prefix location without
-# ^~ loses to the first matching regular expression, so the PHP handler would
-# execute the hundreds of scripts stored there (plugins, conversion helpers,
-# compiled Smarty templates) unless a regular expression denies them first.
-# admin/include is closed the same way, except the two upload scripts the
-# admin panel requests.
+# admin/logs, admin/plugins, admin/smarty, admin/stamp, admin/template,
+# admin/tools and tmp internal with plain prefix locations that lose to the
+# first matching regular expression, so an asset regex would serve a file
+# there and the PHP handler would run a script there. Two regular expressions
+# deny them. The server-only directories, denied before the asset regexes so
+# no extension is served. admin/plugins and admin/include, denied after the
+# asset regexes: a plugin's admin page loads its JS and CSS from admin/plugins,
+# and admin/include keeps the two upload scripts the admin panel requests.
 assert_kvs_internal_directories_denied_before_php() {
     local file="$1"
-    local php_line
-    local deny_line
-    local directory
+    local php_line pre_line post_line directory
 
     php_line=$(line_number "$file" 'location ~ \.php$ {')
-    deny_line=$(line_number "$file" "$KVS_INTERNAL_DIRECTORIES_RULE")
-    [ "$deny_line" -lt "$php_line" ] ||
-        fail "the KVS internal directories are denied after the PHP handler in ${file}"
-    for directory in include data logs plugins smarty stamp template tools; do
-        printf '/admin/%s/index.php\n' "$directory" |
-            grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" ||
-            fail "the deny rule does not cover /admin/${directory}/ in ${file}"
+    pre_line=$(line_number "$file" "$KVS_INTERNAL_PRE_RULE")
+    post_line=$(line_number "$file" "$KVS_INTERNAL_POST_RULE")
+    { [ "$pre_line" -lt "$php_line" ] && [ "$post_line" -lt "$php_line" ]; } ||
+        fail "a KVS internal directory is denied after the PHP handler in ${file}"
+    # The server-only directories, including tmp, are denied and the admin
+    # panel and its plugins are not: the deny of assets must leave them out.
+    for directory in data logs smarty stamp template tools; do
+        printf '/admin/%s/system/leak.js\n' "$directory" |
+            grep -Pq "$KVS_INTERNAL_PRE_REGEX" ||
+            fail "the server-only deny does not cover /admin/${directory}/ in ${file}"
     done
-    printf '/admin/index.php\n' |
-        grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" &&
-        fail "the deny rule blocks the admin panel itself"
-    printf '/admin/data/plugins/example_plugin/index.php\n' |
-        grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" ||
-        fail "the deny rule does not cover plugin scripts stored under /admin/data/"
-    # The admin panel uploads files through these two scripts (admin/js/config.php:
-    # file_upload_form_url and file_upload_status_url); a 403 there breaks every
-    # upload from the admin panel while the rest of admin/include stays closed.
+    printf '/tmp/leak.mp4\n' | grep -Pq "$KVS_INTERNAL_PRE_REGEX" ||
+        fail "the server-only deny does not cover /tmp/ in ${file}"
+    for path in /admin/index.php /admin/plugins/p/admin.js /admin/plugins/p/admin.php /admin/include/uploader.php; do
+        printf '%s\n' "$path" | grep -Pq "$KVS_INTERNAL_PRE_REGEX" &&
+            fail "the server-only deny wrongly covers ${path} in ${file}"
+    done
+    # admin/plugins scripts and the rest of admin/include are denied after the
+    # asset regexes; the two upload scripts and the admin panel are not.
+    for path in /admin/plugins/p/admin.php /admin/include/setup_db.php /admin/include/cron.php; do
+        printf '%s\n' "$path" | grep -Pq "$KVS_INTERNAL_POST_REGEX" ||
+            fail "the admin deny leaves ${path} reachable in ${file}"
+    done
     for script in uploader get_upload_status; do
         printf '/admin/include/%s.php\n' "$script" |
-            grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" &&
-            fail "the deny rule blocks the admin uploader script ${script}.php in ${file}"
+            grep -Pq "$KVS_INTERNAL_POST_REGEX" &&
+            fail "the admin deny blocks the upload script ${script}.php in ${file}"
     done
-    for script in setup_db cron functions_base; do
-        printf '/admin/include/%s.php\n' "$script" |
-            grep -Pq "$KVS_INTERNAL_DIRECTORIES_REGEX" ||
-            fail "the deny rule leaves /admin/include/${script}.php reachable in ${file}"
-    done
+    printf '/admin/index.php\n' | grep -Pq "$KVS_INTERNAL_POST_REGEX" &&
+        fail "the admin deny blocks the admin panel itself in ${file}"
     grep -q 'location ^~ /admin/include/' "$file" &&
         fail "a ^~ prefix location hides the admin uploader scripts from the PHP handler in ${file}"
     return 0
+}
+
+# The server-only deny must come before the asset regexes, or an asset there
+# is served over it. In the standalone config those regexes live in
+# globals/general.conf, included after the deny.
+assert_internal_dirs_denied_before_assets() {
+    local file="$1"
+    local pre_line asset_line
+
+    pre_line=$(line_number "$file" "$KVS_INTERNAL_PRE_RULE")
+    if grep -qF "$KVS_ASSET_RULE" "$file"; then
+        asset_line=$(line_number "$file" "$KVS_ASSET_RULE")
+    else
+        asset_line=$(line_number "$file" 'include globals/general.conf;')
+    fi
+    [ "$pre_line" -lt "$asset_line" ] ||
+        fail "the server-only directories are denied after the asset regexes in ${file}"
 }
 
 assert_contents_php_denied_before_php() {
@@ -608,7 +632,9 @@ for site_config in \
     conf/nginx/conf.d/domain.conf
 do
     assert_kvs_internal_directories_denied_before_php "${ROOT_DIR}/${site_config}"
-    assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_INTERNAL_DIRECTORIES_RULE" 'deny all;'
+    assert_internal_dirs_denied_before_assets "${ROOT_DIR}/${site_config}"
+    assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_INTERNAL_PRE_RULE" 'deny all;'
+    assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_INTERNAL_POST_RULE" 'deny all;'
     assert_location_body_has "${ROOT_DIR}/${site_config}" 'location ^~ /contents/videos/ {' 'internal;'
     assert_contents_php_denied_before_php "${ROOT_DIR}/${site_config}"
     assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_CONTENTS_PHP_RULE" 'deny all;'

@@ -55,6 +55,15 @@ protected_paths=(
     tmp/proof.php blocks/proof.php langs/proof.php template/proof.php
     contents/videos/proof.mp4
     contents/other/evil.php contents/other/up.phar
+    admin/data/system/leak.js admin/logs/leak.svg admin/smarty/leak.css
+    admin/stamp/leak.png admin/template/leak.webp admin/tools/leak.js tmp/leak.mp4
+)
+# The admin panel loads a plugin's admin JS and CSS from admin/plugins, so an
+# asset there must still be served even though a .php under it is denied: the
+# deny of the internal directories must not reach admin/plugins assets.
+served_paths=(
+    admin/plugins/example_plugin/proof.css admin/plugins/example_plugin/proof.js
+    admin/plugins/example_plugin/proof.png
 )
 # Scripts the PHP handler must still receive, the two admin upload scripts of
 # admin/include among them. No PHP-FPM listens behind these containers, so a
@@ -63,6 +72,10 @@ handled_php_paths=(proof.php admin/index.php admin/include/uploader.php admin/in
 for path in "${protected_paths[@]}" "${handled_php_paths[@]}"; do
     mkdir -p "$TEST_DIR/site/$(dirname "$path")"
     printf 'kvs-source-sentinel\n' > "$TEST_DIR/site/$path"
+done
+for path in "${served_paths[@]}"; do
+    mkdir -p "$TEST_DIR/site/$(dirname "$path")"
+    printf 'kvs-plugin-asset-sentinel\n' > "$TEST_DIR/site/$path"
 done
 # PATH_INFO paths through an existing file, which PHP-FPM would run in place
 # of the script named: an uploaded up.phar, or any script. They must not reach
@@ -195,6 +208,13 @@ assert_kvs_paths_protected() {
         request "$@" "$base/$path"
         if [ "$http_status" != 502 ] || grep -q kvs-source-sentinel "$TEST_DIR/body"; then
             printf 'FAIL: PHP script %s did not reach the PHP handler: HTTP %s\n' "$base/$path" "$http_status" >&2
+            protected_path_failures=$((protected_path_failures + 1))
+        fi
+    done
+    for path in "${served_paths[@]}"; do
+        request "$@" "$base/$path"
+        if [ "$http_status" != 200 ] || ! grep -q kvs-plugin-asset-sentinel "$TEST_DIR/body"; then
+            printf 'FAIL: plugin asset %s was not served: HTTP %s\n' "$base/$path" "$http_status" >&2
             protected_path_failures=$((protected_path_failures + 1))
         fi
     done

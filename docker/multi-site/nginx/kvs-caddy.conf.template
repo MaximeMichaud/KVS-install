@@ -60,6 +60,16 @@ server {
         deny all;
     }
 
+    # The KVS rewrites file marks these directories internal with plain prefix
+    # locations, which lose to the asset and PHP handler regular expressions
+    # below, so an asset extension under them would be served; deny them with a
+    # regular expression evaluated first. These hold server-side files only:
+    # the admin panel serves its own assets from admin/styles and admin/js, and
+    # the signup captcha from the /captcha/ endpoint, never from these.
+    location ~ ^/(admin/(data|logs|smarty|stamp|template|tools)|tmp)/ {
+        deny all;
+    }
+
     # Assets, media
     location ~* \.(?:css(\.map)?|js(\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv)$ {
         expires 180d;
@@ -126,13 +136,12 @@ server {
         }
     }
 
-    # The KVS rewrites file marks these directories internal with plain prefix
-    # locations, which lose to the PHP handler regular expression below; deny
-    # them with a regular expression that is evaluated first. admin/include
-    # holds the server side code, except the two scripts the admin panel
-    # uploads through (file_upload_form_url and file_upload_status_url in
-    # admin/js/config.php), which the PHP handler must still serve.
-    location ~ ^/(admin/(include(?!/(uploader|get_upload_status)\.php$)|data|logs|plugins|smarty|stamp|template|tools)|tmp)/ {
+    # admin/include holds the server side code, except the two scripts the
+    # admin panel uploads through (file_upload_form_url and
+    # file_upload_status_url in admin/js/config.php), which the PHP handler
+    # must still serve. admin/plugins is denied here, after the asset regexes
+    # above: a plugin's admin page loads its JS and CSS from it.
+    location ~ ^/admin/(include(?!/(uploader|get_upload_status)\.php$)|plugins)/ {
         deny all;
     }
 
