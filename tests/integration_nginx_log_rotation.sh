@@ -50,7 +50,13 @@ docker run -d --name "$container" --pull never --network none \
     -c '/usr/local/bin/rotate-site-logs & exec nginx -g "daemon off;"' >/dev/null
 
 # Sends batches of requests from four clients at once, over several check
-# intervals: /ok/<client>/<n> and /missing/<client>/<n> alternate.
+# intervals: /ok/<client>/<n> and /missing/<client>/<n> alternate. A rotation
+# takes two checks or more: one moves <name> to <name>.1, and <name>.1 is
+# compressed only once nothing has written to it for a whole interval, and
+# the next rotation waits for that. The pauses keep the load going for at
+# least 12 seconds, so a fast runner still sees three rotations or more; the
+# load used to end after 3.6 seconds, which on a fast runner left time for
+# two only.
 send_requests() {
     local pass="$1"
 
@@ -63,7 +69,7 @@ send_requests() {
                     last=$((first + 49))
                     curl -s "http://127.0.0.1:8080/{ok,missing}/${PASS}${client}/[${first}-${last}]" >/dev/null
                     batch=$((batch + 1))
-                    sleep 0.3
+                    sleep 1
                 done
             ) &
         done
