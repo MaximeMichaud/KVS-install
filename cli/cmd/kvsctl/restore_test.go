@@ -43,6 +43,97 @@ func TestResolveBackup(t *testing.T) {
 	}
 }
 
+// K2: a path relative to the current directory comes back absolute, so the
+// journal of the restore names a file recover finds from anywhere, and a
+// relative path to a listed archive is that archive.
+func TestResolveBackupMakesARelativePathAbsolute(t *testing.T) {
+	work := t.TempDir()
+	t.Chdir(work)
+	if err := os.MkdirAll("sub", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("sub", "b.tar"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := filepath.EvalSymlinks(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(cwd, "backups")
+	list := sampleBackups(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(list[1].Path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if path, err := resolveBackup(dir, filepath.Join("sub", "b.tar"), list); err != nil || path != filepath.Join(cwd, "sub", "b.tar") {
+		t.Fatalf("a relative path: %q, %v; want %q", path, err, filepath.Join(cwd, "sub", "b.tar"))
+	}
+	if path, err := resolveBackup(dir, filepath.Join("backups", list[1].Name), list); err != nil || path != list[1].Path {
+		t.Fatalf("a relative path to a listed archive: %q, %v; want %q", path, err, list[1].Path)
+	}
+	missing := filepath.Join("sub", "missing.tar")
+	if path, err := resolveBackup(dir, missing, list); err == nil || err.Error() != "no backup named "+missing+" in "+dir {
+		t.Fatalf("a relative path to nothing: %q, %v", path, err)
+	}
+}
+
+// K2: from a directory reached through a symlink, "../x.tar" names what the
+// shell and tar open, the file beside the physical directory, not the one
+// beside the symlink $PWD keeps, and whether or not that one exists. A
+// symlink inside the argument that ".." then leaves makes the absolute path
+// name another file: the argument is refused, to be given absolute.
+func TestResolveBackupTakesARelativePathFromThePhysicalDirectory(t *testing.T) {
+	physical, logical, elsewhere := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, d := range []string{filepath.Join(physical, "sub"), filepath.Join(elsewhere, "deep")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, content := range map[string]string{
+		filepath.Join(physical, "x.tar"):        "the archive named",
+		filepath.Join(logical, "x.tar"):         "the archive beside the symlink",
+		filepath.Join(physical, "sub", "y.tar"): "the archive the lexical path names",
+		filepath.Join(elsewhere, "y.tar"):       "the archive the kernel opens",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(physical, "sub"), filepath.Join(logical, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(elsewhere, "deep"), filepath.Join(physical, "sub", "link")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Join(logical, "sub"))
+	dir := filepath.Join(t.TempDir(), "backups")
+	read := func(arg string) (string, error) {
+		path, err := resolveBackup(dir, arg, nil)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(path) {
+			t.Errorf("%s resolves to the relative path %s", arg, path)
+		}
+		data, err := os.ReadFile(path)
+		return string(data), err
+	}
+	if got, err := read("../x.tar"); err != nil || got != "the archive named" {
+		t.Errorf("../x.tar names %q, %v; want the archive beside the physical directory", got, err)
+	}
+	if err := os.Remove(filepath.Join(logical, "x.tar")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := read("../x.tar"); err != nil || got != "the archive named" {
+		t.Errorf("../x.tar with nothing beside the symlink names %q, %v; want the archive beside the physical directory", got, err)
+	}
+	if path, err := resolveBackup(dir, "link/../y.tar", nil); err == nil || !strings.Contains(err.Error(), "name the archive by its absolute path") {
+		t.Errorf("link/../y.tar: %q, %v; want a refusal", path, err)
+	}
+}
+
 func TestChooseBackup(t *testing.T) {
 	dir := t.TempDir()
 	list := sampleBackups(dir)

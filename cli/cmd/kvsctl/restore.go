@@ -272,8 +272,11 @@ func chooseBackup(ctx context.Context, s *session, ask *ui.Plain, dir, arg strin
 	return list[n-1].Path, nil
 }
 
-// resolveBackup turns an argument into a path: the name of a backup of
-// the directory, or a file anywhere on disk.
+// resolveBackup turns an argument into an absolute path: the name of a
+// backup of the directory, or a file anywhere on disk. A path relative to
+// the current directory is made absolute by upgrade.AbsoluteArchive,
+// because the journal of the restore records it and recover may run from
+// another directory, cron's or /root's.
 func resolveBackup(dir, arg string, list []backup.Info) (string, error) {
 	for _, b := range list {
 		if b.Name == arg || b.Path == arg {
@@ -283,6 +286,13 @@ func resolveBackup(dir, arg string, list []backup.Info) (string, error) {
 	candidate := arg
 	if !filepath.IsAbs(candidate) && !strings.ContainsRune(candidate, filepath.Separator) {
 		candidate = filepath.Join(dir, arg)
+	}
+	candidate, err := upgrade.AbsoluteArchive(candidate)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "", fmt.Errorf("no backup named %s in %s", arg, dir)
+	case err != nil:
+		return "", err
 	}
 	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 		return candidate, nil

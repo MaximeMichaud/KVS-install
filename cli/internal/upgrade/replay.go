@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/backup"
@@ -146,6 +147,13 @@ func (r *Runner) Restore(ctx context.Context, state *instance.State, archive str
 	if err := r.noJournal(state); err != nil {
 		return err
 	}
+	// The journal names the archive for recover, which may run from another
+	// directory: a path relative to this one is made absolute first.
+	abs, err := AbsoluteArchive(archive)
+	if err != nil {
+		return fmt.Errorf("%w; nothing was changed", err)
+	}
+	archive = abs
 	if err := r.mariadbUsable(ctx, state); err != nil {
 		return err
 	}
@@ -378,9 +386,29 @@ func (r *Runner) recoverRestore(ctx context.Context, state *instance.State, j *i
 	if j.Backup != "" {
 		r.log("the database as it was before the restore is in " + j.Backup)
 	}
+	// A kvsctl older than the absolute path recorded the archive as it was
+	// typed, relative to the directory the restore ran in. The replay and
+	// the .env of the archive need it, and from another directory the same
+	// path may name another file: it is taken only when it names one of the
+	// archives of this site in the backup directory, which the question
+	// then gives in full.
+	question := restoreQuestion(j)
+	if needed := j.Phase == instance.PhaseReplay || (j.Phase != instance.PhaseBackup && j.Env); needed && !filepath.IsAbs(j.Replay) {
+		path, err := r.legacyArchive(j.Replay)
+		if err != nil {
+			site := r.Inst.Domain()
+			if site == "" {
+				site = "this site"
+			}
+			return fmt.Errorf("%s, but its journal holds the relative path %s, which an older kvsctl took from the directory the restore ran in, and from here it names no archive of %s in %s (%v): run 'kvsctl recover' again from the directory the restore ran in or, for an archive kept elsewhere, write its absolute path as \"replay\" in %s; nothing was changed", what, j.Replay, site, r.Inst.BackupDir(), err, filepath.Join(r.Inst.StateDir(), "journal.json"))
+		}
+		r.log("the journal holds the relative path " + j.Replay + ", which names " + path + " from here")
+		question += fmt.Sprintf(" The journal names it by the relative path %s, which from here is %s.", j.Replay, path)
+		j.Replay = path
+	}
 	if !r.Opts.Yes {
 		r.start(StepConfirm, capitalize(what))
-		if !r.Reporter.Confirm(ctx, restoreQuestion(j)) {
+		if !r.Reporter.Confirm(ctx, question) {
 			r.fail(StepConfirm, "cancelled")
 			return errors.New("recover cancelled, nothing was changed")
 		}
@@ -431,6 +459,38 @@ func (r *Runner) recoverRestore(ctx context.Context, state *instance.State, j *i
 	return r.verifyRestore(ctx, services, j.Ignored, slow, "containers, site, admin", "the database holds "+archive)
 }
 
+// legacyArchive is the archive the relative path of an older journal
+// names from the directory recover runs in, when that is one of the
+// archives of this site in the backup directory: the same file as one
+// listed there, whose backup.json names the domain of the instance.
+func (r *Runner) legacyArchive(rel string) (string, error) {
+	abs, err := AbsoluteArchive(rel)
+	if err != nil {
+		return "", err
+	}
+	named, err := os.Stat(abs)
+	if err != nil {
+		return "", err
+	}
+	list, err := backup.List(r.Inst.BackupDir())
+	if err != nil {
+		return "", err
+	}
+	for _, b := range list {
+		if info, err := os.Stat(b.Path); err != nil || !os.SameFile(named, info) {
+			continue
+		}
+		switch {
+		case b.Domain == "":
+			return "", fmt.Errorf("%s names no domain in its backup.json", b.Path)
+		case !strings.EqualFold(b.Domain, r.Inst.Domain()):
+			return "", fmt.Errorf("%s is an archive of %s", b.Path, b.Domain)
+		}
+		return b.Path, nil
+	}
+	return "", fmt.Errorf("%s is not one of them", abs)
+}
+
 // restoreQuestion is what recover asks before it finishes a restore.
 func restoreQuestion(j *instance.Journal) string {
 	archive := filepath.Base(j.Replay)
@@ -441,6 +501,32 @@ func restoreQuestion(j *instance.Journal) string {
 		return fmt.Sprintf("Replay %s again, from the start, and finish the restore? The site is down until the replay is over.", archive)
 	}
 	return fmt.Sprintf("Finish the restore of %s, whose database is replayed?", archive)
+}
+
+// AbsoluteArchive is path as an absolute path that names the same file. A
+// relative path is taken from the directory kvsctl runs in as the kernel
+// knows it, not from $PWD, which a shell keeps through a symlink: from a
+// directory reached through one, "../x.tar" names what tar and the shell
+// open. A symlink inside path that ".." then leaves still resolves apart
+// from the lexical path, so the two must stat as the same file, or path is
+// refused and has to be given absolute. An absolute path is kept as it is.
+func AbsoluteArchive(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	cwd, err := syscall.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("the directory kvsctl runs in cannot be read to make %s absolute: %w", path, err)
+	}
+	named, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("the archive %s cannot be read: %w", path, err)
+	}
+	abs := filepath.Join(cwd, path)
+	if same, err := os.Stat(abs); err != nil || !os.SameFile(named, same) {
+		return "", fmt.Errorf("%s does not name the same file once made absolute, as %s: a symlink inside it is followed by \"..\"; name the archive by its absolute path", path, abs)
+	}
+	return abs, nil
 }
 
 // ArchiveKVSVersion is the KVS version the backup.json of an archive

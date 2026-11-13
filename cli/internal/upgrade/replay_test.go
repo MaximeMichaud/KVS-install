@@ -447,6 +447,197 @@ func (s *stack) restore(r *Runner, archive string) error {
 	return r.Restore(context.Background(), state, archive, false, func() {})
 }
 
+// K2: a restore named by a relative path records the archive absolute in
+// its journal, so recover run later from another directory, cron's or
+// /root, replays the same file instead of failing or replaying whatever
+// that relative name means there.
+func TestRestoreOfARelativeArchiveIsRecoveredFromElsewhere(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"})
+	archive := s.backupNow("1.0.0")
+	s.writeData("data-2")
+	t.Chdir(s.root)
+	relative := filepath.Join("backups", filepath.Base(archive))
+	s.rep.cut = isLog("replaying backups/" + filepath.Base(archive))
+	cutRun(t, s.rep, func() { _ = s.restore(s.runner(), relative) })
+	j := s.journal()
+	if j == nil || j.Phase != instance.PhaseReplay || !filepath.IsAbs(j.Replay) || !sameFile(j.Replay, archive) {
+		t.Fatalf("journal after the cut: %+v, want the replay of %s", j, archive)
+	}
+	t.Chdir(t.TempDir())
+	s.fresh()
+	if err := s.recover(s.runner()); err != nil {
+		t.Fatalf("recover from another directory: %v", err)
+	}
+	if db, _, _, _ := s.world(); db != "data-1" {
+		t.Errorf("the database holds %q after recover, want the archive", db)
+	}
+}
+
+// K2: from a directory reached through a symlink, the shell and tar take
+// "../backups/<name>" from the physical directory, and so does the
+// restore: its journal names that archive, not the path beside the
+// symlink $PWD keeps, which here leads nowhere.
+func TestRestoreTakesARelativeArchiveFromThePhysicalDirectory(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"})
+	archive := s.backupNow("1.0.0")
+	s.writeData("data-2")
+	logical := t.TempDir()
+	if err := os.Symlink(filepath.Join(s.root, "backups"), filepath.Join(logical, "link")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Join(logical, "link"))
+	relative := filepath.Join("..", "backups", filepath.Base(archive))
+	s.rep.cut = isLog("replaying backups/" + filepath.Base(archive))
+	cutRun(t, s.rep, func() { _ = s.restore(s.runner(), relative) })
+	j := s.journal()
+	if j == nil || j.Phase != instance.PhaseReplay || !filepath.IsAbs(j.Replay) || !sameFile(j.Replay, archive) {
+		t.Fatalf("journal after the cut: %+v, want the replay of %s", j, archive)
+	}
+	t.Chdir(t.TempDir())
+	s.fresh()
+	if err := s.recover(s.runner()); err != nil {
+		t.Fatalf("recover from another directory: %v", err)
+	}
+	if db, _, _, _ := s.world(); db != "data-1" {
+		t.Errorf("the database holds %q after recover, want the archive", db)
+	}
+}
+
+// K2: the journal of a restore an older kvsctl ran names the archive by
+// the relative path it was given. Recover takes that path from where it runs
+// only when it names one of the archives of the site in backups/: from a
+// directory where it names nothing, a decoy of the same name, or an archive
+// of another site, recover says the journal holds a relative path and where
+// to run it from, and changes nothing. From the directory the restore ran
+// in, the question gives the archive in full and recover finishes.
+func TestRecoverOfARelativeJournalTakesOnlyAnArchiveOfTheSite(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"})
+	archive := s.backupNow("1.0.0")
+	s.writeData("decoy")
+	decoy := s.backupNow("1.0.0")
+	s.writeData("data-2")
+	s.rep.cut = isLog("replaying backups/" + filepath.Base(archive))
+	cutRun(t, s.rep, func() { _ = s.restore(s.runner(), archive) })
+	inst, err := instance.Detect(s.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := s.journal()
+	relative := filepath.Join("backups", filepath.Base(archive))
+	j.Replay = relative
+	if err := inst.SaveJournal(j); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere, decoyDir := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(decoyDir, "backups"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(decoy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoyDir, relative), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(s.root, "docker", ".env")
+	env, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, _, _, _ := s.world()
+	for _, c := range []struct {
+		what, dir, domain, cause string
+	}{
+		{"from a directory where the path names nothing", elsewhere, "", "cannot be read"},
+		{"from a directory where the path names a decoy", decoyDir, "", "is not one of them"},
+		{"for a site the archive is not of", s.root, "other.example", "is an archive of example.com"},
+	} {
+		t.Chdir(c.dir)
+		if c.domain != "" {
+			if err := os.WriteFile(envPath, bytes.Replace(env, []byte("DOMAIN=example.com\n"), []byte("DOMAIN="+c.domain+"\n"), 1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.fresh()
+		commands := len(s.f.commands())
+		err := s.recover(s.runner())
+		if err == nil || !strings.Contains(err.Error(), "its journal holds the relative path "+relative) || !strings.Contains(err.Error(), c.cause) || !strings.Contains(err.Error(), "run 'kvsctl recover' again from the directory the restore ran in") || !strings.HasSuffix(err.Error(), "; nothing was changed") {
+			t.Errorf("recover %s: %v", c.what, err)
+		}
+		if len(s.f.commands()) != commands {
+			t.Errorf("recover %s ran docker: %v", c.what, s.f.commands()[commands:])
+		}
+		if db, _, _, _ := s.world(); db != held {
+			t.Errorf("recover %s left the database holding %q, want %q", c.what, db, held)
+		}
+		if j := s.journal(); j == nil || j.Phase != instance.PhaseReplay || j.Replay != relative {
+			t.Errorf("journal after the refusal %s: %+v", c.what, j)
+		}
+		if err := os.WriteFile(envPath, env, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(s.root)
+	s.fresh()
+	if err := s.recover(s.runner(func(o *Options) { o.Yes = false })); err != nil {
+		t.Fatalf("recover from the directory the restore ran in: %v", err)
+	}
+	if q := s.rep.questions; len(q) != 1 || !strings.Contains(q[0], "The journal names it by the relative path "+relative+", which from here is "+archive+".") {
+		t.Errorf("question: %q", q)
+	}
+	if db, _, _, _ := s.world(); db != "data-1" {
+		t.Errorf("the database holds %q after recover, want the archive", db)
+	}
+}
+
+// K2: a restore with --env an older kvsctl ran, stopped once its database
+// was replayed, still needs its archive for the .env: recover run from
+// another directory refuses, and from the directory the restore ran in it
+// finishes.
+func TestRecoverOfARelativeJournalAfterTheReplayNeedsItForTheEnv(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"})
+	archive := s.backupNow("1.0.0")
+	s.writeData("data-2")
+	s.rep.cut = isLog("replaying backups/" + filepath.Base(archive))
+	cutRun(t, s.rep, func() { _ = s.restore(s.runner(), archive) })
+	inst, err := instance.Detect(s.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := s.journal()
+	relative := filepath.Join("backups", filepath.Base(archive))
+	j.Replay, j.Phase, j.Env = relative, instance.PhaseRestart, true
+	if err := inst.SaveJournal(j); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	s.fresh()
+	if err := s.recover(s.runner()); err == nil || !strings.Contains(err.Error(), "its journal holds the relative path "+relative) {
+		t.Fatalf("recover from another directory: %v", err)
+	}
+	if j := s.journal(); j == nil || j.Phase != instance.PhaseRestart || j.Replay != relative {
+		t.Errorf("journal after the refusal: %+v", j)
+	}
+	t.Chdir(s.root)
+	s.fresh()
+	if err := s.recover(s.runner()); err != nil {
+		t.Fatalf("recover from the directory the restore ran in: %v", err)
+	}
+	if j := s.journal(); j != nil {
+		t.Errorf("the journal is left after recover: %+v", j)
+	}
+}
+
+// sameFile tells whether a and b name one file.
+func sameFile(a, b string) bool {
+	ia, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	ib, err := os.Stat(b)
+	return err == nil && os.SameFile(ia, ib)
+}
+
 // A restore cut during its replay leaves its journal, which names it:
 // another restore refuses, and recover replays the archive again, from
 // the start, names the backup of the live database and starts the services
