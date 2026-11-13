@@ -918,13 +918,24 @@ import_free_space_mb_ok() {
 }
 
 # import_free_space_ok <source> <destination>: room for a copy of the source.
+# When an earlier pass from the same source wrote under the destination (its
+# marker names the source), the copy resumes and only what is not there yet
+# needs room: the space the destination already takes is taken off the size
+# of the source.
 import_free_space_ok() {
     local source="$1"
     local destination="$2"
-    local needed
+    local needed held marker resolved
 
     needed=$(du -sLm -- "$source" 2>/dev/null | awk '{print $1}')
     [ -n "$needed" ] || return 1
+    marker=$(import_marker_file "$destination")
+    resolved=$(readlink -f -- "$source")
+    if [ -f "$marker" ] && [ "$(cat "$marker")" = "$resolved" ]; then
+        # A destination du cannot measure prints nothing: nothing is held.
+        held=$(du -sm -- "$destination" 2>/dev/null | awk '{print $1}')
+        needed=$((needed > held ? needed - held : 0))
+    fi
     import_free_space_mb_ok "$needed" "$destination"
 }
 

@@ -357,6 +357,61 @@ test_free_space_check_uses_the_nearest_existing_parent() {
     pass "free space check uses the nearest existing parent"
 }
 
+# A copy cut short and run again resumes: it needs room for the files not
+# copied yet, not for the whole site a second time. Another source, or no
+# earlier pass at all, still needs room for all of it.
+test_free_space_check_counts_what_a_resumed_copy_still_needs() {
+    local source="$TMP_ROOT/resume-space-source" link="$TMP_ROOT/resume-space-link"
+    local destination="$TMP_ROOT/resume-space-dest" i
+
+    make_site "$source" /home/old/www
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        head -c 1048576 /dev/urandom > "$source/contents/videos/big$i.bin"
+    done
+    ln -s "$source" "$link"
+    # The first pass goes through a link to the site and writes the marker.
+    import_place_site "$link" "$destination" >/dev/null || fail "the first pass must copy the site"
+    (
+        # shellcheck disable=SC2329  # Stub consumed by the extracted function.
+        df() { echo "Filesystem 1M-blocks Used Available Capacity Mounted on"; echo "fs 100 95 5 95% /"; }
+        import_free_space_ok "$link" "$destination" || fail "a repeat after a complete copy needs no room for the files"
+        rm -f "$destination/contents/videos/big9.bin" "$destination/contents/videos/big10.bin"
+        import_free_space_ok "$link" "$destination" || fail "a copy cut short needs room for the files left only"
+        rm -f "$destination"/contents/videos/big[1-8].bin
+        import_free_space_ok "$link" "$destination" && fail "the files left must still fit"
+        printf '%s\n' "$TMP_ROOT/elsewhere" > "$(import_marker_file "$destination")"
+        cp "$source"/contents/videos/big*.bin "$destination/contents/videos/"
+        import_free_space_ok "$link" "$destination" && fail "files from another source do not count"
+        import_free_space_ok "$link" "$TMP_ROOT/resume-space-fresh" && fail "a first copy needs room for the whole site"
+        exit 0
+    ) || exit 1
+    (
+        # shellcheck disable=SC2329  # Stub consumed by the extracted function.
+        df() { echo "Filesystem 1M-blocks Used Available Capacity Mounted on"; echo "fs 100 80 20 80% /"; }
+        export IMPORT_MARKER_DIR="$TMP_ROOT/resume-space-markers"
+        import_mark_destination "$TMP_ROOT/resume-space-gone" "$(readlink -f -- "$source")"
+        rm -rf "$TMP_ROOT/resume-space-gone"
+        import_free_space_ok "$link" "$TMP_ROOT/resume-space-gone" || fail "a marker left without its destination is a first copy"
+        (
+            # shellcheck disable=SC2329  # Stub consumed by the extracted function.
+            df() { echo "Filesystem 1M-blocks Used Available Capacity Mounted on"; echo "fs 100 95 5 95% /"; }
+            import_free_space_ok "$link" "$TMP_ROOT/resume-space-gone" && fail "a marker left without its destination is not a complete copy"
+            exit 0
+        ) || exit 1
+        # A destination du cannot measure counts as empty.
+        import_mark_destination "$TMP_ROOT/resume-space-unread" "$(readlink -f -- "$source")"
+        cp -a "$source/." "$TMP_ROOT/resume-space-unread/"
+        # shellcheck disable=SC2329  # Stub consumed by the extracted function.
+        du() { if [ "$3" = "$TMP_ROOT/resume-space-unread" ]; then return 1; fi; command du "$@"; }
+        import_free_space_ok "$link" "$TMP_ROOT/resume-space-unread" || fail "an unmeasured destination still gets the check of a first copy"
+        # shellcheck disable=SC2329  # Stub consumed by the extracted function.
+        df() { echo "Filesystem 1M-blocks Used Available Capacity Mounted on"; echo "fs 100 95 5 95% /"; }
+        import_free_space_ok "$link" "$TMP_ROOT/resume-space-unread" && fail "an unmeasured destination is not taken as a complete copy"
+        exit 0
+    ) || exit 1
+    pass "free space check counts what a resumed copy still needs"
+}
+
 test_setup_and_init_are_wired_for_imports() {
     local setup="$REPO_ROOT/docker/setup.sh"
     local configure="$REPO_ROOT/docker/init/docker-entrypoint.d/40-configure-database.sh"
@@ -742,6 +797,7 @@ test_prepared_dump_loads_into_the_container_database
 test_sql_escaping_survives_quotes_and_like_wildcards
 test_site_placement_copies_once_and_refuses_a_used_directory
 test_free_space_check_uses_the_nearest_existing_parent
+test_free_space_check_counts_what_a_resumed_copy_still_needs
 test_setup_and_init_are_wired_for_imports
 test_source_domain_persistence_errors_stop_import
 test_cached_dump_inspection_preserves_output
