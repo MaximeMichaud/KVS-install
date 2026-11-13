@@ -5437,12 +5437,34 @@ import_ensure_nginx_rewrites
 # Show progress header
 progress_header "KVS Docker Setup" "Building and deploying containers"
 
-# Generate dhparam if not exists
+# Generate dhparam only when a complete, valid one is not already there.
+# An interrupted run (Ctrl-C, an OOM kill, a failed step) could leave a 0-byte
+# or truncated file, depending on when the openssl in use creates its output,
+# and the old "[ ! -f ]" guard kept it; nginx then refused to start
+# ("PEM_read_bio_DHparams ... no start line"). Require a regular, non-empty
+# file that passes openssl's own check, and generate through a temporary file
+# that is moved into place only once it is complete, so a failure never
+# leaves a partial file behind.
 progress_bar "Generating DH parameters"
-if [ ! -f nginx/dhparam.pem ]; then
-    run_step "Generating DH parameters (this may take a while)" openssl dhparam -out nginx/dhparam.pem 2048
-else
+if [ -f nginx/dhparam.pem ] && [ -s nginx/dhparam.pem ] &&
+    openssl dhparam -check -noout -in nginx/dhparam.pem >/dev/null 2>&1; then
     echo -e "  ${GREEN}✓${NC} DH parameters already exist"
+else
+    # Docker bind-mounts this path as a file; started while it was missing,
+    # it leaves an empty directory there. Remove that one; anything else that
+    # is a directory stops the run instead of receiving the file.
+    if [ -d nginx/dhparam.pem ] && [ ! -L nginx/dhparam.pem ] &&
+        ! rmdir nginx/dhparam.pem 2>/dev/null; then
+        echo -e "${RED}ERROR: nginx/dhparam.pem is a directory that is not empty. Move it away and run the setup again.${NC}"
+        exit 1
+    fi
+    rm -f nginx/dhparam.pem.tmp
+    # The $1/$2 are the inner sh -c positional parameters, expanded there and
+    # not by this shell, so the single quotes are intentional. mv -T never
+    # moves the file into a directory that took the name since.
+    # shellcheck disable=SC2016
+    run_step "Generating DH parameters (this may take a while)" \
+        sh -c 'openssl dhparam -out "$1.tmp" "$2" && mv -fT "$1.tmp" "$1"' sh nginx/dhparam.pem 2048
 fi
 
 # Create SSL directory structure (certificates will be generated later)

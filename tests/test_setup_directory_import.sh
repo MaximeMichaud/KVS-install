@@ -36,7 +36,15 @@ exit 97
 SH
 cat > "$fixture/bin/openssl" <<'SH'
 #!/bin/bash
-[ "$1" != dhparam ] || exit 97
+if [ "$1" = dhparam ]; then
+    # D4: generation writes a complete file to the -out path, and the check
+    # (-check -noout -in <file>) accepts only such a complete file.
+    case "$2" in
+        -out) printf 'VALID-DHPARAM regenerated\n' > "$3"; exit 0 ;;
+        -check) grep -q '^VALID-DHPARAM' "$5" 2>/dev/null; exit ;;
+    esac
+    exit 97
+fi
 exec /usr/bin/openssl "$@"
 SH
 printf '#!/bin/bash\nexit 7\n' > "$fixture/bin/curl"
@@ -48,7 +56,7 @@ for tool in sudo apt apt-get systemctl ssh scp; do
     ln -s blocked "$fixture/bin/$tool"
 done
 
-# run_case <name> <with _INSTALL: yes|no> [IMPORT_NGINX_REWRITES content]
+# run_case <name> <with _INSTALL: yes|no> [IMPORT_NGINX_REWRITES content] [valid-dhparam]
 run_case() {
     local dir=$fixture/$1
     mkdir -p "$dir/logs" "$dir/www" "$dir/oldsite/admin/include"
@@ -69,7 +77,13 @@ database_configure_resources() { :; }
 database_import_jobs() { echo 2; }
 database_wait_ready() { echo wait >> "$CALLS"; exit 42; }
 SH
-    : > "$dir/docker/nginx/dhparam.pem"
+    # D4: a 0-byte dhparam.pem stands in for one an interrupted run left
+    # behind; a complete one must be kept as it is.
+    if [ "${4:-}" = valid-dhparam ]; then
+        printf 'VALID-DHPARAM kept\n' > "$dir/docker/nginx/dhparam.pem"
+    else
+        : > "$dir/docker/nginx/dhparam.pem"
+    fi
     cat > "$dir/oldsite/admin/include/setup.php" <<'PHP'
 <?php
 $config['project_path']="/var/www/old.example.com";
@@ -122,7 +136,24 @@ status=0
 run_case install-rules yes
 check_case install-rules 'rewrite ^/videos/$ /videos.php last;' \
     "a site directory's own _INSTALL/nginx_config.txt is used and MariaDB is reached" || status=1
-run_case explicit-rules no 'rewrite ^/albums/$ /albums.php last;'
+run_case explicit-rules no 'rewrite ^/albums/$ /albums.php last;' valid-dhparam
 check_case explicit-rules 'rewrite ^/albums/$ /albums.php last;' \
     'IMPORT_NGINX_REWRITES with a site directory reaches MariaDB with the site in place' || status=1
+
+# D4: the 0-byte dhparam.pem must be regenerated into a complete file rather
+# than kept (nginx would refuse to start with it), and the complete one must
+# be left as it is.
+if grep -Fxq 'VALID-DHPARAM regenerated' "$fixture/install-rules/docker/nginx/dhparam.pem"; then
+    echo "PASS: an empty dhparam.pem is regenerated"
+else
+    echo "FAIL: an empty dhparam.pem must be regenerated" >&2
+    status=1
+fi
+if grep -Fxq 'VALID-DHPARAM kept' "$fixture/explicit-rules/docker/nginx/dhparam.pem"; then
+    echo "PASS: a complete dhparam.pem is kept"
+else
+    echo "FAIL: a complete dhparam.pem must be kept" >&2
+    status=1
+fi
+
 exit "$status"
