@@ -216,8 +216,13 @@ func (r *Runner) backupBefore(ctx context.Context, state *instance.State, plan *
 		return "", r.untouched(plan, fmt.Errorf("backup: %w", err))
 	}
 	// The archive a manual rollback of the installed version replays stays
-	// too: this upgrade may still fail and leave that version in place.
-	r.prune(result.Path, state.UpgradeBackup)
+	// too: this upgrade may still fail and leave that version in place. A
+	// rollback archive that cannot be found leaves every backup alone.
+	if rollback, err := RollbackArchive(r.Inst.BackupDir(), state); err != nil {
+		r.log("the old backups were not pruned: the archive a rollback would replay could not be found: " + err.Error())
+	} else {
+		r.prune(result.Path, rollback)
+	}
 	r.done(StepBackup, fmt.Sprintf("%s (%s, %s)", relPath(r.Inst.Root, result.Path), humanBytes(result.Size), result.Duration.Round(time.Second)))
 	return result.Path, nil
 }

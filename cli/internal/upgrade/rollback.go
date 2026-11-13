@@ -1034,23 +1034,38 @@ func (r *Runner) MissingRollbackImages(ctx context.Context, state *instance.Stat
 	return r.missingImages(ctx, r.targetImages(ctx, state.ReleaseImages[state.Previous], state.ReleaseImages[state.Current], state.PreviousImages, services))
 }
 
+// RollbackArchive is the archive a rollback of the installed version
+// replays when it takes the database back: the exact archive the upgrade to
+// that version took or, for a state that names none (an upgrade run with
+// --skip-backup, a state written before kvsctl recorded it), the newest
+// backup of the previous version in dir. It is "" with no error when the
+// state has no previous version or no such backup is kept. rollbackDump
+// and every prune of the backups go by this one rule, so a prune never
+// removes the archive a rollback would replay.
+func RollbackArchive(dir string, state *instance.State) (string, error) {
+	switch {
+	case state == nil:
+		return "", nil
+	case state.UpgradeBackup != "":
+		return state.UpgradeBackup, nil
+	case state.Previous == "":
+		return "", nil
+	}
+	return backup.Latest(dir, state.Previous)
+}
+
 // rollbackDump is the archive a rollback replays, "" when the version left
-// declared no change to the database and none was asked for: the exact
-// archive the upgrade to the installed version took or, for a state that
-// does not name one, the newest backup of the previous version. taken is
-// when the archive was written.
+// declared no change to the database and none was asked for: the archive
+// RollbackArchive names. taken is when the archive was written.
 func (r *Runner) rollbackDump(state *instance.State) (path string, taken time.Time, err error) {
 	if state.Database != migrates && !state.OneWay && !r.Opts.RestoreDB {
 		return "", time.Time{}, nil
 	}
-	path = state.UpgradeBackup
+	if path, err = RollbackArchive(r.Inst.BackupDir(), state); err != nil {
+		return "", time.Time{}, err
+	}
 	if path == "" {
-		if path, err = backup.Latest(r.Inst.BackupDir(), state.Previous); err != nil {
-			return "", time.Time{}, err
-		}
-		if path == "" {
-			return "", time.Time{}, fmt.Errorf("%s changed the database and no backup of %s is kept in %s: the old code would run on the new schema, so take the database back by hand first", state.Label(state.Current), state.Label(state.Previous), r.Inst.BackupDir())
-		}
+		return "", time.Time{}, fmt.Errorf("%s changed the database and no backup of %s is kept in %s: the old code would run on the new schema, so take the database back by hand first", state.Label(state.Current), state.Label(state.Previous), r.Inst.BackupDir())
 	}
 	meta, _, err := backup.Describe(path)
 	if err != nil {

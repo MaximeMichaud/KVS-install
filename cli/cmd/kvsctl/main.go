@@ -1038,9 +1038,9 @@ func runBackup(s *session, keep int) error {
 	if err != nil {
 		return err
 	}
-	version, rollbackArchive := "unknown", ""
+	version := "unknown"
 	if state != nil {
-		version, rollbackArchive = state.Current, state.UpgradeBackup
+		version = state.Current
 	}
 	result, err := createBackup(s.ctx(), s.inst.BackupDir(), version, s.inst.ContainerPrefix()+"-mariadb", s.inst.EnvPath, filepath.Join(s.inst.StateDir(), "state.json"), s.detail, backup.WithKVSVersion(s.inst.KVSVersion()), backup.WithFiles(upgrade.OverridePaths(s.inst.DockerDir)...))
 	switch {
@@ -1061,7 +1061,13 @@ func runBackup(s *session, keep int) error {
 	}
 	s.detailf("%s (%s, %s)", result.Path, upgrade.HumanBytes(result.Size), result.Duration.Round(time.Second))
 	// The archive a manual rollback of the installed version replays
-	// stays whatever its age.
+	// stays whatever its age: the one the upgrade to it took or, when the
+	// state names none, the newest backup of the previous version, which
+	// the rollback falls back to. Without it no older archive is removed.
+	rollbackArchive, err := upgrade.RollbackArchive(s.inst.BackupDir(), state)
+	if err != nil {
+		return fmt.Errorf("%s is written, but the older backups were not pruned: the archive a rollback would replay could not be found: %w", result.Path, err)
+	}
 	removed, err := pruneBackups(s.inst.BackupDir(), keep, result.Path, rollbackArchive)
 	for _, p := range removed {
 		s.detailf("removed %s", filepath.Base(p))

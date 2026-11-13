@@ -1357,6 +1357,66 @@ func TestUpgradeKeepsTheArchiveARollbackReplays(t *testing.T) {
 	}
 }
 
+// K1: an upgrade run with --skip-backup on a release that changes the
+// database records no upgrade backup, and a rollback then replays the newest
+// backup of the previous version. The prune of a later upgrade must keep
+// that archive too, or the rollback refuses for want of it.
+func TestUpgradeKeepsTheArchiveARollbackFallsBackTo(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0", database: migrates}, rel{version: "1.2.0"})
+	fallback := s.backupNow("1.0.0")
+	if err := s.upgrade(s.runner(func(o *Options) { o.Version = "1.1.0"; o.SkipBackup = true })); err != nil {
+		t.Fatalf("upgrade to 1.1.0 with --skip-backup: %v", err)
+	}
+	if got := s.state().UpgradeBackup; got != "" {
+		t.Fatalf("an upgrade with --skip-backup recorded the backup %q", got)
+	}
+	s.backupNow("1.1.0")
+	s.writeData("data-2")
+	s.f.behave(registry+"php:1.2.0-php8.1", behavior{unhealthy: true})
+	s.fresh()
+	if err := s.upgrade(s.runner(quick, func(o *Options) { o.KeepBackups = 1 })); !errors.Is(err, ErrRolledBack) {
+		t.Fatalf("upgrade to 1.2.0: %v", err)
+	}
+	if _, err := os.Stat(fallback); err != nil {
+		t.Fatalf("the 1.0.0 archive a rollback of 1.1.0 falls back to was pruned: %v", err)
+	}
+	s.fresh()
+	if err := s.rollback(s.runner()); err != nil {
+		t.Fatalf("rollback to 1.0.0: %v", err)
+	}
+	s.back("1.0.0")
+	if db, _, _, _ := s.world(); db != "data-1" {
+		t.Errorf("the database holds %q after the rollback, want the 1.0.0 archive", db)
+	}
+}
+
+// RollbackArchive names what a prune must keep: the upgrade's own archive,
+// or the newest backup of the previous version when the state names none,
+// and nothing without a previous version.
+func TestRollbackArchive(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"backup-1.0.0-20260901-000000.tar", "backup-1.0.0-20261001-000000.tar", "backup-1.1.0-20261005-000000.tar"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("archive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		state *instance.State
+		want  string
+	}{
+		{nil, ""},
+		{&instance.State{Current: "1.1.0"}, ""},
+		{&instance.State{Current: "1.1.0", Previous: "1.0.0", UpgradeBackup: "/elsewhere/backup-1.0.0-20261002-000000.tar"}, "/elsewhere/backup-1.0.0-20261002-000000.tar"},
+		{&instance.State{Current: "1.1.0", Previous: "1.0.0"}, filepath.Join(dir, "backup-1.0.0-20261001-000000.tar")},
+		{&instance.State{Current: "1.2.0", Previous: "0.9.0"}, ""},
+	} {
+		got, err := RollbackArchive(dir, c.state)
+		if err != nil || got != c.want {
+			t.Errorf("RollbackArchive(%+v) = %q, %v; want %q", c.state, got, err, c.want)
+		}
+	}
+}
+
 // A MariaDB created by a release that set it no grace period has Docker's
 // 10 seconds, and compose kills it that soon when it recreates the
 // container, unless --timeout says otherwise: the first upgrade to a

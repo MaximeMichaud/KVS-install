@@ -610,6 +610,49 @@ func TestBackupSaysHowManyArchivesThePruneRemoved(t *testing.T) {
 	}
 }
 
+// K1: after an upgrade run with --skip-backup on a release that changes the
+// database, the state names no upgrade backup, and a rollback replays the
+// newest backup of the previous version. A routine backup at --keep 1 must
+// not remove that archive, or the rollback refuses for want of it.
+func TestBackupKeepsTheArchiveARollbackFallsBackTo(t *testing.T) {
+	root := newRoot(t)
+	saveState(t, root, &instance.State{Current: "1.1.0", Previous: "1.0.0", Database: "migrates"})
+	s := testSession(t, root)
+	dir := s.inst.BackupDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(dir, "backup-1.0.0-20261001-000000.tar")
+	older := filepath.Join(dir, "backup-1.0.0-20260901-000000.tar")
+	routine := filepath.Join(dir, "backup-1.1.0-20261005-000000.tar")
+	for _, p := range []string{older, previous, routine} {
+		if err := os.WriteFile(p, []byte("archive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(dir, "backup-1.1.0-20261007-010600.tar")
+	useCreateBackup(t, func(context.Context, string, func(string)) (*backup.Result, error) {
+		if err := os.WriteFile(path, []byte("new"), 0o600); err != nil {
+			return nil, err
+		}
+		return &backup.Result{Path: path, Size: 3}, nil
+	})
+	if err := runBackup(s, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := backup.Latest(dir, "1.0.0"); err != nil || got != previous {
+		t.Fatalf("after backup --keep 1 the newest 1.0.0 archive is %q (%v), want %q: the rollback would refuse", got, err, previous)
+	}
+	for _, gone := range []string{older, routine} {
+		if _, err := os.Stat(gone); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s should have been pruned: %v", filepath.Base(gone), err)
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the new archive is gone: %v", err)
+	}
+}
+
 // A backup that works is all progress for --quiet: its lines, its archive
 // and the archives it removed go to the log, and a cron job mails nothing.
 func TestQuietBackupPrintsNothing(t *testing.T) {
