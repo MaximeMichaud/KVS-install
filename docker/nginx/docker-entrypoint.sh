@@ -69,13 +69,30 @@ if [ "$INCLUDE_WWW" = "true" ]; then
     www.${DOMAIN} 1;"
 fi
 
+# The test tls/internal-trust.sh makes before it publishes a self-signed
+# certificate as the root PHP and cron trust: an explicit CA:FALSE, without
+# which GnuTLS (the wget of the PHP-FPM and cron images) takes a trusted root
+# as the issuer of other certificates, and no SSL server CA for OpenSSL.
+certificate_signs_no_certificate() {
+    certificate_basic_constraints=$(
+        openssl x509 -in "${SSL_DIR}/cert.pem" -noout -ext basicConstraints 2>/dev/null
+    ) || return 1
+    [ "$(printf '%s\n' "$certificate_basic_constraints" | sed '1d' | tr -d ' \t')" = 'CA:FALSE' ] ||
+        return 1
+    openssl x509 -in "${SSL_DIR}/cert.pem" -noout -purpose 2>/dev/null |
+        grep -Fxq 'SSL server CA : No'
+}
+
 certificate_pair_is_valid() {
+    certificate_pair_signs_others=false
     certificate_not_before=''
     certificate_not_before_epoch=''
     certificate_now_epoch=''
     certificate_san_entries=''
     certificate_actual_dns_names=''
     certificate_expected_dns_names=''
+    certificate_pair_subject=''
+    certificate_pair_issuer=''
 
     [ -s "${SSL_DIR}/cert.pem" ] || return 1
     [ -s "${SSL_DIR}/key.pem" ] || return 1
@@ -127,6 +144,26 @@ certificate_pair_is_valid() {
             >/dev/null 2>&1 || return 1
     fi
 
+    # A self-signed certificate is published as the root PHP and cron trust,
+    # which tls/internal-trust.sh refuses when it may sign other
+    # certificates: such a pair, as this installer generated before it added
+    # CA:FALSE, is replaced like any other this provider cannot use, and
+    # kept next to the new one. A CA-issued certificate is not published,
+    # and stays.
+    if [ "$SSL_PROVIDER" = selfsigned ]; then
+        certificate_pair_subject=$(
+            openssl x509 -in "${SSL_DIR}/cert.pem" -noout -subject -nameopt RFC2253 2>/dev/null
+        ) || return 1
+        certificate_pair_issuer=$(
+            openssl x509 -in "${SSL_DIR}/cert.pem" -noout -issuer -nameopt RFC2253 2>/dev/null
+        ) || return 1
+        if [ "${certificate_pair_subject#subject=}" = "${certificate_pair_issuer#issuer=}" ] &&
+            ! certificate_signs_no_certificate; then
+            certificate_pair_signs_others=true
+            return 1
+        fi
+    fi
+
     certificate_public_key=$(
         openssl x509 -in "${SSL_DIR}/cert.pem" -pubkey -noout 2>/dev/null
     ) || return 1
@@ -154,12 +191,27 @@ generate_self_signed_pair() (
     echo "Self-signed certificate generated for ${DOMAIN}"
 )
 
+# A self-signed pair that may sign other certificates can be one an operator
+# put there: keep it, the key included, before generating a new one.
+keep_replaced_pair() (
+    replaced_suffix="replaced-$(date -u +%Y%m%dT%H%M%SZ)"
+    umask 077
+    cp -p "${SSL_DIR}/key.pem" "${SSL_DIR}/key.pem.${replaced_suffix}" || exit 1
+    chmod 600 "${SSL_DIR}/key.pem.${replaced_suffix}" || exit 1
+    cp -p "${SSL_DIR}/cert.pem" "${SSL_DIR}/cert.pem.${replaced_suffix}" || exit 1
+    echo "The self-signed certificate may sign other certificates, which PHP and cron would then trust; keeping it as cert.pem.${replaced_suffix} and key.pem.${replaced_suffix}. To serve a certificate of your own, use one issued by your own CA and mount that CA's public .crt in PHP and cron (docker/SECURITY.md). Generating a new self-signed certificate..."
+)
+
 # Generate self-signed cert if not exists (fallback until ACME runs)
 # Skip if SSL_PROVIDER=none (behind reverse proxy like Caddy)
 if [ "$SSL_PROVIDER" != "none" ]; then
     SSL_DIR="/etc/nginx/ssl/${DOMAIN}"
     if ! certificate_pair_is_valid; then
-        echo "SSL certificate pair is missing, invalid, or mismatched; generating a self-signed certificate..."
+        if [ "$certificate_pair_signs_others" = true ]; then
+            keep_replaced_pair
+        else
+            echo "SSL certificate pair is missing, invalid, or mismatched; generating a self-signed certificate..."
+        fi
         generate_self_signed_pair
     fi
 else

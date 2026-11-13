@@ -243,6 +243,7 @@ generate_fixture_pair() {
         -out "${pair_dir}/cert.pem" \
         -subj "/CN=${primary_domain}" \
         -addext "subjectAltName=${certificate_san}" \
+        -addext "basicConstraints=critical,${FIXTURE_BASIC_CONSTRAINTS:-CA:FALSE}" \
         >/dev/null 2>&1
 }
 
@@ -301,6 +302,42 @@ generate_fixture_pair extra-san example.com true unexpected.example
 generate_fixture_pair subdomain-only 7.0.2.example.org false
 generate_fixture_pair monitor-a renew.example.com false
 generate_fixture_pair monitor-b renew.example.com false
+# What a default "openssl req -x509" gives, and what this installer generated
+# before CA:FALSE: a certificate that may sign others.
+FIXTURE_BASIC_CONSTRAINTS=CA:TRUE generate_fixture_pair ca-true example.com
+# No basicConstraints at all, from a configuration without the v3_ca
+# defaults, but a key usage that allows signing certificates.
+mkdir -p "${TEST_DIR}/fixtures/cert-sign"
+printf '%s\n' '[req]' 'distinguished_name = dn' '[dn]' > "${TEST_DIR}/fixtures/cert-sign/openssl.cnf"
+"$REAL_OPENSSL" req -x509 -nodes -days 1 -newkey rsa:1024 \
+    -config "${TEST_DIR}/fixtures/cert-sign/openssl.cnf" \
+    -keyout "${TEST_DIR}/fixtures/cert-sign/key.pem" \
+    -out "${TEST_DIR}/fixtures/cert-sign/cert.pem" \
+    -subj /CN=example.com -addext 'subjectAltName=DNS:example.com,DNS:www.example.com' \
+    -addext 'keyUsage=digitalSignature,keyCertSign' >/dev/null 2>&1
+# No basicConstraints and no key usage either: OpenSSL calls it no SSL server
+# CA, but GnuTLS, the wget of the PHP-FPM and cron images, takes it as the
+# issuer of other certificates once it is a trusted root.
+mkdir -p "${TEST_DIR}/fixtures/bare"
+"$REAL_OPENSSL" req -x509 -nodes -days 1 -newkey rsa:1024 \
+    -config "${TEST_DIR}/fixtures/cert-sign/openssl.cnf" \
+    -keyout "${TEST_DIR}/fixtures/bare/key.pem" \
+    -out "${TEST_DIR}/fixtures/bare/cert.pem" \
+    -subj /CN=example.com -addext 'subjectAltName=DNS:example.com,DNS:www.example.com' >/dev/null 2>&1
+# Issued by another CA, and able to sign certificates as well: not
+# self-signed, so never published as trust.
+FIXTURE_BASIC_CONSTRAINTS=CA:TRUE generate_fixture_pair fixture-ca fixture-ca.example false
+mkdir -p "${TEST_DIR}/fixtures/ca-issued"
+printf '%s\n' 'basicConstraints=critical,CA:TRUE' \
+    'subjectAltName=DNS:example.com,DNS:www.example.com' > "${TEST_DIR}/fixtures/ca-issued/extensions.cnf"
+"$REAL_OPENSSL" req -new -nodes -newkey rsa:1024 -subj /CN=example.com \
+    -keyout "${TEST_DIR}/fixtures/ca-issued/key.pem" \
+    -out "${TEST_DIR}/fixtures/ca-issued/request.pem" >/dev/null 2>&1
+"$REAL_OPENSSL" x509 -req -days 1 -set_serial 2 \
+    -in "${TEST_DIR}/fixtures/ca-issued/request.pem" \
+    -CA "${TEST_DIR}/fixtures/fixture-ca/cert.pem" -CAkey "${TEST_DIR}/fixtures/fixture-ca/key.pem" \
+    -extfile "${TEST_DIR}/fixtures/ca-issued/extensions.cnf" \
+    -out "${TEST_DIR}/fixtures/ca-issued/cert.pem" >/dev/null 2>&1
 generate_timed_fixture_pair expired example.com 20000101000000Z 20000102000000Z
 generate_timed_fixture_pair future example.com \
     "$(date -u -d '+1 day' +%Y%m%d%H%M%SZ)" \
@@ -309,7 +346,17 @@ mkdir -p "${TEST_DIR}/fixtures/cn-only"
 "$REAL_OPENSSL" req -x509 -nodes -days 1 -newkey rsa:1024 \
     -keyout "${TEST_DIR}/fixtures/cn-only/key.pem" \
     -out "${TEST_DIR}/fixtures/cn-only/cert.pem" \
-    -subj /CN=example.com >/dev/null 2>&1
+    -subj /CN=example.com -addext 'basicConstraints=critical,CA:FALSE' >/dev/null 2>&1
+for fixture in ca-true cert-sign ca-issued; do
+    "$REAL_OPENSSL" x509 -in "${TEST_DIR}/fixtures/${fixture}/cert.pem" -noout -purpose |
+        grep -Fxq 'SSL server CA : Yes' || fail "the ${fixture} fixture cannot sign certificates"
+done
+for fixture in pair-a pair-b cn-only bare; do
+    "$REAL_OPENSSL" x509 -in "${TEST_DIR}/fixtures/${fixture}/cert.pem" -noout -purpose |
+        grep -Fxq 'SSL server CA : No' || fail "the ${fixture} fixture can sign certificates"
+done
+"$REAL_OPENSSL" x509 -in "${TEST_DIR}/fixtures/bare/cert.pem" -noout -ext basicConstraints 2>/dev/null |
+    grep -q . && fail 'the bare fixture has basicConstraints'
 export REAL_OPENSSL
 export TEST_GENERATED_KEY="${TEST_DIR}/fixtures/pair-b/key.pem"
 export TEST_GENERATED_CERT="${TEST_DIR}/fixtures/pair-b/cert.pem"
@@ -383,6 +430,7 @@ assert_valid_pair() {
 run_certificate_case() {
     local name="$1"
     local initial_state="$2"
+    local provider="${3:-selfsigned}"
     local case_dir="${TEST_DIR}/${name}"
     local ssl_dir="${case_dir}/etc/nginx/ssl/example.com"
     local before_cert=''
@@ -454,12 +502,59 @@ run_certificate_case() {
             cp "${TEST_DIR}/fixtures/future/cert.pem" "${ssl_dir}/cert.pem"
             cp "${TEST_DIR}/fixtures/future/key.pem" "${ssl_dir}/key.pem"
             ;;
+        ca-true|cert-sign|bare|ca-issued)
+            cp "${TEST_DIR}/fixtures/${initial_state}/cert.pem" "${ssl_dir}/cert.pem"
+            cp "${TEST_DIR}/fixtures/${initial_state}/key.pem" "${ssl_dir}/key.pem"
+            # As an operator may have left it: the copy it keeps is 600 still.
+            chmod 644 "${ssl_dir}/key.pem"
+            before_cert=$(sha256sum "${ssl_dir}/cert.pem")
+            before_key=$(sha256sum "${ssl_dir}/key.pem")
+            ;;
     esac
 
-    DOMAIN=example.com USE_WWW=false SSL_PROVIDER=selfsigned \
+    DOMAIN=example.com USE_WWW=false SSL_PROVIDER="$provider" \
         bash "${case_dir}/docker-entrypoint.sh" true >/dev/null
 
     assert_valid_pair "$name" "$ssl_dir"
+
+    # The self-signed provider publishes its certificate as the root PHP and
+    # cron trust: one that may sign others is replaced, and kept next to the
+    # new one as an operator may have put it there. A CA-issued one is never
+    # published, and no other provider replaces it.
+    case "${initial_state}:${provider}" in
+        ca-true:selfsigned|cert-sign:selfsigned|bare:selfsigned)
+            [ "$(sha256sum "${ssl_dir}/cert.pem")" != "$before_cert" ] &&
+                [ "$(sha256sum "${ssl_dir}/key.pem")" != "$before_key" ] ||
+                fail "${name}: a self-signed pair that may sign certificates was kept"
+            [ "$("$REAL_OPENSSL" x509 -in "${ssl_dir}/cert.pem" -noout -ext basicConstraints | sed '1d' | tr -d ' ')" = CA:FALSE ] ||
+                fail "${name}: the replacement does not say CA:FALSE"
+            "$REAL_OPENSSL" x509 -in "${ssl_dir}/cert.pem" -noout -purpose |
+                grep -Fxq 'SSL server CA : No' ||
+                fail "${name}: the replacement may sign certificates"
+            replaced_certs=("${ssl_dir}"/cert.pem.replaced-*)
+            replaced_keys=("${ssl_dir}"/key.pem.replaced-*)
+            [ "${#replaced_certs[@]}" -eq 1 ] && [ -f "${replaced_certs[0]}" ] &&
+                [ "${#replaced_keys[@]}" -eq 1 ] && [ -f "${replaced_keys[0]}" ] ||
+                fail "${name}: the replaced pair was not kept"
+            [ "${replaced_keys[0]#"${ssl_dir}"/key.pem.}" = "${replaced_certs[0]#"${ssl_dir}"/cert.pem.}" ] ||
+                fail "${name}: the kept certificate and key have different names"
+            [ "$(sha256sum < "${replaced_certs[0]}")" = "${before_cert%% *}  -" ] &&
+                [ "$(sha256sum < "${replaced_keys[0]}")" = "${before_key%% *}  -" ] ||
+                fail "${name}: the kept pair is not the replaced one"
+            [ "$(stat -c %a "${replaced_keys[0]}")" = 600 ] ||
+                fail "${name}: the kept key is readable by others"
+            ;;
+        *)
+            replaced_files=("${ssl_dir}"/*.replaced-*)
+            [ ! -e "${replaced_files[0]}" ] ||
+                fail "${name}: a pair was kept as replaced although it could not sign certificates"
+            ;;&
+        ca-true:*|cert-sign:*|bare:*|ca-issued:*)
+            [ "$(sha256sum "${ssl_dir}/cert.pem")" = "$before_cert" ] &&
+                [ "$(sha256sum "${ssl_dir}/key.pem")" = "$before_key" ] ||
+                fail "${name}: SSL_PROVIDER=${provider} replaced a pair it does not publish"
+            ;;
+    esac
 
     if [ "$initial_state" = valid ]; then
         [ "$(sha256sum "${ssl_dir}/cert.pem")" = "$before_cert" ] ||
@@ -722,6 +817,12 @@ run_certificate_case cn-only cn-only
 run_certificate_case extra-san extra-san
 run_certificate_case expired expired
 run_certificate_case future future
+run_certificate_case ca-true ca-true
+run_certificate_case cert-sign cert-sign
+run_certificate_case bare bare
+run_certificate_case bare-letsencrypt bare letsencrypt
+run_certificate_case ca-true-letsencrypt ca-true letsencrypt
+run_certificate_case ca-issued ca-issued
 run_public_port_case
 assert_template_renders_with_older_entrypoints
 assert_invalid_public_port 0

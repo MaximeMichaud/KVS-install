@@ -25,19 +25,21 @@ jobs:
         with:
           persist-credentials: false
 
-      # PyYAML lets the workflow suite read the workflows as GitHub does. The
-      # runner image has every other tool the suites use, Docker with
-      # Compose, PHP, rsync, zstd and 7-Zip among them. The suites check the
-      # scripts against GNU coreutils, those of the Debian releases the stack
-      # supports: an image whose coreutils are the uutils ones, which Ubuntu
-      # defaults to from 26.04 on, gets GNU coreutils first, as the uutils
-      # sort also leaves a temporary directory behind in a TMPDIR that one of
-      # the suites checks stays empty.
+      # PyYAML lets the workflow suite read the workflows as GitHub does, and
+      # certtool (gnutls-bin) lets the internal TLS suite check its trust with
+      # GnuTLS, the library of the wget in the PHP images, as well as with
+      # OpenSSL. The runner image has every other tool the suites use, Docker
+      # with Compose, PHP, rsync, zstd and 7-Zip among them. The suites check
+      # the scripts against GNU coreutils, those of the Debian releases the
+      # stack supports: an image whose coreutils are the uutils ones, which
+      # Ubuntu defaults to from 26.04 on, gets GNU coreutils first, as the
+      # uutils sort also leaves a temporary directory behind in a TMPDIR that
+      # one of the suites checks stays empty.
       - name: the tools the suites use
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            gettext-base uidmap python3-yaml
+            gettext-base uidmap python3-yaml gnutls-bin
           if sort --version | grep -q uutils; then
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
               --allow-remove-essential coreutils-from-gnu coreutils-from-uutils-
@@ -45,6 +47,7 @@ jobs:
           sort --version | sed -n 1p
           sort --version | grep -q 'GNU coreutils'
           python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+          certtool --version | sed -n 1p
 
       # The phpMyAdmin suite runs as root of a user namespace of its own,
       # mapped onto the subordinate ids that as-uid-1000.sh gives the user

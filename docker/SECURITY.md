@@ -172,6 +172,19 @@ certificate within the last seven days of validity; its certificate monitor
 checks every five minutes, and application trust refreshes every two seconds.
 A replacement can briefly fail verification while the consumers refresh.
 Missing or invalid trust never falls back to disabling verification.
+Only a certificate that cannot sign others becomes trust: a self-signed
+certificate must say `CA:FALSE` in its basic constraints. One marked as a CA
+(`CA:TRUE`, the `openssl req -x509` default), or one without basic
+constraints, which OpenSSL accepts as the issuer of other certificates when
+its key usage allows certificate signing and GnuTLS (the `wget` of the PHP-FPM
+and cron images) accepts in any case, is refused, since whoever holds its key
+could then issue a certificate for any host. NGINX replaces such a
+self-signed pair, which installations before 26.10.0 generated, with a new one
+when it starts, and keeps the old one next to it as `cert.pem.replaced-<time>`
+and `key.pem.replaced-<time>`. An NGINX image older than the `docker/tls`
+directory does not replace it: it publishes no trust and says so, and PHP and
+cron start without the internal trust (after waiting two minutes when the old
+publication is still there) until NGINX runs an image of the same release.
 
 A retained CA-issued certificate keeps using the normal CA store. To use a
 private development CA, explicitly mount its public `.crt` file under
