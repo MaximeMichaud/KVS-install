@@ -5183,6 +5183,50 @@ select_mode() {
     esac
 }
 
+# A single site moving from Let's Encrypt or ZeroSSL to a self-signed
+# certificate keeps, in the acme-certs volume, the pair acme.sh installed:
+# Nginx keeps any valid pair, and once the ACME container is gone nothing
+# renews it. That pair is removed before the container goes, so Nginx
+# generates its self-signed one when it is started again. It is told from
+# a pair from anywhere else (an operator's own certificate, a private CA,
+# Cloudflare Origin CA), which stays, by its key: acme.sh keeps the key it
+# installed in its own volume. Read through a container that only borrows
+# the volumes of the ACME container, with no network.
+setup_drop_acme_installed_pair() {
+    local acme_container_names acme_image dropped
+
+    [ "$MODE" = single ] && [ "$SSL_PROVIDER" = selfsigned ] || return 0
+    if ! acme_container_names=$(docker ps -a --format '{{.Names}}' 2>/dev/null); then
+        echo -e "${RED}ERROR: Could not inspect ACME containers${NC}"
+        return 1
+    fi
+    grep -Fxq "${SITE_PREFIX}-acme" <<< "$acme_container_names" || return 0
+    if ! acme_image=$(docker inspect --format '{{.Image}}' "${SITE_PREFIX}-acme"); then
+        echo -e "${RED}ERROR: Could not inspect ${SITE_PREFIX}-acme${NC}"
+        return 1
+    fi
+    # shellcheck disable=SC2016  # Expanded inside the container.
+    if ! dropped=$(docker run --rm --network none --volumes-from "${SITE_PREFIX}-acme" \
+        --entrypoint sh "$acme_image" -c '
+            set -eu
+            live=$1
+            shift
+            for issued_key in "$@"; do
+                if cmp -s "$live/key.pem" "$issued_key"; then
+                    rm -f "$live/cert.pem" "$live/key.pem"
+                    echo removed
+                fi
+            done
+        ' sh "/etc/nginx/ssl/${DOMAIN}" \
+        "/acme.sh/${DOMAIN}_ecc/${DOMAIN}.key" "/acme.sh/${DOMAIN}/${DOMAIN}.key" </dev/null); then
+        echo -e "${RED}ERROR: Could not check the certificate ${SITE_PREFIX}-acme installed${NC}"
+        return 1
+    fi
+    if [ "$dropped" = removed ]; then
+        echo -e "${YELLOW}The certificate acme.sh installed for ${DOMAIN} is removed with the ACME container, which renewed it: Nginx generates a self-signed one when it starts.${NC}"
+    fi
+}
+
 configure_direct_tls_profile() {
     local acme_container_names
 
@@ -5234,6 +5278,7 @@ configure_mode() {
         return 1
     fi
 
+    setup_drop_acme_installed_pair || return $?
     configure_direct_tls_profile || return $?
 
     if [ "$MODE" = "multi" ]; then

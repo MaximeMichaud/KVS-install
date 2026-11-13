@@ -38,6 +38,7 @@ extract_function compose_files_for "$mode_function"
 extract_function set_compose_file "$mode_function"
 extract_function remove_env_value "$mode_function"
 extract_function select_mode "$mode_function"
+extract_function setup_drop_acme_installed_pair "$mode_function"
 extract_function configure_direct_tls_profile "$mode_function"
 extract_function configure_mode "$mode_function"
 
