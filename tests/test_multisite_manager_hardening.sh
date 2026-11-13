@@ -796,4 +796,162 @@ grep -Fxq 'compose -p kvs-a-test down -v' "$r1_ok_log" ||
 [ ! -d "$r1_ok_site" ] ||
     fail "a legitimate remove kept the site directory"
 
+# R2: a host two sites would both serve makes the Caddy config ambiguous, so
+# every reload fails and a restart takes all sites down. An add must refuse
+# such a host and leave no half-made site.
+create_fixture r2_hosts
+r2_script="${TEST_DIR}/r2_hosts/docker/multi-site/site-manager.sh"
+r2_webroot="${TEST_DIR}/r2_hosts/webroots"
+r2_caddy="${TEST_DIR}/r2_hosts/docker/multi-site/caddy/sites"
+r2_sites="${TEST_DIR}/r2_hosts/docker/multi-site/sites"
+
+# A two-label site also serves its www host through a redirect.
+KVS_WEBROOT_BASE="$r2_webroot" bash "$r2_script" add collide.example >/dev/null
+[ -f "${r2_caddy}/collide.example.caddy" ] || fail "R2: the first site was not created"
+
+set +e
+KVS_WEBROOT_BASE="$r2_webroot" \
+    bash "$r2_script" add www.collide.example > "${TEST_DIR}/r2_hosts/out" 2>&1
+r2_status=$?
+set -e
+[ "$r2_status" -ne 0 ] ||
+    fail "R2: a second site claimed www.collide.example, already served by the first"
+[ ! -e "${r2_caddy}/www.collide.example.caddy" ] ||
+    fail "R2: the ambiguous www.collide.example route was written"
+[ ! -e "${r2_sites}/www.collide.example" ] ||
+    fail "R2: the refused site left its directory behind"
+[ ! -e "${r2_webroot}/www.collide.example" ] ||
+    fail "R2: the refused site left its webroot behind"
+grep -Fq 'already served by another Caddy site' "${TEST_DIR}/r2_hosts/out" ||
+    fail "R2: the host collision was not reported: $(cat "${TEST_DIR}/r2_hosts/out")"
+echo "PASS: add refuses a host an existing site's www redirect already claims"
+
+# The reverse order: a www host added first, then its apex, which serves
+# that same www host.
+create_fixture r2_reverse
+rev_script="${TEST_DIR}/r2_reverse/docker/multi-site/site-manager.sh"
+rev_webroot="${TEST_DIR}/r2_reverse/webroots"
+rev_caddy="${TEST_DIR}/r2_reverse/docker/multi-site/caddy/sites"
+KVS_WEBROOT_BASE="$rev_webroot" bash "$rev_script" add www.flip.example >/dev/null
+[ -f "${rev_caddy}/www.flip.example.caddy" ] || fail "R2: www.flip.example was not created"
+set +e
+KVS_WEBROOT_BASE="$rev_webroot" \
+    bash "$rev_script" add flip.example > "${TEST_DIR}/r2_reverse/out" 2>&1
+rev_status=$?
+set -e
+[ "$rev_status" -ne 0 ] ||
+    fail "R2: the apex flip.example claimed the www host of an existing site"
+[ ! -e "${rev_caddy}/flip.example.caddy" ] ||
+    fail "R2: the ambiguous apex route was written"
+echo "PASS: add refuses an apex whose www host an existing site already serves"
+
+# A genuinely distinct site is still accepted.
+KVS_WEBROOT_BASE="$r2_webroot" bash "$r2_script" add distinct.example >/dev/null
+[ -f "${r2_caddy}/distinct.example.caddy" ] ||
+    fail "R2: a non-colliding site was refused"
+echo "PASS: a non-colliding site is still added"
+
+# remove can keep a site's webroot. A later add of that domain that is refused
+# (here because www.keep.example took its www host meanwhile, or because of an
+# invalid CADDY_TLS_MODE) must leave that webroot and its files alone: the
+# refusal comes before anything is created.
+create_fixture r2_keep
+keep_script="${TEST_DIR}/r2_keep/docker/multi-site/site-manager.sh"
+keep_webroot="${TEST_DIR}/r2_keep/webroots"
+KVS_WEBROOT_BASE="$keep_webroot" bash "$keep_script" add keep.example >/dev/null
+mkdir -p "${keep_webroot}/keep.example/contents/videos"
+printf 'video\n' > "${keep_webroot}/keep.example/contents/videos/1.mp4"
+printf 'yes\nn\n' | MOCK_CADDY_RUNNING=false KVS_WEBROOT_BASE="$keep_webroot" \
+    bash "$keep_script" remove keep.example >/dev/null
+[ -f "${keep_webroot}/keep.example/contents/videos/1.mp4" ] ||
+    fail "R2: remove did not keep the webroot it was told to keep"
+set +e
+KVS_WEBROOT_BASE="$keep_webroot" CADDY_TLS_MODE=bogus \
+    bash "$keep_script" add keep.example > "${TEST_DIR}/r2_keep/out" 2>&1
+keep_status=$?
+set -e
+[ "$keep_status" -ne 0 ] || fail "R2: add accepted an invalid CADDY_TLS_MODE"
+[ -f "${keep_webroot}/keep.example/contents/videos/1.mp4" ] ||
+    fail "R2: a refused add (invalid TLS mode) deleted a webroot that predates it"
+KVS_WEBROOT_BASE="$keep_webroot" bash "$keep_script" add www.keep.example >/dev/null
+set +e
+KVS_WEBROOT_BASE="$keep_webroot" \
+    bash "$keep_script" add keep.example > "${TEST_DIR}/r2_keep/out" 2>&1
+keep_status=$?
+set -e
+[ "$keep_status" -ne 0 ] ||
+    fail "R2: keep.example claimed the host of www.keep.example"
+[ -f "${keep_webroot}/keep.example/contents/videos/1.mp4" ] ||
+    fail "R2: a refused add deleted a webroot that predates it"
+[ ! -e "${TEST_DIR}/r2_keep/docker/multi-site/sites/keep.example" ] ||
+    fail "R2: the refused add left its site directory behind"
+echo "PASS: a refused add keeps a webroot that predates it"
+
+# A route that cannot be written is a failure, not a created site.
+if [ "$(id -u)" -ne 0 ]; then
+    create_fixture r2_write
+    write_script="${TEST_DIR}/r2_write/docker/multi-site/site-manager.sh"
+    write_caddy="${TEST_DIR}/r2_write/docker/multi-site/caddy/sites"
+    mkdir -p "$write_caddy"
+    chmod 555 "$write_caddy"
+    set +e
+    KVS_WEBROOT_BASE="${TEST_DIR}/r2_write/webroots" \
+        bash "$write_script" add y.example > "${TEST_DIR}/r2_write/out" 2>&1
+    write_status=$?
+    set -e
+    chmod 755 "$write_caddy"
+    [ "$write_status" -ne 0 ] ||
+        fail "R2: add reported success although the Caddy route could not be written"
+    ! grep -Fq 'created successfully' "${TEST_DIR}/r2_write/out" ||
+        fail "R2: a failed route write was reported as a created site"
+    [ ! -e "${TEST_DIR}/r2_write/docker/multi-site/sites/y.example" ] ||
+        fail "R2: the failed add left its site directory behind"
+    [ ! -e "${TEST_DIR}/r2_write/webroots/y.example" ] ||
+        fail "R2: the failed add left the webroot it created behind"
+    # The same failure over a webroot that predates the add keeps it.
+    mkdir -p "${TEST_DIR}/r2_write/webroots/z.example/contents"
+    printf 'video\n' > "${TEST_DIR}/r2_write/webroots/z.example/contents/1.mp4"
+    chmod 555 "$write_caddy"
+    set +e
+    KVS_WEBROOT_BASE="${TEST_DIR}/r2_write/webroots" \
+        bash "$write_script" add z.example > "${TEST_DIR}/r2_write/out" 2>&1
+    write_status=$?
+    set -e
+    chmod 755 "$write_caddy"
+    [ "$write_status" -ne 0 ] ||
+        fail "R2: add reported success although the Caddy route could not be written (z.example)"
+    [ -f "${TEST_DIR}/r2_write/webroots/z.example/contents/1.mp4" ] ||
+        fail "R2: a failed add deleted a webroot that predates it"
+    echo "PASS: a route that cannot be written fails the add"
+fi
+
+# Hand-written routes in caddy/sites may list several addresses in one block,
+# with a scheme, a port or capitals. Every one of them is a claimed host.
+create_fixture r2_multi
+multi_script="${TEST_DIR}/r2_multi/docker/multi-site/site-manager.sh"
+multi_caddy="${TEST_DIR}/r2_multi/docker/multi-site/caddy/sites"
+mkdir -p "$multi_caddy"
+cat > "${multi_caddy}/hand.caddy" <<'CADDY'
+# Hand-written route
+b.example, www.b.example {
+    respond "b"
+}
+
+https://C.example:443 {
+    respond "c"
+}
+CADDY
+for multi_host in www.b.example c.example; do
+    set +e
+    KVS_WEBROOT_BASE="${TEST_DIR}/r2_multi/webroots" \
+        bash "$multi_script" add "$multi_host" > "${TEST_DIR}/r2_multi/out" 2>&1
+    multi_status=$?
+    set -e
+    [ "$multi_status" -ne 0 ] ||
+        fail "R2: add claimed ${multi_host}, already listed in a hand-written route"
+    [ ! -e "${multi_caddy}/${multi_host}.caddy" ] ||
+        fail "R2: the ambiguous ${multi_host} route was written"
+done
+echo "PASS: add refuses every address of a hand-written multi-address route"
+
 echo "PASS: Multi-site manager hardening"

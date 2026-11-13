@@ -311,20 +311,54 @@ ensure_proxy_network() {
     log_success "Created network: kvs-proxy"
 }
 
-write_caddy_site_config() {
+# caddy_hosts_in_use prints every host the current site configs serve, one
+# per line and in lowercase, skipping the file named (the one about to be
+# rewritten). A Caddy site block starts with a line at column zero that ends
+# in "{" and lists one or more addresses, separated by commas or spaces; a
+# hand-written route may give an address a scheme, a port or capitals, which
+# are dropped or folded here. Used to refuse a host two sites would both claim.
+caddy_hosts_in_use() {
+    local exclude="$1"
+    local file
+
+    [ -d "$CADDY_SITES_DIR" ] || return 0
+    for file in "$CADDY_SITES_DIR"/*.caddy; do
+        [ -e "$file" ] || continue
+        [ "$file" = "$exclude" ] && continue
+        awk '/^[^[:space:]#].*\{[[:space:]]*$/ {
+            line = $0
+            sub(/\{[[:space:]]*$/, "", line)
+            gsub(/,/, " ", line)
+            count = split(line, addresses, /[[:space:]]+/)
+            for (i = 1; i <= count; i++) {
+                host = tolower(addresses[i])
+                sub(/^[a-z][a-z0-9+.-]*:\/\//, "", host)
+                sub(/\/.*$/, "", host)
+                sub(/:[0-9]+$/, "", host)
+                if (host != "") print host
+            }
+        }' "$file"
+    done
+}
+
+# caddy_route_hosts settles the route of a site: it checks the TLS and www
+# settings and sets canonical_host, alternate_host (empty without a www route)
+# and tls_directive, which the caller declares local. It refuses a host
+# another site already serves, skipping the site's own file so a rewrite does
+# not clash with itself. Nothing is written, so add runs it before creating
+# anything and a refusal leaves no half-made site.
+caddy_route_hosts() {
     local domain="$1"
     local tls_mode="${2:-public}"
     local use_www="${3:-false}"
     local include_www="${4:-auto}"
-    local canonical_host
-    local alternate_host=""
     local dot_count
-    local tls_directive=""
-    local temp_file
+    local in_use host
 
     validate_domain "$domain" || return 1
     case "$tls_mode" in
         public)
+            tls_directive=""
             ;;
         internal)
             tls_directive="    tls internal"
@@ -360,8 +394,8 @@ write_caddy_site_config() {
     esac
 
     # A canonical www host necessarily requires a route and certificate for it.
+    alternate_host=""
     if [ "$use_www" = true ]; then
-        include_www=true
         canonical_host="www.${domain}"
         alternate_host="$domain"
     else
@@ -371,8 +405,34 @@ write_caddy_site_config() {
         fi
     fi
 
-    mkdir -p "$CADDY_SITES_DIR"
-    temp_file=$(mktemp "${CADDY_SITES_DIR}/.${domain}.caddy.XXXXXX")
+    # Two Caddy site blocks for the same host make the config ambiguous:
+    # every reload then fails and a restart takes all sites down. The www
+    # redirect is a claimed host too, so a plain "a.example" (which also
+    # serves www.a.example) and a later "www.a.example" collide.
+    in_use=$(caddy_hosts_in_use "${CADDY_SITES_DIR}/${domain}.caddy")
+    for host in "$canonical_host" "$alternate_host"; do
+        [ -n "$host" ] || continue
+        if grep -Fxq "$host" <<< "$in_use"; then
+            log_error "Host ${host} is already served by another Caddy site; refusing an ambiguous route for ${domain}"
+            return 1
+        fi
+    done
+}
+
+write_caddy_site_config() {
+    local domain="$1"
+    local canonical_host
+    local alternate_host=""
+    local tls_directive=""
+    local temp_file
+
+    caddy_route_hosts "$@" || return 1
+
+    # Callers test this function in a condition, which turns set -e off
+    # inside it: every step checks its own status, so a route that cannot be
+    # written is never reported as generated.
+    mkdir -p "$CADDY_SITES_DIR" || return 1
+    temp_file=$(mktemp "${CADDY_SITES_DIR}/.${domain}.caddy.XXXXXX") || return 1
     {
         cat << EOF
 # KVS Site: ${domain}
@@ -412,8 +472,14 @@ ${tls_directive}
 }
 EOF
         fi
-    } > "$temp_file"
-    mv -f "$temp_file" "${CADDY_SITES_DIR}/${domain}.caddy"
+    } > "$temp_file" || {
+        rm -f "$temp_file"
+        return 1
+    }
+    mv -f "$temp_file" "${CADDY_SITES_DIR}/${domain}.caddy" || {
+        rm -f "$temp_file"
+        return 1
+    }
     log_success "Generated Caddy config: ${CADDY_SITES_DIR}/${domain}.caddy"
 }
 
@@ -552,6 +618,12 @@ add_site() {
     ensure_site_prefix_available "$domain" "$site_prefix" || return 1
     ensure_new_site_project_free "$domain" "$site_prefix" || return 1
 
+    # Refuse the route before anything is created: a host another site
+    # already serves (or an invalid CADDY_TLS_MODE) must not cost a webroot
+    # that remove kept or an operator prepared.
+    local canonical_host alternate_host tls_directive
+    caddy_route_hosts "$domain" "${CADDY_TLS_MODE:-public}" false auto || return 1
+
     # Check KVS archive
     if ! compgen -G "${KVS_ARCHIVE_DIR}/KVS_*.zip" >/dev/null; then
         log_error "No KVS archive found in ${KVS_ARCHIVE_DIR}/"
@@ -576,6 +648,8 @@ add_site() {
 
     # Create webroot directory
     local webroot="${WEBROOT_BASE}/${domain}"
+    local webroot_created=false
+    [ -e "$webroot" ] || webroot_created=true
     mkdir -p "${webroot}"
     chown 1000:1000 "${webroot}"
     log_success "Created webroot: ${webroot}"
@@ -631,8 +705,16 @@ EOF
     cp "${SCRIPT_DIR}/docker-compose.site.yml.template" "${site_dir}/docker-compose.yml"
     log_success "Created docker-compose.yml"
 
-    # Generate Caddy site config
-    write_caddy_site_config "$domain" "${CADDY_TLS_MODE:-public}" false auto
+    # Generate Caddy site config. A route that cannot be written leaves no
+    # half-made site behind: the site directory goes, and the webroot too
+    # when this add created it, so the add can be retried. A webroot that
+    # existed before (one remove kept) is left as it was.
+    if ! write_caddy_site_config "$domain" "${CADDY_TLS_MODE:-public}" false auto; then
+        rm -rf "${site_dir}"
+        [ "$webroot_created" = false ] || rm -rf "${webroot}"
+        log_error "Removed the half-created site ${domain}"
+        return 1
+    fi
 
     echo ""
     log_success "Site ${domain} created successfully!"
