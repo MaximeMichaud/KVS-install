@@ -2011,7 +2011,7 @@ make_reconfigure_docker_mock() {
 printf '%s\n' "$*" >> "${TEST_DOCKER_CALLS:?}"
 
 if [ "${1:-}" = "ps" ]; then
-    printf '%s\n' kvs-php kvs-nginx kvs-acme
+    printf '%s\n' kvs-php kvs-nginx kvs-acme kvs-mariadb
     exit "${TEST_DOCKER_PS_STATUS:-0}"
 fi
 

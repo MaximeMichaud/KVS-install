@@ -474,6 +474,13 @@ CADDY_ROUTE_FILE=''
 CADDY_RESERVATION_FILE=''
 CADDY_ROUTE_EXISTED=false
 CADDY_RESERVATION_EXISTED=false
+# The environment and configuration hash of each running service, kept in
+# memory and never written to a file: an environment can hold the database
+# password.
+declare -A RUNTIME_RECORD_ENV=()
+declare -A RUNTIME_RECORD_HASH=()
+RUNTIME_RECREATED=false
+RUNTIME_TOUCHED=()
 
 # Check containers are running
 if ! RUNNING_CONTAINER_NAMES=$(docker ps --format '{{.Names}}' 2>/dev/null); then
@@ -482,6 +489,12 @@ if ! RUNNING_CONTAINER_NAMES=$(docker ps --format '{{.Names}}' 2>/dev/null); the
 fi
 if ! grep -Fxq "$PHP_CONTAINER" <<< "$RUNNING_CONTAINER_NAMES"; then
     echo -e "${RED}ERROR: ${PHP_CONTAINER} not running${NC}"
+    exit 1
+fi
+# The recreations below do not start the services Nginx depends on, and the
+# queries need MariaDB.
+if ! grep -Fxq "${CONTAINER_PREFIX}-mariadb" <<< "$RUNNING_CONTAINER_NAMES"; then
+    echo -e "${RED}ERROR: ${CONTAINER_PREFIX}-mariadb not running: start it (docker compose start mariadb, or docker compose up -d --no-deps mariadb if it was removed); nothing was changed${NC}"
     exit 1
 fi
 if [ "$MODE" = "multi" ]; then
@@ -905,6 +918,7 @@ rollback_multi_application_state() {
         [ "$current_setup" != "$MULTI_SETUP_AFTER" ] ||
         [ "$current_plugin" != "$MULTI_PLUGIN_AFTER" ]; then
         echo -e "${RED}ERROR: Application state changed concurrently; rollback was not attempted${NC}"
+        report_runtime_left_on_edited_env
         return 1
     fi
     if [ "$MULTI_SETUP_AFTER" != "$MULTI_SETUP_BEFORE" ] &&
@@ -920,6 +934,9 @@ rollback_multi_application_state() {
     fi
     if [ "$MULTI_DB_AFTER" != "$MULTI_DB_BEFORE" ] &&
         ! restore_server_state "$MULTI_DB_BEFORE" "$MULTI_DB_AFTER"; then
+        rollback_status=1
+    fi
+    if [ "$RUNTIME_RECREATED" = true ] && ! restore_runtime_environment; then
         rollback_status=1
     fi
     if [ "$rollback_status" -ne 0 ]; then
@@ -1002,9 +1019,11 @@ multi_rollback_on_exit() {
                 fi
             else
                 echo -e "${RED}ERROR: Application rollback was skipped because Caddy could not be restored${NC}"
+                report_runtime_left_on_edited_env
             fi
         fi
     fi
+    discard_runtime_environment
     exit "$status"
 }
 
@@ -1441,22 +1460,229 @@ issue_and_install_public_certificate() {
     fi
 }
 
-recreate_runtime_services() {
+# The services recreate_runtime_services recreates: php-fpm, cron and the
+# cache or search service of each active profile.
+runtime_services() {
     local profile
-    local -a services=(php-fpm cron)
     local -a active_profiles
 
+    RUNTIME_SERVICES=(php-fpm cron)
     IFS=',' read -r -a active_profiles <<< "${COMPOSE_PROFILES:-}"
     for profile in "${active_profiles[@]}"; do
         case "$profile" in
-            dragonfly|memcached|manticore) services+=("$profile") ;;
+            dragonfly|memcached|manticore) RUNTIME_SERVICES+=("$profile") ;;
         esac
     done
-    docker compose up -d --force-recreate --no-deps "${services[@]}" >/dev/null
+}
+
+recreate_runtime_services() {
+    runtime_services
+    RUNTIME_TOUCHED+=("${RUNTIME_SERVICES[@]}")
+    docker compose up -d --force-recreate --no-deps "${RUNTIME_SERVICES[@]}" >/dev/null
+}
+
+service_container_name() {
+    case "$1" in
+        php-fpm) printf '%s\n' "${CONTAINER_PREFIX}-php" ;;
+        *) printf '%s\n' "${CONTAINER_PREFIX}-$1" ;;
+    esac
+}
+
+container_environment() {
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1"
+}
+
+# The hash Compose labels a container with, of the whole configuration it
+# created the container from: environment, command, ports, image and the
+# rest, whatever .env values went into them.
+container_config_hash() {
+    docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$1"
+}
+
+# The variables a service's environment takes from .env under their own name
+# (- NAME=${NAME...} in the Compose files of the stack). Compose reads a
+# variable from the shell before .env, so exporting the value a container was
+# created with creates it again with that value. Variables of the image, such
+# as NGINX_VERSION, are not among them and are never passed back.
+compose_passthrough_names() {
+    local file
+    local -a files
+
+    if [ -n "${COMPOSE_FILE:-}" ]; then
+        IFS=':' read -r -a files <<< "$COMPOSE_FILE"
+    else
+        files=(docker-compose.yml docker-compose.override.yml)
+    fi
+    for file in "${files[@]}"; do
+        [ -f "$file" ] || continue
+        sed -n -E 's/^[[:space:]]*-[[:space:]]*"?([A-Za-z_][A-Za-z0-9_]*)=\$\{\1([:?}-].*)?$/\1/p' "$file"
+    done | sort -u
+}
+
+name_is_listed() {
+    local name="$1"
+    local listed
+
+    shift
+    for listed in "$@"; do
+        [ "$listed" != "$name" ] || return 0
+    done
+    return 1
+}
+
+# Multi mode recreates Nginx and the application services from the edited
+# .env before its commit point, and nothing kept the .env they were created
+# from. Their running environment is that record, with the configuration
+# hash Compose gave them: both are read before anything changes, so that a
+# failure before the commit point can create them again and check they run
+# as they ran. A service that is not running is not recorded.
+capture_runtime_environment() {
+    local service
+    local container
+    local environment
+    local config_hash
+
+    runtime_services
+    RUNTIME_RECORD_ENV=()
+    RUNTIME_RECORD_HASH=()
+    for service in "${RUNTIME_SERVICES[@]}" nginx; do
+        [ -z "${RUNTIME_RECORD_ENV[$service]+set}" ] || continue
+        container=$(service_container_name "$service")
+        grep -Fxq "$container" <<< "$RUNNING_CONTAINER_NAMES" || continue
+        if ! environment=$(container_environment "$container"); then
+            echo -e "${RED}ERROR: Could not read the environment of ${container}; nothing was changed${NC}"
+            return 1
+        fi
+        if ! config_hash=$(container_config_hash "$container") ||
+            [ -z "$config_hash" ] || [ "$config_hash" = '<no value>' ]; then
+            echo -e "${RED}ERROR: Could not read the Compose configuration hash of ${container}; nothing was changed${NC}"
+            return 1
+        fi
+        RUNTIME_RECORD_ENV[$service]=$environment
+        RUNTIME_RECORD_HASH[$service]=$config_hash
+    done
+}
+
+# The containers this run recreated from the edited .env, named when the
+# rollback does not create them again.
+report_runtime_left_on_edited_env() {
+    local service
+    local left=''
+    local seen=' '
+
+    for service in "${RUNTIME_TOUCHED[@]}"; do
+        [[ "$seen" != *" ${service} "* ]] || continue
+        seen="${seen}${service} "
+        left="${left:+${left}, }$(service_container_name "$service")"
+    done
+    [ -z "$left" ] ||
+        echo -e "${RED}Recreated from the edited .env and left on it: ${left}${NC}" || true
+}
+
+discard_runtime_environment() {
+    RUNTIME_RECORD_ENV=()
+    RUNTIME_RECORD_HASH=()
+}
+
+# The values of the listed variables in a recorded environment, as
+# NAME=VALUE lines.
+recorded_passthrough_lines() {
+    local record="$1"
+    local line
+    local name
+
+    shift
+    while IFS= read -r line; do
+        name=${line%%=*}
+        [ -n "$name" ] && [ "$name" != "$line" ] || continue
+        name_is_listed "$name" "$@" || continue
+        printf '%s\n' "$line"
+    done < <(printf '%s\n' "$record")
+}
+
+# Creates each service this run recreated, or tried to, again with the
+# environment it ran with, the application services first and Nginx last, as
+# Nginx resolves them when it starts, then checks every container took those
+# values back and carries the configuration hash it ran with. A service this
+# run did not recreate still runs as it ran and is left alone. A value .env
+# gives a container outside its environment, such as CACHE_MEMORY on the
+# command line of the cache, cannot be passed back: the hash tells, and the
+# container is named. The recorded environments are read without a
+# here-string: Bash writes one to a file under TMPDIR, before 5.1 always and
+# since when it is larger than a pipe.
+restore_runtime_environment() {
+    local service
+    local container
+    local record
+    local line
+    local current
+    local current_hash
+    local status=0
+    local restored=''
+    local added=''
+    local seen=' '
+    local -a names
+    local -a lines
+
+    mapfile -t names < <(compose_passthrough_names)
+    if [ "${#names[@]}" -eq 0 ]; then
+        echo -e "${RED}ERROR: The Compose files list no variable a container takes from .env; no container was created again${NC}" || true
+        report_runtime_left_on_edited_env
+        return 1
+    fi
+    runtime_services
+    for service in "${RUNTIME_SERVICES[@]}" nginx; do
+        [[ "$seen" != *" ${service} "* ]] || continue
+        seen="${seen}${service} "
+        name_is_listed "$service" "${RUNTIME_TOUCHED[@]}" || continue
+        container=$(service_container_name "$service")
+        if [ -z "${RUNTIME_RECORD_ENV[$service]+set}" ]; then
+            # Not running before this run: a profile the edited .env added.
+            if container_environment "$container" >/dev/null 2>&1; then
+                added="${added:+${added}, }${container}"
+            fi
+            continue
+        fi
+        record=${RUNTIME_RECORD_ENV[$service]}
+        mapfile -t lines < <(recorded_passthrough_lines "$record" "${names[@]}")
+        if ! (
+            for line in "${lines[@]}"; do
+                export "${line%%=*}=${line#*=}"
+            done
+            docker compose up -d --force-recreate --no-deps "$service" >/dev/null
+        ) || ! current=$(container_environment "$container") ||
+            ! current_hash=$(container_config_hash "$container"); then
+            echo -e "${RED}ERROR: ${container} could not be created again as it ran; it runs with the edited .env${NC}" || true
+            status=1
+            continue
+        fi
+        for line in "${lines[@]}"; do
+            if [[ $'\n'"$current"$'\n' != *$'\n'"$line"$'\n'* ]]; then
+                echo -e "${RED}ERROR: ${container} could not be created again as it ran; it runs with the edited .env${NC}" || true
+                status=1
+                continue 2
+            fi
+        done
+        if [ "$current_hash" != "${RUNTIME_RECORD_HASH[$service]}" ]; then
+            echo -e "${RED}ERROR: ${container} could not be created again as it ran; its configuration keeps values of the edited .env${NC}" || true
+            status=1
+            continue
+        fi
+        restored="${restored:+${restored}, }${container}"
+    done
+    [ -z "$restored" ] ||
+        echo -e "${GREEN}Recreated with the configuration they ran with: ${restored}${NC}" || true
+    [ -z "$added" ] ||
+        echo -e "${YELLOW}Not running before this run, left as the edited .env created them: ${added}${NC}" || true
+    return "$status"
 }
 
 if [ "$MODE" = "multi" ]; then
     prepare_multi_application_snapshot || exit 1
+    if ! capture_runtime_environment; then
+        discard_runtime_environment
+        exit 1
+    fi
     MULTI_DB_AFTER="$MULTI_DB_BEFORE"
     MULTI_SETUP_AFTER="$MULTI_SETUP_BEFORE"
     MULTI_PLUGIN_AFTER="$MULTI_PLUGIN_BEFORE"
@@ -1466,12 +1692,20 @@ if [ "$MODE" = "multi" ]; then
 fi
 
 # 1. Synchronize TLS services and validate the effective certificate.
+# Nginx and acme are recreated with --no-deps: PHP-FPM, the one service Nginx
+# depends on, runs (checked above), and a dependency Compose found changed in
+# the edited .env, MariaDB through PHP-FPM, would otherwise be recreated too.
 echo -e "${CYAN}Configuring SSL settings...${NC}"
 if ! sync_direct_tls_profile; then
     exit 1
 fi
 if [ "$MODE" = "multi" ]; then
-    if ! docker compose up -d --force-recreate nginx >/dev/null; then
+    # From here a rollback must create the services again as they ran,
+    # Nginx included when its own recreation fails: that can leave it
+    # removed or on the edited .env.
+    RUNTIME_RECREATED=true
+    RUNTIME_TOUCHED+=(nginx)
+    if ! docker compose up -d --force-recreate --no-deps nginx >/dev/null; then
         echo -e "${RED}ERROR: Could not recreate Nginx${NC}"
         exit 1
     fi
@@ -1485,7 +1719,7 @@ if [ "$MODE" = "multi" ]; then
         echo -e "${GREEN}Caddy public TLS selected${NC}"
     fi
 elif [ "$SSL_PROVIDER" = "selfsigned" ]; then
-    if ! docker compose up -d --force-recreate nginx >/dev/null; then
+    if ! docker compose up -d --force-recreate --no-deps nginx >/dev/null; then
         echo -e "${RED}ERROR: Could not recreate Nginx${NC}"
         exit 1
     fi
@@ -1510,7 +1744,7 @@ elif [ "$SSL_PROVIDER" = "selfsigned" ]; then
         exit 1
     fi
 else
-    if ! docker compose up -d --force-recreate nginx acme >/dev/null; then
+    if ! docker compose up -d --force-recreate --no-deps nginx acme >/dev/null; then
         echo -e "${RED}ERROR: Could not start Nginx and ACME${NC}"
         exit 1
     fi
@@ -1674,6 +1908,8 @@ if [ "$PENDING_MULTI_ROUTE" = true ]; then
     fi
     MULTI_ROLLBACK_ARMED=false
     trap - EXIT
+    discard_runtime_environment
+    RUNTIME_RECREATED=false
     MULTI_DB_BEFORE=''
     MULTI_DB_AFTER=''
     MULTI_SETUP_BEFORE=''

@@ -96,6 +96,56 @@ assert_before() {
         [ "$first_line" -lt "$second_line" ] || fail "$message"
 }
 
+# The number of the first line equal to $2 after the first line containing
+# $3, or nothing.
+line_after() {
+    local file="$1"
+    local line="$2"
+    local anchor="$3"
+    local start
+
+    start=$(grep -nFm 1 -- "$anchor" "$file" | cut -d : -f 1 || true)
+    [ -n "$start" ] || return 0
+    awk -v start="$start" -v line="$line" \
+        'NR > start && $0 == line { print NR; exit }' "$file"
+}
+
+assert_line_after() {
+    local file="$1"
+    local anchor="$2"
+    local line="$3"
+    local message="$4"
+
+    ASSERTIONS=$((ASSERTIONS + 1))
+    [ -n "$(line_after "$file" "$line" "$anchor")" ] || fail "$message"
+}
+
+assert_no_line_after() {
+    local file="$1"
+    local anchor="$2"
+    local line="$3"
+    local message="$4"
+
+    ASSERTIONS=$((ASSERTIONS + 1))
+    [ -z "$(line_after "$file" "$line" "$anchor")" ] || fail "$message"
+}
+
+assert_lines_ordered_after() {
+    local file="$1"
+    local anchor="$2"
+    local first="$3"
+    local second="$4"
+    local message="$5"
+    local first_line
+    local second_line
+
+    first_line=$(line_after "$file" "$first" "$anchor")
+    second_line=$(line_after "$file" "$second" "$anchor")
+    ASSERTIONS=$((ASSERTIONS + 1))
+    [ -n "$first_line" ] && [ -n "$second_line" ] &&
+        [ "$first_line" -lt "$second_line" ] || fail "$message"
+}
+
 file_snapshot() {
     local contents="$1"
     local digest
@@ -226,7 +276,20 @@ create_fixture() {
         "$fixture/multi-site/caddy/sites"
     cp "$ROOT_DIR/docker/reconfigure.sh" "$fixture/reconfigure.sh"
     chmod +x "$fixture/reconfigure.sh"
-    : > "$fixture/docker-compose.yml"
+    # The entries a multi rollback passes back, as in the real stack.
+    cat > "$fixture/docker-compose.yml" <<'EOF'
+services:
+  nginx:
+    environment:
+      - DOMAIN=${DOMAIN}
+      - MODE=${MODE:-single}
+      - USE_WWW=${USE_WWW:-false}
+      - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+  php-fpm:
+    environment:
+      - DOMAIN=${DOMAIN}
+      - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+EOF
 
     cat > "$fixture/.env" <<'EOF'
 DOMAIN=7.0.2.example.org
@@ -365,10 +428,120 @@ inject_concurrent_mutation() {
         "$MOCK_CALLS"
 }
 
+# The environment of a service container: the one a modelled compose up
+# gave it, or what the stack's .env gives it, or MOCK_INITIAL_ENV_<service>
+# for a container created before .env was edited.
+container_environment() {
+    local service="$1"
+    local initial_name="MOCK_INITIAL_ENV_${service//-/_}"
+    local key
+
+    if [ -f "${MOCK_STATE:?}/env-${service}" ]; then
+        cat "$MOCK_STATE/env-${service}"
+    elif [ -n "${!initial_name:-}" ]; then
+        printf '%s\n' "${!initial_name}"
+    else
+        for key in DOMAIN USE_WWW SSL_PROVIDER MODE PROJECT_HTTPS_PORT; do
+            printf '%s=%s\n' "$key" "$(sed -n "s/^${key}=//p" .env | tail -n 1)"
+        done
+    fi
+}
+
+# The value Compose interpolates for a variable: the caller's environment
+# wins over .env, as with the real Compose.
+compose_value() {
+    local key="$1"
+
+    if [ -n "${!key+x}" ] && [ "${MOCK_COMPOSE_IGNORES_SHELL:-false}" != true ]; then
+        printf '%s\n' "${!key}"
+    else
+        sed -n "s/^${key}=//p" .env | tail -n 1
+    fi
+}
+
+# The com.docker.compose.config-hash label: a digest of the values Compose
+# interpolated for the service, its environment and, for the cache
+# services, CACHE_MEMORY on their command line.
+config_hash_of() {
+    local service="$1"
+    local environment="$2"
+    local cache_memory="$3"
+
+    {
+        grep -E '^(DOMAIN|USE_WWW|SSL_PROVIDER|MODE)=' <<< "$environment" | sort
+        case "$service" in
+            dragonfly|memcached) printf 'CACHE_MEMORY=%s\n' "$cache_memory" ;;
+        esac
+    } | sha256sum | cut -c1-64
+}
+
+# The label of a running container: the one a modelled compose up gave it,
+# or the one of a container created before .env was edited, with
+# MOCK_INITIAL_CACHE_MEMORY_<service> as the CACHE_MEMORY it was created with.
+container_config_hash() {
+    local service="$1"
+    local initial_name="MOCK_INITIAL_CACHE_MEMORY_${service//-/_}"
+
+    if [ -f "${MOCK_STATE:?}/hash-${service}" ]; then
+        cat "$MOCK_STATE/hash-${service}"
+    else
+        config_hash_of "$service" "$(container_environment "$service")" \
+            "${!initial_name:-$(sed -n 's/^CACHE_MEMORY=//p' .env | tail -n 1)}"
+    fi
+}
+
+# Models the interpolation of compose up: a variable set in the caller's
+# environment wins over .env, as with the real Compose.
+record_compose_environment() {
+    local service="$1"
+    local key
+    local value
+
+    for key in DOMAIN USE_WWW SSL_PROVIDER MODE PROJECT_HTTPS_PORT; do
+        if [ -n "${!key+x}" ] && [ "${MOCK_COMPOSE_IGNORES_SHELL:-false}" != true ]; then
+            value=${!key}
+        else
+            value=$(sed -n "s/^${key}=//p" .env | tail -n 1)
+        fi
+        printf '%s=%s\n' "$key" "$value"
+    done > "${MOCK_STATE:?}/env-${service}"
+    if [ -n "${NGINX_VERSION+x}" ]; then
+        printf 'compose-saw-image-variable NGINX_VERSION\n' >> "$MOCK_CALLS"
+    fi
+    printf 'compose-environment %s %s\n' "$service" \
+        "$(tr '\n' ' ' < "$MOCK_STATE/env-${service}")" >> "$MOCK_CALLS"
+    config_hash_of "$service" "$(cat "$MOCK_STATE/env-${service}")" \
+        "$(compose_value CACHE_MEMORY)" > "$MOCK_STATE/hash-${service}"
+}
+
 log_call "$@"
 joined=" $* "
 
 case "${1:-}" in
+    inspect)
+        container="${!#}"
+        case "$container" in
+            kvs-php) service=php-fpm ;;
+            kvs-*) service=${container#kvs-} ;;
+            *) exit 1 ;;
+        esac
+        # No such container: neither running nor created by compose up.
+        if [ ! -f "${MOCK_STATE:?}/env-${service}" ] &&
+            ! print_names "${MOCK_RUNNING_NAMES:-kvs-php}" | grep -Fxq "$container"; then
+            exit 1
+        fi
+        if [[ "$joined" == *'com.docker.compose.config-hash'* ]]; then
+            # A container Compose did not create has no such label.
+            if [ "${MOCK_NO_CONFIG_HASH:-}" = "$container" ]; then
+                printf '\n'
+                exit 0
+            fi
+            container_config_hash "$service"
+        else
+            container_environment "$service"
+        fi
+        exit "${MOCK_INSPECT_STATUS:-0}"
+        ;;
     ps)
         if [[ "$joined" == *' -a '* ]]; then
             if [ "${MOCK_PS_ALL_STATUS:-0}" -ne 0 ]; then
@@ -380,6 +553,7 @@ case "${1:-}" in
             fi
         else
             print_names "${MOCK_RUNNING_NAMES:-kvs-php}"
+            [ "${MOCK_MARIADB_STOPPED:-false}" = true ] || printf '%s\n' kvs-mariadb
             exit "${MOCK_PS_STATUS:-0}"
         fi
         exit 0
@@ -394,10 +568,33 @@ case "${1:-}" in
         exit "${MOCK_RM_STATUS:-0}"
         ;;
     compose)
-        if [[ "$joined" == *' --no-deps '* ]]; then
-            exit "${MOCK_RUNTIME_STATUS:-0}"
+        # Nginx (and acme with it) on one side, the application services on
+        # the other, each with its own sequence of results.
+        if [[ "$joined" == *' nginx '* ]]; then
+            next_status MOCK_COMPOSE_STATUS nginx-recreate-count
+        else
+            next_status MOCK_RUNTIME_STATUS runtime-recreate-count
         fi
-        exit "${MOCK_COMPOSE_STATUS:-0}"
+        # Without --no-deps Compose brings the dependencies of Nginx up to
+        # date: PHP-FPM, then MariaDB, recreated when the edited .env changed
+        # its configuration, its image included.
+        if [[ "$joined" == *' up '* ]] && [[ "$joined" == *' nginx '* ]] &&
+            [[ "$joined" != *' --no-deps '* ]] &&
+            [ "$(compose_value MARIADB_VERSION)" != \
+                "${MOCK_INITIAL_MARIADB_VERSION:-$(compose_value MARIADB_VERSION)}" ]; then
+            printf 'compose-recreated-dependency mariadb %s\n' \
+                "$(compose_value MARIADB_VERSION)" >> "$MOCK_CALLS"
+        fi
+        if [ "$NEXT_STATUS" -eq 0 ] && [[ "$joined" == *' up '* ]]; then
+            for argument in "$@"; do
+                case "$argument" in
+                    nginx|php-fpm|cron|dragonfly|memcached|manticore)
+                        record_compose_environment "$argument"
+                        ;;
+                esac
+            done
+        fi
+        exit "$NEXT_STATUS"
         ;;
     exec)
         if [[ "$joined" == *' KVS_TLS_HOST='* ]]; then
@@ -415,6 +612,12 @@ case "${1:-}" in
                 printf 'caddy-validate signal=TERM\n' >> "$MOCK_CALLS"
                 kill -TERM "$PPID"
                 exit 143
+            fi
+            if [ "$NEXT_COUNT" -eq 2 ] &&
+                [ "${MOCK_CADDY_VALIDATE_SIGNAL:-}" = KILL ]; then
+                printf 'caddy-validate signal=KILL\n' >> "$MOCK_CALLS"
+                kill -KILL "$PPID"
+                exit 137
             fi
             if [ "$NEXT_COUNT" -eq 2 ] && [ "$NEXT_STATUS" -ne 0 ]; then
                 inject_concurrent_mutation
@@ -791,7 +994,7 @@ set_env_value "$TEST_ROOT/cloudflare-enabled" CLOUDFLARE_ENABLED true
 run_case cloudflare-enabled CLOUDFLARE_ENABLED=invalid
 assert_success "saved Cloudflare setting"
 assert_contains "$LAST_DIR/.env" 'CLOUDFLARE_ENABLED=true' "Cloudflare choice was lost"
-assert_contains "$LAST_DIR/docker.calls" 'compose up -d --force-recreate nginx acme' "Nginx was not recreated"
+assert_contains "$LAST_DIR/docker.calls" 'compose up -d --force-recreate --no-deps nginx acme' "Nginx was not recreated"
 
 # Public direct TLS, exact SANs, profiles, stopped Nginx/ACME, runtime services,
 # plugin safety, persisted port, and the final verified success marker.
@@ -807,7 +1010,7 @@ assert_eq 'dragonfly,direct-tls' \
 assert_count 1 "$LAST_DIR/.env" 'PROJECT_HTTPS_PORT=18443' \
     "persisted HTTPS port"
 assert_contains "$LAST_DIR/docker.calls" \
-    'docker compose up -d --force-recreate nginx acme' \
+    'docker compose up -d --force-recreate --no-deps nginx acme' \
     "stopped Nginx and ACME were not started"
 assert_contains "$LAST_DIR/docker.calls" \
     'acme.sh --issue -d 7.0.2.example.org' \
@@ -1248,10 +1451,15 @@ set_env_value "$TEST_ROOT/multi-runtime-rollback" MODE multi
 set_env_value "$TEST_ROOT/multi-runtime-rollback" COMPOSE_FILE \
     'docker-compose.yml:docker-compose.multi.yml'
 set_env_value "$TEST_ROOT/multi-runtime-rollback" SSL_PROVIDER selfsigned
+# The recreation of the application services fails; the one the rollback
+# makes to give them back their previous environment succeeds.
 run_case multi-runtime-rollback \
     MOCK_RUNNING_NAMES='kvs-php kvs-caddy' \
-    MOCK_RUNTIME_STATUS=52
+    MOCK_RUNTIME_STATUS=52,0
 assert_failure "multi-site runtime failure rollback"
+assert_count 2 "$LAST_DIR/docker.calls" \
+    'docker-text compose up -d --force-recreate --no-deps php-fpm' \
+    "runtime failure rollback did not create php-fpm again"
 assert_eq "$(<"$LAST_DIR/state/db-before")" \
     "$(<"$LAST_DIR/state/db-current")" \
     "runtime failure did not restore the database"
@@ -1479,6 +1687,342 @@ assert_contains "$LAST_DIR/docker.calls" \
     "Caddy did not receive public TLS and USE_WWW=false"
 assert_not_contains "$LAST_DIR/output.log" 'Reconfiguration Complete' \
     "Caddy validation failure reported success"
+
+# R3: Nginx, PHP-FPM, cron and the cache are recreated from the edited .env
+# before the commit point. A later failure must create them again with the
+# environment they ran with before, not only restore Caddy and the database:
+# with USE_WWW edited from true to false, the old route sends www to an Nginx
+# that would now answer it 444.
+r3_compose_file() {
+    cat > "$1/docker-compose.yml" <<'EOF'
+services:
+  nginx:
+    environment:
+      - DOMAIN=${DOMAIN}
+      - MODE=${MODE:-single}
+      - USE_WWW=${USE_WWW:-false}
+      - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+  php-fpm:
+    environment:
+      - DOMAIN=${DOMAIN}
+      - SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+EOF
+}
+r3_old_nginx_env=$'DOMAIN=7.0.2.example.org\nMODE=multi\nUSE_WWW=true\nSSL_PROVIDER=none\nNGINX_VERSION=1.29.0'
+for name in r3-restore-environment r3-restore-environment-failure \
+    r3-restore-environment-mismatch; do
+    create_fixture "$name"
+    set_env_value "$TEST_ROOT/$name" MODE multi
+    set_env_value "$TEST_ROOT/$name" COMPOSE_FILE \
+        'docker-compose.yml:docker-compose.multi.yml'
+    r3_compose_file "$TEST_ROOT/$name"
+    printf '%s\n' old-route > \
+        "$TEST_ROOT/$name/multi-site/caddy/sites/7.0.2.example.org.caddy"
+    printf '%s\n' old-reservation > \
+        "$TEST_ROOT/$name/multi-site/sites/.primary.env"
+done
+run_case r3-restore-environment \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_ENV_nginx="$r3_old_nginx_env" \
+    MOCK_CADDY_VALIDATE_RESULTS=0,57,0
+assert_failure "R3: Caddy validation failure after the recreation"
+assert_contains "$LAST_DIR/state/env-nginx" 'USE_WWW=true' \
+    "R3: Nginx kept the edited USE_WWW after the rollback"
+# The forward recreations run the same commands: only the lines after the
+# failing validation are the rollback's.
+r3_failure='caddy-validate count=2 status=57'
+assert_line_after "$LAST_DIR/docker.calls" "$r3_failure" \
+    'docker-text compose up -d --force-recreate --no-deps nginx' \
+    "R3: the rollback did not create Nginx again"
+assert_before "$LAST_DIR/docker.calls" "$r3_failure" \
+    'compose-environment nginx DOMAIN=7.0.2.example.org USE_WWW=true' \
+    "R3: Nginx did not get its previous USE_WWW back after the failure"
+assert_lines_ordered_after "$LAST_DIR/docker.calls" "$r3_failure" \
+    'docker-text compose up -d --force-recreate --no-deps php-fpm' \
+    'docker-text compose up -d --force-recreate --no-deps nginx' \
+    "R3: Nginx was created again before the application services it resolves"
+for r3_service in php-fpm cron dragonfly; do
+    assert_line_after "$LAST_DIR/docker.calls" "$r3_failure" \
+        "docker-text compose up -d --force-recreate --no-deps ${r3_service}" \
+        "R3: the rollback did not create ${r3_service} again"
+done
+assert_not_contains "$LAST_DIR/docker.calls" 'compose-saw-image-variable' \
+    "R3: a variable of the image, not of the Compose file, was passed back"
+assert_contains "$LAST_DIR/output.log" \
+    'Recreated with the configuration they ran with: kvs-php, kvs-cron, kvs-dragonfly, kvs-nginx' \
+    "R3: the restored containers were not named"
+assert_contains "$LAST_DIR/output.log" \
+    'Application state restored after the reconfiguration failure' \
+    "R3: a complete rollback was not confirmed"
+
+# The Nginx recreation of the rollback fails: the message must not claim a
+# restored application.
+run_case r3-restore-environment-failure \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_ENV_nginx="$r3_old_nginx_env" \
+    MOCK_CADDY_VALIDATE_RESULTS=0,57,0 \
+    MOCK_COMPOSE_STATUS=0,61
+assert_failure "R3: failed rollback recreation"
+assert_contains "$LAST_DIR/state/env-nginx" 'USE_WWW=false' \
+    "R3: the failed recreation fixture did not keep the edited Nginx"
+assert_contains "$LAST_DIR/output.log" \
+    'kvs-nginx could not be created again as it ran' \
+    "R3: the container left on the edited .env was not named"
+assert_contains "$LAST_DIR/output.log" \
+    'Application rollback failed and requires manual recovery' \
+    "R3: a partial rollback was not reported as such"
+assert_not_contains "$LAST_DIR/output.log" \
+    'Application state restored after the reconfiguration failure' \
+    "R3: a partial rollback claimed a restored application"
+
+# Compose succeeds but the container did not take its previous values back:
+# the rollback must check the container, not only the exit status.
+run_case r3-restore-environment-mismatch \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_ENV_nginx="$r3_old_nginx_env" \
+    MOCK_CADDY_VALIDATE_RESULTS=0,57,0 \
+    MOCK_COMPOSE_IGNORES_SHELL=true
+assert_failure "R3: unverified rollback recreation"
+assert_contains "$LAST_DIR/output.log" \
+    'kvs-nginx could not be created again as it ran' \
+    "R3: a container that kept the edited values was not detected"
+assert_not_contains "$LAST_DIR/output.log" \
+    'Application state restored after the reconfiguration failure' \
+    "R3: an unverified rollback claimed a restored application"
+
+# The cache takes CACHE_MEMORY on its command line, not in its environment:
+# no exported value can bring the old one back. The configuration hash
+# Compose labels it with tells, and the rollback must not claim it.
+for name in r3-cache-command r3-no-passthrough-names r3-concurrent-left \
+    r3-caddy-skip-left r3-profile-added; do
+    create_fixture "$name"
+    set_env_value "$TEST_ROOT/$name" MODE multi
+    set_env_value "$TEST_ROOT/$name" COMPOSE_FILE \
+        'docker-compose.yml:docker-compose.multi.yml'
+    printf '%s\n' old-route > \
+        "$TEST_ROOT/$name/multi-site/caddy/sites/7.0.2.example.org.caddy"
+    printf '%s\n' old-reservation > \
+        "$TEST_ROOT/$name/multi-site/sites/.primary.env"
+done
+set_env_value "$TEST_ROOT/r3-cache-command" CACHE_MEMORY 4096
+run_case r3-cache-command \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_CACHE_MEMORY_dragonfly=512 \
+    MOCK_CADDY_VALIDATE_RESULTS=0,57,0
+assert_failure "R3: cache recreated with an edited command"
+assert_contains "$LAST_DIR/output.log" \
+    'kvs-dragonfly could not be created again as it ran; its configuration keeps values of the edited .env' \
+    "R3: a cache left on the edited CACHE_MEMORY was not detected"
+assert_contains "$LAST_DIR/output.log" \
+    'Recreated with the configuration they ran with: kvs-php, kvs-cron, kvs-nginx' \
+    "R3: the containers that did run as before were not named apart"
+assert_contains "$LAST_DIR/output.log" \
+    'Application rollback failed and requires manual recovery' \
+    "R3: the cache left on the edited .env did not fail the rollback"
+assert_not_contains "$LAST_DIR/output.log" \
+    'Application state restored after the reconfiguration failure' \
+    "R3: a cache on the edited .env was reported restored"
+
+# A failure before the application services are recreated: the rollback
+# creates Nginx again, from its record even when its own recreation failed,
+# and leaves PHP-FPM, cron and the cache as they ran. The cache would
+# otherwise lose its data and come back on the edited CACHE_MEMORY.
+for name in r3-untouched-left-alone r3-untouched-after-update; do
+    create_fixture "$name"
+    set_env_value "$TEST_ROOT/$name" MODE multi
+    set_env_value "$TEST_ROOT/$name" COMPOSE_FILE \
+        'docker-compose.yml:docker-compose.multi.yml'
+    set_env_value "$TEST_ROOT/$name" CACHE_MEMORY 4096
+    printf '%s\n' old-route > \
+        "$TEST_ROOT/$name/multi-site/caddy/sites/7.0.2.example.org.caddy"
+    printf '%s\n' old-reservation > \
+        "$TEST_ROOT/$name/multi-site/sites/.primary.env"
+done
+run_case r3-untouched-left-alone \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_CACHE_MEMORY_dragonfly=512 \
+    MOCK_COMPOSE_STATUS=47,0
+assert_failure "R3: forward Nginx recreation failure"
+assert_count 2 "$LAST_DIR/docker.calls" \
+    'docker-text compose up -d --force-recreate --no-deps nginx' \
+    "R3: the rollback did not create Nginx again after its failed recreation"
+run_case r3-untouched-after-update \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_CACHE_MEMORY_dragonfly=512 \
+    MOCK_TLS_DB_STATUS=1
+assert_failure "R3: update failure after the Nginx recreation"
+assert_count 2 "$LAST_DIR/docker.calls" \
+    'docker-text compose up -d --force-recreate --no-deps nginx' \
+    "R3: the rollback did not create Nginx again after the failed update"
+for name in r3-untouched-left-alone r3-untouched-after-update; do
+    LAST_DIR="$TEST_ROOT/$name"
+    for r3_service in php-fpm cron dragonfly; do
+        assert_not_contains "$LAST_DIR/docker.calls" \
+            "--force-recreate --no-deps ${r3_service}" \
+            "R3: the rollback recreated ${r3_service}, which this run never touched (${name})"
+    done
+    assert_contains "$LAST_DIR/output.log" \
+        'Recreated with the configuration they ran with: kvs-nginx' \
+        "R3: Nginx alone was not named as created again (${name})"
+    assert_contains "$LAST_DIR/output.log" \
+        'Application state restored after the reconfiguration failure' \
+        "R3: a rollback of Nginx alone was not reported complete (${name})"
+done
+
+# Killed before its rollback, the run leaves nothing on disk that holds the
+# environments of the containers, passwords included.
+create_fixture r3-no-secret-on-disk
+set_env_value "$TEST_ROOT/r3-no-secret-on-disk" MODE multi
+set_env_value "$TEST_ROOT/r3-no-secret-on-disk" COMPOSE_FILE \
+    'docker-compose.yml:docker-compose.multi.yml'
+run_case r3-no-secret-on-disk \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_ENV_php_fpm=$'DOMAIN=7.0.2.example.org\nSSL_PROVIDER=letsencrypt\nMARIADB_PASSWORD=r3-marker-not-on-disk' \
+    MOCK_CADDY_VALIDATE_SIGNAL=KILL
+assert_eq 137 "$LAST_STATUS" "R3: the fixture did not kill the run"
+assert_eq '' "$(grep -rl 'r3-marker-not-on-disk' "$LAST_DIR/state" || true)" \
+    "R3: a container environment, password included, was left on disk"
+# Bash writes a here-string to a file under TMPDIR, any of them before 5.1
+# and one larger than a pipe since: the functions that read the recorded
+# environments do without.
+for r3_function in recorded_passthrough_lines restore_runtime_environment; do
+    awk -v sig="${r3_function}() {" \
+        '$0 == sig { c = 1 } c { print } c && /^}$/ { exit }' \
+        "$ROOT_DIR/docker/reconfigure.sh" > "$TEST_ROOT/${r3_function}.body"
+    assert_contains "$TEST_ROOT/${r3_function}.body" "${r3_function}() {" \
+        "R3: ${r3_function} was not found in reconfigure.sh"
+    assert_not_contains "$TEST_ROOT/${r3_function}.body" '<<<' \
+        "R3: ${r3_function} reads a recorded environment through a here-string"
+done
+
+# A container without the configuration hash cannot be checked after a
+# rollback: multi mode must stop before it changes anything.
+create_fixture r3-no-config-hash
+set_env_value "$TEST_ROOT/r3-no-config-hash" MODE multi
+set_env_value "$TEST_ROOT/r3-no-config-hash" COMPOSE_FILE \
+    'docker-compose.yml:docker-compose.multi.yml'
+run_case r3-no-config-hash \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_NO_CONFIG_HASH=kvs-cron
+assert_failure "R3: container without a configuration hash"
+assert_contains "$LAST_DIR/output.log" \
+    'Could not read the Compose configuration hash of kvs-cron; nothing was changed' \
+    "R3: a container without a configuration hash was not refused"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose up' \
+    "R3: a container was recreated though the rollback could not check it"
+
+# No Compose file lists a passed-through variable: nothing could be passed
+# back, so no recreation can be checked. The rollback must say so and name
+# the containers left on the edited .env, not pass every check trivially.
+: > "$TEST_ROOT/r3-no-passthrough-names/docker-compose.yml"
+run_case r3-no-passthrough-names \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_ENV_nginx="$r3_old_nginx_env" \
+    MOCK_CADDY_VALIDATE_RESULTS=0,57,0
+assert_failure "R3: no variable to pass back"
+assert_contains "$LAST_DIR/output.log" \
+    'The Compose files list no variable a container takes from .env; no container was created again' \
+    "R3: an empty list of passed-through variables was not refused"
+assert_contains "$LAST_DIR/output.log" \
+    'Recreated from the edited .env and left on it: kvs-nginx, kvs-php, kvs-cron, kvs-dragonfly' \
+    "R3: the containers left on the edited .env were not named"
+assert_no_line_after "$LAST_DIR/docker.calls" "$r3_failure" \
+    'docker-text compose up -d --force-recreate --no-deps nginx' \
+    "R3: Nginx was recreated with nothing to pass back"
+assert_not_contains "$LAST_DIR/output.log" \
+    'Application state restored after the reconfiguration failure' \
+    "R3: a rollback with nothing passed back was reported restored"
+
+# The rollback stops before the containers: the ones this run recreated from
+# the edited .env must be named.
+run_case r3-concurrent-left \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_ENV_nginx="$r3_old_nginx_env" \
+    MOCK_CADDY_VALIDATE_RESULTS=0,57,0 \
+    MOCK_CONCURRENT_MUTATION_TARGET=setup
+assert_failure "R3: concurrent change before the rollback"
+assert_contains "$LAST_DIR/output.log" \
+    'Application state changed concurrently; rollback was not attempted' \
+    "R3: the concurrent change fixture did not stop the rollback"
+assert_contains "$LAST_DIR/output.log" \
+    'Recreated from the edited .env and left on it: kvs-nginx, kvs-php, kvs-cron, kvs-dragonfly' \
+    "R3: the containers a stopped rollback left were not named"
+run_case r3-caddy-skip-left \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_ENV_nginx="$r3_old_nginx_env" \
+    MOCK_CADDY_VALIDATE_RESULTS=0,57,58
+assert_failure "R3: Caddy not restored"
+assert_contains "$LAST_DIR/output.log" \
+    'Application rollback was skipped because Caddy could not be restored' \
+    "R3: the Caddy failure fixture did not skip the rollback"
+assert_contains "$LAST_DIR/output.log" \
+    'Recreated from the edited .env and left on it: kvs-nginx, kvs-php, kvs-cron, kvs-dragonfly' \
+    "R3: the containers a skipped rollback left were not named"
+
+# The edited .env added a profile: its service did not run before, so there
+# is nothing to create it again from, and it must be named.
+set_env_value "$TEST_ROOT/r3-profile-added" COMPOSE_PROFILES dragonfly,memcached
+run_case r3-profile-added \
+    MOCK_RUNNING_NAMES='kvs-php kvs-nginx kvs-cron kvs-dragonfly kvs-caddy' \
+    MOCK_INITIAL_ENV_nginx="$r3_old_nginx_env" \
+    MOCK_CADDY_VALIDATE_RESULTS=0,57,0
+assert_failure "R3: rollback after a profile was added"
+assert_contains "$LAST_DIR/output.log" \
+    'Not running before this run, left as the edited .env created them: kvs-memcached' \
+    "R3: a service the edited .env added was not named"
+assert_contains "$LAST_DIR/output.log" \
+    'Recreated with the configuration they ran with: kvs-php, kvs-cron, kvs-dragonfly, kvs-nginx' \
+    "R3: the recorded containers were not created again"
+
+# --no-deps does not start a stopped MariaDB, which the queries need: the run
+# must stop before it recreates anything or requests a certificate.
+create_fixture r3-mariadb-stopped
+run_case r3-mariadb-stopped MOCK_RUNNING_NAMES='kvs-php kvs-nginx' \
+    MOCK_MARIADB_STOPPED=true
+assert_failure "R3: stopped MariaDB"
+assert_contains "$LAST_DIR/output.log" \
+    'kvs-mariadb not running: start it (docker compose start mariadb, or docker compose up -d --no-deps mariadb if it was removed); nothing was changed' \
+    "R3: a stopped MariaDB was not refused"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose up' \
+    "R3: a container was recreated while MariaDB was stopped"
+assert_not_contains "$LAST_DIR/docker.calls" 'acme.sh' \
+    "R3: a certificate was requested while MariaDB was stopped"
+
+# Nginx and acme are recreated with --no-deps in every mode: without it
+# Compose brings their dependencies up to date, and an edited
+# MARIADB_VERSION would recreate MariaDB on another image.
+for name in r3-no-deps-public r3-no-deps-selfsigned r3-no-deps-multi; do
+    create_fixture "$name"
+    set_env_value "$TEST_ROOT/$name" MARIADB_VERSION 12.3
+done
+set_env_value "$TEST_ROOT/r3-no-deps-selfsigned" SSL_PROVIDER selfsigned
+set_env_value "$TEST_ROOT/r3-no-deps-multi" MODE multi
+set_env_value "$TEST_ROOT/r3-no-deps-multi" COMPOSE_FILE \
+    'docker-compose.yml:docker-compose.multi.yml'
+set_env_value "$TEST_ROOT/r3-no-deps-multi" SSL_PROVIDER selfsigned
+run_case r3-no-deps-public MOCK_INITIAL_MARIADB_VERSION=11.8
+assert_success "R3: public reconfiguration with an edited MARIADB_VERSION"
+assert_contains "$LAST_DIR/docker.calls" \
+    'docker-text compose up -d --force-recreate --no-deps nginx acme' \
+    "R3: Nginx and acme were recreated without --no-deps"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose-recreated-dependency' \
+    "R3: the public Nginx recreation recreated MariaDB"
+run_case r3-no-deps-selfsigned MOCK_INITIAL_MARIADB_VERSION=11.8 \
+    MOCK_CERT_RESULTS=1,0
+assert_success "R3: self-signed reconfiguration with an edited MARIADB_VERSION"
+assert_contains "$LAST_DIR/docker.calls" \
+    'docker-text compose up -d --force-recreate --no-deps nginx' \
+    "R3: the self-signed Nginx was recreated without --no-deps"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose-recreated-dependency' \
+    "R3: the self-signed Nginx recreation recreated MariaDB"
+run_case r3-no-deps-multi MOCK_INITIAL_MARIADB_VERSION=11.8 \
+    MOCK_RUNNING_NAMES='kvs-php kvs-caddy'
+assert_success "R3: multi reconfiguration with an edited MARIADB_VERSION"
+assert_contains "$LAST_DIR/docker.calls" \
+    'docker-text compose up -d --force-recreate --no-deps nginx' \
+    "R3: the multi-mode Nginx was recreated without --no-deps"
+assert_not_contains "$LAST_DIR/docker.calls" 'compose-recreated-dependency' \
+    "R3: the multi-mode Nginx recreation recreated MariaDB"
 
 # TERM while validating the generated route occurs before the commit point.
 # The EXIT trap must restore and reload Caddy before rolling back application
