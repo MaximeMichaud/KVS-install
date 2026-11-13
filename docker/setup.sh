@@ -3443,6 +3443,33 @@ preflight_checks() {
         else
             echo -e "${GREEN}✓${NC} Docker Compose installed: ${compose_version}"
         fi
+        # BuildKit, when this stack builds its images. The PHP-FPM and cron
+        # images mount the FFmpeg packages of their build stage into the step
+        # that installs them (RUN --mount), so the compiler and the package
+        # files never become layers, and only BuildKit runs that step.
+        # Compose builds with the legacy builder when DOCKER_BUILDKIT is
+        # false, and cannot use BuildKit without the buildx plugin: the
+        # legacy builder compiles FFmpeg for many minutes and then stops on
+        # that step. A stack that runs the images of a kvsctl release
+        # (docker-compose.release.yml) builds none.
+        if [ ! -e docker-compose.release.yml ]; then
+            case "${DOCKER_BUILDKIT:-}" in
+                0|f|F|false|FALSE|False)
+                    echo -e "${RED}✗${NC} DOCKER_BUILDKIT=${DOCKER_BUILDKIT} selects the legacy builder, which cannot build the PHP-FPM and cron images"
+                    echo "  Unset it, BuildKit is the default, and run the setup again"
+                    critical_failed=$((critical_failed + 1))
+                    ;;
+                *)
+                    if docker buildx version >/dev/null 2>&1; then
+                        echo -e "${GREEN}✓${NC} Docker buildx installed: the images build with BuildKit"
+                    else
+                        echo -e "${RED}✗${NC} Docker buildx not installed: Docker Compose needs it to build the PHP-FPM and cron images with BuildKit"
+                        echo "  Install the buildx plugin (docker-buildx-plugin from Docker's repository, or the distribution's docker-buildx package), then run the setup again"
+                        critical_failed=$((critical_failed + 1))
+                    fi
+                    ;;
+            esac
+        fi
     else
         echo -e "${RED}✗${NC} Docker Compose not installed"
         echo "  Docker Compose v2 is required (plugin, not standalone)"
