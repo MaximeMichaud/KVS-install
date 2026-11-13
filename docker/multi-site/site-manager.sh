@@ -945,6 +945,15 @@ EOF
 # Start Site
 # =============================================================================
 
+# A start that ends between the cron stop and the "up -d" that starts the
+# site again leaves cron stopped, and restart: unless-stopped keeps it
+# stopped after a reboot too: the exit says so. Run from the EXIT trap.
+STOPPED_CRON_SITE=""
+stopped_cron_notice() {
+    [ -n "$STOPPED_CRON_SITE" ] || return 0
+    log_warn "cron of ${STOPPED_CRON_SITE} is stopped: docker compose start cron in ${SITES_DIR}/${STOPPED_CRON_SITE}, or re-run ./site-manager.sh start ${STOPPED_CRON_SITE}"
+}
+
 start_site() {
     local domain="$1"
     local admin_password="${KVS_ADMIN_PASSWORD:-}"
@@ -966,6 +975,14 @@ start_site() {
 
     log_info "Starting site: ${domain}"
     cd "$site_dir"
+
+    # kvs-init clears KVS's cron locks and its cron registration
+    # (40-configure-database.sh): a cron.php still running on a started
+    # site must not see that. The "up -d" below starts cron again.
+    log_info "Stopping cron for the initialization..."
+    docker compose stop cron
+    STOPPED_CRON_SITE=$domain
+    trap stopped_cron_notice EXIT
 
     # Run init containers first
     log_info "Running initialization..."
@@ -1031,6 +1048,7 @@ start_site() {
     # Start all services
     log_info "Starting services..."
     docker compose up -d
+    STOPPED_CRON_SITE=""
 
     # Reload Caddy to pick up the new site
     reload_caddy

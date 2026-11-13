@@ -1301,8 +1301,33 @@ setup_start_runtime_services() {
 }
 
 setup_start_cron() {
-    [ "$SETUP_CRON_PENDING" = true ] || return 0
-    run_step "Starting cron" docker compose up "${SETUP_RUNTIME_FLAGS[@]}" cron
+    if [ "$SETUP_CRON_PENDING" = true ]; then
+        run_step "Starting cron" docker compose up "${SETUP_RUNTIME_FLAGS[@]}" cron || return 1
+    fi
+    SETUP_CRON_STOPPED=false
+}
+
+# A run that ends between the stop of cron before MariaDB and
+# setup_start_cron leaves cron stopped, and restart: unless-stopped keeps it
+# stopped after a reboot too: the exit says so. Run from the EXIT trap.
+SETUP_CRON_STOPPED=false
+setup_cron_stopped_notice() {
+    [ "$SETUP_CRON_STOPPED" = true ] || return 0
+    echo -e "${YELLOW}cron is stopped: docker compose start cron, or re-run setup.sh${NC}"
+}
+
+# setup_add_exit_trap <command>: runs the command on exit before the EXIT
+# trap already set, which an import over SSH uses to close its connection.
+setup_add_exit_trap() {
+    local command="$1" current
+
+    current=$(trap -p EXIT)
+    if [ -n "$current" ]; then
+        eval "set -- $current"
+        command="${command}; $3"
+    fi
+    # shellcheck disable=SC2064 # The command is complete now.
+    trap "$command" EXIT
 }
 
 # KVS initialization was built before the SQL import started. Compose run
@@ -6270,6 +6295,17 @@ import_verify_database() {
 progress_bar "Starting MariaDB"
 import_stage_dump
 import_replace_database_volume
+# kvs-init clears KVS's cron locks and its cron registration
+# (40-configure-database.sh), and MariaDB restarts under whatever is
+# running: a cron.php in progress must see neither. Keeping the database
+# stops nothing, and check_configured_ports stops this project only when it
+# sees one of its published ports listening: with Docker's userland proxy
+# off, for instance, it sees none.
+# setup_start_cron starts cron again at the end; a run that fails before
+# says that cron is stopped (setup_cron_stopped_notice).
+run_step "Stopping cron" docker compose stop cron
+SETUP_CRON_STOPPED=true
+setup_add_exit_trap setup_cron_stopped_notice
 run_step "Starting MariaDB" docker compose up -d --force-recreate mariadb
 import_place_site_files
 

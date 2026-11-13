@@ -218,6 +218,9 @@ docker() {
                 fi
                 return 0
             fi
+            if [[ " $* " == *' compose stop cron '* ]]; then
+                return "${MOCK_CRON_STOP_STATUS:-0}"
+            fi
             if [[ " $* " == *' run --rm --no-deps phpmyadmin-init '* ]]; then
                 return "${MOCK_PHPMYADMIN_INIT_STATUS:-0}"
             fi
@@ -659,6 +662,15 @@ fi
 [ "$(grep -Fxc 'compose --profile setup run --rm --no-deps kvs-init' \
     "$start_log")" -eq 2 ] ||
     fail "KVS initialization is not a checked one-shot on every start"
+# kvs-init clears KVS's cron locks and its cron registration: on every
+# start, the site already running or not, cron stops before MariaDB and the
+# initialization, and starts again with the rest of the site.
+start_sequence=$(grep -Fx -e 'compose stop cron' -e 'compose up -d mariadb' \
+    -e 'compose --profile setup run --rm --no-deps kvs-init' -e 'compose up -d' \
+    "$start_log" | paste -sd '|')
+expected_start='compose stop cron|compose up -d mariadb|compose --profile setup run --rm --no-deps kvs-init|compose up -d'
+[ "$start_sequence" = "${expected_start}|${expected_start}" ] ||
+    fail "a site start did not stop cron before MariaDB and kvs-init, then start it again: ${start_sequence}"
 [ "$(grep -Fxc \
     'exec kvs-caddy caddy reload --force --config /etc/caddy/Caddyfile' \
     "$start_log")" -eq 2 ] ||
@@ -716,6 +728,37 @@ set -e
 if grep -Fq 'Admin login:' "$check_failure_output" ||
     grep -Fq 'run --rm --no-deps kvs-init' "$check_failure_log"; then
     fail "the start went on after the admin account check failed"
+fi
+# That start ended with cron stopped, which it stays after a reboot too:
+# its last words say so, and how to start it. A start that completes, or
+# that could not stop cron, says nothing of the kind.
+stopped_notice="[WARN] cron of example.com is stopped: docker compose start cron in ${TEST_DIR}/valid/docker/multi-site/sites/example.com, or re-run ./site-manager.sh start example.com"
+[ "$(sed 's/\x1b\[[0-9;]*m//g' "$check_failure_output" | tail -n 1)" = "$stopped_notice" ] ||
+    fail "a start that failed with cron stopped did not say so: $(tail -n 1 "$check_failure_output")"
+if grep -Fq 'is stopped:' "$first_start_output" "$second_start_output"; then
+    fail "a start that completed said that cron is stopped"
+fi
+
+# A cron that cannot be stopped ends the start before MariaDB and kvs-init.
+cron_stop_failure_log="${TEST_DIR}/valid/cron-stop-failure.log"
+set +e
+MOCK_CRON_STOP_STATUS=44 \
+MOCK_DOCKER_LOG="$cron_stop_failure_log" \
+MOCK_ADMIN_STATE_FILE="$admin_state" \
+KVS_WEBROOT_BASE="$valid_webroot" \
+    bash "$valid_script" start example.com > "${TEST_DIR}/valid/cron-stop-failure.out" 2>&1
+cron_stop_failure_status=$?
+set -e
+[ "$cron_stop_failure_status" -eq 44 ] ||
+    fail "a failed cron stop did not stop the start with its exit status"
+if grep -Fq 'is stopped:' "${TEST_DIR}/valid/cron-stop-failure.out"; then
+    fail "a start that could not stop cron said that cron is stopped"
+fi
+grep -Fxq 'compose stop cron' "$cron_stop_failure_log" ||
+    fail "the start did not try to stop cron"
+if grep -Fxq 'compose up -d mariadb' "$cron_stop_failure_log" ||
+    grep -Fq 'run --rm --no-deps kvs-init' "$cron_stop_failure_log"; then
+    fail "the start went on to MariaDB and kvs-init after cron could not be stopped"
 fi
 
 mkdir -p "${TEST_DIR}/valid/docker/multi-site/sites/oneshot-failure.example"

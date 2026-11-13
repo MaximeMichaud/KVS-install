@@ -27,6 +27,8 @@ case "$*" in
         printf '  %s:\n    build:\n      context: .\n' "${@:3}"
         ;;
     'compose build'*) echo build >> "$CALLS" ;;
+    # cron stops before MariaDB is recreated and kvs-init runs.
+    'compose stop cron') ;;
     'compose up -d --force-recreate mariadb') echo mariadb-start >> "$CALLS" ;;
     *) echo "unexpected:docker $*" >> "$CALLS"; exit 97 ;;
 esac
