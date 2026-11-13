@@ -5259,17 +5259,32 @@ geoip_readable_by_php() {
     find geoip -maxdepth 1 -type f -name '*.mmdb' -exec chmod 644 {} + 2>/dev/null || true
 }
 
+# A MaxMind database ends with its metadata, which starts with this marker;
+# the readers look for it in the last 128 KiB and refuse a file without it.
+# A download cut short has a first part of the file and no metadata.
+geoip_database_is_complete() {
+    [ -f "$1" ] || return 1
+    LC_ALL=C grep -aqF -- $'\xab\xcd\xefMaxMind.com' < <(tail -c 131072 -- "$1")
+}
+
 select_geoip() {
     echo ""
     echo -e "${CYAN}GeoIP Database${NC}"
 
-    # Check if file already exists
-    if [ -f geoip/GeoLite2-Country.mmdb ] || [ -f geoip/GeoLite2-City.mmdb ]; then
+    # Check if file already exists. A City database is only ever placed by
+    # hand; the Country one is what this step downloads, and an older run
+    # cut short could leave it incomplete.
+    if [ -f geoip/GeoLite2-City.mmdb ] || geoip_database_is_complete geoip/GeoLite2-Country.mmdb; then
         geoip_readable_by_php
         echo -e "${GREEN}✓ GeoIP database already configured${NC}"
         echo -e "${YELLOW}Note: Admin → Settings → System → GEOIP info may show ❌ on first page load.${NC}"
         echo -e "${YELLOW}      Refresh (F5) to see ✔️ IP, Country.${NC}"
         return 0
+    fi
+    if [ -e geoip/GeoLite2-Country.mmdb ]; then
+        echo -e "${YELLOW}⚠ $PWD/geoip/GeoLite2-Country.mmdb is incomplete (an interrupted download): KVS cannot read it.${NC}"
+        echo "  A new download replaces it."
+        echo ""
     fi
 
     echo "Enables visitor geolocation (country/state detection) in KVS admin."
@@ -5344,14 +5359,22 @@ select_geoip() {
         mkdir -p geoip
         GEOIP_URL="https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb"
 
-        if curl -fsSL "$GEOIP_URL" -o geoip/GeoLite2-Country.mmdb; then
+        # Downloaded next to its final name and moved there only once it is
+        # complete, so an interrupted transfer never leaves a partial
+        # database that a later run would take as configured.
+        local geoip_download=""
+        if geoip_download=$(mktemp geoip/.GeoLite2-Country.download.XXXXXX) &&
+            curl -fsSL "$GEOIP_URL" -o "$geoip_download" &&
+            geoip_database_is_complete "$geoip_download" &&
+            mv -fT -- "$geoip_download" geoip/GeoLite2-Country.mmdb; then
             geoip_readable_by_php
             echo -e "${GREEN}✓ GeoIP database downloaded${NC}"
             echo ""
             echo -e "${YELLOW}Note: After installation, Admin → Settings → System → GEOIP info may show ❌ on first load.${NC}"
             echo -e "${YELLOW}      This is cosmetic - refresh the page (F5) and it will show ✔️ IP, Country.${NC}"
         else
-            echo -e "${YELLOW}⚠ Download failed - continuing without GeoIP${NC}"
+            [ -z "$geoip_download" ] || rm -f -- "$geoip_download"
+            echo -e "${YELLOW}⚠ Download failed or incomplete - continuing without GeoIP${NC}"
             echo "  You can manually add it later to: $PWD/geoip/"
         fi
     else

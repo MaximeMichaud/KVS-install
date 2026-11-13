@@ -2,3 +2,6 @@
 *.mmdb
 *.mmdb.gz
 *.tar.gz
+# The temporary file of a download docker/setup.sh did not finish (a run
+# killed while curl runs cannot remove it)
+.GeoLite2-Country.download.*
