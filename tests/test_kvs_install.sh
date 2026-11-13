@@ -1037,6 +1037,79 @@ EOF
     fail "phpMyAdmin staging directory did not receive the preserved owner and group" || return 1
 }
 
+# whatisdomain no longer leaves the shell in /root, so the phpMyAdmin install
+# must not depend on the current directory: started from a directory root
+# cannot write to, the archive was saved there, the download and extraction
+# failed unchecked and phpMyAdmin was silently missing.
+test_phpmyadmin_install_downloads_outside_the_current_directory() {
+  local temp_dir
+  local start_dir
+  local install_dir
+  local fixture_dir
+  local fixture_archive
+  local output
+  local status
+  temp_dir=$(mktemp -d)
+  trap 'chmod -R u+w "$temp_dir"; rm -rf "$temp_dir"' RETURN
+  start_dir="$temp_dir/start"
+  install_dir="$temp_dir/phpmyadmin"
+  fixture_dir="$temp_dir/fixture/phpMyAdmin-test"
+  fixture_archive="$temp_dir/phpmyadmin-fixture.tar.gz"
+  mkdir -p "$start_dir" "$fixture_dir"
+  printf 'new-version\n' >"$fixture_dir/index.php"
+  cat >"$fixture_dir/config.sample.inc.php" <<'EOF'
+<?php
+$cfg['blowfish_secret'] = '';
+EOF
+  tar czf "$fixture_archive" -C "$temp_dir/fixture" phpMyAdmin-test
+  export TEST_PMA_ARCHIVE="$fixture_archive" TEST_PMA_OUTPUT_LOG="$temp_dir/output.log"
+
+  curl() {
+    local previous=""
+    local argument
+
+    if [[ $* == *"downloads.test"* ]]; then
+      printf '<a href="https://files.phpmyadmin.net/phpMyAdmin/test/phpMyAdmin-test-all-languages.tar.gz">download</a>\n'
+      return 0
+    fi
+    for argument in "$@"; do
+      if [[ $previous == "-o" ]]; then
+        printf '%s\n' "$argument" >"$TEST_PMA_OUTPUT_LOG"
+        cp "$TEST_PMA_ARCHIVE" "$argument"
+        return
+      fi
+      previous="$argument"
+    done
+    return 64
+  }
+  chown() { :; }
+  openssl() { printf 'fixed-test-secret\n'; }
+  webserver=""
+
+  chmod 555 "$start_dir"
+  (cd "$start_dir" && aptinstall_phpmyadmin "$install_dir" "https://downloads.test/") >/dev/null 2>&1
+  status=$?
+  chmod 755 "$start_dir"
+
+  assert_equal "0" "$status" "phpMyAdmin installation from a read-only directory failed" || return 1
+  [[ -z "$(ls -A "$start_dir")" ]] || fail "the phpMyAdmin archive was written to the current directory" || return 1
+  output=$(cat "$TEST_PMA_OUTPUT_LOG" 2>/dev/null)
+  [[ $output == /* ]] || fail "the phpMyAdmin archive must be downloaded to an absolute path, got '$output'" || return 1
+  [[ ! -e $output ]] || fail "the downloaded phpMyAdmin archive was left behind" || return 1
+  assert_file_contains "$install_dir/index.php" "new-version" "phpMyAdmin was not installed" || return 1
+  assert_file_contains "$install_dir/config.inc.php" "fixed-test-secret" "phpMyAdmin config was not generated" || return 1
+
+  # A failed download fails the step instead of leaving phpMyAdmin missing.
+  curl() {
+    [[ $* == *"downloads.test"* ]] || return 22
+    printf '<a href="https://files.phpmyadmin.net/phpMyAdmin/test/phpMyAdmin-test-all-languages.tar.gz">download</a>\n'
+  }
+  (cd "$start_dir" && aptinstall_phpmyadmin "$temp_dir/phpmyadmin-failed" "https://downloads.test/") >/dev/null 2>&1
+  status=$?
+  [[ $status -ne 0 ]] || fail "a failed phpMyAdmin download must fail the step" || return 1
+  [[ -z "$(ls -A "$start_dir")" ]] || fail "a failed phpMyAdmin download left files in the current directory" || return 1
+}
+
 test_nginx_cleanup_uses_scoped_paths() {
   local temp_dir
   local current_dir
@@ -1358,6 +1431,7 @@ run_test "the backup stays until the new copy is in place" test_restore_preserve
 run_test "backup survives failed clone" test_failed_clone_keeps_user_backup || failures=$((failures + 1))
 run_test "phpMyAdmin failure is non-destructive" test_phpmyadmin_failure_preserves_installation || failures=$((failures + 1))
 run_test "phpMyAdmin staged update succeeds" test_phpmyadmin_success_swaps_staged_installation || failures=$((failures + 1))
+run_test "phpMyAdmin install downloads outside the current directory" test_phpmyadmin_install_downloads_outside_the_current_directory || failures=$((failures + 1))
 run_test "NGINX cleanup is scoped" test_nginx_cleanup_uses_scoped_paths || failures=$((failures + 1))
 run_test "runtime input stays quiet without a terminal" test_runtime_input_stays_quiet_without_a_terminal || failures=$((failures + 1))
 run_test "an import source needs no archive" test_import_source_given_needs_no_archive || failures=$((failures + 1))

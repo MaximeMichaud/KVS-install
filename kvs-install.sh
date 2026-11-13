@@ -827,30 +827,28 @@ validate_kvs_domain() {
 }
 
 function whatisdomain() {
-  mkdir -p /root/tmp
-  cp KVS_* /root/tmp/
-  cd /root/tmp && unzip -o KVS_*
+  local archive setup kvs_file
+  archive=$(find_kvs_archive "${KVS_ARCHIVE_DIR:-/root}") || return $?
 
-  # Try to extract domain from setup.php if it exists
-  if [[ -f /root/tmp/admin/include/setup.php ]]; then
+  # Read the licence domain straight from the archive's setup.php. unzip -p
+  # streams that one member to standard output, so nothing is written to disk:
+  # the old code unzipped the whole archive into a fixed /root/tmp and then
+  # removed it, which destroyed anything a user already kept there and depended
+  # on the current directory holding the archive.
+  setup=$(unzip -p "$archive" admin/include/setup.php 2> /dev/null)
+  if [[ -n "$setup" ]]; then
     # shellcheck disable=SC2016
-    DOMAIN=$(grep -P -i '\$config\['"'"'project_licence_domain'"'"']=' /root/tmp/admin/include/setup.php | head -1)
+    DOMAIN=$(printf '%s\n' "$setup" | grep -P -i '\$config\['"'"'project_licence_domain'"'"']=' | head -1)
     # Extract value between quotes
     DOMAIN=${DOMAIN#*=\"}
     DOMAIN=${DOMAIN%\"*}
   fi
 
-  # Fallback: extract domain from filename if not found in setup.php
+  # Fallback: extract domain from the archive name, KVS_X.X.X_[domain.com].zip
   if [[ -z "$DOMAIN" ]]; then
-    # Extract domain from filename pattern like KVS_X.X.X_[domain.com].zip
-    local kvs_file
-    kvs_file=$(find /root -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
-    kvs_file=${kvs_file##*/}
-    if [[ -n "$kvs_file" ]]; then
-      # Extract domain from brackets
-      DOMAIN=${kvs_file#*[}
-      DOMAIN=${DOMAIN%]*}
-    fi
+    kvs_file=${archive##*/}
+    DOMAIN=${kvs_file#*[}
+    DOMAIN=${DOMAIN%]*}
   fi
 
   DOMAIN=${DOMAIN,,}
@@ -867,7 +865,6 @@ function whatisdomain() {
     URL="$DOMAIN"
     REDIRECT_SERVER_NAME="*.$DOMAIN"
   fi
-  rm -rf /root/tmp && cd /root || exit
   echo "Domain extracted: $DOMAIN"
   echo "Project URL: $URL"
 }
@@ -1138,17 +1135,35 @@ function aptinstall_php() {
 }
 
 function aptinstall_phpmyadmin() {
+  local install_dir="${1:-$PHPMYADMIN_INSTALL_DIR}"
+  local download_page="${2:-$PHPMYADMIN_DOWNLOAD_PAGE}"
+  local work_dir
+  local status
   echo "phpMyAdmin Installation"
-    PHPMYADMIN_URL=$(curl -s "${PHPMYADMIN_DOWNLOAD_PAGE}" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
-    curl -fsSL "${PHPMYADMIN_URL}" -o phpmyadmin.tar.gz
-    mkdir -p "${PHPMYADMIN_INSTALL_DIR}"
-    tar xzf phpmyadmin.tar.gz --strip-components=1 -C "${PHPMYADMIN_INSTALL_DIR}"
-    rm phpmyadmin.tar.gz
-    mkdir -p "${PHPMYADMIN_INSTALL_DIR}/tmp" || exit
-    chown www-data:www-data "${PHPMYADMIN_INSTALL_DIR}/tmp"
-    chmod 700 "${PHPMYADMIN_INSTALL_DIR}/tmp"
+    # The archive goes to a private work directory, never to the current
+    # directory: that is wherever the installer was started from, which root
+    # may not be able to write to (an NFS home with root_squash, a read-only
+    # mount), and a failed download there left phpMyAdmin silently missing.
+    work_dir=$(mktemp -d) || return $?
+    PHPMYADMIN_URL=$(curl -s "$download_page" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
+    if [[ -z "$PHPMYADMIN_URL" ]] || ! curl -fsSL "${PHPMYADMIN_URL}" -o "$work_dir/phpmyadmin.tar.gz"; then
+      echo "phpMyAdmin installation failed: cannot download the archive" >&2
+      rm -rf "$work_dir"
+      return 1
+    fi
+    mkdir -p "$install_dir" &&
+      tar xzf "$work_dir/phpmyadmin.tar.gz" --strip-components=1 -C "$install_dir"
+    status=$?
+    rm -rf "$work_dir"
+    if ((status != 0)); then
+      echo "phpMyAdmin installation failed: cannot unpack the archive into $install_dir" >&2
+      return "$status"
+    fi
+    mkdir -p "$install_dir/tmp" || exit
+    chown www-data:www-data "$install_dir/tmp"
+    chmod 700 "$install_dir/tmp"
     randomBlowfishSecret=$(openssl rand -base64 22)
-    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "${PHPMYADMIN_INSTALL_DIR}/config.sample.inc.php" >"${PHPMYADMIN_INSTALL_DIR}/config.inc.php"
+    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "$install_dir/config.sample.inc.php" >"$install_dir/config.inc.php"
     if [[ "$webserver" =~ (nginx) ]]; then
       apt_get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} || return $?
       service nginx restart
