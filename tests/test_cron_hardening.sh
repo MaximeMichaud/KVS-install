@@ -198,42 +198,8 @@ grep -Fq 'chmod 600 /etc/manticoresearch/manticore.conf' \
     "$ROOT_DIR/docker/manticore/docker-entrypoint.sh" ||
     fail "the generated Manticore configuration can expose the database password"
 
-if [ -n "${MANTICORE_RUNTIME_CONTAINER:-}" ]; then
-    command -v docker >/dev/null 2>&1 || fail "Docker is required for the runtime UID check"
-    [ "$(docker inspect --format '{{.State.Running}}' "$MANTICORE_RUNTIME_CONTAINER")" = true ] ||
-        fail "Manticore runtime container is not running"
-
-    docker exec "$MANTICORE_RUNTIME_CONTAINER" sh -ceu '
-        manticore_uid=$(id -u manticore)
-        manticore_gid=$(id -g manticore)
-        [ "$manticore_uid" -ne 0 ]
-        # PID 1 is the Docker init: check the privilege drop on searchd.
-        searchd_pid=$(pgrep -o -x searchd)
-        [ "$(stat -c %u "/proc/$searchd_pid")" = "$manticore_uid" ]
-        [ "$(stat -c %g "/proc/$searchd_pid")" = "$manticore_gid" ]
-        [ "$(stat -c %u /etc/manticoresearch/manticore.conf)" = "$manticore_uid" ]
-        [ "$(stat -c %a /etc/manticoresearch/manticore.conf)" = 600 ]
-        [ "$(stat -c %u /var/lib/manticore)" = "$manticore_uid" ]
-        [ "$(stat -c %u /var/log/manticore/indexer-cron.log)" = "$manticore_uid" ]
-        [ "$(stat -c %a /var/log/manticore/indexer-cron.log)" = 640 ]
-        ps -eo uid=,comm= | awk -v expected_uid="$manticore_uid" '\''
-            $2 == "searchd" {
-                searchd++
-                if ($1 != expected_uid) bad++
-            }
-            $2 ~ /^manticore-execu/ {
-                buddy++
-                if ($1 != expected_uid) bad++
-            }
-            $2 == "cron" {
-                cron++
-                if ($1 != 0) bad++
-            }
-            END {
-                exit(searchd == 1 && buddy > 0 && cron == 1 && bad == 0 ? 0 : 1)
-            }
-        '\''
-    ' || fail "Manticore runtime processes have unsafe UIDs"
-fi
+# The processes and modes these lines lead to, on a running container, are
+# checked by tests/integration_manticore_startup.sh, which CI runs: a check
+# here would need a container nothing in CI starts.
 
 echo "PASS: Cron hardening"

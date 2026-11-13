@@ -39,6 +39,11 @@
 #       first run asked for goes on after that run ran out of time, waits
 #       for that build: the same container builds on, nothing starts the
 #       build over, and KVS is switched once it ends.
+#   (k) after the first start and after a restart, searchd and Buddy run as
+#       the manticore user and cron as root, manticore.conf, which holds the
+#       database password, is the manticore user's with mode 600, the cron
+#       log is the manticore user's with mode 640, and /var/lib/manticore,
+#       where the indexes are, belongs to the manticore user.
 # The manticore service is the one of docker/docker-compose.yml, its health
 # check (probed every 2 s instead of 30 s) and init included, without its
 # published ports. MariaDB is the 11.8 image of docker/images.lock, with the
@@ -300,6 +305,52 @@ rebuilds_reported() {
         grep -c 'Indexes rebuilt in the background and handed to searchd')" = "$1" ]
 }
 zombies() { docker exec "$manticore" ps -eo stat=,pid=,ppid=,args= | awk '$1 ~ /^Z/'; }
+# The privileges the container runs with. searchd, which reads the database
+# password in manticore.conf, and Buddy (manticore-executor), which searchd
+# starts, run as the manticore user, never root; only cron stays root, to run
+# the hourly line as that user. manticore.conf is the manticore user's with
+# mode 600, the cron log with mode 640, and /var/lib/manticore, where the
+# indexes are, is the manticore user's. Prints what is wrong.
+runtime_privileges() {
+    docker exec "$manticore" sh -ceu '
+        problems=""
+        bad() { problems="${problems}${problems:+; }$1"; }
+        uid=$(id -u manticore)
+        gid=$(id -g manticore)
+        [ "$uid" -ne 0 ] || bad "the manticore user is root"
+        # PID 1 is the Docker init: the privilege drop is on searchd.
+        searchd_pid=$(pgrep -o -x searchd) || searchd_pid=""
+        if [ -z "$searchd_pid" ]; then
+            bad "no searchd process"
+        else
+            [ "$(stat -c %u "/proc/$searchd_pid")" = "$uid" ] || bad "searchd runs as uid $(stat -c %u "/proc/$searchd_pid")"
+            [ "$(stat -c %g "/proc/$searchd_pid")" = "$gid" ] || bad "searchd runs as gid $(stat -c %g "/proc/$searchd_pid")"
+        fi
+        conf=/etc/manticoresearch/manticore.conf
+        [ "$(stat -c %u:%a "$conf")" = "$uid:600" ] || bad "$conf is $(stat -c %U:%a "$conf")"
+        [ "$(stat -c %u /var/lib/manticore)" = "$uid" ] || bad "/var/lib/manticore belongs to $(stat -c %U /var/lib/manticore)"
+        log=/var/log/manticore/indexer-cron.log
+        [ "$(stat -c %u:%a "$log")" = "$uid:640" ] || bad "$log is $(stat -c %U:%a "$log")"
+        counts=$(ps -eo uid=,comm= | awk -v uid="$uid" "
+            \$2 == \"searchd\" { searchd++; if (\$1 != uid) wrong = wrong \" searchd:\" \$1 }
+            \$2 ~ /^manticore-execu/ { buddy++; if (\$1 != uid) wrong = wrong \" buddy:\" \$1 }
+            \$2 == \"cron\" { cron++; if (\$1 != 0) wrong = wrong \" cron:\" \$1 }
+            END { printf \"%d %d %d%s\", searchd, buddy, cron, wrong }")
+        set -- $counts
+        [ "$1" = 1 ] || bad "$1 searchd processes"
+        [ "$2" -gt 0 ] || bad "no Buddy (manticore-executor) process"
+        [ "$3" = 1 ] || bad "$3 cron processes"
+        shift 3
+        [ "$#" -eq 0 ] || bad "processes under the wrong uid:$*"
+        if [ -n "$problems" ]; then
+            echo "$problems"
+            ps -eo uid=,pid=,ppid=,comm=
+            exit 1
+        fi
+    '
+}
+# Buddy starts after searchd answers, so the check is retried a little.
+privileges_safe() { runtime_privileges > /dev/null; }
 
 docker compose build manticore > "$TEST_DIR/build.log" 2>&1 ||
     { cat "$TEST_DIR/build.log" >&2; fail "the Manticore image did not build"; }
@@ -327,6 +378,8 @@ container_log_has 'Initial indexes built successfully' ||
     fail "the first build was not reported"
 wait_until 120 is_healthy || fail "the container is $(health) after the first start"
 healthy_a=$(seconds_since "$start_a")
+wait_until 30 privileges_safe ||
+    fail "the first start runs Manticore with unsafe privileges: $(runtime_privileges)"
 # The base image ships MySQL's client only; the entrypoint, the health check
 # and the rebuild run the mariadb command the image adds.
 docker exec "$manticore" sh -c 'command -v mariadb' > /dev/null ||
@@ -415,6 +468,8 @@ wait_until 120 rebuilds_reported 2 || fail "the rebuild after a restart did not 
 wait_until 30 rebuild_gone || fail "the rebuild after a restart did not end"
 [ -z "$(zombies)" ] || fail "zombie processes after a restart: $(zombies)"
 wait_until 120 is_healthy || fail "the container is $(health) after a restart"
+wait_until 30 privileges_safe ||
+    fail "a restart runs Manticore with unsafe privileges: $(runtime_privileges)"
 
 # (e) The database changes under the kept indexes, as an import or a
 # replaced database leaves it, and the rebuild is requested.
@@ -739,4 +794,4 @@ printf 'recreate: searchd answered %d ms after the container started, healthy af
 printf 'restart: searchd answered %d ms after the container started\n' "$answer_r_ms"
 printf 'requested rebuild: searchd answered %ss after the build was released, with the current rows\n' "$answer_e"
 printf 'enable run again during the build: switched %ss after the build was released, same container\n' "$answer_j"
-echo "PASS: Manticore serves its kept indexes at once and rebuilds them in the background, builds them before it answers when a rebuild is requested, serves the tables a failed build made and reports it without a restart, its clients never ask for TLS, and enable run again waits for the build in progress ($mariadb_image)"
+echo "PASS: Manticore serves its kept indexes at once and rebuilds them in the background, builds them before it answers when a rebuild is requested, serves the tables a failed build made and reports it without a restart, its clients never ask for TLS, enable run again waits for the build in progress, and searchd and Buddy run unprivileged with a private configuration ($mariadb_image)"
