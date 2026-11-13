@@ -331,9 +331,32 @@ assert_tls_rejected "$https_port" ''
 request -H 'Host: example.test' "http://127.0.0.1:$http_port/.well-known/acme-challenge/proof"
 [ "$http_status" = 200 ] || fail 'standalone ACME bootstrap failed'
 
-sed -e 's/domain.tld/example.test/g' -e 's/project_url/example.test/g' \
-    -e 's/redirect_server_name/www.example.test/g' \
-    "$ROOT_DIR/conf/nginx/conf.d/domain.conf" > "$TEST_DIR/native/etc/nginx/conf.d/kvs.conf"
+# The site vhost as kvs-install.sh writes it: its own host names for the
+# domain and USE_WWW, and its own placeholder substitution.
+render_native_site() {
+    local use_www=$1 dest="$TEST_DIR/native/etc/nginx/conf.d/kvs.conf"
+    cp "$ROOT_DIR/conf/nginx/conf.d/domain.conf" "$dest"
+    (
+        set +eu
+        # shellcheck source=/dev/null
+        source "$ROOT_DIR/kvs-install.sh"
+        # shellcheck disable=SC2034  # read by the installer's functions
+        DOMAIN=example.test USE_WWW=$use_www PHP=8.3
+        set_site_hostnames
+        render_nginx_site_config "$dest"
+    ) || fail 'the installer could not render the site vhost'
+    chmod a+r "$dest"
+}
+# Every other host of the domain gets a 301 to the canonical one, whatever
+# its name: the redirect server's server_name selects them already.
+assert_native_redirect() {
+    local host=$1 target=$2
+    request --resolve "$host:$https_port:127.0.0.1" "https://$host:$https_port/path"
+    [ "$http_status" = 301 ] || fail "standalone redirect of $host failed (HTTP $http_status, curl $curl_status)"
+    grep -Fq "Location: https://$target/path" "$TEST_DIR/headers" || fail "incorrect standalone redirect of $host"
+}
+
+render_native_site false
 docker restart "$nginx_container" >/dev/null
 wait_nginx
 assert_closed "http://127.0.0.1:$http_port/"
@@ -352,10 +375,21 @@ assert_kvs_paths_protected "https://example.test:$https_port" --resolve "example
 request --resolve "example.test:$https_port:127.0.0.1" "https://example.test:$https_port/.well-known/proof.txt"
 [ "$http_status" = 200 ] || fail 'standalone well-known directory failed'
 grep -qx well-known-sentinel "$TEST_DIR/body" || fail 'incorrect well-known body'
-request --resolve "www.example.test:$https_port:127.0.0.1" "https://www.example.test:$https_port/path"
-[ "$http_status" = 301 ] || fail 'standalone canonical redirect failed'
-grep -Fq 'Location: https://example.test/path' "$TEST_DIR/headers" || fail 'incorrect standalone redirect'
-printf 'PASS: standalone bootstrap ACME, host/SNI rejection, configured site and canonical redirect.\n'
+assert_native_redirect www.example.test example.test
+assert_native_redirect cdn.example.test example.test
+
+# USE_WWW=true: the site answers on www, the apex and the other subdomains
+# are sent there.
+render_native_site true
+docker restart "$nginx_container" >/dev/null
+wait_nginx
+request --resolve "www.example.test:$https_port:127.0.0.1" "https://www.example.test:$https_port/index.html"
+[ "$http_status" = 200 ] || fail 'standalone www site failed'
+grep -qx origin-site-sentinel "$TEST_DIR/body" || fail 'incorrect standalone www site body'
+assert_native_redirect example.test www.example.test
+assert_native_redirect cdn.example.test www.example.test
+assert_tls_rejected "$https_port" unrelated.test
+printf 'PASS: standalone bootstrap ACME, host/SNI rejection, configured site and canonical redirect in both www modes.\n'
 [ "$hidden_file_failures" -eq 0 ] || fail "$hidden_file_failures hidden-file requests bypassed access restrictions"
 printf 'PASS: hidden files are denied and public CSS/SVG assets remain available in every layout.\n'
 [ "$protected_path_failures" -eq 0 ] || fail "$protected_path_failures requests for KVS internal paths were served or misrouted"

@@ -1713,6 +1713,44 @@ test_menu_add_site_refuses_on_a_docker_host() {
   unset TEST_WORKING_DIRS
 }
 
+# The www redirect vhost of the native install answered every request with
+# 444: its server_name is a wildcard and it compared $host with $server_name,
+# which holds that pattern. Rendered as the installer writes it, the redirect
+# server selects the other hosts by server_name alone, in both www modes;
+# tests/integration_origin_security.sh proves the 301 on a real nginx.
+test_site_vhost_redirects_every_other_host() {
+  local temp_dir file block
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  file="$temp_dir/site.conf"
+
+  for USE_WWW in false true; do
+    DOMAIN=example.com
+    PHP=8.3
+    set_site_hostnames
+    cp "$REPO_DIR/conf/nginx/conf.d/domain.conf" "$file"
+    render_nginx_site_config "$file" || fail "the site vhost could not be rendered" || return 1
+    if [[ "$USE_WWW" == true ]]; then
+      assert_equal "www.example.com|.example.com" "$URL|$REDIRECT_SERVER_NAME" "www mode host names" || return 1
+    else
+      assert_equal "example.com|*.example.com" "$URL|$REDIRECT_SERVER_NAME" "default host names" || return 1
+    fi
+    grep -Eq "^[[:space:]]*server_name[[:space:]]+$URL;" "$file" || fail "the site server must answer on $URL" || return 1
+    block=$(awk '/^# subdomains redirect/,/^}/' "$file" | grep -v '^[[:space:]]*#')
+    grep -Fq "server_name             $REDIRECT_SERVER_NAME;" <<<"$block" ||
+      fail "the redirect server must select $REDIRECT_SERVER_NAME" || return 1
+    grep -Fq "return                  301 https://$URL\$request_uri;" <<<"$block" ||
+      fail "the redirect server must send the other hosts to https://$URL" || return 1
+    if grep -Fq "\$server_name" <<<"$block"; then
+      fail "the redirect server compares the host with its wildcard server_name ($USE_WWW)" || return 1
+    fi
+    grep -Eq 'domain\.tld|project_url|redirect_server_name|phpX\.X' "$file" &&
+      { fail "a placeholder is left in the rendered vhost"; return 1; }
+    grep -Fq 'fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;' "$file" || fail "the PHP socket is not set" || return 1
+  done
+  USE_WWW=false
+}
+
 run_test "installation failures stop the pipeline" test_install_failure_stops_pipeline || failures=$((failures + 1))
 run_test "gum repository leaves with its key" test_gum_repository_leaves_with_its_key || failures=$((failures + 1))
 run_test "visual progress failures are non-fatal" test_visual_progress_failure_is_nonfatal || failures=$((failures + 1))
@@ -1749,6 +1787,7 @@ run_test "a question with no answer left stops the installer" test_a_question_wi
 run_test "the installer says it needs bash" test_the_installer_says_it_needs_bash || failures=$((failures + 1))
 run_test "a failed database import is not reported as success" test_failed_db_import_keeps_install_files_and_retries || failures=$((failures + 1))
 run_test "an install re-run keeps setup_db.php restricted" test_install_rerun_keeps_setup_db_restricted || failures=$((failures + 1))
+run_test "the site vhost redirects every other host" test_site_vhost_redirects_every_other_host || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2

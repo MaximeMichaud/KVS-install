@@ -843,6 +843,30 @@ archive_domain_from_name() {
   printf '%s\n' "${domain,,}"
 }
 
+# URL, the host the site answers on, and REDIRECT_SERVER_NAME, the server_name
+# of the vhost that sends every other host of the domain to it: the apex, or
+# www.<domain> with USE_WWW=true.
+set_site_hostnames() {
+  if [[ "$USE_WWW" == "true" ]]; then
+    URL="www.$DOMAIN"
+    REDIRECT_SERVER_NAME=".$DOMAIN"
+  else
+    URL="$DOMAIN"
+    REDIRECT_SERVER_NAME="*.$DOMAIN"
+  fi
+}
+
+# Fills in the placeholders of a conf/nginx/conf.d template for the site.
+render_nginx_site_config() {
+  local file="$1"
+
+  sed -i -e "s/domain.tld/$DOMAIN/g" \
+    -e "s/project_url/$URL/g" \
+    -e "s/redirect_server_name/$REDIRECT_SERVER_NAME/g" \
+    -e "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" \
+    "$file"
+}
+
 function whatisdomain() {
   local archive setup kvs_file
   archive=$(find_kvs_archive "${KVS_ARCHIVE_DIR:-/root}") || return $?
@@ -874,14 +898,7 @@ function whatisdomain() {
     echo "Error: Invalid or empty domain extracted: '$DOMAIN'"
     exit 1
   fi
-  # Set URL and redirect server_name based on USE_WWW
-  if [[ "$USE_WWW" == "true" ]]; then
-    URL="www.$DOMAIN"
-    REDIRECT_SERVER_NAME=".$DOMAIN"
-  else
-    URL="$DOMAIN"
-    REDIRECT_SERVER_NAME="*.$DOMAIN"
-  fi
+  set_site_hostnames
   echo "Domain extracted: $DOMAIN"
   echo "Project URL: $URL"
 }
@@ -1100,14 +1117,10 @@ function aptinstall_nginx() {
       openssl dhparam -out /etc/nginx/dhparam.pem 2048
       # Download domain config (disabled during SSL setup, enabled after)
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/domain.conf -o /etc/nginx/conf.d/"$DOMAIN".conf.disabled
-      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
-      sed -i "s/project_url/$URL/g" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
-      sed -i "s/redirect_server_name/$REDIRECT_SERVER_NAME/g" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
-      sed -i "s|fastcgi_pass unix:/var/run/php/phpX.X-fpm.sock;|fastcgi_pass unix:/var/run/php/php$PHP-fpm.sock;|" /etc/nginx/conf.d/"$DOMAIN".conf.disabled
+      render_nginx_site_config /etc/nginx/conf.d/"$DOMAIN".conf.disabled
       # Download sslgen config for ACME challenge
       curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/conf.d/sslgen.conf -o /etc/nginx/conf.d/sslgen.conf
-      sed -i "s/domain.tld/$DOMAIN/g" /etc/nginx/conf.d/sslgen.conf
-      sed -i "s/project_url/$URL/g" /etc/nginx/conf.d/sslgen.conf
+      render_nginx_site_config /etc/nginx/conf.d/sslgen.conf
       service nginx restart
       #update CF IPV4/V6 if CF is used
       #curl -fsSL https://raw.githubusercontent.com/MaximeMichaud/KVS-install/main/conf/nginx/update-cloudflare-ip-list.sh -o /usr/bin/update-cloudflare-ip-list.sh

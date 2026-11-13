@@ -21,10 +21,11 @@ command -v unzip > /dev/null 2>&1 ||
 command -v zip > /dev/null 2>&1 ||
     { echo "ok - zip is not installed here, the case is left to the CI runner"; exit 0; }
 
-# The function and the archive finder it leans on, as kvs-install.sh defines
-# them (each closes with a column-zero brace).
+# The function, the archive finder and the host names helper it leans on,
+# as kvs-install.sh defines them (each closes with a column-zero brace).
 awk '
     /^find_kvs_archive\(\) \{/,/^}/
+    /^set_site_hostnames\(\) \{/,/^}/
     /^function whatisdomain\(\) \{/,/^}/
 ' "$ROOT_DIR/kvs-install.sh" > "$WORK/fn.sh"
 grep -q 'find_kvs_archive()' "$WORK/fn.sh" || fail "find_kvs_archive is not defined in kvs-install.sh"
