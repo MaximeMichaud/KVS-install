@@ -461,6 +461,77 @@ func TestSet(t *testing.T) {
 	}
 }
 
+// A line Set adds ends with CRLF only in a file saved with CRLF throughout
+// (LineBreak). A CRLF elsewhere, a comment pasted in, a blank line, the
+// last line or the line before a last line that has no break, is no reason
+// to end the line added with a carriage return, which the shell of the
+// scripts reads into its value, nor to give one to that last line. shell is
+// what the shell reads, nil to leave a file the operator saved with CRLF
+// unchecked.
+func TestSetEndsTheLineAddedWithCRLFOnlyInACRLFFile(t *testing.T) {
+	bash, _ := exec.LookPath("bash")
+	cases := []struct {
+		name, data, key, value, want string
+		shell                        map[string]string
+	}{
+		{"a CRLF comment above lines that end with a line feed",
+			"# pasted header\r\nDOMAIN=example.com\nSITE_PREFIX=kvs\n", "KVS_STACK_VERSION", "26.10.0",
+			"# pasted header\r\nDOMAIN=example.com\nSITE_PREFIX=kvs\nKVS_STACK_VERSION=26.10.0\n",
+			map[string]string{"DOMAIN": "example.com", "SITE_PREFIX": "kvs", "KVS_STACK_VERSION": "26.10.0"}},
+		{"a CRLF comment pasted at the end",
+			"DOMAIN=example.com\nSITE_PREFIX=kvs\n# pasted note\r\n", "KVS_STACK_VERSION", "26.10.0",
+			"DOMAIN=example.com\nSITE_PREFIX=kvs\n# pasted note\r\nKVS_STACK_VERSION=26.10.0\n",
+			map[string]string{"DOMAIN": "example.com", "SITE_PREFIX": "kvs", "KVS_STACK_VERSION": "26.10.0"}},
+		{"a blank CRLF line at the end",
+			"DOMAIN=example.com\nSITE_PREFIX=kvs\n\r\n", "KVS_STACK_VERSION", "26.10.0",
+			"DOMAIN=example.com\nSITE_PREFIX=kvs\n\r\nKVS_STACK_VERSION=26.10.0\n",
+			map[string]string{"DOMAIN": "example.com", "SITE_PREFIX": "kvs", "KVS_STACK_VERSION": "26.10.0"}},
+		{"a last setting that ends with CRLF", "A=1\nB=2\r\n", "C", "3", "A=1\nB=2\r\nC=3\n",
+			map[string]string{"A": "1", "B": "2\r", "C": "3"}},
+		{"a CRLF line before a last line without its break", "\r\nA=", "B", "0", "\r\nA=\nB=0\n",
+			map[string]string{"A": "", "B": "0"}},
+		{"a CRLF file whose last line has no break", "A=1\r\nB=2", "C", "3", "A=1\r\nB=2\nC=3\n",
+			map[string]string{"A": "1\r", "B": "2", "C": "3"}},
+		{"a CRLF file", "# c\r\nA=1\r\n\r\nB=2\r\n", "C", "3", "# c\r\nA=1\r\n\r\nB=2\r\nC=3\r\n", nil},
+	}
+	for _, tc := range cases {
+		got, err := Set([]byte(tc.data), tc.key, tc.value)
+		if err != nil || string(got) != tc.want {
+			t.Errorf("%s: got %q, %v; want %q", tc.name, got, err, tc.want)
+			continue
+		}
+		if env, err := Parse(got, nil); err != nil || env[tc.key] != tc.value {
+			t.Errorf("%s: compose reads %s=%q from %q, %v", tc.name, tc.key, env[tc.key], got, err)
+		}
+		if bash == "" || tc.shell == nil {
+			continue
+		}
+		if read := shellReads(t, bash, got, slices.Sorted(maps.Keys(tc.shell))); !maps.Equal(read, tc.shell) {
+			t.Errorf("%s: the shell reads %q from %q, want %q", tc.name, read, got, tc.shell)
+		}
+	}
+}
+
+func TestLineBreak(t *testing.T) {
+	for data, want := range map[string]string{
+		"":                          "\n",
+		"A=1":                       "\n",
+		"A=1\n":                     "\n",
+		"A=1\r\n":                   "\r\n",
+		"# c\r\nA=1\r\n\r\n":        "\r\n",
+		"A=1\r\nB=2":                "\n",
+		"A=1\nB=2\r\n":              "\n",
+		"# c\r\nA=1\n":              "\n",
+		"A=1\r\n\n":                 "\n",
+		"A=\"one\ntwo\"\r\nB=2\r\n": "\n",
+		"A=1\r":                     "\n",
+	} {
+		if got := LineBreak([]byte(data)); got != want {
+			t.Errorf("LineBreak(%q) = %q, want %q", data, got, want)
+		}
+	}
+}
+
 func TestUnset(t *testing.T) {
 	cases := []struct{ name, data, key, want string }{
 		{"a key", "A=1\nB=2\nC=3\n", "B", "A=1\nC=3\n"},

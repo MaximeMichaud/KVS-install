@@ -69,14 +69,25 @@ func Set(data []byte, key, value string) ([]byte, error) {
 	if out, err = endJoin(data, entries, key); err != nil {
 		return nil, err
 	}
-	newline := "\n"
-	if bytes.Contains(data, []byte("\r\n")) {
-		newline = "\r\n"
-	}
+	newline := LineBreak(data)
 	if len(out) > 0 && out[len(out)-1] != '\n' {
-		out = append(out, newline...)
+		out = append(out, '\n')
 	}
 	return append(out, key+"="+written+newline...), nil
+}
+
+// LineBreak is the line break of a line added to data: CRLF when every
+// line break of data is one and data ends with one, as in a file saved
+// with CRLF throughout, and a line feed otherwise. The shell of the
+// scripts reads the carriage return of a CRLF as part of the value before
+// it, so a CRLF anywhere else, a comment pasted in at the end or a blank
+// line, is no reason to give one to the line added. A last line without a
+// break is ended with a line feed, which leaves it read as before.
+func LineBreak(data []byte) string {
+	if bytes.HasSuffix(data, []byte("\r\n")) && bytes.Count(data, []byte("\r\n")) == bytes.Count(data, []byte("\n")) {
+		return "\r\n"
+	}
+	return "\n"
 }
 
 // Unset returns data without the settings of key, each with its whole line,

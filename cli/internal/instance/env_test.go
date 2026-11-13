@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -186,6 +187,69 @@ func TestMergeEnvReadsBothFilesLikeCompose(t *testing.T) {
 	}
 	if inst.Env["CACHE_TTL"] != "42" || inst.Env["NEW_KEY"] != "two words" || inst.Env["OTHER"] != "$literal" {
 		t.Errorf("Env = %q", inst.Env)
+	}
+}
+
+// The lines MergeEnv adds end with CRLF only in a live file saved with
+// CRLF throughout (dotenv.LineBreak): a CRLF in a comment pasted above or
+// at the end, on the last setting, or on the line before a last line that
+// has no break, gives them no carriage return, which the shell of the
+// scripts (set -a; . .env) reads into the value. The last line keeps its
+// own line break, and gets a line feed when it has none.
+func TestMergeEnvEndsTheLinesAddedWithCRLFOnlyInACRLFFile(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is not installed")
+	}
+	cases := []struct {
+		name, live, want string
+		shell            map[string]string
+	}{
+		{"a CRLF comment above lines that end with a line feed",
+			"# pasted header\r\nDOMAIN=example.com\nSITE_PREFIX=kvs\n",
+			"# pasted header\r\nDOMAIN=example.com\nSITE_PREFIX=kvs\n\n# New.\nNEW_KEY=1\n",
+			map[string]string{"DOMAIN": "example.com", "SITE_PREFIX": "kvs", "NEW_KEY": "1"}},
+		{"a CRLF line before a last line without its break",
+			"DOMAIN=example.com\r\nA=",
+			"DOMAIN=example.com\r\nA=\n\n# New.\nNEW_KEY=1\n",
+			map[string]string{"A": "", "NEW_KEY": "1"}},
+		{"a CRLF comment pasted at the end",
+			"DOMAIN=example.com\nSITE_PREFIX=kvs\n# pasted note\r\n",
+			"DOMAIN=example.com\nSITE_PREFIX=kvs\n# pasted note\r\n\n# New.\nNEW_KEY=1\n",
+			map[string]string{"DOMAIN": "example.com", "SITE_PREFIX": "kvs", "NEW_KEY": "1"}},
+		{"a last setting that ends with CRLF",
+			"DOMAIN=example.com\nA=1\r\n\n",
+			"DOMAIN=example.com\nA=1\r\n\n# New.\nNEW_KEY=1\n",
+			map[string]string{"DOMAIN": "example.com", "A": "1\r", "NEW_KEY": "1"}},
+	}
+	example := filepath.Join(t.TempDir(), ".env.example")
+	if err := os.WriteFile(example, []byte("# New.\nNEW_KEY=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		inst := newInstance(t, tc.live)
+		if added, err := inst.MergeEnv(example); err != nil || strings.Join(added, ",") != "NEW_KEY" {
+			t.Errorf("%s: added %v, %v", tc.name, added, err)
+			continue
+		}
+		got, _ := os.ReadFile(inst.EnvPath)
+		if string(got) != tc.want {
+			t.Errorf("%s: .env =\n%q\nwant\n%q", tc.name, got, tc.want)
+		}
+		script := `set -a; . "$1" >/dev/null 2>&1; shift; for k; do printf '%s=%s\0' "$k" "${!k-unset}"; done`
+		keys := slices.Sorted(maps.Keys(tc.shell))
+		out, err := exec.Command(bash, append([]string{"-c", script, "bash", inst.EnvPath}, keys...)...).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		read := map[string]string{}
+		for _, entry := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
+			key, value, _ := strings.Cut(entry, "=")
+			read[key] = value
+		}
+		if !maps.Equal(read, tc.shell) {
+			t.Errorf("%s: the shell reads %q from %q, want %q", tc.name, read, got, tc.shell)
+		}
 	}
 }
 

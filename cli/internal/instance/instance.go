@@ -379,10 +379,6 @@ func (i *Instance) MergeEnv(examplePath string) ([]string, error) {
 	for _, e := range have {
 		known[e.Key] = true
 	}
-	newline := "\n"
-	if bytes.Contains(live, []byte("\r\n")) {
-		newline = "\r\n"
-	}
 	var added, appended []string
 	previousEnd := 0
 	for n, e := range settings {
@@ -406,7 +402,18 @@ func (i *Instance) MergeEnv(examplePath string) ([]string, error) {
 	if len(added) == 0 {
 		return nil, nil
 	}
-	body := strings.TrimRight(string(live), "\r\n") + newline + strings.Join(appended, newline) + newline
+	// The last line that is not blank keeps its line break, and gets a
+	// line feed when it has none. The lines added end with CRLF only in a
+	// file saved with CRLF throughout, as dotenv.Set adds a line: a CRLF
+	// elsewhere is no reason for one the shell of the scripts reads into
+	// the value before it.
+	kept := strings.TrimRight(string(live), "\r\n")
+	end := "\n"
+	if strings.HasPrefix(string(live[len(kept):]), "\r\n") {
+		end = "\r\n"
+	}
+	newline := dotenv.LineBreak(live)
+	body := kept + end + strings.Join(appended, newline) + newline
 	if err := i.ReplaceEnv([]byte(body)); err != nil {
 		return nil, err
 	}
