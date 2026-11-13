@@ -118,18 +118,23 @@ func TestLockOutlivesARunKilledDuringADockerCommand(t *testing.T) {
 	}
 }
 
-// A reader that holds the lock shared for a moment, as kvsctl status and
-// the lock probe of the scripts do, is no docker command a killed run left:
-// once the run the lock file names has ended, Lock asks again and takes the
-// lock when the reader lets it go. A run that lives is named at once, and a
-// hold that outlasts the wait is named as what a killed run left.
+// A reader that holds the lock shared for a moment, as kvsctl status does,
+// is no docker command a killed run left: Lock asks again and takes the
+// lock when the reader lets it go, whatever the lock file names: a run
+// that has ended, no run at all (the empty file a script makes), or a
+// process that lives and holds nothing (a pid used again). A run that
+// lives, which holds the lock exclusive, is named at once. A shared hold
+// that outlasts the wait is a script (setup.sh, reconfigure.sh,
+// kvs-install.sh hold it shared for their whole run), named as such even
+// though the lock file still names a run that has ended; an exclusive one
+// that outlasts it is what a killed run left.
 func TestLockWaitsForAMomentaryReader(t *testing.T) {
 	inst := newInstance(t, "DOMAIN=example.com\n")
 	ended := exec.Command("true")
 	if err := ended.Run(); err != nil {
 		t.Fatal(err)
 	}
-	hold := func(pid int) *os.File {
+	hold := func(pid, how int) *os.File {
 		t.Helper()
 		if err := os.MkdirAll(inst.StateDir(), 0o750); err != nil {
 			t.Fatal(err)
@@ -138,40 +143,98 @@ func TestLockWaitsForAMomentaryReader(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := writeHolder(f, holder{PID: pid, Command: "upgrade", Since: time.Now()}); err != nil {
+		if pid == 0 {
+			// The lock file a script makes: empty, naming no run.
+			err = f.Truncate(0)
+		} else {
+			err = writeHolder(f, holder{PID: pid, Command: "upgrade", Since: time.Now()})
+		}
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		if err := syscall.Flock(int(f.Fd()), how); err != nil {
 			t.Fatal(err)
 		}
 		return f
 	}
 
-	moment := hold(ended.ProcessState.Pid())
-	time.AfterFunc(100*time.Millisecond, func() { moment.Close() })
-	release, err := inst.Lock("recover")
-	if err != nil {
-		t.Fatalf("a shared hold of a moment beside a run that has ended: %v", err)
+	for _, pid := range []int{ended.ProcessState.Pid(), 0, os.Getpid()} {
+		moment := hold(pid, syscall.LOCK_SH)
+		time.AfterFunc(100*time.Millisecond, func() { moment.Close() })
+		release, err := inst.Lock("recover")
+		if err != nil {
+			t.Fatalf("a shared hold of a moment beside a lock file naming pid %d: %v", pid, err)
+		}
+		release()
 	}
-	release()
 
-	live := hold(os.Getpid())
+	live := hold(os.Getpid(), syscall.LOCK_EX)
 	start := time.Now()
-	_, err = inst.Lock("recover")
+	_, err := inst.Lock("recover")
 	took := time.Since(start)
 	live.Close()
 	var held *LockedError
-	if !errors.As(err, &held) || held.Orphaned || took >= orphanWait {
+	if !errors.As(err, &held) || held.Orphaned || held.Script || took >= orphanWait {
 		t.Errorf("a run that lives: %v after %s, want it named at once", err, took)
 	}
 
-	lasting := hold(ended.ProcessState.Pid())
+	script := hold(ended.ProcessState.Pid(), syscall.LOCK_SH)
+	start = time.Now()
+	_, err = inst.Lock("recover")
+	took = time.Since(start)
+	script.Close()
+	if !errors.As(err, &held) || !held.Script || held.Orphaned || took < orphanWait {
+		t.Errorf("a shared hold that lasts: %v after %s, want a script named after %s", err, took, orphanWait)
+	} else if msg := err.Error(); !strings.Contains(msg, "setup.sh, reconfigure.sh or kvs-install.sh") || !strings.Contains(msg, inst.lockPath()) {
+		t.Errorf("a script's hold is named %q", msg)
+	}
+
+	lasting := hold(ended.ProcessState.Pid(), syscall.LOCK_EX)
 	defer lasting.Close()
 	start = time.Now()
 	_, err = inst.Lock("recover")
-	if took := time.Since(start); !errors.As(err, &held) || !held.Orphaned || took < orphanWait {
-		t.Errorf("a hold that lasts: %v after %s, want what the run left named after %s", err, took, orphanWait)
+	if took := time.Since(start); !errors.As(err, &held) || !held.Orphaned || held.Script || took < orphanWait {
+		t.Errorf("an exclusive hold that lasts: %v after %s, want what the run left named after %s", err, took, orphanWait)
 	}
+}
+
+// The lock a script holds the way setup.sh does (flock --shared on a
+// descriptor of its own, for its whole run, from another process) refuses
+// every run of kvsctl until the script ends, and the next run then takes it.
+func TestScriptHoldRefusesARunUntilItEnds(t *testing.T) {
+	inst := newInstance(t, "DOMAIN=example.com\n")
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock(1) is not installed")
+	}
+	if err := os.MkdirAll(inst.StateDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(t.TempDir(), "ready")
+	script := exec.Command("bash", "-c", `exec {fd}<>"$1" && flock --shared --nonblock "$fd" && : > "$2" && exec sleep 300`, "script", inst.lockPath(), ready)
+	if err := script.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = script.Process.Kill(); _ = script.Wait() })
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the script never held the lock")
+		}
+	}
+	_, err := inst.Lock("backup")
+	var held *LockedError
+	if !errors.As(err, &held) || !held.Script {
+		t.Fatalf("a run beside a script that holds the lock: %v", err)
+	}
+	_ = script.Process.Kill()
+	_ = script.Wait()
+	release, err := inst.Lock("backup")
+	if err != nil {
+		t.Fatalf("the lock stayed held after the script ended: %v", err)
+	}
+	release()
 }
 
 // A docker command run while the lock is held holds it too, and so does

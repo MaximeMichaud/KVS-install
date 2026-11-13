@@ -69,7 +69,8 @@ Exit codes:
   4  the upgrade failed and the previous version is back and healthy
   5  a rollback failed (the automatic one, or a manual one part way), or a
      restore stopped part way: the stack is in an unknown state, read the log
-  6  another kvsctl holds the lock of the installation
+  6  another kvsctl, or a setup.sh, reconfigure.sh or kvs-install.sh run,
+     holds the lock of the installation
   7  the manifest is older than the one already seen
   8  the change succeeded but could not be recorded: run 'kvsctl recover'
 `

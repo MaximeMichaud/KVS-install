@@ -2562,6 +2562,88 @@ for action in enable disable; do
         "reconfigure.sh --manticore $action took a shared hold of the kvsctl lock for a run: $(cat "$LAST_DIR/output.log")"
 done
 
+# A reconfiguration that goes on holds the lock shared until it ends, so a
+# kvsctl run started meanwhile, which takes it exclusive, is refused: the
+# stand-in for lib/manticore.sh asks for it as kvsctl does while the run is
+# at it. On an installation kvsctl never ran on, the lock file is made as
+# kvsctl makes it, and the hold ends with the run.
+for files in idle none; do
+    name="kvsctl-held-${files}"
+    kvsctl_case "$name" "$files"
+    lock="$TEST_ROOT/$name/kvsctl/lock"
+    [ "$files" != none ] || rm -rf "${lock%/lock}"
+    printf 'manticore_manage() { if /usr/bin/flock --exclusive --nonblock %q true; then echo "kvsctl-lock free"; else echo "kvsctl-lock held"; fi; }\n' \
+        "$lock" > "$TEST_ROOT/$name/docker/lib/manticore.sh"
+    kvsctl_reconfigure "$name" "$files" --manticore enable
+    assert_success "reconfigure.sh --manticore enable with an idle kvsctl lock ($files): $(cat "$LAST_DIR/output.log")"
+    assert_contains "$LAST_DIR/output.log" 'kvsctl-lock held' \
+        "a kvsctl run could take the lock while reconfigure.sh ran ($files): $(cat "$LAST_DIR/output.log")"
+    assert_not_contains "$LAST_DIR/output.log" 'kvsctl-lock free' \
+        "a kvsctl run could take the lock while reconfigure.sh ran ($files): $(cat "$LAST_DIR/output.log")"
+    /usr/bin/flock --exclusive --nonblock "$lock" true ||
+        fail "reconfigure.sh kept the kvsctl lock after it ended ($files)"
+    if [ "$files" = none ]; then
+        assert_eq '750 600 ' "$(stat -c %a "${lock%/lock}" "$lock" | tr '\n' ' ')" \
+            "reconfigure.sh made the kvsctl lock with other modes than kvsctl"
+    fi
+done
+
+# An update of kvs-install.sh stopped outright leaves the kvsctl/ of the
+# installation in <install dir>.kvsctl.XXXXXX, and moves it back on its
+# next run only into an installation with no kvsctl/ or an empty one:
+# beside such a kvsctl/ set aside, reconfigure.sh stops before it makes the
+# lock and names the move that puts it back (aside, and aside-empty with an
+# empty kvsctl/ of the installation). Beside a kvsctl/ the installation has
+# of its own, nothing it makes keeps it out, and it goes on (aside-own, and
+# aside-dot where it holds only a dotfile).
+for files in aside aside-empty aside-own aside-dot; do
+    for action in '' enable; do
+        name="kvsctl-${files}-${action:-apply}"
+        kvsctl_case "$name" idle
+        case_dir="$TEST_ROOT/$name"
+        rm -rf "$case_dir/kvsctl"
+        case "$files" in
+            aside-empty) mkdir "$case_dir/kvsctl" ;;
+            aside-own) mkdir "$case_dir/kvsctl" && : > "$case_dir/kvsctl/lock" ;;
+            aside-dot) mkdir "$case_dir/kvsctl" && : > "$case_dir/kvsctl/.keep" ;;
+        esac
+        mkdir -p "$case_dir.kvsctl.Ab12Cd/kvsctl/logs"
+        printf 'backup\n' > "$case_dir.kvsctl.Ab12Cd/kvsctl/logs/20261007-010000-backup.log"
+        if [ -n "$action" ]; then
+            kvsctl_reconfigure "$name" idle --manticore "$action"
+        else
+            kvsctl_reconfigure "$name" idle
+        fi
+        if [ "$files" = aside-own ] || [ "$files" = aside-dot ]; then
+            if [ -n "$action" ]; then
+                assert_success "reconfigure.sh --manticore $action beside a kvsctl/ of the installation's own: $(cat "$LAST_DIR/output.log")"
+                assert_contains "$LAST_DIR/output.log" "manticore_manage $action" \
+                    "reconfigure.sh --manticore $action did not run beside a kvsctl/ of the installation's own: $(cat "$LAST_DIR/output.log")"
+            fi
+            assert_not_contains "$LAST_DIR/output.log" 'kvs-install.sh set aside' \
+                "reconfigure.sh ${action:+--manticore $action }was refused beside a kvsctl/ of the installation's own: $(cat "$LAST_DIR/output.log")"
+            continue
+        fi
+        assert_failure "reconfigure.sh ${action:+--manticore $action }beside the kvsctl/ an update set aside ($files)"
+        assert_contains "$LAST_DIR/output.log" \
+            "ERROR: $case_dir.kvsctl.Ab12Cd/kvsctl holds the files of kvsctl that kvs-install.sh set aside for an update and has not moved back to $case_dir/kvsctl: the update still runs, was stopped before it could, or could not move them, and the lock this script makes there would keep them out. Once no update runs, run kvs-install.sh again, which moves them back first, or move them back yourself: mv -T -- $case_dir.kvsctl.Ab12Cd/kvsctl $case_dir/kvsctl. Then run reconfigure.sh again. Nothing was changed." \
+            "reconfigure.sh ${action:+--manticore $action }does not name the kvsctl/ an update set aside ($files): $(cat "$LAST_DIR/output.log")"
+        assert_eq '' "$(cat "$LAST_DIR/docker.calls")" \
+            "reconfigure.sh ${action:+--manticore $action }ran docker beside the kvsctl/ an update set aside ($files)"
+        assert_not_contains "$LAST_DIR/output.log" 'manticore_manage' \
+            "reconfigure.sh ${action:+--manticore $action }ran beside the kvsctl/ an update set aside ($files)"
+        assert_eq "$(cat "$case_dir/env.before")" "$(cat "$LAST_DIR/.env")" \
+            "reconfigure.sh ${action:+--manticore $action }changed .env beside the kvsctl/ an update set aside ($files)"
+        if [ "$files" = aside ]; then
+            [ ! -e "$case_dir/kvsctl" ] && [ ! -L "$case_dir/kvsctl" ] ||
+                fail "reconfigure.sh ${action:+--manticore $action }made $case_dir/kvsctl beside the kvsctl/ an update set aside"
+        else
+            assert_eq '' "$(ls -A "$case_dir/kvsctl")" \
+                "reconfigure.sh ${action:+--manticore $action }wrote into the empty kvsctl/ beside the kvsctl/ an update set aside"
+        fi
+    done
+done
+
 # Static checks retain the cryptographic and atomic-update invariants exercised
 # through the full-script mocks above.
 # shellcheck disable=SC2016

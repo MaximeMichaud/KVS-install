@@ -367,15 +367,35 @@ echo 'PASS: parsed saved PHP series, selection and locked bases agree for ordina
 # running, not interrupted. A check that cannot take the lock (flock fails)
 # cannot tell, and stops too. A lock no run holds, one held shared as
 # kvsctl status holds it while it reads, or no kvsctl at all stops nothing.
-# The copy here passes the root check (the suite runs as a user) and keeps
-# its logs in the case; docker, curl, gum and ss are stand-ins that log
-# their calls, and a Docker without Compose ends a run that got past the
-# check in the preflight.
+# A setup that goes on holds the lock shared until it ends, so a kvsctl run
+# started meanwhile, which takes it exclusive, is refused: each stand-in
+# asks for it as kvsctl does and logs whether it was free. On an
+# installation kvsctl never ran on the setup makes the lock file as kvsctl
+# makes it. The copy here passes the root check (the suite runs as a user)
+# and keeps its logs in the case; docker, curl, gum and ss are stand-ins
+# that log their calls, and a Docker without Compose ends a run that got
+# past the check in the preflight. An update of kvs-install.sh stopped
+# outright leaves the kvsctl/ of the installation in
+# <install dir>.kvsctl.XXXXXX, and moves it back on its next run only into
+# an installation with no kvsctl/ or an empty one: beside such a kvsctl/
+# set aside (aside), with an empty kvsctl/ of the installation too
+# (aside-empty), the setup stops before it makes the lock and names the
+# move that puts it back. Beside a kvsctl/ the installation has of its own
+# (aside-own, and aside-dot where it holds only a dotfile), or a holding
+# directory with only backups/ in it (aside-backups), nothing it makes
+# keeps them out, and it goes on.
 mkdir -p "$TEST_DIR/stub"
 for tool in docker curl gum ss; do
     cat > "$TEST_DIR/stub/$tool" <<'EOF'
 #!/bin/bash
 printf '%s %s\n' "${0##*/}" "$*" >> "$SETUP_CALLS"
+if [ -e "$KVSCTL_LOCK" ]; then
+    if /usr/bin/flock --exclusive --nonblock "$KVSCTL_LOCK" true; then
+        echo 'kvsctl-lock free' >> "$SETUP_CALLS"
+    else
+        echo 'kvsctl-lock held' >> "$SETUP_CALLS"
+    fi
+fi
 case "${0##*/} $*" in
     'docker --version') echo 'Docker version 29.0.0, build test' ;;
     'docker compose '*) exit 1 ;;
@@ -390,19 +410,33 @@ printf '#!/bin/bash\necho "flock: cannot open lock file" >&2\nexit 66\n' > "$TES
 chmod +x "$TEST_DIR/flock-fails/flock"
 
 # setup_run <case> <kvsctl files: none, idle, watched, running,
-# interrupted, both or unknown> [arguments of setup.sh]
+# interrupted, both, unknown, aside, aside-empty, aside-own, aside-dot or
+# aside-backups> [arguments of setup.sh]
 setup_run() {
     local case_root="$TEST_DIR/kvsctl-run/$1" files="$2" path="$TEST_DIR/stub:/usr/bin:/bin"
     shift 2
-    rm -rf "$case_root"
+    rm -rf "$case_root" "$case_root".kvsctl.*
     mkdir -p "$case_root/docker"
     # shellcheck disable=SC2016  # The EUID test is matched literally.
     sed -e "s|/opt/kvs/logs|${case_root}/logs|g" -e 's/if \[ "$EUID" -ne 0 \]; then/if false; then/' \
         "$ROOT_DIR/docker/setup.sh" > "$case_root/docker/setup.sh"
     case "$files" in
-        idle | watched | running | interrupted | both | unknown)
+        idle | watched | running | interrupted | both | unknown | aside-own)
             mkdir -p "$case_root/kvsctl"
             : > "$case_root/kvsctl/lock"
+            ;;
+        aside-empty) mkdir -p "$case_root/kvsctl" ;;
+        aside-dot) mkdir -p "$case_root/kvsctl" && : > "$case_root/kvsctl/.keep" ;;
+    esac
+    case "$files" in
+        aside | aside-empty | aside-own | aside-dot)
+            mkdir -p "$case_root.kvsctl.Ab12Cd/kvsctl/logs"
+            printf 'backup\n' > "$case_root.kvsctl.Ab12Cd/kvsctl/logs/20261007-010000-backup.log"
+            printf '{"action":"restore"}\n' > "$case_root.kvsctl.Ab12Cd/kvsctl/journal.json"
+            ;;
+        aside-backups)
+            mkdir -p "$case_root.kvsctl.Ab12Cd/backups"
+            printf 'dump\n' > "$case_root.kvsctl.Ab12Cd/backups/backup-unknown-20261007-010000.tar"
             ;;
     esac
     [ "$files" != unknown ] || path="$TEST_DIR/flock-fails:$path"
@@ -418,7 +452,7 @@ setup_run() {
             watched) exec 9< "$case_root/kvsctl/lock" && flock --shared 9 ;;
         esac
         cd "$case_root/docker"
-        SETUP_CALLS="$TEST_DIR/calls" PATH="$path" bash ./setup.sh "$@" < /dev/null
+        SETUP_CALLS="$TEST_DIR/calls" KVSCTL_LOCK="$case_root/kvsctl/lock" PATH="$path" bash ./setup.sh "$@" < /dev/null
     ) > "$TEST_DIR/out" 2> "$TEST_DIR/err"
 }
 
@@ -446,9 +480,21 @@ for args in '' '--dev' '--resume-import'; do
     refused "both-$name" both "$(printf "$running_reason" "both-$name")" $args
     refused "interrupted-$name" interrupted "$(printf "$interrupted_reason" "interrupted-$name")" $args
     refused "unknown-$name" unknown "$(printf "$unknown_reason" "unknown-$name")" $args
+    for files in aside aside-empty; do
+        case_root="$TEST_DIR/kvsctl-run/$files-$name"
+        refused "$files-$name" "$files" "$case_root.kvsctl.Ab12Cd/kvsctl holds the files of kvsctl that kvs-install.sh set aside for an update and has not moved back to $case_root/kvsctl: the update still runs, was stopped before it could, or could not move them, and the lock this setup makes there would keep them out. Once no update runs, run kvs-install.sh again, which moves them back first, or move them back yourself: mv -T -- $case_root.kvsctl.Ab12Cd/kvsctl $case_root/kvsctl. Then run setup.sh again." $args
+        if [ "$files" = aside ] && { [ -e "$case_root/kvsctl" ] || [ -L "$case_root/kvsctl" ]; }; then
+            fail "setup.sh $args made $case_root/kvsctl beside the kvsctl/ an update set aside: $(ls -lA "$case_root/kvsctl")"
+        fi
+        if [ "$files" = aside-empty ] && [ -n "$(ls -A "$case_root/kvsctl")" ]; then
+            fail "setup.sh $args wrote into the empty kvsctl/ beside the kvsctl/ an update set aside: $(ls -lA "$case_root/kvsctl")"
+        fi
+        [ "$(ls -A "$case_root.kvsctl.Ab12Cd/kvsctl")" = "$(printf 'journal.json\nlogs')" ] ||
+            fail "setup.sh $args changed the kvsctl/ an update set aside: $(ls -lA "$case_root.kvsctl.Ab12Cd/kvsctl")"
+    done
 done
 
-for files in idle watched none; do
+for files in idle watched none aside-own aside-dot aside-backups; do
     status=0
     setup_run "past-$files" "$files" || status=$?
     [ "$status" -eq 1 ] || fail "the stand-in Docker without Compose must end the run ($files, status $status): $(cat "$TEST_DIR/out" "$TEST_DIR/err")"
@@ -457,8 +503,21 @@ for files in idle watched none; do
     if grep -Fq 'kvsctl' "$TEST_DIR/out" "$TEST_DIR/err"; then
         fail "an installation kvsctl does not run on must not hear of it ($files): $(cat "$TEST_DIR/out" "$TEST_DIR/err")"
     fi
+    if ! grep -Fxq 'kvsctl-lock held' "$TEST_DIR/calls" || grep -Fxq 'kvsctl-lock free' "$TEST_DIR/calls"; then
+        fail "a kvsctl run could take the lock while setup.sh ran ($files): $(cat "$TEST_DIR/calls")"
+    fi
+    lock="$TEST_DIR/kvsctl-run/past-$files/kvsctl/lock"
+    /usr/bin/flock --exclusive --nonblock "$lock" true ||
+        fail "setup.sh kept the kvsctl lock after it ended ($files)"
+    case "$files" in
+        none | aside-backups)
+            if [ "$(stat -c %a "${lock%/lock}" "$lock" | tr '\n' ' ')" != '750 600 ' ]; then
+                fail "setup.sh made the kvsctl lock with modes $(stat -c %a "${lock%/lock}" "$lock" | tr '\n' ' '), not 750 600 as kvsctl ($files)"
+            fi
+            ;;
+    esac
 done
-echo 'PASS: setup.sh starts nothing while kvsctl runs or after a kvsctl run that did not finish'
+echo 'PASS: setup.sh starts nothing while kvsctl runs or after a kvsctl run that did not finish, and holds the lock while it runs'
 
 # Step 1 of the setup builds the images Compose builds on this stack: all
 # of them on a checkout, Manticore only when it is enabled, and none on a

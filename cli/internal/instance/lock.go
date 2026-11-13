@@ -14,19 +14,29 @@ import (
 	"github.com/MaximeMichaud/KVS-install/cli/internal/dockerx"
 )
 
-// LockedError says another kvsctl holds the lock of the instance, and names
-// the run that holds it. Orphaned is a run that has ended, killed, while a
+// LockedError says the lock of the instance is held, and names who holds
+// it. Orphaned is a run that has ended, killed, while a
 // docker command it started still runs: that command holds the lock (see
-// Lock), and Path is the lock file it holds open.
+// Lock), and Path is the lock file it holds open. Script is a lock no kvsctl
+// holds: setup.sh, reconfigure.sh and kvs-install.sh hold it shared for as
+// long as they run, and the lock file names no run of theirs.
 type LockedError struct {
 	PID      int
 	Command  string
 	Since    time.Time
 	Orphaned bool
+	Script   bool
 	Path     string
 }
 
 func (e *LockedError) Error() string {
+	if e.Script {
+		msg := "a setup.sh, reconfigure.sh or kvs-install.sh run is changing this installation and holds its lock; wait until it is done"
+		if e.Path != "" {
+			msg += " ('fuser -v " + e.Path + "' names it)"
+		}
+		return msg
+	}
 	who := "pid unknown"
 	if e.PID > 0 {
 		who = fmt.Sprintf("pid %d", e.PID)
@@ -104,7 +114,10 @@ const (
 // a second compose on the project beside it. The release closes the
 // descriptor instead of unlocking it, for the same reason. A lock another
 // run holds comes back as a *LockedError naming it, at once while that run
-// lives, after orphanWait once it has ended.
+// lives, after orphanWait once it has ended. A lock held only shared is no
+// kvsctl run and no docker command one left, which hold it exclusive: it is
+// kvsctl status reading for a moment, or a script that holds it for its
+// whole run, named as such once orphanWait has passed.
 func (i *Instance) Lock(command string) (func(), error) {
 	if err := os.MkdirAll(i.StateDir(), 0o750); err != nil {
 		return nil, err
@@ -115,14 +128,22 @@ func (i *Instance) Lock(command string) (func(), error) {
 		return nil, err
 	}
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if errors.Is(err, syscall.EWOULDBLOCK) && gone(readHolder(path).PID) {
-		// The run the file names has ended. What holds the lock is a
-		// docker command it left, or a reader that takes it shared for a
-		// moment: kvsctl status, and the lock probe of the scripts. The
-		// lock is asked for again a while before the first is named.
+	if errors.Is(err, syscall.EWOULDBLOCK) && (sharedOnly(f) || gone(readHolder(path).PID)) {
+		// What holds the lock is no kvsctl that lives: a docker command a
+		// run that has ended left, kvsctl status reading for a moment, or
+		// a script. The lock is asked for again a while before what still
+		// holds it is named.
 		for deadline := time.Now().Add(orphanWait); errors.Is(err, syscall.EWOULDBLOCK) && time.Now().Before(deadline); {
 			time.Sleep(orphanPoll)
 			err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		}
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) && sharedOnly(f) {
+		// Held shared and nothing else: a script, unless it has just let
+		// go, which the last ask for the lock tells.
+		if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return nil, &LockedError{Script: true, Path: path}
 		}
 	}
 	if err != nil {
@@ -147,6 +168,16 @@ func (i *Instance) Lock(command string) (func(), error) {
 			f.Close()
 		})
 	}, nil
+}
+
+// sharedOnly reports whether the lock f is the file of is held shared and
+// by nobody exclusive: a shared hold of f is granted, and let go at once.
+func sharedOnly(f *os.File) bool {
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB) != nil {
+		return false
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return true
 }
 
 // Holder names the run that holds the lock of the instance, nil when no run

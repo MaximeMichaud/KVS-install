@@ -376,7 +376,12 @@ lock is a `flock`, which a run that dies, whatever the way, never leaves
 behind; the docker commands a run started hold it too, until they end, so a
 run killed while `docker compose` works leaves the lock to that command,
 and no second compose starts beside it. `kvs-install.sh`, `docker/setup.sh`
-and `docker/reconfigure.sh` change nothing while a run holds the lock.
+and `docker/reconfigure.sh` change nothing while a run holds the lock, and
+hold it shared for as long as they run: a run started meanwhile exits 6
+with `a setup.sh, reconfigure.sh or kvs-install.sh run is changing this
+installation and holds its lock`. `kvsctl status`, `kvsctl check` and
+`kvsctl doctor` only read the lock: they still answer beside them, and do
+not see them either (doctor reports no operation running).
 
 ## Exit codes
 
@@ -388,7 +393,7 @@ and `docker/reconfigure.sh` change nothing while a run holds the lock.
 | 3 | the upgrade is blocked and nothing was touched (`kvsctl check` says why) |
 | 4 | the upgrade failed and the previous version is back and healthy |
 | 5 | a rollback failed (the automatic one, or a manual one part way), or a restore stopped part way: the stack is in an unknown state, read the log |
-| 6 | another `kvsctl` holds the lock of the installation |
+| 6 | another `kvsctl`, or a run of `setup.sh`, `reconfigure.sh` or `kvs-install.sh`, holds the lock of the installation |
 | 7 | the manifest is older than the one already seen |
 | 8 | the change succeeded but could not be recorded: run `kvsctl recover` |
 
@@ -963,9 +968,12 @@ keeps `backups/` and `kvsctl/` in its new copy.
   command keeps the lock until it ends, so that no second compose runs beside
   it. `fuser -v /opt/kvs/kvsctl/lock` names it: wait for it, then run
   `kvsctl recover` when `kvsctl status` shows an interrupted run. When
-  `fuser` names nothing, a check held the lock for a moment (`kvsctl status`,
-  or `setup.sh`, `reconfigure.sh` or `kvs-install.sh` looking for a run):
-  run the command again.
+  `fuser` names nothing, that command has ended since: run the command
+  again.
+- `a setup.sh, reconfigure.sh or kvs-install.sh run is changing this installation and holds its lock`
+  (exit 6): one of the scripts runs on the installation, or a process it
+  started does (`fuser -v /opt/kvs/kvsctl/lock` names it). Wait until it is
+  done, then run the command again.
 - `... was interrupted during ...: run 'kvsctl recover'`: a run was cut
   short. Read its log, named in the message, then run `kvsctl recover`.
 - `... failed ... on ...: <cause>; once the cause is fixed, run 'kvsctl recover'`:

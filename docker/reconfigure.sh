@@ -117,26 +117,58 @@ fi
 # directory, and a run of it that did not finish leaves kvsctl/journal.json,
 # from which kvsctl recover finishes or undoes that run: containers changed
 # meanwhile, or before that recover, are not the ones kvsctl expects. Both
-# are refused before anything changes; an installation kvsctl never ran on
-# has neither file. When recover cannot finish a run, it leaves the run to
-# be finished by hand and the journal to be removed: the refusal says so,
-# or this script and recover would each send the operator to the other.
-# setup.sh and kvs-install.sh check the same.
+# are refused before anything changes. When recover cannot finish a run, it
+# leaves the run to be finished by hand and the journal to be removed: the
+# refusal says so, or this script and recover would each send the operator
+# to the other. The script then holds that lock shared until it ends, on a
+# descriptor of its own: a kvsctl run takes it exclusive, so one started
+# meanwhile is refused (exit 6) instead of changing the stack beside this
+# script, while kvsctl status, which reads it shared, still answers. The
+# children of the script inherit the descriptor, and so hold it as long as
+# they run. On an installation kvsctl never ran on, the lock file is made
+# the way kvsctl makes it. setup.sh and kvs-install.sh do the same.
+# An update of kvs-install.sh sets kvsctl/ aside in
+# <install dir>.kvsctl.XXXXXX while it swaps the copy, and one stopped
+# outright (kill -9, a power cut), or whose move back failed, leaves it
+# there, where kvsctl does not look: the next run of kvs-install.sh moves
+# it back, but only into an installation with no kvsctl/ or an empty one.
+# The lock file made here would keep it out, its logs and the journal of a
+# run to recover with it, so the script is refused until it is back.
+# Beside a kvsctl/ the installation has of its own, it could not go back
+# anyway: the script goes on.
 refuse_during_kvsctl_run() {
     local root="$1"
     local lock="$1/kvsctl/lock"
     local status=0
+    local holding move
 
-    # A shared lock is refused exactly while a kvsctl run holds its own.
-    if [ -e "$lock" ]; then
-        flock --shared --nonblock "$lock" true || status=$?
-        if [ "$status" -eq 1 ]; then
-            echo "ERROR: kvsctl is running on this installation (it holds ${lock}): wait until it is done; 'kvsctl status' shows what it does. Nothing was changed." >&2
+    if [ ! -L "$root/kvsctl" ] && { [ ! -e "$root/kvsctl" ] || (shopt -s nullglob dotglob; set -- "$root/kvsctl"/*; [ -d "$root/kvsctl" ] && [ "$#" -eq 0 ]); }; then
+        for holding in "$root".kvsctl.??????; do
+            [ -d "$holding" ] && [ ! -L "$holding" ] || continue
+            [ -e "$holding/kvsctl" ] || [ -L "$holding/kvsctl" ] || continue
+            printf -v move 'mv -T -- %q %q' "$holding/kvsctl" "$root/kvsctl"
+            echo "ERROR: ${holding}/kvsctl holds the files of kvsctl that kvs-install.sh set aside for an update and has not moved back to ${root}/kvsctl: the update still runs, was stopped before it could, or could not move them, and the lock this script makes there would keep them out. Once no update runs, run kvs-install.sh again, which moves them back first, or move them back yourself: ${move}. Then run reconfigure.sh again. Nothing was changed." >&2
             return 1
-        elif [ "$status" -ne 0 ]; then
-            echo "ERROR: could not tell whether kvsctl is running: flock ${lock} failed with status ${status}. Nothing was changed." >&2
+        done
+    fi
+    if [ ! -e "$lock" ]; then
+        if ! { [ -d "$root/kvsctl" ] || mkdir -m 0750 "$root/kvsctl"; } || ! (umask 077 && : >> "$lock"); then
+            echo "ERROR: could not create ${lock}, the lock kvsctl and this script share. Nothing was changed." >&2
             return 1
         fi
+    fi
+    if ! exec {KVSCTL_LOCK_FD}< "$lock"; then
+        echo "ERROR: could not open ${lock}, the lock kvsctl and this script share. Nothing was changed." >&2
+        return 1
+    fi
+    # A shared lock is refused exactly while a kvsctl run holds its own.
+    flock --shared --nonblock "$KVSCTL_LOCK_FD" || status=$?
+    if [ "$status" -eq 1 ]; then
+        echo "ERROR: kvsctl is running on this installation (it holds ${lock}): wait until it is done; 'kvsctl status' shows what it does. Nothing was changed." >&2
+        return 1
+    elif [ "$status" -ne 0 ]; then
+        echo "ERROR: could not tell whether kvsctl is running: flock ${lock} failed with status ${status}. Nothing was changed." >&2
+        return 1
     fi
     if [ -e "$root/kvsctl/journal.json" ]; then
         echo "ERROR: an interrupted kvsctl run left ${root}/kvsctl/journal.json: run 'kvsctl recover' first. Where recover says to finish by hand and that takes reconfigure.sh, remove that file, then run reconfigure.sh again. Nothing was changed." >&2

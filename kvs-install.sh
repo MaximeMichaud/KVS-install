@@ -2069,6 +2069,24 @@ recover_kvsctl_data() {
   done
 }
 
+# kvsctl_data_left_aside <install dir>: prints the kvsctl/ an update set
+# aside beside the installation and did not move back, while the
+# installation has none (bring_back_kvsctl_data removes an empty one before
+# its move): the lock file the installer or the setup makes there would
+# keep it out. Prints nothing otherwise.
+kvsctl_data_left_aside() {
+  local install_dir="$1"
+  local holding
+
+  [[ ! -e "$install_dir/kvsctl" && ! -L "$install_dir/kvsctl" ]] || return 0
+  for holding in "$install_dir".kvsctl.??????; do
+    [[ -d "$holding" && ! -L "$holding" ]] || continue
+    [[ -e "$holding/kvsctl" || -L "$holding/kvsctl" ]] || continue
+    printf '%s\n' "$holding/kvsctl"
+    return 0
+  done
+}
+
 # recover_user_data <install dir> <backup dir>: a swap cut short once it
 # began to remove the old copy leaves the installation without all or part
 # of its .env and archive. Their backup is under /tmp unless KVS_BACKUP_DIR
@@ -2127,7 +2145,9 @@ swap_kvs_install() {
     return 1
   fi
   # The new copy is in place: what kvsctl wrote and cannot go back into it
-  # is named, and the update goes on, which does not need it.
+  # is named. The update goes on beside backups/, which nothing it runs
+  # needs; it stops before the setup when kvsctl/ stayed aside, since the
+  # lock the setup makes there would keep it out (dockerInstall).
   if [[ -n "$holding" ]] && bring_back_kvsctl_data "$holding" "$install_dir"; then
     echo "${cyan}Kept the files of kvsctl in the new copy${normal}"
   fi
@@ -2238,20 +2258,58 @@ refuse_kvsctl_managed_install() {
 # kvsctl backup and kvsctl restore included, and a run of it that did not
 # finish leaves kvsctl/journal.json, from which kvsctl recover finishes or
 # undoes that run. The update would change the files under it, and the
-# setup the containers. Both are refused before anything moves: an
-# installation kvsctl never ran on has neither file. When recover cannot
-# finish a run, it leaves the run to be finished by hand and the journal to
-# be removed: the refusal says so, or the installer and recover would each
-# send the operator to the other. docker/setup.sh and docker/reconfigure.sh
-# check the same.
+# setup the containers. Both are refused before anything moves. When
+# recover cannot finish a run, it leaves the run to be finished by hand and
+# the journal to be removed: the refusal says so, or the installer and
+# recover would each send the operator to the other.
+# refuse_during_kvsctl_run <install dir> [hold]: with hold, the installer
+# then holds that lock shared until it ends, on a descriptor of its own: a
+# kvsctl run takes it exclusive, so one started meanwhile is refused (exit
+# 6) instead of changing the installation beside the update and the setup,
+# while kvsctl status, which reads it shared, still answers. The setup it
+# runs holds it too. The lock file is made the way kvsctl makes it when the
+# installation has none; a directory that is not there yet holds no
+# installation, so nothing is made or held there. Without hold, the lock is
+# only probed and nothing is made: the first check comes before the files
+# of kvsctl an interrupted update set aside are moved back, and a kvsctl
+# directory made there would keep them out. For the same reason, a hold
+# that would make the lock file is refused while a kvsctl/ set aside could
+# not be moved back and the installation has none of its own. docker/setup.sh
+# and docker/reconfigure.sh do the same.
 refuse_during_kvsctl_run() {
   local install_dir="$1"
+  local mode="${2:-probe}"
   local lock="$1/kvsctl/lock"
   local status=0
+  local aside
+  local move
 
+  if [[ "$mode" == hold && -d "$install_dir" && ! -e "$lock" ]]; then
+    # A kvsctl/ recover_kvsctl_data could not move back (its mv failed)
+    # goes back only while the installation has none: the lock made here
+    # would keep it out.
+    aside=$(kvsctl_data_left_aside "$install_dir")
+    if [[ -n "$aside" ]]; then
+      printf -v move 'mv -T -- %q %q' "$aside" "$install_dir/kvsctl"
+      echo "${red}$aside holds the files of kvsctl an earlier update set aside, and they could not go back to $install_dir/kvsctl: the lock this installer makes there would keep them out. Move them back yourself: $move. Then run the installer again. Nothing was changed.${normal}" >&2
+      return 1
+    fi
+    if ! { [ -d "$install_dir/kvsctl" ] || mkdir -m 0750 "$install_dir/kvsctl"; } || ! (umask 077 && : >>"$lock"); then
+      echo "${red}Could not create $lock, the lock kvsctl and this installer share. Nothing was changed.${normal}" >&2
+      return 1
+    fi
+  fi
   # A shared lock is refused exactly while a kvsctl run holds its own.
   if [[ -e "$lock" ]]; then
-    flock --shared --nonblock "$lock" true || status=$?
+    if [[ "$mode" == hold ]]; then
+      if ! exec {KVSCTL_LOCK_FD}<"$lock"; then
+        echo "${red}Could not open $lock, the lock kvsctl and this installer share. Nothing was changed.${normal}" >&2
+        return 1
+      fi
+      flock --shared --nonblock "$KVSCTL_LOCK_FD" || status=$?
+    else
+      flock --shared --nonblock "$lock" true || status=$?
+    fi
     if ((status == 1)); then
       echo "${red}kvsctl is running on the installation in $install_dir (it holds $lock): wait until it is done; 'kvsctl status' shows what it does. Nothing was changed.${normal}" >&2
       return 1
@@ -2363,6 +2421,8 @@ function dockerInstall() {
   local BACKUP_DIR
   local clone_status
   local staged_archive
+  local kvsctl_aside
+  local kvsctl_move
 
   echo ""
   echo "${cyan}=== Docker Installation ===${normal}"
@@ -2379,7 +2439,7 @@ function dockerInstall() {
   # first, where kvsctl looks for it, whatever this run does next. The
   # journal of a kvsctl run may be among it.
   recover_kvsctl_data "$INSTALL_DIR"
-  refuse_during_kvsctl_run "$INSTALL_DIR" || return $?
+  refuse_during_kvsctl_run "$INSTALL_DIR" hold || return $?
   refuse_kvsctl_managed_install "$INSTALL_DIR" || return $?
 
   # Check if Docker is installed
@@ -2459,6 +2519,16 @@ function dockerInstall() {
       return "$clone_status"
     fi
     drop_user_data_backup "$BACKUP_DIR" || return $?
+  fi
+
+  # A kvsctl/ the swap could not move into the new copy (its mv failed)
+  # stays aside, and the lock the setup makes in the copy would keep it
+  # out: the installer stops before the setup and names the move.
+  kvsctl_aside=$(kvsctl_data_left_aside "$INSTALL_DIR")
+  if [[ -n "$kvsctl_aside" ]]; then
+    printf -v kvsctl_move 'mv -T -- %q %q' "$kvsctl_aside" "$INSTALL_DIR/kvsctl"
+    echo "${red}The new copy is in place in $INSTALL_DIR, but $kvsctl_aside, the files of kvsctl this update set aside, could not go back to $INSTALL_DIR/kvsctl, and the lock the setup makes there would keep them out. Move them back yourself: $kvsctl_move. Then run the installer again; the setup has not run.${normal}" >&2
+    return 1
   fi
 
   cd "$INSTALL_DIR/docker" || { echo "${red}Failed to enter docker directory${normal}"; exit 1; }

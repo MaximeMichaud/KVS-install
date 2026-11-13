@@ -165,6 +165,21 @@ kvsctl_data_identity() {
   done
 }
 
+# script_lock_step <script> <install dir>: the check of kvsctl that
+# <script> (docker/setup.sh or docker/reconfigure.sh of this repository)
+# makes before it changes anything, run from the docker directory of the
+# installation as the script runs it. A check that goes on holds the lock
+# until the subshell ends.
+script_lock_step() {
+  local script="$1"
+  local install_dir="$2"
+
+  (
+    eval "$(sed -n '/^refuse_during_kvsctl_run() {/,/^}/p' "$script" | sed 's/^refuse_during_kvsctl_run/script_refuse_during_kvsctl_run/')"
+    cd "$install_dir/docker" && script_refuse_during_kvsctl_run "$(cd .. && pwd)"
+  )
+}
+
 # A git that cannot pull or fetch, as for a copy whose repository is
 # damaged or that is no checkout at all, and whose clone works.
 git_that_clones_only() {
@@ -236,8 +251,12 @@ test_reclone_keeps_the_backups_and_logs_of_kvsctl() {
 
 # Once the new copy is in place, what kvsctl wrote and cannot go back into
 # it stays in the directory that holds it, which the installer names, and
-# the rest goes back. The update goes on: neither the setup nor the site
-# needs those files.
+# the rest goes back. Beside a backups/ left there the update goes on:
+# neither the setup nor the site needs it. A kvsctl/ left there would be
+# kept out by the lock the setup makes in the new copy, so the installer
+# stops before the setup and names the move that puts it back, and the
+# setup run by hand meanwhile says the update could not move it; once it
+# is moved, the next run goes on.
 test_kvsctl_data_that_cannot_move_back_is_named() {
   local temp_dir
   local status
@@ -245,42 +264,74 @@ test_kvsctl_data_that_cannot_move_back_is_named() {
   local holding
   local backup_inode
   local log_inode
+  local stuck
+  local move
   temp_dir=$(mktemp -d)
   trap 'rm -rf "$temp_dir"' RETURN
 
   git() { git_that_clones_only "$@"; }
 
-  install_dir="$temp_dir/install"
-  export KVS_INSTALL_DIR="$install_dir"
-  export KVS_BACKUP_DIR="$temp_dir/backup"
-  seed_installation "$install_dir"
-  rm -rf "$install_dir/.git"
-  seed_kvsctl_data "$install_dir"
-  backup_inode=$(stat -c %i "$install_dir/backups/backup-unknown-20261007-010000.tar")
-  log_inode=$(stat -c %i "$install_dir/kvsctl/logs/20261007-010000-backup.log")
-  # kvsctl/, the first to go back, does not go back into the new clone.
-  mv() {
-    [[ ${*: -1} != "$install_dir/kvsctl" ]] || return 1
-    command mv "$@"
-  }
+  for stuck in backups kvsctl; do
+    install_dir="$temp_dir/$stuck/install"
+    export KVS_INSTALL_DIR="$install_dir"
+    export KVS_BACKUP_DIR="$temp_dir/$stuck/backup"
+    seed_installation "$install_dir"
+    rm -rf "$install_dir/.git"
+    seed_kvsctl_data "$install_dir"
+    backup_inode=$(stat -c %i "$install_dir/backups/backup-unknown-20261007-010000.tar")
+    log_inode=$(stat -c %i "$install_dir/kvsctl/logs/20261007-010000-backup.log")
+    # One of them does not go back into the new clone.
+    mv() {
+      [[ ${*: -1} != "$install_dir/$stuck" ]] || return 1
+      command mv "$@"
+    }
 
-  (dockerInstall) >"$temp_dir/out" 2>&1
-  status=$?
-  unset -f mv
+    (dockerInstall) >"$temp_dir/out" 2>&1
+    status=$?
+    unset -f mv
 
-  [[ $status -eq 0 ]] || fail "the update stopped although the new copy was in place (status $status): $(cat "$temp_dir/out")" || return 1
-  [[ "$(cat "$install_dir/docker/docker-compose.yml")" == "fresh" ]] || fail "the copy was not cloned again" || return 1
-  grep -q 'MARIADB_PASSWORD=secret' "$install_dir/docker/.env" || fail "the new clone lost the .env of the site" || return 1
-  grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run: $(cat "$temp_dir/out")" || return 1
-  [[ "$(stat -c %i "$install_dir/backups/backup-unknown-20261007-010000.tar" 2>/dev/null)" == "$backup_inode" ]] ||
-    fail "backups/ did not go back into the new clone: $(find "$temp_dir" -path '*/.git' -prune -o -print)" || return 1
-  holding=$(find "$temp_dir" -mindepth 1 -maxdepth 1 -name 'install.kvsctl.*')
-  [[ -n "$holding" && "$(stat -c %i "$holding/kvsctl/logs/20261007-010000-backup.log" 2>/dev/null)" == "$log_inode" ]] ||
-    fail "the logs of kvsctl are not kept, moved, beside the installation: $(find "$temp_dir" -name '*.log')" || return 1
-  grep -Fq "$holding/kvsctl could not go back to $install_dir/kvsctl: move it there" "$temp_dir/out" ||
-    fail "the directory that holds the logs of kvsctl is not named: $(cat "$temp_dir/out")" || return 1
-  ! grep -Fq 'No new copy was installed' "$temp_dir/out" ||
-    fail "the installer said no new copy was installed: $(cat "$temp_dir/out")" || return 1
+    [[ "$(cat "$install_dir/docker/docker-compose.yml")" == "fresh" ]] || fail "the copy was not cloned again ($stuck)" || return 1
+    grep -q 'MARIADB_PASSWORD=secret' "$install_dir/docker/.env" || fail "the new clone lost the .env of the site ($stuck)" || return 1
+    holding=$(find "$temp_dir/$stuck" -mindepth 1 -maxdepth 1 -name 'install.kvsctl.*')
+    [[ -n "$holding" ]] || fail "nothing was kept beside the installation ($stuck): $(ls -A "$temp_dir/$stuck")" || return 1
+    grep -Fq "$holding/$stuck could not go back to $install_dir/$stuck: move it there" "$temp_dir/out" ||
+      fail "the directory that holds $stuck/ is not named: $(cat "$temp_dir/out")" || return 1
+    ! grep -Fq 'No new copy was installed' "$temp_dir/out" ||
+      fail "the installer said no new copy was installed ($stuck): $(cat "$temp_dir/out")" || return 1
+    if [[ $stuck == backups ]]; then
+      [[ $status -eq 0 ]] || fail "the update stopped beside a backups/ that could not go back (status $status): $(cat "$temp_dir/out")" || return 1
+      grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run beside a backups/ that could not go back: $(cat "$temp_dir/out")" || return 1
+      [[ "$(stat -c %i "$install_dir/kvsctl/logs/20261007-010000-backup.log" 2>/dev/null)" == "$log_inode" ]] ||
+        fail "kvsctl/ did not go back into the new clone: $(find "$temp_dir/$stuck" -path '*/.git' -prune -o -print)" || return 1
+      [[ "$(stat -c %i "$holding/backups/backup-unknown-20261007-010000.tar" 2>/dev/null)" == "$backup_inode" ]] ||
+        fail "the backups are not kept, moved, beside the installation: $(find "$temp_dir/$stuck" -name '*.tar')" || return 1
+      continue
+    fi
+    [[ $status -eq 1 ]] || fail "the update went on beside a kvsctl/ that could not go back (status $status): $(cat "$temp_dir/out")" || return 1
+    ! grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup ran beside a kvsctl/ that could not go back: $(cat "$temp_dir/out")" || return 1
+    [[ ! -e "$install_dir/kvsctl" && ! -L "$install_dir/kvsctl" ]] ||
+      fail "the installer made $install_dir/kvsctl beside the kvsctl/ that could not go back: $(ls -lA "$install_dir/kvsctl")" || return 1
+    [[ "$(stat -c %i "$install_dir/backups/backup-unknown-20261007-010000.tar" 2>/dev/null)" == "$backup_inode" ]] ||
+      fail "backups/ did not go back into the new clone: $(find "$temp_dir/$stuck" -path '*/.git' -prune -o -print)" || return 1
+    [[ "$(stat -c %i "$holding/kvsctl/logs/20261007-010000-backup.log" 2>/dev/null)" == "$log_inode" ]] ||
+      fail "the logs of kvsctl are not kept, moved, beside the installation: $(find "$temp_dir/$stuck" -name '*.log')" || return 1
+    grep -Fq "The new copy is in place in $install_dir, but $holding/kvsctl, the files of kvsctl this update set aside, could not go back to $install_dir/kvsctl, and the lock the setup makes there would keep them out. Move them back yourself: mv -T -- $holding/kvsctl $install_dir/kvsctl. Then run the installer again; the setup has not run." "$temp_dir/out" ||
+      fail "the installer does not name the move that puts kvsctl/ back: $(cat "$temp_dir/out")" || return 1
+    status=0
+    script_lock_step "$REPO_DIR/docker/setup.sh" "$install_dir" >"$temp_dir/step" 2>&1 || status=$?
+    [[ $status -eq 1 ]] && grep -Fq "has not moved back to $install_dir/kvsctl: the update still runs, was stopped before it could, or could not move them," "$temp_dir/step" ||
+      fail "setup.sh does not say the update could not move kvsctl/ back (status $status): $(cat "$temp_dir/step")" || return 1
+    move=$(sed -n 's/.* Move them back yourself: \(mv -T -- .*\)\. Then run the installer again.*/\1/p' "$temp_dir/out")
+    eval "$move" || fail "the move named does not run: $move" || return 1
+    (dockerInstall) >"$temp_dir/out" 2>&1
+    status=$?
+    [[ $status -eq 0 ]] || fail "the next run stopped once kvsctl/ was moved back (status $status): $(cat "$temp_dir/out")" || return 1
+    grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run once kvsctl/ was moved back: $(cat "$temp_dir/out")" || return 1
+    [[ "$(stat -c %i "$install_dir/kvsctl/logs/20261007-010000-backup.log" 2>/dev/null)" == "$log_inode" ]] ||
+      fail "kvsctl/ is not in the installation once moved back: $(find "$temp_dir/$stuck" -path '*/.git' -prune -o -print)" || return 1
+    [[ -z "$(find "$temp_dir/$stuck" -mindepth 1 -maxdepth 1 -name 'install.*')" ]] ||
+      fail "something was left beside the installation once kvsctl/ was moved back: $(ls -A "$temp_dir/$stuck")" || return 1
+  done
 }
 
 # What cannot be renamed into the new clone stops the swap before anything
@@ -622,7 +673,12 @@ test_the_log_tee_ignores_ctrl_c() {
 # old copy was already removed (its .env and archive waiting in
 # KVS_BACKUP_DIR). One the installation has again stays aside, named, and
 # the update goes on. A holding directory left empty (the update stopped
-# as it made it) goes without a word.
+# as it made it) goes without a word. docker/setup.sh and
+# docker/reconfigure.sh, run meanwhile, would make kvsctl/lock, and the
+# kvsctl/ set aside could not go back: they refuse, make nothing, and name
+# the move that puts it back, which the operator may run instead (by-hand).
+# A kvsctl/ that does not move back (its mv fails) stops the installer
+# before it makes the lock there, and the setup does not run (stuck).
 test_a_later_run_moves_back_what_an_update_left_aside() {
   local temp_dir
   local status
@@ -632,10 +688,12 @@ test_a_later_run_moves_back_what_an_update_left_aside() {
   local before
   local held
   local log_inode
+  local script
+  local move
   temp_dir=$(mktemp -d)
   trap 'rm -rf "$temp_dir"' RETURN
 
-  for layout in checkout plain gone again empty; do
+  for layout in checkout plain gone again empty setup by-hand stuck; do
     install_dir="$temp_dir/$layout/install"
     holding="$install_dir.kvsctl.Ab12Cd"
     export KVS_INSTALL_DIR="$install_dir"
@@ -663,11 +721,57 @@ test_a_later_run_moves_back_what_an_update_left_aside() {
         mkdir "$install_dir/backups"
         printf 'newer\n' >"$install_dir/backups/backup-unknown-20261008-010000.tar"
         ;;
+      setup | by-hand)
+        for script in setup reconfigure; do
+          status=0
+          script_lock_step "$REPO_DIR/docker/$script.sh" "$install_dir" >"$temp_dir/step" 2>&1 || status=$?
+          [[ $status -eq 1 ]] ||
+            fail "$script.sh went on beside the kvsctl/ an update set aside (status $status): $(cat "$temp_dir/step")" || return 1
+          [[ ! -e "$install_dir/kvsctl" && ! -L "$install_dir/kvsctl" ]] ||
+            fail "$script.sh made $install_dir/kvsctl beside the kvsctl/ an update set aside: $(ls -lA "$install_dir/kvsctl")" || return 1
+          grep -Fq "ERROR: $holding/kvsctl holds the files of kvsctl that kvs-install.sh set aside for an update and has not moved back to $install_dir/kvsctl:" "$temp_dir/step" ||
+            fail "$script.sh does not name the kvsctl/ set aside: $(cat "$temp_dir/step")" || return 1
+          grep -Fq "move them back yourself: mv -T -- $holding/kvsctl $install_dir/kvsctl. Then run $script.sh again. Nothing was changed." "$temp_dir/step" ||
+            fail "$script.sh does not name the move that puts it back: $(cat "$temp_dir/step")" || return 1
+        done
+        if [[ $layout == by-hand ]]; then
+          move=$(sed -n 's/.* move them back yourself: \(mv -T -- .*\)\. Then run .*/\1/p' "$temp_dir/step")
+          eval "$move" || fail "the move named does not run: $move" || return 1
+          [[ "$(stat -c %i "$install_dir/kvsctl/logs/20261007-010000-backup.log" 2>/dev/null)" == "$log_inode" ]] ||
+            fail "the move named did not put kvsctl/ back: $move" || return 1
+          for script in setup reconfigure; do
+            status=0
+            script_lock_step "$REPO_DIR/docker/$script.sh" "$install_dir" >"$temp_dir/step" 2>&1 || status=$?
+            [[ $status -eq 0 ]] || fail "$script.sh was refused once kvsctl/ was back (status $status): $(cat "$temp_dir/step")" || return 1
+          done
+        fi
+        ;;
+      stuck)
+        mv() {
+          if [[ "${*: -2:1}" == "$holding/kvsctl" ]]; then
+            echo "mv: cannot move '$holding/kvsctl': Permission denied" >&2
+            return 1
+          fi
+          command mv "$@"
+        }
+        ;;
     esac
 
     (dockerInstall) >"$temp_dir/out" 2>&1
     status=$?
+    unset -f mv
 
+    if [[ $layout == stuck ]]; then
+      [[ $status -eq 1 ]] || fail "dockerInstall went on beside a kvsctl/ that could not go back (status $status): $(cat "$temp_dir/out")" || return 1
+      ! grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup ran beside a kvsctl/ that could not go back: $(cat "$temp_dir/out")" || return 1
+      [[ ! -e "$install_dir/kvsctl" && ! -L "$install_dir/kvsctl" ]] ||
+        fail "the installer made $install_dir/kvsctl beside the kvsctl/ that could not go back: $(ls -lA "$install_dir/kvsctl")" || return 1
+      [[ "$(stat -c %i "$holding/kvsctl/logs/20261007-010000-backup.log" 2>/dev/null)" == "$log_inode" ]] ||
+        fail "the kvsctl/ that could not go back did not stay where it was: $(find "$temp_dir/$layout" -path '*/.git' -prune -o -print)" || return 1
+      grep -Fq "$holding/kvsctl holds the files of kvsctl an earlier update set aside, and they could not go back to $install_dir/kvsctl: the lock this installer makes there would keep them out. Move them back yourself: mv -T -- $holding/kvsctl $install_dir/kvsctl. Then run the installer again. Nothing was changed." "$temp_dir/out" ||
+        fail "the installer does not name the kvsctl/ that could not go back: $(cat "$temp_dir/out")" || return 1
+      continue
+    fi
     [[ $status -eq 0 ]] || fail "dockerInstall failed ($layout, status $status): $(cat "$temp_dir/out")" || return 1
     grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run ($layout): $(cat "$temp_dir/out")" || return 1
     grep -q 'MARIADB_PASSWORD=secret' "$install_dir/docker/.env" || fail "the update lost the .env of the site ($layout)" || return 1
@@ -887,7 +991,10 @@ test_kvsctl_managed_install_is_refused() {
 # there is running, not interrupted. A check that cannot take the lock
 # (flock fails) cannot tell, and stops too. A lock no run holds stops
 # nothing (the other cases of this suite run with one), nor one held shared,
-# as kvsctl status holds it while it reads.
+# as kvsctl status holds it while it reads. An update that goes on holds the
+# lock shared until it ends, the setup it runs included, so a kvsctl run
+# started meanwhile, which takes it exclusive, is refused; on an
+# installation kvsctl never ran on the lock file is made as kvsctl makes it.
 test_a_kvsctl_run_is_refused() {
   local temp_dir
   local status
@@ -995,15 +1102,29 @@ test_a_kvsctl_run_is_refused() {
   grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run beside a shared hold of the kvsctl lock: $(cat "$temp_dir/out")" || return 1
   rm -f "$temp_dir/calls"
 
-  # Without kvsctl the update goes on, as before kvsctl.
-  export KVS_INSTALL_DIR="$temp_dir/none/install"
-  export KVS_BACKUP_DIR="$temp_dir/none/backup"
-  seed_installation "$KVS_INSTALL_DIR"
-  printf '#!/bin/bash\necho setup-ran\n' >"$KVS_INSTALL_DIR/docker/setup.sh"
-  (dockerInstall) >"$temp_dir/out" 2>&1
-  status=$?
-  [[ $status -eq 0 ]] || fail "dockerInstall failed on an installation kvsctl never ran on (status $status): $(cat "$temp_dir/out")" || return 1
-  grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run without kvsctl: $(cat "$temp_dir/out")" || return 1
+  # Without kvsctl the update goes on, as before kvsctl, and so does one
+  # with a lock no run holds; both hold the lock while the setup runs, and
+  # let it go when they end.
+  for state in none idle; do
+    export KVS_INSTALL_DIR="$temp_dir/$state/install"
+    export KVS_BACKUP_DIR="$temp_dir/$state/backup"
+    seed_installation "$KVS_INSTALL_DIR"
+    [[ $state == none ]] || seed_kvsctl_data "$KVS_INSTALL_DIR"
+    printf '#!/bin/bash\necho setup-ran\nif [[ ! -e %q ]]; then echo kvsctl-lock-missing\nelif /usr/bin/flock --exclusive --nonblock %q true; then echo kvsctl-lock-free\nelse echo kvsctl-lock-held\nfi\n' \
+      "$KVS_INSTALL_DIR/kvsctl/lock" "$KVS_INSTALL_DIR/kvsctl/lock" >"$KVS_INSTALL_DIR/docker/setup.sh"
+    (dockerInstall) >"$temp_dir/out" 2>&1
+    status=$?
+    [[ $status -eq 0 ]] || fail "dockerInstall failed on an installation kvsctl does not run on ($state, status $status): $(cat "$temp_dir/out")" || return 1
+    grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run ($state): $(cat "$temp_dir/out")" || return 1
+    grep -Fxq 'kvsctl-lock-held' "$temp_dir/out" ||
+      fail "a kvsctl run could take the lock while the installer ran ($state): $(cat "$temp_dir/out")" || return 1
+    /usr/bin/flock --exclusive --nonblock "$KVS_INSTALL_DIR/kvsctl/lock" true ||
+      fail "the installer kept the kvsctl lock after it ended ($state)" || return 1
+    if [[ $state == none && "$(stat -c %a "$KVS_INSTALL_DIR/kvsctl" "$KVS_INSTALL_DIR/kvsctl/lock" | tr '\n' ' ')" != '750 600 ' ]]; then
+      fail "the installer made the kvsctl lock with other modes than kvsctl: $(stat -c %a "$KVS_INSTALL_DIR/kvsctl" "$KVS_INSTALL_DIR/kvsctl/lock" | tr '\n' ' ')" || return 1
+    fi
+    rm -f "$temp_dir/calls"
+  done
 }
 
 run_test() {

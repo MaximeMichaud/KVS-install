@@ -276,6 +276,35 @@ func TestSessionLocked(t *testing.T) {
 	}
 }
 
+// A script that holds the lock shared for its run, as setup.sh,
+// reconfigure.sh and kvs-install.sh do, is exit 6 too, named as a script,
+// and the run writes no log.
+func TestSessionLockedByAScript(t *testing.T) {
+	root := newRoot(t)
+	useRoot(t, root)
+	inst, _ := instance.Detect(root)
+	if err := os.MkdirAll(inst.StateDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(inst.StateDir(), "lock"), os.O_CREATE|os.O_RDONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+	g := newGuard("stops", nil)
+	defer g.stop()
+	_, err = openSession("backup", g, sessionOptions{})
+	if exitCode(err) != exitLocked || !strings.Contains(fmt.Sprint(err), "setup.sh, reconfigure.sh or kvs-install.sh") {
+		t.Fatalf("a script holding the lock gives %v", err)
+	}
+	if logs, _ := runlog.List(inst.StateDir()); len(logs) != 0 {
+		t.Fatalf("a locked run wrote %v", logs)
+	}
+}
+
 // While the journal of an interrupted run is there, a command that
 // changes the stack refuses, names recover and the log of that run, lets
 // go of the lock and writes no log of its own; recover itself goes on.

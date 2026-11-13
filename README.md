@@ -478,6 +478,12 @@ killed outright (`kill -9`, a power cut) leaves them in
 `<install dir>.kvsctl.XXXXXX`, and the next run of `kvs-install.sh` moves
 them back before anything else; one the installation holds again by then,
 a newer `backups/` for instance, stays there, named.
+Until `kvsctl/` is back, `docker/setup.sh` and `docker/reconfigure.sh`
+refuse to start on an installation that has no `kvsctl/` of its own, or
+an empty one, since the lock they would make there would keep it out;
+they name the `mv` that puts it back by hand. So does `kvs-install.sh`
+when it could not move it back itself, and it then stops before the
+setup.
 
 On any installation, managed or not, `kvs-install.sh`, `docker/setup.sh`
 and `docker/reconfigure.sh` change nothing while a kvsctl run holds
@@ -485,9 +491,12 @@ and `docker/reconfigure.sh` change nothing while a kvsctl run holds
 the ones kvsctl expects. Nor do they after a run that did not finish left
 `kvsctl/journal.json`, until `kvsctl recover` has finished or undone that
 run; where recover says to finish by hand, remove `kvsctl/journal.json`
-before running them for it. `reconfigure.sh --import-status`,
-`--writeback-status` and `--manticore status` still run, and
-`kvsctl status`, which only reads the lock, stops none of them.
+before running them for it. Once past that check they hold
+`kvsctl/lock` shared for as long as they run, so a kvsctl run started
+meanwhile is refused (exit 6) instead of changing the stack beside them.
+`reconfigure.sh --import-status`, `--writeback-status` and
+`--manticore status` still run, and `kvsctl status`, which only reads the
+lock, stops none of them.
 
 ## Compatibility
 
