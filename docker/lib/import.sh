@@ -171,10 +171,12 @@ import_dump_cat() {
 # CREATE DATABASE or USE statements, which the prepared dump drops, and
 # yes when the dump ends with the "Dump completed" line the dump tools
 # write, no otherwise (a streamed dump that broke off has no such line).
+# A decompressor error (a corrupt or truncated .gz, .zst or .xz) fails the
+# inspection: the part read before the error can look complete.
 import_inspect_dump() {
     local dump="$1"
     local prefix="$2"
-    local tool
+    local tool result
 
     if import_is_native_dump "$dump"; then
         if ! declare -F native_import_inspect >/dev/null; then
@@ -199,7 +201,9 @@ import_inspect_dump() {
         echo "ERROR: $tool is needed to read $dump" >&2
         return 1
     fi
-    import_dump_cat "$dump" | awk -v prefix="$prefix" '
+    # pipefail: without it only awk's status counts, and a gzip CRC error or
+    # a zstd "premature end" would go unnoticed.
+    if ! result=$(set -o pipefail; import_dump_cat "$dump" | awk -v prefix="$prefix" '
         BEGIN { tables = 0; initial = ""; statements = 0; completed = "no"; databases = "" }
         /^-- Dump completed/ { completed = "yes"; next }
         NF { completed = "no" }
@@ -228,7 +232,11 @@ import_inspect_dump() {
             initial = value
         }
         END { printf "%d\t%s\t%d\t%s\t%s\n", tables, initial, statements, completed, databases }
-    '
+    '); then
+        echo "ERROR: $dump could not be read to the end${tool:+ ($tool reported an error above: the file is corrupt or truncated)}" >&2
+        return 1
+    fi
+    printf '%s\n' "$result"
 }
 
 import_is_native_dump() {
@@ -345,57 +353,66 @@ import_prepare_dump() {
             return 1
             ;;
     esac
-    {
-        # Enter the mariadb client sandbox before anything is replayed, so a
-        # dump cannot run client commands (\!, system, source, \.): the
-        # entrypoint replays this file with the mariadb client, as root in the
-        # container, and an older mysqldump carries no such guard. The
-        # /*M!999999\- ... */ directive is the one mariadb-dump itself writes
-        # and is an inert comment to any other client.
-        printf '%s\n' '/*M!999999\- enable the sandbox mode */'
-        # The mariadb image maps utf8mb4 and utf8mb3 to the uca1400
-        # collations (character-set-collations), so a CREATE TABLE that
-        # names a charset without COLLATE - what MySQL 5.x and MariaDB
-        # before 10.3.37 / 10.6.11 write - lands on uca1400_ai_ci instead of
-        # the general_ci the source meant. That silently changes equality,
-        # sorting and uniqueness for most KVS tables, and two spellings that
-        # collate equal under uca1400 but not general_ci (an ASCII word and
-        # its fullwidth form, say) in a UNIQUE column abort the whole replay.
-        # Reset the session to the legacy per-charset
-        # default so a charset-only table keeps its source collation. The
-        # /*M!110300 ... */ guard runs this only on MariaDB 11.3+, where the
-        # variable exists and the uca1400 mapping is; on older servers it is
-        # an inert comment (the variable is unknown and the default is already
-        # general_ci, so there is nothing to undo).
-        printf "/*M!110300 SET SESSION character_set_collations='' */;\n"
-        # shellcheck disable=SC2016  # The backticks are SQL quoting inside the sed program.
-        # A MySQL dump writes GTID_PURGED over several lines when the source
-        # knew several servers (one UUID set per line, up to the semicolon).
-        # The caller checks this function conditionally, disabling errexit.
-        # Stop on read/filter failures before appending a completion marker.
-        import_dump_cat "$dump" | sed -E -e '/^(CREATE DATABASE|USE )/d' \
-            -e '/^SET @@(GLOBAL|SESSION)\.GTID_PURGED/{' -e ':gtid' -e '/;[[:space:]]*$/!{' -e 'N' -e 'b gtid' -e '}' -e 'd' -e '}' \
-            -e '/^SET @@(GLOBAL|SESSION)\.SQL_LOG_BIN/d' -e '/^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
-            import_innodb_row_format - || return 1
-        echo
-        echo "-- kvs-install import"
-        # --no-autocommit dumps can leave this session in manual commit mode.
-        # Commit their final transaction and persist the adjustments and
-        # completion marker below, including after the client disconnects.
-        printf '\nSET autocommit=1;\n'
-        if [ -z "$initial" ]; then
-            printf "INSERT INTO \`%soptions\` (variable, value) VALUES ('INITIAL_VERSION', '%s') ON DUPLICATE KEY UPDATE value = value;\n" \
-                "$prefix" "$(import_sql_escape "$version")"
-        fi
-        if [ "$old_path" != "$new_path" ]; then
-            import_path_rewrite_sql "$prefix" "$old_path" "$new_path"
-        fi
-        printf "INSERT INTO \`%soptions\` (variable, value) VALUES ('KVS_INSTALL_IMPORT', '%s') ON DUPLICATE KEY UPDATE value = VALUES(value);\n" \
-            "$prefix" "$(import_sql_escape "$token")"
-    } | import_dump_write "$output" || {
+    # pipefail, in a subshell: a decompressor or filter error inside the
+    # group, or a failed write, fails the whole pipeline, so no completion
+    # marker is ever written after a partial dump and the output is removed.
+    # Without it only the status of import_dump_write counted, and the
+    # group's own "|| exit 1" was lost with it.
+    if ! (
+        set -o pipefail
+        {
+            # Enter the mariadb client sandbox before anything is replayed, so a
+            # dump cannot run client commands (\!, system, source, \.): the
+            # entrypoint replays this file with the mariadb client, as root in the
+            # container, and an older mysqldump carries no such guard. The
+            # /*M!999999\- ... */ directive is the one mariadb-dump itself writes
+            # and is an inert comment to any other client.
+            printf '%s\n' '/*M!999999\- enable the sandbox mode */'
+            # The mariadb image maps utf8mb4 and utf8mb3 to the uca1400
+            # collations (character-set-collations), so a CREATE TABLE that
+            # names a charset without COLLATE - what MySQL 5.x and MariaDB
+            # before 10.3.37 / 10.6.11 write - lands on uca1400_ai_ci instead of
+            # the general_ci the source meant. That silently changes equality,
+            # sorting and uniqueness for most KVS tables, and two spellings that
+            # collate equal under uca1400 but not general_ci (an ASCII word and
+            # its fullwidth form, say) in a UNIQUE column abort the whole replay.
+            # Reset the session to the legacy per-charset
+            # default so a charset-only table keeps its source collation. The
+            # /*M!110300 ... */ guard runs this only on MariaDB 11.3+, where the
+            # variable exists and the uca1400 mapping is; on older servers it is
+            # an inert comment (the variable is unknown and the default is already
+            # general_ci, so there is nothing to undo).
+            printf "/*M!110300 SET SESSION character_set_collations='' */;\n"
+            # shellcheck disable=SC2016  # The backticks are SQL quoting inside the sed program.
+            # A MySQL dump writes GTID_PURGED over several lines when the source
+            # knew several servers (one UUID set per line, up to the semicolon).
+            # The caller checks this function conditionally, disabling errexit.
+            # Stop on read/filter failures before appending a completion marker.
+            import_dump_cat "$dump" | sed -E -e '/^(CREATE DATABASE|USE )/d' \
+                -e '/^SET @@(GLOBAL|SESSION)\.GTID_PURGED/{' -e ':gtid' -e '/;[[:space:]]*$/!{' -e 'N' -e 'b gtid' -e '}' -e 'd' -e '}' \
+                -e '/^SET @@(GLOBAL|SESSION)\.SQL_LOG_BIN/d' -e '/^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
+                import_innodb_row_format - || exit 1
+            echo
+            echo "-- kvs-install import"
+            # --no-autocommit dumps can leave this session in manual commit mode.
+            # Commit their final transaction and persist the adjustments and
+            # completion marker below, including after the client disconnects.
+            printf '\nSET autocommit=1;\n'
+            if [ -z "$initial" ]; then
+                printf "INSERT INTO \`%soptions\` (variable, value) VALUES ('INITIAL_VERSION', '%s') ON DUPLICATE KEY UPDATE value = value;\n" \
+                    "$prefix" "$(import_sql_escape "$version")"
+            fi
+            if [ "$old_path" != "$new_path" ]; then
+                import_path_rewrite_sql "$prefix" "$old_path" "$new_path"
+            fi
+            printf "INSERT INTO \`%soptions\` (variable, value) VALUES ('KVS_INSTALL_IMPORT', '%s') ON DUPLICATE KEY UPDATE value = VALUES(value);\n" \
+                "$prefix" "$(import_sql_escape "$token")"
+        } | import_dump_write "$output"
+    ); then
         rm -f -- "$output"
+        echo "ERROR: could not write $output from $dump: it could not be read to the end (corrupt or truncated) or the write failed" >&2
         return 1
-    }
+    fi
     printf '%s\t%s\t%s\n' "$tables" "$initial" "$statements"
 }
 

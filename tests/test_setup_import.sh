@@ -609,6 +609,9 @@ SQL
     grep -q '^CREATE TABLE `ktvs_example`' "$TMP_ROOT/full.sql" || fail 'the second stream must normally be included'
 
     (
+        # setup.sh runs with set -e alone: this file's pipefail would hide a
+        # decompressor status the functions themselves ignore.
+        set +o pipefail
         # The first dictionary fits; the second needs 64 MiB. This reproduces
         # a real read failure after valid SQL, without replacing the source.
         ulimit -v 32768
@@ -620,6 +623,63 @@ SQL
         [ ! -e "$TMP_ROOT/partial.sql" ] || fail 'a failed preparation must remove its incomplete output'
     ) || fail 'preparation must propagate read errors when called conditionally'
     pass 'dump preparation rejects a failed second stream without leaving a partial import'
+}
+
+# M3: a CRC-corrupted gzip or a truncated zstd dump decompresses part way
+# and looks complete to the line filters. Inspection must fail, and
+# preparation, with or without the cached inspection setup.sh passes, must
+# fail and leave no output, so no completion marker follows a partial dump.
+# Run as setup.sh runs them, without pipefail.
+test_corrupt_or_truncated_compressed_dumps_are_refused() {
+    local plain="$TMP_ROOT/m3-dump.sql" gz="$TMP_ROOT/m3-crc.sql.gz" zst="$TMP_ROOT/m3-cut.sql.zst"
+    local full="$TMP_ROOT/m3-full.sql.zst" inspection i
+
+    {
+        echo 'CREATE TABLE `ktvs_options` (`variable` varchar(255) PRIMARY KEY, `value` text);'
+        echo "INSERT INTO \`ktvs_options\` VALUES ('INITIAL_VERSION', '7.0.2');"
+        echo 'CREATE TABLE `ktvs_videos` (`id` int PRIMARY KEY, `title` text);'
+        for i in $(seq 1 20000); do printf "INSERT INTO \`ktvs_videos\` VALUES (%d, 'title %08d');\n" "$i" "$i"; done
+        echo '-- Dump completed on 2026-11-13 10:00:00'
+    } > "$plain"
+    gzip -c "$plain" > "$gz"
+    # Flip a byte of the CRC32 trailer: every byte of SQL comes out, then
+    # gzip reports the error.
+    python3 - "$gz" <<'PYCODE'
+import sys
+path = sys.argv[1]
+data = bytearray(open(path, 'rb').read())
+data[-8] ^= 0xff
+open(path, 'wb').write(data)
+PYCODE
+    gzip -t "$gz" 2>/dev/null && fail 'the gzip fixture must fail its CRC check'
+    zstd -q -c "$plain" > "$full"
+    head -c "$(( $(stat -c %s "$full") / 2 ))" "$full" > "$zst"
+    inspection=$(import_inspect_dump "$full" ktvs_) || fail 'the intact zstd dump must pass inspection'
+    [ "$(import_field "$inspection" 4)" = yes ] || fail 'the intact dump must be complete'
+    (
+        set +o pipefail
+        for dump in "$gz" "$zst"; do
+            if import_inspect_dump "$dump" ktvs_ > "$TMP_ROOT/m3.out" 2> "$TMP_ROOT/m3.err"; then
+                fail "inspection must fail on ${dump##*/}: got '$(cat "$TMP_ROOT/m3.out")'"
+            fi
+            grep -q 'could not be read to the end' "$TMP_ROOT/m3.err" ||
+                fail "the refusal must say the dump could not be read: $(cat "$TMP_ROOT/m3.err")"
+            if import_prepare_dump "$dump" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/m3-out.sql.zst" token >/dev/null 2>&1; then
+                fail "preparation must fail on ${dump##*/}"
+            fi
+            [ ! -e "$TMP_ROOT/m3-out.sql.zst" ] || fail "a failed preparation of ${dump##*/} must leave no output"
+            # setup.sh passes the inspection it made when the file is unchanged.
+            if import_prepare_dump "$dump" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/m3-out.sql" token "$inspection" >/dev/null 2>&1; then
+                fail "preparation with a cached inspection must fail on ${dump##*/}"
+            fi
+            [ ! -e "$TMP_ROOT/m3-out.sql" ] || fail "a failed preparation of ${dump##*/} must leave no plain output either"
+        done
+        import_prepare_dump "$full" ktvs_ 7.0.2 /home/old/www /var/www/kvs "$TMP_ROOT/m3-ok.sql.zst" token-m3 "$inspection" >/dev/null ||
+            fail 'the intact zstd dump must still be prepared without pipefail'
+        [ "$(zstd -dc "$TMP_ROOT/m3-ok.sql.zst" | tail -n 1)" = "INSERT INTO \`ktvs_options\` (variable, value) VALUES ('KVS_INSTALL_IMPORT', 'token-m3') ON DUPLICATE KEY UPDATE value = VALUES(value);" ] ||
+            fail 'the intact dump must end with its completion marker'
+    ) || fail 'corrupt or truncated dumps must be refused'
+    pass 'a corrupt or truncated compressed dump fails inspection and preparation'
 }
 
 # The staged dump is the whole source database. It waits in mariadb/init,
@@ -686,6 +746,7 @@ test_setup_and_init_are_wired_for_imports
 test_source_domain_persistence_errors_stop_import
 test_cached_dump_inspection_preserves_output
 test_dump_preparation_stops_after_a_decompression_failure
+test_corrupt_or_truncated_compressed_dumps_are_refused
 test_the_staged_dump_is_readable_by_the_database_group_only
 
 echo "All $TESTS_RUN import tests passed."
