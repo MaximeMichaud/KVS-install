@@ -370,7 +370,7 @@ EOF
 extract remove_env_value set_env_value import_check_completed validate_domain validate_site_prefix \
     retirement_root retirement_ids_ok retirement_engine retirement_load retirement_validate_ids \
     retirement_list retirement_write retirement_mask_completion retirement_prepare_identity retirement_subset \
-    > "$TEST_DIR/completed.sh"
+    retirement_request_prefix_selection > "$TEST_DIR/completed.sh"
 MAX_SITE_PREFIX_LENGTH=235
 database_docker_query() {
     case "$*" in

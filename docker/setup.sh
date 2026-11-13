@@ -994,13 +994,28 @@ retirement_prepare_identity() {
     fi
     if [ "${RETIRE_PHASE:-}" = reset ]; then
         set_env_value DOMAIN "$RETIRE_TARGET" || return 1
-        set_env_value SITE_PREFIX kvs || return 1
+        retirement_request_prefix_selection || return 1
         RETIRE_PHASE=ready
         retirement_write || return 1
     elif [ "${RETIRE_PHASE:-}" != ready ]; then
+        if [ "$reset_prefix" = yes ]; then
+            retirement_request_prefix_selection || return 1
+        fi
         set_env_value DOMAIN "$DOMAIN" || return 1
-        [ "$reset_prefix" != yes ] || set_env_value SITE_PREFIX kvs || return 1
     fi
+}
+
+# A new domain gets its own prefix: put the kvs placeholder back and record
+# in .env that a prefix must be chosen, so a run stopped before the selection
+# (or at its question) still chooses one next time instead of keeping kvs as
+# a saved legacy prefix. The record is written first, so no stopping point
+# leaves the placeholder without it.
+retirement_request_prefix_selection() {
+    set_env_value SITE_PREFIX_RESELECT yes || return 1
+    remove_env_value SITE_PREFIX_LEGACY || return 1
+    set_env_value SITE_PREFIX kvs || return 1
+    SITE_PREFIX_RESELECT=yes
+    unset SITE_PREFIX_LEGACY
 }
 
 retirement_subset() {
@@ -1364,11 +1379,13 @@ fi
 #################################################################
 # Headless mode defaults (inherit from parent kvs-install.sh)
 if [[ "$HEADLESS" == "y" ]]; then
-    PREFIX_CHOICE=${PREFIX_CHOICE:-1}       # 1=default (kvs-domain), 2=legacy (kvs), 3=custom
-    SSL_CHOICE=${SSL_CHOICE:-1}             # 1=letsencrypt, 2=zerossl, 3=selfsigned
+    # PREFIX_CHOICE, SSL_CHOICE and CACHE_CHOICE are left unset on purpose: a
+    # default of 1 here overrides what .env already holds (a saved prefix, SSL
+    # provider or cache) on every headless re-run. When one is not given, the
+    # selection points below keep the saved value, and a prefix that is really
+    # being chosen (a fresh .env, or a new domain) takes the default 1.
     DB_CHOICE=${DB_CHOICE:-1}               # 1=the newest LTS (MARIADB_LTS_VERSIONS)
     IONCUBE_CHOICE=${IONCUBE_CHOICE:-1}     # 1=yes, 2=no
-    CACHE_CHOICE=${CACHE_CHOICE:-1}         # 1=dragonfly, 2=memcached
     VOLUME_CHOICE=${VOLUME_CHOICE:-2}       # For credential mismatch: 1=delete volume, 2=exit (safe default)
     STOP_EXISTING=${STOP_EXISTING:-Y}       # Y=stop existing containers
     DNS_CHOICE=${DNS_CHOICE:-2}             # 1=retry, 2=continue anyway, 3=exit
@@ -3385,6 +3402,7 @@ chmod 600 .env
 
 # Load environment
 unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED KVS_IMPORT_PENDING_RETIREMENT MANTICORE_REBUILD_PENDING
+unset SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
@@ -3692,8 +3710,10 @@ select_site_prefix() {
     echo "Container names will be: {prefix}-php, {prefix}-mariadb, etc."
     echo "  Default: ${generated_prefix} (e.g., ${generated_prefix}-php)"
 
-    # Skip prompt if already set (headless mode)
-    if [[ -z "$PREFIX_CHOICE" ]]; then
+    # Skip prompt if already set; headless mode takes the default
+    if [[ -z "$PREFIX_CHOICE" && "$HEADLESS" == "y" ]]; then
+        PREFIX_CHOICE=1
+    elif [[ -z "$PREFIX_CHOICE" ]]; then
         echo ""
         echo "Options:"
         echo "  1) Use default: kvs-${DEFAULT_PREFIX}"
@@ -3730,6 +3750,28 @@ select_site_prefix() {
     set_env_value SITE_PREFIX "$SITE_PREFIX" || exit 1
     # Set COMPOSE_PROJECT_NAME to match SITE_PREFIX for consistent volume naming
     set_env_value COMPOSE_PROJECT_NAME "$SITE_PREFIX" || exit 1
+    # A kvs chosen here is the legacy prefix, not the placeholder: record it
+    # now, before the MariaDB passwords exist, so a later run keeps it.
+    if [ "$SITE_PREFIX" = kvs ]; then
+        set_env_value SITE_PREFIX_LEGACY yes || exit 1
+    else
+        remove_env_value SITE_PREFIX_LEGACY || exit 1
+    fi
+    remove_env_value SITE_PREFIX_RESELECT || exit 1
+}
+
+# SITE_PREFIX=kvs is both the legacy prefix (option 2) and the placeholder
+# that .env.example ships and a retirement for a new domain puts back. It is a
+# saved choice when .env records it (SITE_PREFIX_LEGACY=yes) or when this .env
+# has been through a setup already, which generated its MariaDB password; a
+# legacy site from before the record exists is in that case. A selection a
+# retirement left pending (SITE_PREFIX_RESELECT=yes) wins over both. A saved
+# prefix is never chosen again, like any other prefix: renaming it would
+# bring the stack up on new, empty volumes and orphan the database.
+site_prefix_is_saved() {
+    [ "${SITE_PREFIX_RESELECT:-}" != yes ] || return 1
+    [ "${SITE_PREFIX_LEGACY:-}" != yes ] || return 0
+    [ -n "${MARIADB_PASSWORD:-}" ] && [ "$MARIADB_PASSWORD" != CHANGE_ME_KVS_PASSWORD ]  # pragma: allowlist secret
 }
 
 # Only ask about prefix if using default
@@ -3738,7 +3780,16 @@ if [ "$KVS_EMAIL_OVERRIDE_SET" = true ]; then
     EMAIL="$KVS_EMAIL_OVERRIDE"
 fi
 if [ "$SITE_PREFIX" = "kvs" ]; then
-    select_site_prefix
+    if site_prefix_is_saved; then
+        echo ""
+        echo -e "${GREEN}Keeping the saved legacy prefix: kvs${NC}"
+        if [ -n "${PREFIX_CHOICE:-}" ] && [ "$PREFIX_CHOICE" != 2 ]; then
+            echo -e "${YELLOW}PREFIX_CHOICE=${PREFIX_CHOICE} is ignored: the prefix of an installed site is not changed.${NC}"
+        fi
+        [ "${SITE_PREFIX_LEGACY:-}" = yes ] || set_env_value SITE_PREFIX_LEGACY yes || exit 1
+    else
+        select_site_prefix
+    fi
 fi
 
 if ! validate_site_prefix "$SITE_PREFIX"; then
@@ -3760,11 +3811,21 @@ echo ""
 echo -e "${CYAN}SSL Certificate Provider${NC}"
 # Skip prompt if already set (headless mode)
 if [[ -z "$SSL_CHOICE" ]]; then
-    echo "  1) Let's Encrypt (recommended, default)"
-    echo "  2) ZeroSSL"
-    echo "  3) Self-signed (dev/testing or behind reverse proxy)"
-    echo -n "Select SSL provider [1-3] (default: 1): "
+    if [[ "$HEADLESS" == "y" ]]; then
+        # No explicit choice: keep the provider already in .env, so a headless
+        # re-run does not switch it (and reissue a certificate with --force).
+        case "${SSL_PROVIDER:-letsencrypt}" in
+            zerossl) SSL_CHOICE=2 ;;
+            selfsigned) SSL_CHOICE=3 ;;
+            *) SSL_CHOICE=1 ;;
+        esac
+    else
+        echo "  1) Let's Encrypt (recommended, default)"
+        echo "  2) ZeroSSL"
+        echo "  3) Self-signed (dev/testing or behind reverse proxy)"
+        echo -n "Select SSL provider [1-3] (default: 1): "
         read -r SSL_CHOICE
+    fi
 fi
 
 case $SSL_CHOICE in
@@ -4330,10 +4391,20 @@ select_cache() {
     echo -e "${CYAN}Cache Server${NC}"
     # Skip prompt if already set (headless mode)
     if [[ -z "$CACHE_CHOICE" ]]; then
-        echo "  1) Dragonfly (faster, modern) (default)"
-        echo "  2) Memcached (legacy, same as standalone)"
-        echo -n "Select cache [1-2] (default: 1): "
-        read -r CACHE_CHOICE
+        if [[ "$HEADLESS" == "y" ]]; then
+            # No explicit choice: keep the cache already selected in .env.
+            # COMPOSE_PROFILES was sourced from it (a plain or an exported
+            # line) and add/remove_compose_profile keep it in step since.
+            case ",${COMPOSE_PROFILES:-}," in
+                *,memcached,*) CACHE_CHOICE=2 ;;
+                *) CACHE_CHOICE=1 ;;
+            esac
+        else
+            echo "  1) Dragonfly (faster, modern) (default)"
+            echo "  2) Memcached (legacy, same as standalone)"
+            echo -n "Select cache [1-2] (default: 1): "
+            read -r CACHE_CHOICE
+        fi
     fi
 
     case $CACHE_CHOICE in
