@@ -107,7 +107,7 @@ prompt_read() {
 #################################################################
 # Progress Tracking (gum-based with fallback)
 #################################################################
-PROGRESS_TOTAL_STEPS=17
+PROGRESS_TOTAL_STEPS=19
 PROGRESS_CURRENT_STEP=0
 PROGRESS_GUM_AVAILABLE=false
 
@@ -346,10 +346,14 @@ function script() {
   run_install_step "Installing phpMyAdmin" "phpMyAdmin installed" aptinstall_phpmyadmin || return $?
   run_install_step "Installing KVS" "KVS installed" install_KVS || return $?
   run_install_step "Configuring KVS system settings" "KVS system settings configured" configure_kvs_system_settings || return $?
+  # Before the cron: KVS works with the storage servers from its first run.
+  # Their TLS check stays off until the certificate step says what the site
+  # really serves.
   run_install_step "Configuring KVS servers" "KVS servers configured" configure_kvs_servers || return $?
   run_install_step "Installing IonCube" "IonCube configured" install_ioncube || return $?
   run_install_step "Setting up cron jobs" "Cron jobs configured" insert_cronjob || return $?
   run_install_step "Installing acme.sh" "SSL certificates configured" install_acme.sh || return $?
+  run_install_step "Configuring the storage TLS check" "Storage TLS check configured" configure_kvs_servers_tls || return $?
   run_install_step "Configuring PHP-FPM" "PHP-FPM optimized" configure_dynamic_php_fpm || return $?
   run_install_step "Configuring auto-updates" "Auto-updates configured" autoUpdate || return $?
 
@@ -1471,11 +1475,60 @@ acme_issue_or_reuse() {
   return "$status"
 }
 
+# The certificate the site serves once install_acme.sh has run: "public" when
+# the CA issued it and acme.sh installed it, "selfsigned" otherwise, asked for
+# or fallen back to. configure_kvs_servers_tls sets the storage servers' TLS
+# check from it, not from the SSL_PROVIDER that was asked for.
+CERTIFICATE_MODE=""
+
+# Issues the certificate with acme.sh (given as the first argument, the issue
+# options after it) and installs it, or falls back to a self-signed one and
+# says so loudly: the site then works over HTTPS only for clients that accept
+# any certificate. acme.sh's own cron installs a certificate only at a
+# renewal, and only once an --install-cert has recorded where it goes, so
+# the warning gives the commands to run, one after the other.
+issue_site_certificate() {
+    local acme="$1"
+    local ssl_dir="/etc/nginx/ssl/$DOMAIN"
+    shift
+
+    if acme_issue_or_reuse "$acme" "$@" &&
+        "$acme" --install-cert --ecc -d "$DOMAIN" \
+          --key-file "$ssl_dir"/key.pem \
+          --fullchain-file "$ssl_dir"/cert.pem \
+          --reloadcmd "service nginx force-reload"; then
+        CERTIFICATE_MODE=public
+        echo "SSL certificate issued and installed"
+        return 0
+    fi
+
+    CERTIFICATE_MODE=selfsigned
+    generate_selfsigned_cert || return $?
+    {
+      echo "${red}WARNING: no ${SSL_PROVIDER} certificate for ${DOMAIN}: the site now uses a self-signed${normal}"
+      echo "${red}certificate, which browsers refuse. The commands below put the real one in place;${normal}"
+      echo "${red}acme.sh's own cron may not do it before a renewal, if ever.${normal}"
+      echo "Check that the domain points at this server and that port 80 is reachable, then run these commands one after the other:"
+      # ZeroSSL issues nothing to an account without an email.
+      if [[ "$SSL_PROVIDER" == "zerossl" && -z "${EMAIL:-}" ]]; then
+        echo "  $acme --register-account -m <your email>"
+      fi
+      echo "  $acme $*"
+      echo "  $acme --install-cert --ecc -d $DOMAIN --key-file $ssl_dir/key.pem --fullchain-file $ssl_dir/cert.pem --reloadcmd 'service nginx force-reload'"
+      if [[ "$SSL_PROVIDER" == "zerossl" && -z "${EMAIL:-}" ]]; then
+        echo "ZeroSSL needs an email for the account: put yours in place of <your email>."
+      fi
+      echo "The --issue command exits with status 2 when the certificate is already issued and still valid: run the --install-cert command all the same."
+      echo "The KVS storage servers skip the TLS check until then; turn it back on in the KVS admin panel once the certificate is in place."
+    } >&2
+}
+
 function install_acme.sh() {
     mkdir -p /etc/nginx/ssl/"$DOMAIN"
 
     # Self-signed: skip acme.sh entirely
     if [[ "$SSL_PROVIDER" == "selfsigned" ]]; then
+        CERTIFICATE_MODE=selfsigned
         generate_selfsigned_cert
         rm -f /etc/nginx/conf.d/sslgen.conf
         mv /etc/nginx/conf.d/"$DOMAIN".conf.disabled /etc/nginx/conf.d/"$DOMAIN".conf
@@ -1502,18 +1555,8 @@ function install_acme.sh() {
         ACME_ARGS="$ACME_ARGS --server letsencrypt"
     fi
 
-    # Try to issue certificate
     # shellcheck disable=SC2086  # Intentional word splitting for multiple flags
-    if acme_issue_or_reuse /root/.acme.sh/acme.sh $ACME_ARGS; then
-        echo "SSL certificate issued successfully"
-        /root/.acme.sh/acme.sh --install-cert --ecc -d "$DOMAIN" \
-          --key-file /etc/nginx/ssl/"$DOMAIN"/key.pem \
-          --fullchain-file /etc/nginx/ssl/"$DOMAIN"/cert.pem \
-          --reloadcmd "service nginx force-reload"
-    else
-        echo "SSL certificate issue failed, generating self-signed certificate..."
-        generate_selfsigned_cert
-    fi
+    issue_site_certificate /root/.acme.sh/acme.sh $ACME_ARGS || return $?
 
     rm -f /etc/nginx/conf.d/sslgen.conf
     mv /etc/nginx/conf.d/"$DOMAIN".conf.disabled /etc/nginx/conf.d/"$DOMAIN".conf
@@ -1812,21 +1855,22 @@ EOSQL
   echo "KVS server type set to nginx, upload limit 2048 MB, default memory limit 256 MB"
 }
 
-# The seeded storage servers point at https://www.<domain>/contents/... and
-# trust every certificate. Both must follow the installed site: the URL the
-# installer chose (with or without www) and the certificate mode, exactly as
-# the Docker init step 40-configure-database.sh does.
+# The seeded storage servers point at https://www.<domain>/contents/... with
+# %PROJECT_PATH% in their paths. Both must follow the installed site, the URL
+# the installer chose (with or without www), as the Docker init step
+# 40-configure-database.sh does, before the cron gives KVS its first run. The
+# TLS check stays off here, the safe default while the certificate is not
+# known; configure_kvs_servers_tls turns it on after the certificate step.
 configure_kvs_servers() {
   local db="${1:-$DOMAIN}"
   local kvs_path="${KVS_PATH:-/var/www/$DOMAIN}"
   local project_url="https://$URL"
   local domain_pattern="${DOMAIN//./[.]}"
-  local ssl_skip=0
+  local ssl_skip=1
   local matching stale mismatch
   local prefix
 
   prefix=$(kvs_tables_prefix)
-  [ "$SSL_PROVIDER" = "selfsigned" ] && ssl_skip=1
   mariadb "$db" <<EOSQL || return $?
 UPDATE ${prefix}admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
 UPDATE ${prefix}admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
@@ -1843,10 +1887,37 @@ EOSQL
     return 1
   fi
   if [ "$mismatch" -ne 0 ] 2>/dev/null; then
+    echo "ERROR: KVS storage servers kept their TLS check (streaming_skip_ssl_check=${ssl_skip} expected)" >&2
+    return 1
+  fi
+  echo "KVS storage servers use ${project_url}/contents/..., TLS verification off until the certificate step"
+}
+
+# After the certificate step: the storage servers verify TLS only when the
+# site serves the certificate the CA issued, not the self-signed one it was
+# asked for or fell back to.
+configure_kvs_servers_tls() {
+  local db="${1:-$DOMAIN}"
+  local ssl_skip mismatch prefix
+
+  case "${CERTIFICATE_MODE:-}" in
+    public) ssl_skip=0 ;;
+    selfsigned) ssl_skip=1 ;;
+    *)
+      echo "ERROR: the storage TLS check follows the certificate step, which has not run" >&2
+      return 1
+      ;;
+  esac
+  prefix=$(kvs_tables_prefix)
+  mariadb "$db" <<EOSQL || return $?
+UPDATE ${prefix}admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
+EOSQL
+  mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
+  if [ "$mismatch" -ne 0 ] 2>/dev/null; then
     echo "ERROR: KVS storage servers do not follow the certificate mode (streaming_skip_ssl_check=${ssl_skip})" >&2
     return 1
   fi
-  echo "KVS storage servers use ${project_url}/contents/..., TLS verification $([ "$ssl_skip" -eq 1 ] && echo "disabled for the self-signed certificate" || echo "enabled")"
+  echo "KVS storage servers: TLS verification $([ "$ssl_skip" -eq 1 ] && echo "left off for the self-signed certificate" || echo "enabled")"
 }
 
 function install_ioncube() {
@@ -1966,6 +2037,10 @@ function setupdone() {
     echo "IPV6 : $IPV6"
   fi
   echo "${cyan}Website: ${green}https://$URL"
+  if [[ "$CERTIFICATE_MODE" == "selfsigned" && "$SSL_PROVIDER" != "selfsigned" ]]; then
+    echo "${red}The ${SSL_PROVIDER} certificate could not be issued or installed: the site uses a self-signed one for now,${normal}"
+    echo "${red}and the KVS storage servers skip the TLS check until the real one is in place (see the warning of the acme.sh step in /root/kvs-install.log).${normal}"
+  fi
   echo "${cyan}phpMyAdmin: ${green}http://$IPV4/phpmyadmin"
   echo "${cyan}Database: ${green}$DOMAIN"
   echo "${cyan}User: ${green}$DOMAIN"

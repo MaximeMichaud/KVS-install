@@ -748,27 +748,46 @@ test_kvs_servers_follow_the_site_url() {
   URL=example.com
   KVS_PATH=/var/www/example.com
   SSL_PROVIDER=letsencrypt
+  CERTIFICATE_MODE=""
   MOCK_STALE=0
+  MOCK_MISMATCH=0
   mariadb() {
     case "$*" in
       *"NOT LIKE"*) printf '%s\n' "$MOCK_STALE" ;;
-      *COALESCE*) printf '0\n' ;;
+      *COALESCE*) printf '%s\n' "$MOCK_MISMATCH" ;;
       *"COUNT(*)"*) printf '2\n' ;;
       *) cat >>"$temp_dir/sql" ;;
     esac
   }
 
+  # Paths and URLs come before the certificate step, with the TLS check off
+  # whatever certificate was asked for.
   configure_kvs_servers >/dev/null 2>&1 || fail "server configuration failed" || return 1
   assert_file_contains "$temp_dir/sql" "'https://example.com/contents/'" "server URLs must follow the site URL" || return 1
   assert_file_contains "$temp_dir/sql" "'^https?://(www[.])?example[.]com(:[0-9]+)?/contents/'" "seeded www and plain http URLs must be matched" || return 1
-  assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = 0" "a public certificate must be verified" || return 1
+  assert_file_contains "$temp_dir/sql" "REPLACE(path, '%PROJECT_PATH%', '/var/www/example.com')" "server paths must follow the site" || return 1
+  assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = 1" "the TLS check must stay off before the certificate step" || return 1
 
-  SSL_PROVIDER=selfsigned
   URL=www.example.com
   : >"$temp_dir/sql"
-  configure_kvs_servers >/dev/null 2>&1 || fail "self-signed server configuration failed" || return 1
+  configure_kvs_servers >/dev/null 2>&1 || fail "www server configuration failed" || return 1
   assert_file_contains "$temp_dir/sql" "'https://www.example.com/contents/'" "the www choice must reach the server URLs" || return 1
-  assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = 1" "a self-signed certificate must not be verified" || return 1
+
+  # After the certificate step the check follows what the site serves: on
+  # for the certificate the CA issued, off for a self-signed one, asked for
+  # or fallen back to from Let's Encrypt.
+  for mode in public:0 selfsigned:1; do
+    CERTIFICATE_MODE=${mode%%:*}
+    : >"$temp_dir/sql"
+    configure_kvs_servers_tls >/dev/null 2>&1 || fail "the TLS check failed for $CERTIFICATE_MODE" || return 1
+    assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = ${mode##*:}" \
+      "a $CERTIFICATE_MODE certificate must give streaming_skip_ssl_check=${mode##*:}" || return 1
+  done
+  MOCK_MISMATCH=1
+  configure_kvs_servers_tls >/dev/null 2>&1 && { fail "a TLS check the servers did not take passed"; return 1; }
+  MOCK_MISMATCH=0
+  CERTIFICATE_MODE=""
+  configure_kvs_servers_tls >/dev/null 2>&1 && { fail "the TLS check was set before the certificate step"; return 1; }
 
   MOCK_STALE=1
   configure_kvs_servers >/dev/null 2>&1
@@ -776,7 +795,7 @@ test_kvs_servers_follow_the_site_url() {
   assert_equal "1" "$status" "a stale server URL must fail the step" || return 1
 
   unset -f mariadb
-  unset MOCK_STALE DOMAIN URL KVS_PATH SSL_PROVIDER
+  unset MOCK_STALE MOCK_MISMATCH DOMAIN URL KVS_PATH SSL_PROVIDER CERTIFICATE_MODE
 }
 
 test_domain_validation_respects_database_limit() {
@@ -1713,6 +1732,195 @@ test_menu_add_site_refuses_on_a_docker_host() {
   unset TEST_WORKING_DIRS
 }
 
+# A failed ACME issuance fell back to a self-signed certificate under the
+# "SSL certificates configured" step, before which the storage servers had
+# already been told to verify TLS: KVS's storage checks then failed, and
+# nothing said the site was not on a real certificate. The fallback is now
+# recorded and reported with commands that do install the certificate, and
+# the storage TLS check follows it in a step of its own.
+test_certificate_fallback_is_reported_and_followed() {
+  local temp_dir out status order expected
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  DOMAIN=example.com
+  SSL_PROVIDER=letsencrypt
+  EMAIL=admin@example.com
+  # acme.sh keeps state as the real one does: a certificate issued once makes
+  # the next --issue exit 2 (still valid, skipped); ZeroSSL refuses to issue
+  # before an account has an email. Each "<what>-fails-once" file makes that
+  # command fail one time.
+  {
+    printf '#!/bin/bash\ns=%q\n' "$temp_dir"
+    cat <<'STUB'
+printf '%s\n' "$*" >>"$s/acme-calls"
+once() { [[ -e "$s/$1-fails-once" ]] && rm -f "$s/$1-fails-once"; }
+case "$1" in
+  --register-account) [[ "$3" == *@* ]] || exit 1; : >"$s/registered" ;;
+  --issue)
+    [[ -e "$s/needs-account" && ! -e "$s/registered" ]] && exit 1
+    once issue && exit 1
+    [[ -e "$s/issued" ]] && exit 2
+    : >"$s/issued" ;;
+  --install-cert) once install && exit 1; : >"$s/installed" ;;
+esac
+exit 0
+STUB
+  } >"$temp_dir/acme.sh"
+  chmod +x "$temp_dir/acme.sh"
+  generate_selfsigned_cert() { : >"$temp_dir/selfsigned"; }
+  reset_acme() { rm -f "$temp_dir"/{issued,installed,registered,needs-account,selfsigned,acme-calls,*-fails-once}; }
+
+  reset_acme
+  CERTIFICATE_MODE=""
+  issue_site_certificate "$temp_dir/acme.sh" --issue -d example.com >/dev/null 2>&1 ||
+    fail "a certificate issued and installed must succeed" || return 1
+  assert_equal "public" "$CERTIFICATE_MODE" "an installed certificate is public" || return 1
+  [[ ! -e "$temp_dir/selfsigned" ]] || fail "a self-signed certificate replaced the issued one" || return 1
+  grep -q -- '--install-cert --ecc -d example.com' "$temp_dir/acme-calls" || fail "the certificate was not installed" || return 1
+
+  # acme.sh exit 2: still valid, installed again, still public.
+  rm -f "$temp_dir/installed"
+  CERTIFICATE_MODE=""
+  issue_site_certificate "$temp_dir/acme.sh" --issue -d example.com >/dev/null 2>&1 ||
+    fail "a still valid certificate must succeed" || return 1
+  assert_equal "public" "$CERTIFICATE_MODE" "a reused certificate is public" || return 1
+  [[ -e "$temp_dir/installed" ]] || fail "a still valid certificate was not installed" || return 1
+
+  # A refused issue, a failed install over an issued certificate, and ZeroSSL
+  # without an email: each falls back, says so, and the commands it prints,
+  # run one after the other as the warning says, install the certificate.
+  for case in issue install zerossl; do
+    reset_acme
+    SSL_PROVIDER=letsencrypt
+    EMAIL=admin@example.com
+    case $case in
+      issue) : >"$temp_dir/issue-fails-once" ;;
+      install) : >"$temp_dir/install-fails-once" ;;
+      zerossl) SSL_PROVIDER=zerossl EMAIL="" && : >"$temp_dir/needs-account" ;;
+    esac
+    CERTIFICATE_MODE=""
+    issue_site_certificate "$temp_dir/acme.sh" --issue -d example.com >"$temp_dir/out" 2>&1
+    status=$?
+    out=$(cat "$temp_dir/out")
+    assert_equal "0" "$status" "the self-signed fallback keeps the install going ($case)" || return 1
+    assert_equal "selfsigned" "$CERTIFICATE_MODE" "a failed $case falls back to self-signed" || return 1
+    [[ -e "$temp_dir/selfsigned" && ! -e "$temp_dir/installed" ]] ||
+      fail "no self-signed certificate after a failed $case" || return 1
+    grep -q "WARNING: no $SSL_PROVIDER certificate for example.com" <<<"$out" ||
+      fail "a failed $case must be reported loudly: $out" || return 1
+    grep -q "acme.sh's own cron may not do it before a renewal, if ever" <<<"$out" ||
+      fail "the warning must say that acme.sh's cron may not install the certificate" || return 1
+    if [[ "$case" == zerossl ]]; then
+      grep -Fq -- "--register-account -m <your email>" <<<"$out" ||
+        fail "ZeroSSL without an email must start with the account: $out" || return 1
+    else
+      ! grep -q -- "--register-account" <<<"$out" ||
+        fail "the account command was printed for $case" || return 1
+    fi
+    # The indented lines, pasted into a shell as they are: each line runs
+    # whatever the one before returned, a line ending in a continuation
+    # joins the next.
+    : >"$temp_dir/acme-calls"
+    sed -n 's/^  //p' "$temp_dir/out" | sed 's/<your email>/admin@example.com/' | bash >/dev/null 2>&1
+    [[ -e "$temp_dir/installed" ]] ||
+      fail "the printed commands did not install the certificate after a failed $case: $(tr '\n' ' ' <"$temp_dir/acme-calls")" || return 1
+  done
+  # An email given to ZeroSSL went to acme.sh --install: no account command.
+  reset_acme
+  SSL_PROVIDER=zerossl
+  EMAIL=admin@example.com
+  : >"$temp_dir/issue-fails-once"
+  issue_site_certificate "$temp_dir/acme.sh" --issue -d example.com >"$temp_dir/out" 2>&1
+  ! grep -q -- "--register-account" "$temp_dir/out" ||
+    fail "the account command was printed although ZeroSSL has an email" || return 1
+
+  # SSL_PROVIDER=selfsigned skips acme.sh: install_acme.sh records the mode
+  # itself, and the TLS step after it leaves the check off instead of
+  # refusing to run. install_acme.sh creates /etc/nginx/ssl/<domain>; the
+  # mkdir stub answers for that path and refuses any other.
+  (
+    KVS_NGINX_DIR="$temp_dir/nginx"
+    command mkdir -p "$KVS_NGINX_DIR/conf.d"
+    : >"$KVS_NGINX_DIR/conf.d/example.com.conf.disabled"
+    : >"$KVS_NGINX_DIR/conf.d/sslgen.conf"
+    mkdir() { [[ "$*" == "-p /etc/nginx/ssl/example.com" ]] || return 99; }
+    nginx() { :; }
+    service() { :; }
+    mariadb() {
+      case "$*" in
+        *COALESCE*) printf '0\n' ;;
+        *) cat >>"$temp_dir/tls-sql" ;;
+      esac
+    }
+    SSL_PROVIDER=selfsigned
+    CERTIFICATE_MODE=""
+    install_acme.sh >"$temp_dir/out" 2>&1 || { fail "the self-signed certificate step failed: $(cat "$temp_dir/out")"; exit 1; }
+    [[ "$CERTIFICATE_MODE" == selfsigned ]] || { fail "SSL_PROVIDER=selfsigned left the mode '$CERTIFICATE_MODE'"; exit 1; }
+    configure_kvs_servers_tls >"$temp_dir/out" 2>&1 ||
+      { fail "the TLS step failed after a self-signed certificate step: $(cat "$temp_dir/out")"; exit 1; }
+    grep -q 'streaming_skip_ssl_check = 1' "$temp_dir/tls-sql" ||
+      { fail "the TLS check must stay off for SSL_PROVIDER=selfsigned"; exit 1; }
+  ) || return 1
+
+  # The final summary repeats the fallback and the TLS note, only when the
+  # site fell back from the provider that was asked for.
+  (
+    curl() { printf '192.0.2.1\n'; }
+    for case in letsencrypt:selfsigned:yes zerossl:selfsigned:yes selfsigned:selfsigned:no letsencrypt:public:no; do
+      IFS=: read -r SSL_PROVIDER CERTIFICATE_MODE expected <<<"$case"
+      out=$(URL=example.com AUTOPACKAGEUPDATE=NO setupdone 2>&1)
+      if [[ "$expected" == yes ]]; then
+        grep -q "The $SSL_PROVIDER certificate could not be issued or installed" <<<"$out" &&
+          grep -q "skip the TLS check until the real one is in place" <<<"$out" ||
+          { fail "the summary must repeat the fallback and the TLS note ($case): $out"; exit 1; }
+      else
+        ! grep -q "could not be issued" <<<"$out" || { fail "the summary reported a fallback for $case"; exit 1; }
+      fi
+    done
+  ) || return 1
+
+  # The step order, with every step stubbed in a subshell that keeps the
+  # stubs. The storage servers get their paths and URLs before the cron,
+  # with the TLS check off; the check follows the certificate step. A failed
+  # certificate step stops there: the cron already finds configured servers.
+  order="$temp_dir/order"
+  expected="aptupdate aptinstall whatisdomain check_dns_configuration install_yt-dlp aptinstall_php aptinstall_memcached aptinstall_nginx aptinstall_mariadb aptinstall_phpmyadmin install_KVS configure_kvs_system_settings configure_kvs_servers install_ioncube insert_cronjob install_acme.sh"
+  for ACME_RC in 0 1; do
+    rm -f "$order"
+    (
+      install_gum() { :; }
+      installQuestions() { :; }
+      progress_header() { :; }
+      progress_step() { :; }
+      progress_done() { :; }
+      progress_success() { :; }
+      setupdone() { :; }
+      for step in aptupdate aptinstall whatisdomain check_dns_configuration install_yt-dlp \
+        aptinstall_php aptinstall_memcached aptinstall_nginx aptinstall_mariadb aptinstall_phpmyadmin \
+        install_KVS configure_kvs_system_settings configure_kvs_servers install_ioncube insert_cronjob \
+        configure_kvs_servers_tls configure_dynamic_php_fpm autoUpdate; do
+        eval "$step() { printf '%s\\n' $step >>\"\$order\"; }"
+      done
+      install_acme.sh() { printf 'install_acme.sh\n' >>"$order"; return "$ACME_RC"; }
+      script >/dev/null 2>&1
+    )
+    status=$?
+    if ((ACME_RC == 0)); then
+      assert_equal "0" "$status" "the stubbed pipeline failed" || return 1
+      assert_equal "$expected configure_kvs_servers_tls configure_dynamic_php_fpm autoUpdate" "$(tr '\n' ' ' <"$order" | sed 's/ $//')" \
+        "the steps must run in this order" || return 1
+      assert_equal "$PROGRESS_TOTAL_STEPS" "$(wc -l <"$order")" "PROGRESS_TOTAL_STEPS must count the steps" || return 1
+    else
+      [[ "$status" -ne 0 ]] || fail "a failed certificate step passed the install" || return 1
+      assert_equal "$expected" "$(tr '\n' ' ' <"$order" | sed 's/ $//')" \
+        "a failed certificate step must stop the install after it" || return 1
+    fi
+  done
+
+  unset -f generate_selfsigned_cert reset_acme
+  unset DOMAIN SSL_PROVIDER CERTIFICATE_MODE EMAIL ACME_RC
+}
+
 # The native PHP settings were sed edits of php.ini on commented lines, but
 # stock php.ini-production has max_execution_time = 30 and max_input_time = 60
 # uncommented, so both stayed: long admin actions hit the 30 s limit. nginx
@@ -1903,6 +2111,7 @@ run_test "a failed database import is not reported as success" test_failed_db_im
 run_test "an install re-run keeps setup_db.php restricted" test_install_rerun_keeps_setup_db_restricted || failures=$((failures + 1))
 run_test "the site vhost redirects every other host" test_site_vhost_redirects_every_other_host || failures=$((failures + 1))
 run_test "PHP settings override the stock php.ini" test_php_settings_override_the_stock_php_ini || failures=$((failures + 1))
+run_test "a certificate fallback is reported and followed" test_certificate_fallback_is_reported_and_followed || failures=$((failures + 1))
 
 if ((failures != 0)); then
   echo "$failures test(s) failed" >&2
