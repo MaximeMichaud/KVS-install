@@ -474,6 +474,129 @@ test_auto_updates_follow_upstream_repositories() {
   unset APT_CONF_DIR AUTOPACKAGEUPDATE
 }
 
+test_ioncube_loader_is_added_once_and_a_failure_stops_the_step() {
+  local temp_dir fpm cli status err
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+
+  IONCUBE=YES
+  PHP=8.1
+  php_path="$temp_dir/ext"
+  IONCUBE_WORK_DIR="$temp_dir/work"
+  KVS_PHP_INI_DIR="$temp_dir/etc-php"
+  fpm="$KVS_PHP_INI_DIR/$PHP/fpm/php.ini"
+  cli="$KVS_PHP_INI_DIR/$PHP/cli/php.ini"
+  mkdir -p "$php_path" "$IONCUBE_WORK_DIR" "$(dirname "$fpm")" "$(dirname "$cli")"
+  : >"$fpm"
+  : >"$cli"
+
+  # Stand in for the network and the service: curl writes the tarball to its
+  # -o path and logs the URL, tar lays the loader down under the -C
+  # directory, systemctl is a no-op, dpkg reports TEST_ARCH. Each honours a
+  # *_RC or *_SKIP override so a failure can be forced.
+  TEST_CURL_LOG="$temp_dir/curl.log"
+  curl() {
+    local a prev="" out=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out="$a"
+      prev="$a"
+    done
+    printf '%s\n' "$*" >>"$TEST_CURL_LOG"
+    { [ "${CURL_RC:-0}" -eq 0 ] && [ -n "$out" ]; } && printf 'tarball\n' >"$out"
+    return "${CURL_RC:-0}"
+  }
+  tar() {
+    local a prev="" cdir=""
+    for a in "$@"; do
+      [ "$prev" = "-C" ] && cdir="$a"
+      prev="$a"
+    done
+    if [ "${TAR_RC:-0}" -eq 0 ] && [ "${TAR_SKIP_LOADER:-0}" -eq 0 ]; then
+      mkdir -p "$cdir/ioncube"
+      printf 'loader\n' >"$cdir/ioncube/ioncube_loader_lin_$PHP.so"
+    fi
+    return "${TAR_RC:-0}"
+  }
+  systemctl() { return "${SYSTEMCTL_RC:-0}"; }
+  dpkg() { [ "$1" = --print-architecture ] && echo "${TEST_ARCH:-amd64}"; }
+
+  install_ioncube >/dev/null 2>&1 || fail "the ionCube step must succeed" || return 1
+  grep -Fq 'ioncube_loaders_lin_x86-64.tar.gz' "$TEST_CURL_LOG" ||
+    fail "an amd64 server must download the x86-64 loaders" || return 1
+  [ -f "$php_path/ioncube_loader_lin_$PHP.so" ] ||
+    fail "the loader must be copied into the extension directory" || return 1
+  assert_equal "1" "$(grep -c 'zend_extension=.*ioncube' "$fpm")" \
+    "the FPM php.ini must gain exactly one loader line" || return 1
+  assert_equal "1" "$(grep -c 'zend_extension=.*ioncube' "$cli")" \
+    "the CLI php.ini must gain exactly one loader line" || return 1
+  { [ ! -e "$IONCUBE_WORK_DIR/ioncube" ] && [ ! -e "$IONCUBE_WORK_DIR/ioncube_loaders_lin_x86-64.tar.gz" ]; } ||
+    fail "the download and the extracted directory must be cleaned up" || return 1
+
+  # A second run must not add the line again.
+  install_ioncube >/dev/null 2>&1 || fail "a re-run of the ionCube step must succeed" || return 1
+  assert_equal "1" "$(grep -c 'zend_extension=.*ioncube' "$fpm")" \
+    "a re-run must not load ionCube twice in the FPM php.ini" || return 1
+  assert_equal "1" "$(grep -c 'zend_extension=.*ioncube' "$cli")" \
+    "a re-run must not load ionCube twice in the CLI php.ini" || return 1
+
+  # A failed download must stop the step and append nothing.
+  : >"$fpm"
+  : >"$cli"
+  CURL_RC=22 install_ioncube >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "a failed download must fail the step" || return 1
+  assert_equal "0" "$(grep -c 'zend_extension=.*ioncube' "$fpm")" \
+    "a failed download must not touch the FPM php.ini" || return 1
+
+  # A tarball that does not hold the loader must also stop the step and
+  # append nothing.
+  TAR_SKIP_LOADER=1 install_ioncube >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "a missing loader must fail the step" || return 1
+  { [ ! -s "$fpm" ] && [ ! -s "$cli" ]; } ||
+    fail "a tarball without the loader must not touch php.ini" || return 1
+
+  # A loader already enabled with spaces around the =, or in the SAPI's
+  # conf.d (the phpenmod layout), counts as present: nothing is appended.
+  printf 'zend_extension = /opt/ioncube/ioncube_loader_lin_8.1.so\n' >"$fpm"
+  : >"$cli"
+  mkdir -p "$(dirname "$cli")/conf.d"
+  printf '; ionCube\nzend_extension=ioncube_loader_lin_8.1.so\n' >"$(dirname "$cli")/conf.d/00-ioncube.ini"
+  install_ioncube >/dev/null 2>&1 || fail "the ionCube step must succeed over an enabled loader" || return 1
+  assert_equal "1" "$(grep -cE 'zend_extension[[:space:]]*=.*ioncube' "$fpm")" \
+    "a loader line written with spaces must not be added again" || return 1
+  [ ! -s "$cli" ] || fail "a loader enabled in conf.d must not be added to php.ini" || return 1
+  rm -rf "$(dirname "$cli")/conf.d"
+
+  # An aarch64 server gets the aarch64 loaders; an architecture ionCube does
+  # not ship fails before anything is downloaded or appended.
+  : >"$fpm"
+  : >"$cli"
+  : >"$TEST_CURL_LOG"
+  TEST_ARCH=arm64 install_ioncube >/dev/null 2>&1 || fail "the ionCube step must succeed on arm64" || return 1
+  grep -Fq 'ioncube_loaders_lin_aarch64.tar.gz' "$TEST_CURL_LOG" ||
+    fail "an arm64 server must download the aarch64 loaders" || return 1
+  : >"$fpm"
+  : >"$cli"
+  : >"$TEST_CURL_LOG"
+  TEST_ARCH=riscv64 install_ioncube >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "an architecture without ionCube loaders must fail the step" || return 1
+  [ ! -s "$TEST_CURL_LOG" ] || fail "nothing must be downloaded for an unsupported architecture" || return 1
+  { [ ! -s "$fpm" ] && [ ! -s "$cli" ]; } ||
+    fail "an unsupported architecture must not touch php.ini" || return 1
+
+  # A missing php.ini is reported, and the other SAPI is still configured.
+  rm -f "$cli"
+  err=$(install_ioncube 2>&1 >/dev/null) || fail "a missing CLI php.ini must not fail the step" || return 1
+  grep -Fq "$cli not found" <<<"$err" || fail "a missing php.ini must be reported" || return 1
+  assert_equal "1" "$(grep -c 'zend_extension=.*ioncube' "$fpm")" \
+    "the FPM php.ini must still be configured when the CLI one is missing" || return 1
+
+  unset -f curl tar systemctl dpkg
+  unset IONCUBE PHP php_path IONCUBE_WORK_DIR KVS_PHP_INI_DIR CURL_RC TAR_RC TAR_SKIP_LOADER SYSTEMCTL_RC TEST_ARCH TEST_CURL_LOG
+}
+
 test_kvs_system_settings_select_nginx() {
   local temp_dir
   local status
@@ -1601,6 +1724,7 @@ run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fa
 run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
 run_test "the self-update replaces the running copy or nothing" test_the_self_update_replaces_the_running_copy_or_nothing || failures=$((failures + 1))
 run_test "auto-updates follow upstream repositories" test_auto_updates_follow_upstream_repositories || failures=$((failures + 1))
+run_test "the ionCube loader is added once and a failure stops the step" test_ioncube_loader_is_added_once_and_a_failure_stops_the_step || failures=$((failures + 1))
 run_test "KVS system settings select nginx" test_kvs_system_settings_select_nginx || failures=$((failures + 1))
 run_test "archive extraction skips an installed site" test_archive_extraction_skips_an_installed_site || failures=$((failures + 1))
 run_test "database file configuration is anchored" test_database_file_configuration_is_anchored || failures=$((failures + 1))

@@ -1811,16 +1811,85 @@ EOSQL
 }
 
 function install_ioncube() {
-  if [[ "$IONCUBE" =~ (YES) ]]; then
-      cd /root || exit
-      curl -fsSL 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz' -o ioncube_loaders_lin_x86-64.tar.gz
-      tar -xvzf ioncube_loaders_lin_x86-64.tar.gz
-      cd ioncube && cp ioncube_loader_lin_"$PHP".so "$php_path"/
-      echo "zend_extension=$php_path/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/fpm/php.ini
-      echo "zend_extension=$php_path/ioncube_loader_lin_$PHP.so" >>/etc/php/"$PHP"/cli/php.ini
-      systemctl restart php"$PHP"-fpm
-      rm -rf /root/ioncube_loaders_lin_x86-64.tar.gz /root/ioncube
+  if [[ ! "$IONCUBE" =~ (YES) ]]; then
+    return 0
   fi
+
+  local work_dir="${IONCUBE_WORK_DIR:-/root}"
+  local php_ini_dir="${KVS_PHP_INI_DIR:-/etc/php}"
+  local arch loaders archive
+  local extract_dir="$work_dir/ioncube"
+  local loader="$extract_dir/ioncube_loader_lin_$PHP.so"
+  local line="zend_extension=$php_path/ioncube_loader_lin_$PHP.so"
+  local status=0 ini conf configured
+
+  # ionCube ships one loader tarball per CPU architecture, named the way the
+  # Docker images pick theirs: an aarch64 server must not get the x86-64
+  # loaders, which PHP cannot load.
+  arch=$(dpkg --print-architecture 2>/dev/null)
+  case "$arch" in
+    amd64) loaders=x86-64 ;;
+    arm64) loaders=aarch64 ;;
+    *)
+      echo "${red}No ionCube loader is available for the ${arch:-unknown} architecture${normal}" >&2
+      return 1
+      ;;
+  esac
+  archive="$work_dir/ioncube_loaders_lin_${loaders}.tar.gz"
+
+  # Each step stops on failure, the download and extraction do not leave a
+  # half-installed loader behind, and the shell never moves into a directory
+  # that is deleted at the end, so a later step keeps a valid working
+  # directory.
+  rm -rf "$archive" "$extract_dir"
+  if ! curl -fsSL "https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_${loaders}.tar.gz" -o "$archive"; then
+    echo "${red}Could not download the ionCube loaders${normal}" >&2
+    rm -rf "$archive" "$extract_dir"
+    return 1
+  fi
+  if ! tar -xzf "$archive" -C "$work_dir"; then
+    echo "${red}Could not extract the ionCube loaders${normal}" >&2
+    rm -rf "$archive" "$extract_dir"
+    return 1
+  fi
+  if [ ! -f "$loader" ]; then
+    echo "${red}The ionCube loader for PHP $PHP is not in the archive${normal}" >&2
+    rm -rf "$archive" "$extract_dir"
+    return 1
+  fi
+  if ! cp "$loader" "$php_path"/; then
+    echo "${red}Could not copy the ionCube loader into $php_path${normal}" >&2
+    rm -rf "$archive" "$extract_dir"
+    return 1
+  fi
+
+  # Add the loader to the FPM and CLI php.ini only when an active line is not
+  # already there, so a re-run does not load it twice (a warning on every PHP
+  # start). The line counts in php.ini or in an .ini of the same SAPI's
+  # conf.d, with or without spaces around the =; a commented ;zend_extension
+  # line does not.
+  for ini in "$php_ini_dir/$PHP/fpm/php.ini" "$php_ini_dir/$PHP/cli/php.ini"; do
+    if [ ! -f "$ini" ]; then
+      echo "${yellow}$ini not found: the ionCube loader is not enabled there${normal}" >&2
+      continue
+    fi
+    configured=false
+    for conf in "$ini" "${ini%/php.ini}"/conf.d/*.ini; do
+      if [ -f "$conf" ] && grep -Eq '^[[:space:]]*zend_extension[[:space:]]*=.*ioncube' "$conf"; then
+        configured=true
+        break
+      fi
+    done
+    if ! $configured && ! echo "$line" >> "$ini"; then
+      echo "${red}Could not enable the ionCube loader in $ini${normal}" >&2
+      rm -rf "$archive" "$extract_dir"
+      return 1
+    fi
+  done
+
+  systemctl restart php"$PHP"-fpm || status=$?
+  rm -rf "$archive" "$extract_dir"
+  return "$status"
 }
 
 function autoUpdate() {
