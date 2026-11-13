@@ -46,8 +46,11 @@ printf 'well-known-sentinel\n' > "$TEST_DIR/site/.well-known/proof.txt"
 # KVS keeps these out of a browser's reach: admin/include holds setup_db.php
 # with the database password, the other directories plugins, logs, compiled
 # templates and temporary files, and contents/videos the files KVS hands out
-# itself. nginx must answer 403 or 404 for them, never their source as a
-# static file and never through the PHP handler.
+# itself. _INSTALL, the installation files of the archive (the database dump
+# and the rewrites), stays on disk after a failed database import, and the
+# init extracts it again while nginx serves the site. nginx must answer 403
+# or 404 for them, never their source as a static file and never through the
+# PHP handler.
 protected_paths=(
     admin/include/setup_db.php admin/include/cron.php
     admin/data/proof.php admin/data/plugins/proof/proof.php admin/logs/proof.php
@@ -58,6 +61,8 @@ protected_paths=(
     contents/other/evil.php contents/other/up.phar
     admin/data/system/leak.js admin/logs/leak.svg admin/smarty/leak.css
     admin/stamp/leak.png admin/template/leak.webp admin/tools/leak.js tmp/leak.mp4
+    _INSTALL/install_db.sql _INSTALL/install_permissions.sh _INSTALL/nginx_config.txt
+    _INSTALL/leak.css _INSTALL/proof.php
 )
 # The admin panel loads a plugin's admin JS and CSS from admin/plugins, so an
 # asset there must still be served even though a .php under it is denied: the
@@ -448,6 +453,77 @@ assert_native_redirect example.test www.example.test
 assert_native_redirect cdn.example.test www.example.test
 assert_tls_rejected "$https_port" unrelated.test
 printf 'PASS: standalone bootstrap ACME, host/SNI rejection, configured site and canonical redirect in both www modes.\n'
+
+# A site's own rewrites can already hold a /_INSTALL/ location: the
+# operator's own fix, or rules imported with IMPORT_NGINX_REWRITES or
+# recovered from the old server. nginx refuses two prefix locations for one
+# path ("duplicate location") and would not start, so the generated
+# configurations must deny _INSTALL without one. Each layout runs here, with
+# no network, with such a location in the file its site rules live in:
+# kvs-rewrites.conf for the Docker templates, globals/kvs.conf, where the
+# installer copies the KVS rewrites, for the standalone one. nginx -t must
+# pass and the files under _INSTALL must still be denied, by the site's own
+# ^~ location or, when the site's location is a plain prefix that would serve
+# them, by the generated deny.
+site_rule_failures=0
+assert_site_install_location() {
+    local name=$1 rule=$2 base=$3 main_config="$TEST_DIR/nginx.conf" dir="$TEST_DIR/site-rule"
+    local container="$network-site-rule" path response status
+    shift 3
+    if [ -f "$TEST_DIR/$name/nginx.conf" ]; then main_config="$TEST_DIR/$name/nginx.conf"; fi
+    rm -rf "$dir"
+    mkdir -p "$dir/includes"
+    cp -R "$ROOT_DIR/conf/nginx/globals" "$dir/globals"
+    printf '%s\n' "$rule" > "$dir/includes/kvs-rewrites.conf"
+    printf '%s\n' "$rule" >> "$dir/globals/kvs.conf"
+    chmod -R a+rX "$dir"
+    local mounts=(
+        -v "$main_config:/etc/nginx/nginx.conf:ro"
+        -v "$TEST_DIR/$name/etc/nginx/conf.d:/etc/nginx/conf.d:ro"
+        -v "$TEST_DIR/$name/etc/nginx/ssl:/etc/nginx/ssl:ro"
+        -v "$TEST_DIR/dhparam.pem:/etc/nginx/dhparam.pem:ro"
+        -v "$dir/includes:/etc/nginx/includes:ro"
+        -v "$dir/globals:/etc/nginx/globals:ro"
+        -v "$TEST_DIR/site:/var/www/kvs:ro"
+        -v "$TEST_DIR/site:/var/www/example.test:ro"
+        -v "$TEST_DIR/phpmyadmin:/usr/share/phpmyadmin:ro"
+        -v "$TEST_DIR/acme:/var/www/_letsencrypt:ro"
+    )
+    if ! docker run --rm --pull never --network none --add-host php-fpm:127.0.0.1 \
+        "${mounts[@]}" --entrypoint nginx "$NGINX_TEST_IMAGE" -t > "$dir/validation.log" 2>&1; then
+        printf 'FAIL: %s does not start with "%s" in its site rules: %s\n' \
+            "$name" "$rule" "$(grep -m 1 emerg "$dir/validation.log")" >&2
+        site_rule_failures=$((site_rule_failures + 1))
+        return
+    fi
+    containers+=("$container")
+    docker run -d --pull never --name "$container" --network none --add-host php-fpm:127.0.0.1 \
+        --memory 128m --pids-limit 128 "${mounts[@]}" \
+        --entrypoint nginx "$NGINX_TEST_IMAGE" -g 'daemon off;' >/dev/null
+    for ((attempt=0; attempt<50; attempt++)); do
+        status=$(docker exec "$container" curl -ksS -o /dev/null -w '%{http_code}' "$@" "$base/index.html" 2>/dev/null) || true
+        [ "$status" = 200 ] && break
+        sleep 0.1
+    done
+    [ "$status" = 200 ] || fail "$name did not serve its site with \"$rule\" in its site rules"
+    for path in install_db.sql install_permissions.sh nginx_config.txt leak.css proof.php; do
+        response=$(docker exec "$container" curl -ksS -w '\n%{http_code}' "$@" "$base/_INSTALL/$path" 2>&1) || true
+        if [ "${response##*$'\n'}" != 403 ] || grep -q kvs-source-sentinel <<< "$response"; then
+            printf 'FAIL: %s with "%s" in its site rules answered _INSTALL/%s with HTTP %s\n' \
+                "$name" "$rule" "$path" "${response##*$'\n'}" >&2
+            site_rule_failures=$((site_rule_failures + 1))
+        fi
+    done
+    docker rm -f "$container" >/dev/null
+}
+render_native_site false
+for rule in 'location /_INSTALL/ { }' 'location ^~ /_INSTALL/ { deny all; }'; do
+    assert_site_install_location direct "$rule" https://example.test --resolve example.test:443:127.0.0.1
+    assert_site_install_location proxy "$rule" http://127.0.0.1 -H 'Host: example.test'
+    assert_site_install_location native "$rule" https://example.test --resolve example.test:443:127.0.0.1
+done
+[ "$site_rule_failures" -eq 0 ] || fail "$site_rule_failures checks failed with a /_INSTALL/ location in the site rules"
+printf 'PASS: a /_INSTALL/ location in the site rules keeps nginx starting and _INSTALL denied in every layout.\n'
 printf 'PASS: TLS 1.3 early data is refused by the Docker and standalone Nginx configurations.\n'
 [ "$hidden_file_failures" -eq 0 ] || fail "$hidden_file_failures hidden-file requests bypassed access restrictions"
 printf 'PASS: hidden files are denied and public CSS/SVG assets remain available in every layout.\n'

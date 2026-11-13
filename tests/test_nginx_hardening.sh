@@ -23,7 +23,7 @@ fail() {
 
 [ -n "$REAL_OPENSSL" ] || fail "OpenSSL is required"
 
-KVS_INTERNAL_PRE_REGEX='^/(admin/(data|logs|smarty|stamp|template|tools)|tmp)/'
+KVS_INTERNAL_PRE_REGEX='^/(admin/(data|logs|smarty|stamp|template|tools)|tmp|_INSTALL)/'
 KVS_INTERNAL_PRE_RULE="location ~ ${KVS_INTERNAL_PRE_REGEX} {"
 KVS_INTERNAL_POST_REGEX='^/admin/(include(?!/(uploader|get_upload_status)\.php$)|plugins)/'
 KVS_INTERNAL_POST_RULE="location ~ ${KVS_INTERNAL_POST_REGEX} {"
@@ -93,6 +93,13 @@ assert_kvs_internal_directories_denied_before_php() {
     done
     printf '/tmp/leak.mp4\n' | grep -Pq "$KVS_INTERNAL_PRE_REGEX" ||
         fail "the server-only deny does not cover /tmp/ in ${file}"
+    # The archive's installation files, which a failed import keeps under
+    # _INSTALL/, with any extension: the database dump, an asset the asset
+    # regular expressions would serve, a script the PHP handler would run.
+    for path in install_db.sql install_permissions.sh nginx_config.txt leak.css proof.php; do
+        printf '/_INSTALL/%s\n' "$path" | grep -Pq "$KVS_INTERNAL_PRE_REGEX" ||
+            fail "the server-only deny does not cover /_INSTALL/${path} in ${file}"
+    done
     for path in /admin/index.php /admin/plugins/p/admin.js /admin/plugins/p/admin.php /admin/include/uploader.php; do
         printf '%s\n' "$path" | grep -Pq "$KVS_INTERNAL_PRE_REGEX" &&
             fail "the server-only deny wrongly covers ${path} in ${file}"
@@ -665,6 +672,13 @@ do
     assert_location_body_has "${ROOT_DIR}/${site_config}" 'location ^~ /contents/videos/ {' 'internal;'
     assert_contents_php_denied_before_php "${ROOT_DIR}/${site_config}"
     assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_CONTENTS_PHP_RULE" 'deny all;'
+    # _INSTALL/ is denied by the regular expression above, never by a prefix
+    # or exact location: nginx refuses two of those for one path ("duplicate
+    # location") and would not start on a site whose own rewrites already hold
+    # a /_INSTALL/ location.
+    if grep -Eq 'location[[:space:]]+(\^~|=)?[[:space:]]*/_INSTALL' "${ROOT_DIR}/${site_config}"; then
+        fail "a prefix location for /_INSTALL/ can clash with the site's own rewrites in ${site_config}"
+    fi
 done
 for site_config in \
     conf/nginx/templates/kvs.conf.tpl \

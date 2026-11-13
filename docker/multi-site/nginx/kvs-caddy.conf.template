@@ -66,7 +66,12 @@ server {
     # regular expression evaluated first. These hold server-side files only:
     # the admin panel serves its own assets from admin/styles and admin/js, and
     # the signup captcha from the /captcha/ endpoint, never from these.
-    location ~ ^/(admin/(data|logs|smarty|stamp|template|tools)|tmp)/ {
+    # _INSTALL holds the installation files of the archive (install_db.sql,
+    # the rewrites, install_permissions.sh): they stay there after a failed
+    # database import, and an init run can extract them again while nginx
+    # serves the site. A regular expression, unlike a prefix location, cannot
+    # clash with a /_INSTALL/ location the site's own rewrites may hold.
+    location ~ ^/(admin/(data|logs|smarty|stamp|template|tools)|tmp|_INSTALL)/ {
         deny all;
     }
 
