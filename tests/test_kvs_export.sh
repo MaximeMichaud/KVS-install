@@ -747,6 +747,96 @@ test_excluded_and_included_paths_change_what_travels() {
     pass "excluded and included paths change what travels"
 }
 
+test_named_paths_are_normalised_and_a_missing_one_is_reported() {
+    local site="$TMP_ROOT/noncanon-site"
+    local out="$TMP_ROOT/noncanon.out"
+    local err="$TMP_ROOT/noncanon.err"
+    local archive="$TMP_ROOT/noncanon.tar"
+    local form value
+
+    make_site_with_extras "$site"
+
+    # A leading "./", a doubled "//" or a trailing "/." names the same
+    # directory as its canonical form. Each must normalise to the one
+    # anchored pattern, be reported excluded, and actually leave the archive.
+    # Before the fix the path was stored verbatim, so the anchored tar pattern
+    # (www/./contents/videos_sources and friends) never matched the real
+    # member and the directory was archived though the summary called it
+    # excluded.
+    for form in \
+        "./contents/videos_sources" \
+        "contents//videos_sources" \
+        "contents/videos_sources//"; do
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude "$form" detect "$site" ||
+            fail "detect with '$form' must succeed: $(cat "$err")"
+        has_pattern "$out" '/contents/videos_sources' ||
+            fail "'$form' must yield the canonical pattern, got: $(grep '^exclude_' "$out")"
+        value=$(entry_value "$out" contents/videos_sources)
+        [ "${value##*|}" = "excluded" ] ||
+            fail "'$form' must report the directory excluded, got: $value"
+
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" --exclude "$form" archive "$site" ||
+            fail "the archive with '$form' must be written: $(cat "$err")"
+        tar -tf "$archive" | grep -Fq "www/contents/videos_sources/" &&
+            fail "'$form' must leave the directory out of the archive, found: $(tar -tf "$archive" | grep videos_sources)"
+        rm -f "$archive"
+    done
+
+    # --include goes through the same normalisation: a hidden entry named in
+    # any of these forms is taken along.
+    for form in \
+        "./.well-known" \
+        ".well-known//" \
+        "/.well-known/."; do
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --include "$form" detect "$site" ||
+            fail "detect with --include '$form' must succeed: $(cat "$err")"
+        value=$(entry_value "$out" .well-known)
+        [ "${value#*|}" = "hidden|copied" ] ||
+            fail "--include '$form' must take the hidden entry along, got: $value"
+        run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" --include "$form" archive "$site" ||
+            fail "the archive with --include '$form' must be written: $(cat "$err")"
+        tar -tf "$archive" | grep -Fxq "www/.well-known/acme/t" ||
+            fail "--include '$form' must put the hidden entry in the archive: $(tar -tf "$archive")"
+        rm -f "$archive"
+    done
+
+    # A named path that is not under the site leaves nothing behind and takes
+    # nothing along; an absolute path typed for the site directory is the
+    # usual case. It used to be listed "excluded (named with --exclude)"
+    # while the directory the operator meant was archived in full. It is now
+    # reported and left out of the entries and patterns, and the run goes on:
+    # the import replays IMPORT_EXCLUDE on later passes, where a path gone
+    # since the first one must not stop it.
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude "$site/contents/videos_sources" \
+        --include no/such/entry detect "$site" ||
+        fail "detect must go on past a named path that is not under the site: $(cat "$err")"
+    grep -Fq "WARNING: --exclude ${site#/}/contents/videos_sources: no such path under $site" "$err" ||
+        fail "a missing excluded path must be reported: $(cat "$err")"
+    grep -Fq "WARNING: --include no/such/entry: no such path under $site" "$err" ||
+        fail "a missing included path must be reported: $(cat "$err")"
+    [ -z "$(entry_value "$out" "${site#/}/contents/videos_sources")" ] ||
+        fail "a missing path must not be listed as excluded: $(grep '^entry_' "$out")"
+    has_pattern "$out" "/${site#/}/contents/videos_sources" && fail "a missing path must not yield a pattern"
+    value=$(entry_value "$out" contents/videos_sources)
+    [ "${value##*|}" = "copied" ] || fail "the real directory is still copied, and reported so: $value"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" --exclude "$site/contents/videos_sources" archive "$site" ||
+        fail "the archive must go on past a missing named path: $(cat "$err")"
+    grep -Fq "named with --exclude" "$err" && fail "the summary must not call a missing path excluded: $(cat "$err")"
+    grep -Fq "WARNING: --exclude ${site#/}/contents/videos_sources: no such path under $site" "$err" ||
+        fail "the archive must report the missing path: $(cat "$err")"
+    rm -f "$archive"
+
+    # A dangling symlink is a path under the site (tar would meet it), so it
+    # can still be named, without a warning.
+    ln -s "$TMP_ROOT/storage-not-mounted" "$site/storage-link"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude storage-link detect "$site" ||
+        fail "detect with a dangling symlink excluded must succeed: $(cat "$err")"
+    grep -Fq "WARNING: --exclude storage-link" "$err" && fail "a dangling symlink is under the site: $(cat "$err")"
+    has_pattern "$out" '/storage-link' || fail "a dangling symlink can be excluded: $(grep '^exclude_' "$out")"
+    rm -f "$site/storage-link"
+    pass "named paths are normalised and a missing one is reported"
+}
+
 test_the_size_walk_can_be_skipped() {
     local site="$TMP_ROOT/nosize-site"
     local out="$TMP_ROOT/nosize.out"
@@ -2203,6 +2293,7 @@ test_the_size_walk_can_be_skipped
 test_a_full_temporary_directory_does_not_shrink_the_site_size
 test_detect_reports_the_entries_and_what_stays_behind
 test_excluded_and_included_paths_change_what_travels
+test_named_paths_are_normalised_and_a_missing_one_is_reported
 test_the_password_reaches_the_client_only_through_the_environment
 test_the_connection_follows_the_host_written_in_setup_db
 test_an_unreachable_database_is_reported_without_stopping_detect

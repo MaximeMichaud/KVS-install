@@ -1111,6 +1111,37 @@ kvs_entry_has_excluded_parent() {
     return 1
 }
 
+# A path named with --exclude or --include that is not under the site
+# directory (an absolute path typed for it, a typo) leaves nothing behind
+# and takes nothing along. It was listed "excluded (named with --exclude)"
+# while the directory the operator meant was archived in full, so it is
+# reported here and dropped from the entries and the patterns. Not an
+# error: the import replays IMPORT_EXCLUDE on every pass, and a path gone
+# since the first one must not stop the next. A dangling symlink is under
+# the site: tar meets it, so it can be named.
+kvs_drop_missing_path_options() {
+    local rel
+    local -a kept=()
+
+    for rel in ${OPT_EXCLUDES[@]+"${OPT_EXCLUDES[@]}"}; do
+        if [ -e "$SITE_DIR/$rel" ] || [ -L "$SITE_DIR/$rel" ]; then
+            kept+=("$rel")
+        else
+            kvs_warn "--exclude $rel: no such path under $SITE_DIR (paths are relative to the site directory), nothing is left behind for it"
+        fi
+    done
+    OPT_EXCLUDES=(${kept[@]+"${kept[@]}"})
+    kept=()
+    for rel in ${OPT_INCLUDES[@]+"${OPT_INCLUDES[@]}"}; do
+        if [ -e "$SITE_DIR/$rel" ] || [ -L "$SITE_DIR/$rel" ]; then
+            kept+=("$rel")
+        else
+            kvs_warn "--include $rel: no such path under $SITE_DIR (paths are relative to the site directory), nothing is taken along for it"
+        fi
+    done
+    OPT_INCLUDES=(${kept[@]+"${kept[@]}"})
+}
+
 # Fill the entry arrays and the exclusion patterns from the walk buckets
 # and the options. What stays behind leaves the site size, once.
 kvs_collect_entries() {
@@ -1121,6 +1152,7 @@ kvs_collect_entries() {
     local i
     local excluded_mb=0
 
+    kvs_drop_missing_path_options
     ENTRY_PATHS=()
     ENTRY_MB=()
     ENTRY_KIND=()
@@ -2643,9 +2675,29 @@ kvs_command_archive() {
 kvs_add_path_option() {
     local option="$1"
     local path="$2"
+    local slash=/
 
-    path=${path#/}
-    path=${path%/}
+    # Normalise the path so the same directory typed in different ways (a
+    # leading, trailing or doubled slash, or a "." segment) yields one
+    # anchored tar pattern. Stored verbatim, "./a", "a//b" or "a/." was
+    # reported excluded yet never matched by tar, so it stayed in the archive.
+    # ".." is rejected below, not normalised away. The slash is quoted
+    # through a variable: bash 4.2 keeps the backslash of an escaped one in
+    # a double quoted replacement.
+    while [[ $path == *"$slash$slash"* ]]; do
+        path=${path//"$slash$slash"/"$slash"}
+    done
+    path=${path#"$slash"}
+    path=${path%"$slash"}
+    while :; do
+        case $path in
+            ./*) path=${path#./} ;;
+            */.) path=${path%/.} ;;
+            */./*) path=${path//"$slash.$slash"/"$slash"} ;;
+            .) path="" ;;
+            *) break ;;
+        esac
+    done
     if [ -z "$path" ] || [ "$path" = "." ]; then
         kvs_error "$option: the whole site cannot be named"
         return 1
