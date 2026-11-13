@@ -397,6 +397,13 @@ if [ -e "$KVSCTL_LOCK" ]; then
         echo 'kvsctl-lock held' >> "$SETUP_CALLS"
     fi
 fi
+if [ -e "$SCRIPTS_LOCK" ]; then
+    if /usr/bin/flock --exclusive --nonblock "$SCRIPTS_LOCK" true; then
+        echo 'scripts-lock free' >> "$SETUP_CALLS"
+    else
+        echo 'scripts-lock held' >> "$SETUP_CALLS"
+    fi
+fi
 case "${0##*/} $*" in
     'docker --version') echo 'Docker version 29.0.0, build test' ;;
     'docker compose '*) exit 1 ;;
@@ -406,13 +413,21 @@ EOF
     chmod +x "$TEST_DIR/stub/$tool"
 done
 # A flock that fails other than on a held lock: it cannot open the file.
-mkdir -p "$TEST_DIR/flock-fails"
+mkdir -p "$TEST_DIR/flock-fails" "$TEST_DIR/flock-fails-exclusive"
 printf '#!/bin/bash\necho "flock: cannot open lock file" >&2\nexit 66\n' > "$TEST_DIR/flock-fails/flock"
 chmod +x "$TEST_DIR/flock-fails/flock"
+# One that fails on the exclusive lock of setup.sh and reconfigure.sh only.
+printf '#!/bin/bash\nif [ "$1" = --exclusive ]; then echo "flock: cannot lock" >&2; exit 66; fi\nexec /usr/bin/flock "$@"\n' \
+    > "$TEST_DIR/flock-fails-exclusive/flock"
+chmod +x "$TEST_DIR/flock-fails-exclusive/flock"
 
 # setup_run <case> <kvsctl files: none, idle, watched, running,
 # interrupted, both, unknown, aside, aside-empty, aside-own, aside-dot or
 # aside-backups> [arguments of setup.sh]
+
+# interrupted, both or unknown; or scripts, a run of reconfigure.sh holding
+# .kvs-scripts.lock, or scripts-unknown, a flock failing on that lock>
+# [arguments of setup.sh]
 setup_run() {
     local case_root="$TEST_DIR/kvsctl-run/$1" files="$2" path="$TEST_DIR/stub:/usr/bin:/bin"
     shift 2
@@ -441,6 +456,8 @@ setup_run() {
             ;;
     esac
     [ "$files" != unknown ] || path="$TEST_DIR/flock-fails:$path"
+    [ "$files" != scripts-unknown ] || path="$TEST_DIR/flock-fails-exclusive:$path"
+    [ "$files" != scripts ] || : > "$case_root/docker/.kvs-scripts.lock"
     case "$files" in
         interrupted | both) printf '{"action":"upgrade"}\n' > "$case_root/kvsctl/journal.json" ;;
     esac
@@ -451,9 +468,12 @@ setup_run() {
             running | both) exec 9< "$case_root/kvsctl/lock" && flock --exclusive 9 ;;
             # Held as kvsctl status holds it while it reads.
             watched) exec 9< "$case_root/kvsctl/lock" && flock --shared 9 ;;
+            # Held as a run of reconfigure.sh holds it.
+            scripts) exec 8< "$case_root/docker/.kvs-scripts.lock" && flock --exclusive 8 ;;
         esac
         cd "$case_root/docker"
-        SETUP_CALLS="$TEST_DIR/calls" KVSCTL_LOCK="$case_root/kvsctl/lock" PATH="$path" bash ./setup.sh "$@" < /dev/null
+        SETUP_CALLS="$TEST_DIR/calls" KVSCTL_LOCK="$case_root/kvsctl/lock" SCRIPTS_LOCK="$case_root/docker/.kvs-scripts.lock" \
+            PATH="$path" bash ./setup.sh "$@" < /dev/null
     ) > "$TEST_DIR/out" 2> "$TEST_DIR/err"
 }
 
@@ -473,6 +493,8 @@ refused() {
 running_reason="kvsctl is running on this installation (it holds $TEST_DIR/kvsctl-run/%s/kvsctl/lock): wait until it is done; 'kvsctl status' shows what it does."
 interrupted_reason="an interrupted kvsctl run left $TEST_DIR/kvsctl-run/%s/kvsctl/journal.json: run 'kvsctl recover' first. Where recover says to finish by hand and that takes setup.sh, remove that file, then run setup.sh again."
 unknown_reason="could not tell whether kvsctl is running: flock $TEST_DIR/kvsctl-run/%s/kvsctl/lock failed with status 66."
+scripts_reason="another setup.sh or reconfigure.sh run is changing this installation (it holds $TEST_DIR/kvsctl-run/%s/docker/.kvs-scripts.lock): wait until it is done."
+scripts_unknown_reason="could not tell whether setup.sh or reconfigure.sh runs: flock $TEST_DIR/kvsctl-run/%s/docker/.kvs-scripts.lock failed with status 66."
 # shellcheck disable=SC2059  # The reasons are the formats.
 for args in '' '--dev' '--resume-import'; do
     name=${args:-plain}
@@ -493,6 +515,11 @@ for args in '' '--dev' '--resume-import'; do
         [ "$(ls -A "$case_root.kvsctl.Ab12Cd/kvsctl")" = "$(printf 'journal.json\nlogs')" ] ||
             fail "setup.sh $args changed the kvsctl/ an update set aside: $(ls -lA "$case_root.kvsctl.Ab12Cd/kvsctl")"
     done
+
+    # F1: a run of reconfigure.sh (or of another setup.sh) holds the lock
+    # both take exclusive; one that cannot be checked stops the run too.
+    refused "scripts-$name" scripts "$(printf "$scripts_reason" "scripts-$name")" $args
+    refused "scripts-unknown-$name" scripts-unknown "$(printf "$scripts_unknown_reason" "scripts-unknown-$name")" $args
 done
 
 for files in idle watched none aside-own aside-dot aside-backups; do
@@ -507,6 +534,13 @@ for files in idle watched none aside-own aside-dot aside-backups; do
     if ! grep -Fxq 'kvsctl-lock held' "$TEST_DIR/calls" || grep -Fxq 'kvsctl-lock free' "$TEST_DIR/calls"; then
         fail "a kvsctl run could take the lock while setup.sh ran ($files): $(cat "$TEST_DIR/calls")"
     fi
+    if ! grep -Fxq 'scripts-lock held' "$TEST_DIR/calls" || grep -Fxq 'scripts-lock free' "$TEST_DIR/calls"; then
+        fail "a reconfigure.sh run could take .kvs-scripts.lock while setup.sh ran ($files): $(cat "$TEST_DIR/calls")"
+    fi
+    scripts_lock="$TEST_DIR/kvsctl-run/past-$files/docker/.kvs-scripts.lock"
+    /usr/bin/flock --exclusive --nonblock "$scripts_lock" true ||
+        fail "setup.sh kept .kvs-scripts.lock after it ended ($files)"
+    [ "$(stat -c %a "$scripts_lock")" = 600 ] || fail "setup.sh made .kvs-scripts.lock with mode $(stat -c %a "$scripts_lock"), not 600"
     lock="$TEST_DIR/kvsctl-run/past-$files/kvsctl/lock"
     /usr/bin/flock --exclusive --nonblock "$lock" true ||
         fail "setup.sh kept the kvsctl lock after it ended ($files)"
@@ -519,6 +553,7 @@ for files in idle watched none aside-own aside-dot aside-backups; do
     esac
 done
 echo 'PASS: setup.sh starts nothing while kvsctl runs or after a kvsctl run that did not finish, and holds the lock while it runs'
+echo 'PASS: setup.sh starts nothing while another setup.sh or reconfigure.sh runs, and holds .kvs-scripts.lock while it runs'
 
 # Step 1 of the setup builds the images Compose builds on this stack: all
 # of them on a checkout, Manticore only when it is enabled, and none on a

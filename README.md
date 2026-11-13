@@ -504,6 +504,13 @@ meanwhile is refused (exit 6) instead of changing the stack beside them.
 `--manticore status` still run, and `kvsctl status`, which only reads the
 lock, stops none of them.
 
+`docker/setup.sh` and `docker/reconfigure.sh` (including the run of
+`setup.sh` that `kvs-install.sh` starts) also hold `docker/.kvs-scripts.lock`
+for as long as they run, and one started while another holds it stops
+before it changes anything: both rewrite `.env` from what they read when
+they started, so two at once would lose each other's changes. The status
+options of `reconfigure.sh` take no such lock.
+
 ## Compatibility
 
 The latest versions are more stable and we recommend using Debian 13 for the best support.

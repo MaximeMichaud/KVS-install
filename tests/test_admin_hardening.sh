@@ -266,7 +266,13 @@ grep -Eq "ktvs_admin_users[^;]*(kvs_support|status_id=0)" \
     "$ROOT_DIR/docker/init/docker-entrypoint.d/35-harden-admin-users.sh" &&
     fail "init step still touches the kvs_support account row"
 
-setup_copy="$TEST_DIR/setup.sh"
+# The copy runs from a docker directory of its own, as setup.sh runs from
+# the docker directory of an installation: the kvsctl lock it takes in the
+# directory above, and the lock it shares with reconfigure.sh in its own
+# directory, stay in the fixture instead of the directory the suite was
+# started from and the one above it.
+mkdir "$TEST_DIR/docker"
+setup_copy="$TEST_DIR/docker/setup.sh"
 # Bypass the root guard only in this disposable copy so the test reaches the
 # headless input validation without writing to the host log directory.
 # Keep EUID literal while replacing the guard in the temporary fixture.
@@ -277,18 +283,20 @@ sed \
     "$ROOT_DIR/docker/setup.sh" > "$setup_copy"
 chmod +x "$setup_copy"
 
-if KVS_ADMIN_PASSWORD=short HEADLESS=y bash "$setup_copy" \
+if (cd "$TEST_DIR/docker" && KVS_ADMIN_PASSWORD=short HEADLESS=y bash ./setup.sh) \
     > "$TEST_DIR/setup-short.log" 2>&1; then
     fail "setup accepted a short headless admin password"
 fi
 grep -Fq 'must contain at least 20 characters' "$TEST_DIR/setup-short.log" ||
     fail "setup did not explain the admin password requirement"
 
-if DISABLE_KVS_SUPPORT_ACCESS=yes HEADLESS=y bash "$setup_copy" \
+if (cd "$TEST_DIR/docker" && DISABLE_KVS_SUPPORT_ACCESS=yes HEADLESS=y bash ./setup.sh) \
     > "$TEST_DIR/setup-support.log" 2>&1; then
     fail "setup accepted an invalid DISABLE_KVS_SUPPORT_ACCESS value"
 fi
 grep -Fq 'DISABLE_KVS_SUPPORT_ACCESS must be true or false' "$TEST_DIR/setup-support.log" ||
     fail "setup did not explain the support access opt-out values"
+[ -f "$TEST_DIR/docker/.kvs-scripts.lock" ] && [ -f "$TEST_DIR/kvsctl/lock" ] ||
+    fail "the locks of setup.sh must stay in the fixture: $(find "$TEST_DIR" -name '*lock*')"
 
 echo "PASS: Administrative account hardening"

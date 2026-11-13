@@ -175,10 +175,40 @@ refuse_during_kvsctl_run() {
         return 1
     fi
 }
+# setup.sh and reconfigure.sh both rewrite .env from what they read when
+# they started (COMPOSE_PROFILES among it) and start or stop containers:
+# two runs at once lose each other's changes, such as the profile of the
+# ACME client or of Manticore. Each holds an exclusive lock on
+# .kvs-scripts.lock, in the docker directory, until it ends, on a
+# descriptor of its own, and a run that finds it held stops before it
+# changes anything. The children of the script inherit the descriptor, and
+# so hold it as long as they run; kvs-install.sh takes none, so the
+# setup.sh it starts takes it. The status options of reconfigure.sh only
+# read, and take none. The file is made private, as the kvsctl lock.
+hold_scripts_lock() {
+    local lock="$PWD/.kvs-scripts.lock"
+    local status=0
+
+    if ! (umask 077 && : >> "$lock") || ! exec {KVS_SCRIPTS_LOCK_FD}< "$lock"; then
+        echo "ERROR: could not open ${lock}, the lock setup.sh and reconfigure.sh share. Nothing was changed." >&2
+        return 1
+    fi
+    flock --exclusive --nonblock "$KVS_SCRIPTS_LOCK_FD" || status=$?
+    if [ "$status" -eq 1 ]; then
+        echo "ERROR: another setup.sh or reconfigure.sh run is changing this installation (it holds ${lock}): wait until it is done. Nothing was changed." >&2
+        return 1
+    elif [ "$status" -ne 0 ]; then
+        echo "ERROR: could not tell whether setup.sh or reconfigure.sh runs: flock ${lock} failed with status ${status}. Nothing was changed." >&2
+        return 1
+    fi
+}
 # The status options only read, as kvsctl status does during a run.
 case "${RUNTIME_ACTION}:${MANTICORE_ACTION}" in
     import-status:* | writeback-status:* | manticore:status) ;;
-    *) refuse_during_kvsctl_run "$(cd .. && pwd)" || exit 1 ;;
+    *)
+        refuse_during_kvsctl_run "$(cd .. && pwd)" || exit 1
+        hold_scripts_lock || exit 1
+        ;;
 esac
 
 # Must have .env

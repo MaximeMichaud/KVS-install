@@ -2644,6 +2644,99 @@ for files in aside aside-empty aside-own aside-dot; do
     done
 done
 
+# F1: setup.sh and reconfigure.sh rewrite .env from what they read when they
+# started, so two runs at once lost each other's changes: a second
+# reconfigure.sh during the Manticore wait of "--manticore enable" saved
+# COMPOSE_PROFILES with direct-tls, and the first then wrote its own list
+# back, without it. A run holds .kvs-scripts.lock exclusive until it ends,
+# and another run that changes the stack is refused meanwhile, before any
+# docker command or change of .env; the status options still run. Here the
+# first run waits in its stand-in for lib/manticore.sh on a FIFO, as
+# manticore_wait_ready waits for the index.
+name=scripts-lock
+kvsctl_case "$name" idle
+scripts_dir="$TEST_ROOT/$name/docker"
+scripts_lock="$scripts_dir/.kvs-scripts.lock"
+mkfifo "$TEST_ROOT/$name/release"
+# shellcheck disable=SC2016
+printf 'manticore_manage() { if [ "$1" = enable ]; then : > %q; exec 3<> %q; read -r -t 120 _ <&3; fi; echo "manticore_manage $1"; }\n' \
+    "$TEST_ROOT/$name/waiting" "$TEST_ROOT/$name/release" > "$scripts_dir/lib/manticore.sh"
+(
+    cd "$scripts_dir" &&
+        exec env PATH="$scripts_dir/bin:/usr/bin:/bin" MOCK_CALLS="$TEST_ROOT/$name/first.calls" \
+            MOCK_STATE="$scripts_dir/state" ./reconfigure.sh --manticore enable
+) > "$TEST_ROOT/$name/first.log" 2>&1 &
+first_run=$!
+# A failure below must not leave the first run waiting.
+trap 'kill "$first_run" 2> /dev/null || true; cleanup' EXIT
+for _ in $(seq 200); do
+    [ ! -e "$TEST_ROOT/$name/waiting" ] || break
+    sleep 0.05
+done
+[ -e "$TEST_ROOT/$name/waiting" ] || fail "the first reconfigure.sh never reached its Manticore wait: $(cat "$TEST_ROOT/$name/first.log")"
+for action in apply disable; do
+    if [ "$action" = apply ]; then
+        kvsctl_reconfigure "$name" idle
+    else
+        kvsctl_reconfigure "$name" idle --manticore "$action"
+    fi
+    assert_failure "a second reconfigure.sh ($action) ran beside the first"
+    assert_contains "$LAST_DIR/output.log" \
+        "ERROR: another setup.sh or reconfigure.sh run is changing this installation (it holds $scripts_lock): wait until it is done. Nothing was changed." \
+        "the second reconfigure.sh ($action) does not say why it stops: $(cat "$LAST_DIR/output.log")"
+    assert_eq '' "$(cat "$LAST_DIR/docker.calls")" "the second reconfigure.sh ($action) ran docker beside the first"
+    assert_not_contains "$LAST_DIR/output.log" 'manticore_manage' \
+        "the second reconfigure.sh ($action) went on beside the first"
+    assert_eq "$(cat "$TEST_ROOT/$name/env.before")" "$(cat "$LAST_DIR/.env")" \
+        "the second reconfigure.sh ($action) changed .env beside the first"
+done
+kvsctl_reconfigure "$name" idle --manticore status
+assert_success "reconfigure.sh --manticore status beside a run: $(cat "$LAST_DIR/output.log")"
+assert_contains "$LAST_DIR/output.log" 'manticore_manage status' "the status of Manticore did not run beside a run"
+for option in import-status writeback-status; do
+    kvsctl_reconfigure "$name" idle "--$option"
+    assert_success "reconfigure.sh --$option beside a run: $(cat "$LAST_DIR/output.log")"
+    assert_not_contains "$LAST_DIR/output.log" 'ERROR' "reconfigure.sh --$option was refused beside a run"
+done
+echo release > "$TEST_ROOT/$name/release"
+LAST_STATUS=0
+wait "$first_run" || LAST_STATUS=$?
+trap cleanup EXIT
+assert_success "the first reconfigure.sh failed: $(cat "$TEST_ROOT/$name/first.log")"
+assert_contains "$TEST_ROOT/$name/first.log" 'manticore_manage enable' "the first reconfigure.sh did not finish its run"
+/usr/bin/flock --exclusive --nonblock "$scripts_lock" true ||
+    fail "reconfigure.sh kept .kvs-scripts.lock after it ended"
+assert_eq 600 "$(stat -c %a "$scripts_lock")" "reconfigure.sh made .kvs-scripts.lock readable by others"
+# Held as setup.sh holds it, and a flock that cannot tell.
+kvsctl_case scripts-lock-setup idle
+LAST_DIR="$TEST_ROOT/scripts-lock-setup/docker"
+: > "$LAST_DIR/.kvs-scripts.lock"
+: > "$LAST_DIR/docker.calls"
+set +e
+(
+    exec 8< "$LAST_DIR/.kvs-scripts.lock" && flock --exclusive 8
+    cd "$LAST_DIR" &&
+        env PATH="$LAST_DIR/bin:/usr/bin:/bin" MOCK_CALLS="$LAST_DIR/docker.calls" MOCK_STATE="$LAST_DIR/state" ./reconfigure.sh
+) > "$LAST_DIR/output.log" 2>&1
+LAST_STATUS=$?
+set -e
+assert_failure "reconfigure.sh ran beside a setup.sh run"
+assert_contains "$LAST_DIR/output.log" "it holds $LAST_DIR/.kvs-scripts.lock" \
+    "reconfigure.sh does not say a setup.sh run holds the lock: $(cat "$LAST_DIR/output.log")"
+assert_eq '' "$(cat "$LAST_DIR/docker.calls")" "reconfigure.sh ran docker beside a setup.sh run"
+kvsctl_case scripts-lock-unknown idle
+LAST_DIR="$TEST_ROOT/scripts-lock-unknown/docker"
+# A flock that answers the probe of the kvsctl lock and fails on this one.
+# shellcheck disable=SC2016  # The stand-in reads its own arguments.
+printf '#!/bin/bash\nif [ "$1" = --exclusive ]; then echo "flock: cannot lock" >&2; exit 66; fi\nexec /usr/bin/flock "$@"\n' > "$LAST_DIR/bin/flock"
+chmod +x "$LAST_DIR/bin/flock"
+kvsctl_reconfigure scripts-lock-unknown idle
+assert_failure "reconfigure.sh went on when flock failed on .kvs-scripts.lock"
+assert_contains "$LAST_DIR/output.log" \
+    "ERROR: could not tell whether setup.sh or reconfigure.sh runs: flock $LAST_DIR/.kvs-scripts.lock failed with status 66. Nothing was changed." \
+    "reconfigure.sh does not say it could not tell: $(cat "$LAST_DIR/output.log")"
+assert_eq '' "$(cat "$LAST_DIR/docker.calls")" "reconfigure.sh ran docker when flock failed"
+
 # Static checks retain the cryptographic and atomic-update invariants exercised
 # through the full-script mocks above.
 # shellcheck disable=SC2016

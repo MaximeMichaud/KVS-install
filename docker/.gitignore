@@ -1,5 +1,7 @@
 # Sensitive files
 .env
+# The lock setup.sh and reconfigure.sh hold while they run
+.kvs-scripts.lock
 kvs-archive/
 
 # Generated files
