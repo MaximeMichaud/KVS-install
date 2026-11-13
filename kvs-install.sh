@@ -1097,6 +1097,18 @@ configure_kvs_database_file() {
           s|'DB_DEVICE','base'|'DB_DEVICE','$domain'|" "$file"
 }
 
+# setup_db.php holds DB_PASS in clear. The blanket chmod of the tree, and an
+# unzip under umask 022, both leave it readable by every local account. Keep it
+# readable by the PHP user only (the tree stays owned by www-data so KVS can
+# update itself from its panel), as the Docker init does (60-permissions.sh),
+# on every run.
+restrict_setup_db_file() {
+  local file="$1"
+
+  [ -f "$file" ] || return 0
+  chmod 600 "$file"
+}
+
 function install_KVS() {
     KVS_PATH="/var/www/$DOMAIN"
     extract_kvs_archive "$KVS_PATH" || return $?
@@ -1161,6 +1173,7 @@ function install_KVS() {
     [ -d "$KVS_PATH"/_INSTALL/ ] && rm -rf "$KVS_PATH"/_INSTALL/
 
     configure_kvs_database_file "$KVS_PATH/admin/include/setup_db.php" "$DOMAIN" "$databasepassword"
+    restrict_setup_db_file "$KVS_PATH/admin/include/setup_db.php"
 }
 
 function aptinstall_memcached() {

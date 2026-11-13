@@ -554,6 +554,28 @@ test_database_file_configuration_is_anchored() {
   assert_equal "" "$(read_kvs_database_password "$temp_dir/missing.php")" "a missing file reads as no password" || return 1
 }
 
+test_setup_db_file_is_restricted_to_the_php_user() {
+  local temp_dir file body
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  file="$temp_dir/setup_db.php"
+
+  printf "define('DB_PASS','secret');\n" >"$file"
+  chmod 644 "$file"
+  restrict_setup_db_file "$file" || fail "restricting setup_db.php failed" || return 1
+  assert_equal 600 "$(stat -c %a "$file")" "setup_db.php must be mode 600" || return 1
+
+  # A missing file is not an error: nothing to restrict.
+  restrict_setup_db_file "$temp_dir/missing.php" || fail "a missing setup_db.php must not fail" || return 1
+
+  # install_KVS must restrict the file, and after it has configured it.
+  body=$(declare -f install_KVS)
+  case "$body" in
+    *configure_kvs_database_file*restrict_setup_db_file*) ;;
+    *) fail "install_KVS must call restrict_setup_db_file after configure_kvs_database_file" || return 1 ;;
+  esac
+}
+
 test_acme_issue_reuses_a_valid_certificate() {
   local temp_dir
   local status
@@ -1267,6 +1289,7 @@ run_test "auto-updates follow upstream repositories" test_auto_updates_follow_up
 run_test "KVS system settings select nginx" test_kvs_system_settings_select_nginx || failures=$((failures + 1))
 run_test "archive extraction skips an installed site" test_archive_extraction_skips_an_installed_site || failures=$((failures + 1))
 run_test "database file configuration is anchored" test_database_file_configuration_is_anchored || failures=$((failures + 1))
+run_test "setup_db.php is restricted to the PHP user" test_setup_db_file_is_restricted_to_the_php_user || failures=$((failures + 1))
 run_test "acme issue reuses a valid certificate" test_acme_issue_reuses_a_valid_certificate || failures=$((failures + 1))
 run_test "port check accepts the installer nginx" test_port_check_accepts_the_installer_nginx || failures=$((failures + 1))
 run_test "KVS servers follow the site URL" test_kvs_servers_follow_the_site_url || failures=$((failures + 1))
