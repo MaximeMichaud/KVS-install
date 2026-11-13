@@ -423,6 +423,111 @@ test_extraction_settles_the_site_and_takes_the_dump_out() {
     pass "extraction settles the site from a private stage and keeps the dump out of the webroot"
 }
 
+# GNU tar escapes non-ASCII bytes and backslashes in its listing; the names
+# must come back as stored, whatever the caller's locale, or the site root
+# and the dump point at paths that are not on disk after the extraction. A
+# name part holding a control character stays escaped: the listing is one
+# line per member, and the setup prints the names it ignores.
+test_tar_names_outside_ascii_reach_the_site() {
+    local layout archive listing result stage destination staging root dump c control
+
+    layout="$TMP_ROOT/layout-accents"
+    rm -rf "$layout"
+    mkdir -p "$layout/site-vidéos"
+    make_site "$layout/site-vidéos" /home/old/www
+    make_dump "$layout/données.sql"
+    printf 'slash\n' > "$layout/site-vidéos/contents/a\\b.txt"
+    printf 'newline\n' > "$layout/site-vidéos/contents/two"$'\n'"lines.txt"
+    printf 'control\n' > "$layout/site-vidéos/contents/"$'ctl\a\b\f\r\v\001.txt'
+    for c in a b f n r t v; do
+        printf -v control '%b' "\\$c"
+        printf '%s\n' "$c" > "$layout/site-vidéos/contents/alone-$control.txt"
+    done
+    printf 'delete\n' > "$layout/site-vidéos/contents/"$'del\177.txt'
+    mkdir "$layout/site-vidéos/contents/sub"$'\033'"dir"
+    printf 'nested\n' > "$layout/site-vidéos/contents/sub"$'\033'"dir/inner.txt"
+    printf 'old dump\n' > "$layout/site-vidéos/contents/old"$'\n'"export.sql"
+    printf 'notes\n' > "$layout/"$'\033]0;title\a\033[2Jnotes.txt'
+    archive="$TMP_ROOT/accents.tar.gz"
+    archive_of "$layout" "$archive"
+    listing=$(LC_ALL=C.UTF-8 import_archive_list "$archive" tar)
+    grep -qx $'f\t[0-9]*\tsite-vidéos/admin/include/setup.php' <<< "$listing" || fail "a non-ASCII directory must be listed as stored: $(grep setup.php <<< "$listing")"
+    grep -qx $'f\t[0-9]*\tdonnées.sql' <<< "$listing" || fail "a non-ASCII dump must be listed as stored: $(grep sql <<< "$listing")"
+    grep -qxF "$(printf 'f\t6\tsite-vidéos/contents/a\\b.txt')" <<< "$listing" || fail "a backslash must be listed once: $(grep 'a.*b.txt' <<< "$listing")"
+    grep -qxF $'f\t8\t''site-vidéos/contents/ctl\a\b\f\r\v\001.txt' <<< "$listing" || fail "control characters must stay escaped under the decoded root: $(grep ctl <<< "$listing" | od -c | head -3)"
+    grep -qxF $'f\t7\t''site-vidéos/contents/del\177.txt' <<< "$listing" || fail "a DEL must stay escaped: $(grep del <<< "$listing" | od -c | head -3)"
+    grep -qxF $'f\t7\t''site-vidéos/contents/sub\033dir/inner.txt' <<< "$listing" || fail "a directory part must stay escaped on its own: $(grep inner <<< "$listing" | od -c | head -3)"
+    for c in a b f n r t v; do
+        grep -qxF $'f\t2\t'"site-vidéos/contents/alone-\\$c.txt" <<< "$listing" || fail "a lone \\$c must stay escaped: $(grep alone <<< "$listing" | od -c | head -3)"
+    done
+    grep -qxF $'f\t9\t''site-vidéos/contents/old\nexport.sql' <<< "$listing" || fail "a newline must stay escaped under the decoded root: $(grep export <<< "$listing" | od -c | head -3)"
+    grep -qxF $'f\t6\t''\033]0;title\a\033[2Jnotes.txt' <<< "$listing" || fail "a terminal escape sequence must stay escaped: $(grep notes <<< "$listing" | od -c | head -3)"
+    LC_ALL=C grep -q $'[\001-\010\013-\037\177]' <<< "$listing" && fail "no control character but the separators may reach the listing: $(LC_ALL=C grep $'[\001-\010\013-\037\177]' <<< "$listing" | od -c | head -3)"
+    grep -qvE $'^[fdlo]\t[0-9]+\t.' <<< "$listing" && fail "every member must stay on one well-formed line: $(grep -vE $'^[fdlo]\t[0-9]+\t.' <<< "$listing")"
+    # The same members stored without the leading "./".
+    tar -czf "$TMP_ROOT/accents-plain.tar.gz" -C "$layout" -- site-vidéos données.sql $'\033]0;title\a\033[2Jnotes.txt'
+    [ "$(LC_ALL=C.UTF-8 import_archive_list "$TMP_ROOT/accents-plain.tar.gz" tar | sort)" = "$(sort <<< "$listing")" ] ||
+        fail "members stored without ./ must list the same: $(diff <(LC_ALL=C.UTF-8 import_archive_list "$TMP_ROOT/accents-plain.tar.gz" tar | sort) <(sort <<< "$listing") | od -c | head -5)"
+    printf '%s\n' "$listing" > "$TMP_ROOT/accents.list"
+    result=$(import_archive_analyze "$TMP_ROOT/accents.list") || fail "a non-ASCII site and dump must be accepted"
+    root=$(import_field "$result" 1)
+    dump=$(import_field "$result" 2)
+    [ "$root" = "site-vidéos/" ] || fail "the root must be the stored name, got '$root'"
+    [ "$dump" = "données.sql" ] || fail "the dump must be the stored name, got '$dump'"
+    [ "$(import_field "$result" 5)" = '\033]0;title\a\033[2Jnotes.txt' ] || fail "an ignored name must be reported escaped, got '$(import_field "$result" 5 | od -c | head -3)'"
+    import_archive_peek "$archive" tar "$root" "$TMP_ROOT/accents-peek" || fail "the peek must find the configuration under the stored name"
+    stage="$TMP_ROOT/accents-stage"
+    destination="$TMP_ROOT/accents-dest"
+    staging="$TMP_ROOT/accents-staging"
+    import_archive_extract "$archive" tar "$stage" || fail "the archive must extract"
+    result=$(import_archive_settle "$stage" "$root" "$dump" "" "$staging" "$destination") || fail "a non-ASCII site and dump must settle"
+    [ -f "$destination/admin/include/setup.php" ] || fail "the site must reach the destination"
+    [ "$(cat "$destination/contents/a\\b.txt")" = slash ] || fail "a name with a backslash must arrive"
+    [ "$(cat "$destination/contents/two"$'\n'"lines.txt")" = newline ] || fail "a name with a newline must still arrive"
+    [ "$(cat "$destination/contents/"$'ctl\a\b\f\r\v\001.txt')" = control ] || fail "a name with control characters must still arrive"
+    [ "$(cat "$destination/contents/"$'del\177.txt')" = delete ] || fail "a name with a DEL must still arrive"
+    [ "$(cat "$destination/contents/sub"$'\033'"dir/inner.txt")" = nested ] || fail "a directory with a control character must still arrive"
+    for c in a b f n r t v; do
+        printf -v control '%b' "\\$c"
+        [ "$(cat "$destination/contents/alone-$control.txt")" = "$c" ] || fail "a name with a lone \\$c must still arrive"
+    done
+    [ "$(cat "$destination/contents/old"$'\n'"export.sql")" = 'old dump' ] || fail "an old export under the site must arrive with it"
+    [ "$(import_field "$result" 1)" = "$staging/données.sql" ] || fail "the staged dump must keep its name, got '$(import_field "$result" 1)'"
+    [ "$(import_inspect_dump "$staging/données.sql" ktvs_)" = $'1\t7.0.2\t0\tyes\t' ] || fail "the staged dump must be intact"
+
+    # tar unquotes member names by default: a stored backslash sequence
+    # in the root must reach the peek untouched.
+    layout="$TMP_ROOT/layout-backslash-root"
+    rm -rf "$layout"
+    mkdir -p "$layout/backup\\new"
+    make_site "$layout/backup\\new" /home/old/www
+    make_dump "$layout/database.sql"
+    # Stored without a leading "./" (the first name the peek tries), then with it.
+    tar --no-unquote -cf "$TMP_ROOT/backslash-root.tar" -C "$layout" 'backup\new' database.sql
+    archive_of "$layout" "$TMP_ROOT/backslash-root-dot.tar"
+    for archive in "$TMP_ROOT/backslash-root.tar" "$TMP_ROOT/backslash-root-dot.tar"; do
+        import_archive_list "$archive" tar > "$TMP_ROOT/backslash-root.list"
+        result=$(import_archive_analyze "$TMP_ROOT/backslash-root.list") || fail "$archive: a root with a backslash must be accepted"
+        root=$(import_field "$result" 1)
+        [ "$root" = 'backup\new/' ] || fail "$archive: the root keeps its backslash, got '$root'"
+        rm -rf "$TMP_ROOT/backslash-peek"
+        import_archive_peek "$archive" tar "$root" "$TMP_ROOT/backslash-peek" || fail "$archive: the peek must not unquote the stored root"
+    done
+
+    # A settle that finds no site where the analysis put it refuses before
+    # anything moves, instead of reporting an empty site as copied.
+    stage="$TMP_ROOT/missing-root-stage"
+    mkdir -p "$stage/www"
+    make_dump "$stage/database.sql"
+    destination="$TMP_ROOT/missing-root-dest"
+    if import_archive_settle "$stage" "site-vid\\303\\251os/" database.sql "" "$TMP_ROOT/missing-root-staging" "$destination" 2> "$TMP_ROOT/missing-root.err"; then
+        fail "a settle without the site must fail"
+    fi
+    grep -q 'no site' "$TMP_ROOT/missing-root.err" || fail "the refusal must say the site is missing: $(cat "$TMP_ROOT/missing-root.err")"
+    [ ! -e "$destination" ] && [ -f "$stage/database.sql" ] || fail "nothing moves when the site is missing"
+    pass "tar names outside ASCII reach the site, the peek and the dump staging"
+}
+
 test_settle_rejects_linked_import_materials() {
     local layout archive stage destination kind result root dump manifest
 
@@ -536,7 +641,8 @@ test_nested_stage_preserves_site_entries() {
 
     # Even a name matching the newly allocated stage must never delete it.
     stage="$destination/.kvs-import-stage-collision"
-    mkdir -p "$stage/www/${stage##*/}"
+    mkdir -p "$stage/www/${stage##*/}" "$stage/www/admin/include"
+    printf '<?php\n' > "$stage/www/admin/include/setup.php"
     printf 'keep staged content\n' > "$stage/www/${stage##*/}/asset.css"
     printf 'synthetic dump\n' > "$stage/database.sql"
     if import_archive_settle "$stage" www/ database.sql '' "$TMP_ROOT/stage-collision-db" "$destination" > "$TMP_ROOT/stage-collision.out" 2> "$TMP_ROOT/stage-collision.err"; then
@@ -2945,6 +3051,7 @@ test_analysis_finds_the_site_root_and_the_dump
 test_analysis_refuses_what_would_pollute_the_webroot
 test_peek_reads_the_config_before_extraction
 test_extraction_settles_the_site_and_takes_the_dump_out
+test_tar_names_outside_ascii_reach_the_site
 test_settle_rejects_linked_import_materials
 test_settle_preserves_complete_entry_names
 test_nested_stage_preserves_site_entries

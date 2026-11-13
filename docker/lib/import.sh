@@ -1083,7 +1083,9 @@ import_archive_report_failure() {
 # import_archive_list <file> <command>
 # One line per member: "<type><TAB><size><TAB><name>", type f, d or l (zip
 # and 7z listings do not tell symlinks apart from files, tar does). Names
-# are as stored, without a leading "./" or trailing "/".
+# are as stored, without a leading "./" or trailing "/", except a path
+# component of a tar member that holds a control character: it keeps the
+# escaped spelling of tar.
 import_archive_list() {
     local file="$1"
     local command="$2"
@@ -1130,7 +1132,43 @@ import_archive_list() {
             rm -f "$raw"
             ;;
         tar)
-            LC_ALL=C tar -tvf "$file" | awk '
+            # GNU tar escapes in this listing what is not printable ASCII
+            # (\303\251 for an e with an acute accent, \\ for a backslash);
+            # the names are decoded back to their stored bytes, in the C
+            # locale so that one escape gives one byte. A path component
+            # that holds a control character once decoded stays escaped:
+            # this listing cannot carry a newline or a tab, and the setup
+            # prints the names it reports, where an escape sequence would
+            # drive the terminal. The other components of that name are
+            # decoded, so it still starts with the site root it is under.
+            LC_ALL=C tar --quoting-style=escape -tvf "$file" | LC_ALL=C awk '
+                function decode(s,    result, c) {
+                    result = ""
+                    while (match(s, /\\([0-7][0-7][0-7]|.)/)) {
+                        c = substr(s, RSTART + 1, 1)
+                        if (RLENGTH == 4) c = sprintf("%c", c * 64 + substr(s, RSTART + 2, 1) * 8 + substr(s, RSTART + 3, 1))
+                        else if (c == "a") c = "\a"
+                        else if (c == "b") c = "\b"
+                        else if (c == "f") c = "\f"
+                        else if (c == "n") c = "\n"
+                        else if (c == "r") c = "\r"
+                        else if (c == "t") c = "\t"
+                        else if (c == "v") c = "\v"
+                        result = result substr(s, 1, RSTART - 1) c
+                        s = substr(s, RSTART + RLENGTH)
+                    }
+                    return result s
+                }
+                function decode_path(s,    n, parts, i, part, result) {
+                    n = split(s, parts, "/")
+                    result = ""
+                    for (i = 1; i <= n; i++) {
+                        part = decode(parts[i])
+                        if (part ~ /[\001-\037\177]/) part = parts[i]
+                        result = result (i > 1 ? "/" : "") part
+                    }
+                    return result
+                }
                 {
                     type = substr($1, 1, 1)
                     size = $3
@@ -1138,6 +1176,7 @@ import_archive_list() {
                     sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +/, "", name)
                     if (type == "l") sub(/ -> .*$/, "", name)
                     if (type == "h") { sub(/ link to .*$/, "", name); type = "f" }
+                    name = decode_path(name)
                     if (type == "-") type = "f"
                     if (type != "f" && type != "d" && type != "l") type = "o"
                     sub(/^\.\//, "", name)
@@ -1320,6 +1359,11 @@ import_archive_settle() {
             return 1
         fi
     done
+    site="$stage/$root"
+    if [ ! -f "${site}admin/include/setup.php" ]; then
+        echo "ERROR: the extracted archive has no site in ${root:-its top level}" >&2
+        return 1
+    fi
     mkdir -p "$staging" "$destination" || return 1
     if [ -n "$dump" ]; then
         dump_path="$staging/$(basename -- "$dump")"
@@ -1329,7 +1373,6 @@ import_archive_settle() {
         manifest_path="$staging/$(basename -- "$manifest")"
         mv -f -- "$stage/$manifest" "$manifest_path" || return 1
     fi
-    site="$stage/$root"
     find "$site" -name .DS_Store -type f -delete 2>/dev/null || true
     while IFS= read -r -d '' entry; do
         name=${entry##*/}
@@ -1371,9 +1414,10 @@ import_archive_peek() {
                 ;;
             tar)
                 # tar matches the stored name; an archive made from inside
-                # its directory stores "./" in front of every member.
-                tar -xOf "$file" --occurrence=1 "${root}admin/include/$member" > "$target" 2> "$errors" < /dev/null ||
-                    tar -xOf "$file" --occurrence=1 "./${root}admin/include/$member" > "$target" 2> "$errors" < /dev/null || status=$?
+                # its directory stores "./" in front of every member. The
+                # root is as stored, so tar must not unquote it.
+                tar --no-unquote -xOf "$file" --occurrence=1 "${root}admin/include/$member" > "$target" 2> "$errors" < /dev/null ||
+                    tar --no-unquote -xOf "$file" --occurrence=1 "./${root}admin/include/$member" > "$target" 2> "$errors" < /dev/null || status=$?
                 ;;
             *)
                 status=1
