@@ -119,6 +119,9 @@ DB_CONN_ARGS=()
 DUMP_ARGS=()
 COMPRESS_CMD=()
 TAR_EXCLUDES=()
+# The symlinks inside the site, found once by kvs_site_links.
+SITE_LINKS=()
+SITE_LINKS_READ="no"
 
 # Removed by the exit trap
 STAGING_DIR=""
@@ -1348,17 +1351,69 @@ kvs_dirname() {
     esac
 }
 
-# kvs_path_inside_site <path>: the output would land under the site directory.
+# kvs_path_inside_site <path>: the output would land inside the tree tar
+# archives. tar follows symlinks (-h), so a destination named through a
+# symlink the site holds, or sitting under the target such a symlink
+# resolves to, ends up inside tar's own input: the archive grows without end
+# and fills the disk, and a dump written there is served by the web server.
+# The name is compared unresolved (a path under the site) and resolved (the
+# real directory under the site, or under the target of a symlink the site
+# holds and tar dereferences). Ways back in that no path shows (a symlink
+# inside a followed target, a bind mount) are left to tar, which skips the
+# staging directory by name (kvs_archive_excludes).
 kvs_path_inside_site() {
-    local directory
+    local raw resolved link target
 
-    directory=$(kvs_dirname "$1")
-    directory=$(readlink -f -- "$directory" < /dev/null 2> /dev/null) || directory=""
-    [ -n "$directory" ] && [ -n "$SITE_DIR" ] || return 1
-    case "$directory/" in
+    [ -n "$SITE_DIR" ] || return 1
+    raw=$(kvs_dirname "$1")
+
+    # A name under the site, even one that resolves elsewhere through a
+    # symlink the site holds (for example contents -> /data). A ".." segment
+    # can lead back out, so such a name is judged resolved only.
+    case "/$raw/" in
+        */../*) ;;
+        *)
+            case "$raw/" in
+                "$SITE_DIR"/*) return 0 ;;
+            esac
+            ;;
+    esac
+
+    resolved=$(readlink -f -- "$raw" < /dev/null 2> /dev/null) || resolved=""
+    [ -n "$resolved" ] || return 1
+
+    # The real directory under the site.
+    case "$resolved/" in
         "$SITE_DIR"/*) return 0 ;;
     esac
+
+    # Under the target of a symlink inside the site, which tar dereferences:
+    # the output would sit inside the tree tar walks. A target of / holds
+    # every path.
+    kvs_site_links
+    for link in ${SITE_LINKS[@]+"${SITE_LINKS[@]}"}; do
+        target=$(readlink -f -- "$link" < /dev/null 2> /dev/null) || continue
+        [ -n "$target" ] || continue
+        [ "$target" != / ] || return 0
+        case "$resolved/" in
+            "$target"/*) return 0 ;;
+        esac
+    done
+
     return 1
+}
+
+# Fill SITE_LINKS with the symlinks inside the site, once. Null separated,
+# so a name holding a line break stays one name.
+kvs_site_links() {
+    local link
+
+    [ "$SITE_LINKS_READ" = "yes" ] && return 0
+    SITE_LINKS=()
+    while IFS= read -r -d '' link; do
+        SITE_LINKS+=("$link")
+    done < <(find "$SITE_DIR" -type l -print0 2> /dev/null < /dev/null)
+    SITE_LINKS_READ="yes"
 }
 
 kvs_check_free_space() {
@@ -2291,11 +2346,20 @@ kvs_archive_excludes() {
     local pattern
 
     TAR_EXCLUDES=()
-    [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] || return 0
-    TAR_EXCLUDES=(--anchored)
-    for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
-        TAR_EXCLUDES+=("--exclude=${KVS_ARCHIVE_SITE_DIR}${pattern}")
-    done
+    if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
+        TAR_EXCLUDES=(--anchored)
+        for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
+            TAR_EXCLUDES+=("--exclude=${KVS_ARCHIVE_SITE_DIR}${pattern}")
+        done
+    fi
+    # The staging directory, by its unique name at any depth: tar may meet
+    # it again inside the site through a symlink in a followed target or a
+    # bind mount, which no path check sees, and would then archive the
+    # staging www link, and the site behind it, again and again until the
+    # disk is full.
+    if [ -n "$STAGING_DIR" ]; then
+        TAR_EXCLUDES+=(--no-anchored "--exclude=${STAGING_DIR##*/}")
+    fi
 }
 
 # Publish only a complete export. A private sibling stage keeps a previous

@@ -1439,7 +1439,82 @@ test_the_dump_is_staged_next_to_the_archive_and_outside_the_site() {
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --dump-only -o "$site/contents/dump.sql.gz" "$site" || status=$?
     [ "$status" -eq 1 ] || fail "a dump inside the site must be refused, got $status"
     [ ! -e "$site/contents/dump.sql.gz" ] || fail "no dump may be written inside the site"
+
+    # A content directory symlinked to a volume outside the site. tar
+    # follows it (-h), so an output under that volume, or named through the
+    # symlink, lands inside tar's own input and recurses until the disk is
+    # full. The check resolves the symlink and refuses before tar starts.
+    local outside="$TMP_ROOT/staging-outside"
+    mkdir -p "$outside"
+    ln -s "$outside" "$site/bigdata"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$outside/export.tar" archive "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "an output under a site symlink target must be refused, got $status"
+    grep -q "inside the site" "$err" || fail "the symlink refusal must explain: $(cat "$err")"
+    [ ! -e "$outside/export.tar" ] || fail "nothing may be written under a followed site symlink"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --dump-only -o "$site/bigdata/dump.sql.gz" "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "a dump named through a site symlink must be refused, got $status"
+    [ ! -e "$outside/dump.sql.gz" ] || fail "no dump may be written through a site symlink"
+
     pass "the dump is staged next to the archive and outside the site"
+}
+
+test_the_archive_never_takes_in_its_own_staging_directory() {
+    local site="$TMP_ROOT/self-site" vol="$TMP_ROOT/self-vol"
+    local out="$TMP_ROOT/self.out" err="$TMP_ROOT/self.err"
+    local status listing
+
+    # The path check cannot see every way back into the site: a symlink inside
+    # a directory tar reaches through another symlink (find does not follow
+    # it), a bind mount, or a TMPDIR under a followed target for the stdout
+    # archive. tar itself must leave its staging directory out, or it
+    # recurses through the staging www link until the disk is full. Bounded,
+    # since that recursion only ends when tar crashes.
+    make_site "$site"
+    mkdir -p "$vol/data" "$vol/disk2"
+    mv "$site/contents"/* "$vol/data/" && rmdir "$site/contents"
+    ln -s "$vol/data" "$site/contents"
+    ln -s "$vol/disk2" "$vol/data/videos_sources"
+    status=0
+    PATH="$STUB_BIN:$MIN_BIN" "$(command -v timeout)" 60 "$BASH" "$EXPORT_SCRIPT" \
+        -y --no-size -o "$vol/disk2/export.tar" archive "$site" > "$out" 2> "$err" < /dev/null || status=$?
+    [ "$status" -eq 0 ] || fail "an output reached through a nested symlink must not recurse, got $status: $(tail -c 300 "$err")"
+    listing=$(tar -tf "$vol/disk2/export.tar")
+    grep -Fxq "www/contents/videos/1.mp4" <<< "$listing" || fail "the site must be archived: $listing"
+    grep -Fq ".kvs-export." <<< "$listing" && fail "the staging directory must stay out of the archive: $listing"
+
+    # The archive on stdout, staged in a TMPDIR under the target of a site
+    # symlink.
+    rm -f "$vol/disk2/export.tar"
+    mkdir -p "$vol/tmp"
+    ln -s "$vol" "$site/bigdata"
+    status=0
+    TMPDIR="$vol/tmp" PATH="$STUB_BIN:$MIN_BIN" "$(command -v timeout)" 60 "$BASH" "$EXPORT_SCRIPT" \
+        -y --no-size -o - archive "$site" > "$out" 2> "$err" < /dev/null || status=$?
+    [ "$status" -eq 0 ] || fail "a stdout archive staged under a followed target must not recurse, got $status: $(tail -c 300 "$err")"
+    listing=$(tar -tf "$out")
+    grep -Fxq "www/admin/include/setup.php" <<< "$listing" || fail "the site must be on stdout: $listing"
+    # TMPDIR holds only the staging directory.
+    grep -q '^www/bigdata/tmp/.' <<< "$listing" && fail "the stdout staging directory must stay out of the archive: $listing"
+    rm -f "$site/bigdata"
+
+    # An output next to the site, named through the site path and "..", is
+    # outside it and accepted.
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o "$site/../self-next.tar" archive "$site" || status=$?
+    [ "$status" -eq 0 ] || fail "an output beside the site named with .. must be accepted: $(cat "$err")"
+    [ -s "$TMP_ROOT/self-next.tar" ] || fail "the output beside the site must be written"
+
+    # A site symlink to / puts every path under a followed target.
+    ln -s / "$site/everything"
+    status=0
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --dump-only -o "$TMP_ROOT/self-root.sql.gz" "$site" || status=$?
+    [ "$status" -eq 1 ] || fail "with a site symlink to / every output must be refused, got $status"
+    grep -q "inside the site" "$err" || fail "the refusal must explain: $(cat "$err")"
+    [ ! -e "$TMP_ROOT/self-root.sql.gz" ] || fail "nothing may be written under a followed /"
+    rm -f "$site/everything"
+    pass "the archive never takes in its own staging directory"
 }
 
 test_failed_exports_preserve_the_previous_output() {
@@ -1995,6 +2070,7 @@ test_the_archive_holds_the_site_the_dump_and_the_manifest
 test_the_archive_can_be_written_on_stdout
 test_dump_only_writes_a_dump_next_to_the_archive
 test_the_dump_is_staged_next_to_the_archive_and_outside_the_site
+test_the_archive_never_takes_in_its_own_staging_directory
 test_failed_exports_preserve_the_previous_output
 test_interrupted_exports_stop_their_database_processes
 test_exports_refuse_non_regular_destinations
