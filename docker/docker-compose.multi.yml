@@ -9,6 +9,14 @@ services:
     volumes:
       - ./multi-site/nginx/kvs-caddy.conf.template:/etc/nginx/templates/kvs.conf.tpl:ro
     networks:
+      # The site's name is no alias of this Nginx here: Caddy terminates TLS
+      # and this Nginx has no TLS listener, so KVS's requests to its own
+      # https:// URLs, the storage server checks among them, were refused.
+      # PHP-FPM and cron reach Caddy through the host instead (extra_hosts
+      # below), as they do on an additional site.
+      kvs-network: !override
+        aliases:
+          - manticore-api
       kvs-proxy:
         aliases:
           - n.${DOMAIN}
@@ -18,13 +26,25 @@ services:
       - direct-tls
 
   # Caddy owns TLS here; the shared trust volume belongs to direct NGINX TLS.
+  # KVS fetches its own https:// URLs from PHP-FPM and cron, the storage
+  # server checks among them. The site's names lead to the host, where
+  # Docker forwards port 443 to Caddy, and not to whatever the DNS of the
+  # host says: a name of the LAN or .test, or one behind a proxy or a NAT
+  # without hairpin, would otherwise fail. host-gateway needs Docker Engine
+  # 20.10 or newer.
   php-fpm:
     environment:
       - SSL_PROVIDER=none
+    extra_hosts:
+      - "${DOMAIN}:host-gateway"
+      - "www.${DOMAIN}:host-gateway"
 
   cron:
     environment:
       - SSL_PROVIDER=none
+    extra_hosts:
+      - "${DOMAIN}:host-gateway"
+      - "www.${DOMAIN}:host-gateway"
 
   kvs-init:
     environment:

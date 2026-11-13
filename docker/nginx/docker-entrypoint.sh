@@ -31,8 +31,23 @@ if [ "$PROJECT_HTTPS_PORT" -lt 1 ] || [ "$PROJECT_HTTPS_PORT" -gt 65535 ]; then
     exit 1
 fi
 HTTPS_PORT_SUFFIX=""
+# KVS fetches its own URLs server side, the storage server checks among
+# them, at https://DOMAIN:PROJECT_HTTPS_PORT, and inside the Docker network
+# that name is an alias of this container. The host maps the public port to
+# 443 here, so the TLS servers listen on it as well (add_https_port_listeners
+# below); 80 and 8080 already serve plain HTTP in this container and cannot
+# take TLS too.
+HTTPS_EXTRA_PORT=""
 if [ "$PROJECT_HTTPS_PORT" -ne 443 ]; then
     HTTPS_PORT_SUFFIX=":${PROJECT_HTTPS_PORT}"
+    case "$PROJECT_HTTPS_PORT" in
+        80|8080)
+            echo "WARNING: PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT} is a plain HTTP port of this container: requests of PHP and cron to https://${DOMAIN}:${PROJECT_HTTPS_PORT} fail inside the Docker network; publish HTTPS on another port" >&2
+            ;;
+        *)
+            HTTPS_EXTRA_PORT=$PROJECT_HTTPS_PORT
+            ;;
+    esac
 fi
 
 DOMAIN_DOT_COUNT=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
@@ -246,12 +261,35 @@ monitor_certificate_changes() (
     done
 )
 
+# add_https_port_listeners <config>: after each "listen 443 ssl;" and
+# "listen 443 ssl default_server;" line of the rendered site, the same line
+# for HTTPS_EXTRA_PORT. The template comes from the checkout, bind-mounted,
+# while this script is part of the image, and either can be the older one
+# after an update: the template therefore names no new variable, and an
+# older template gets the listeners too.
+add_https_port_listeners() (
+    listeners_temp=$(mktemp "$(dirname "$1")/.kvs.conf.XXXXXX") || exit 1
+    trap 'rm -f "$listeners_temp"' EXIT
+    awk -v port="$HTTPS_EXTRA_PORT" '
+        { print }
+        /^[ \t]*listen[ \t]+443[ \t]+ssl([ \t]+default_server)?[ \t]*;[ \t]*$/ {
+            sub(/443/, port)
+            print
+        }
+    ' "$1" > "$listeners_temp" || exit 1
+    chmod 0644 "$listeners_temp" || exit 1
+    mv -f "$listeners_temp" "$1"
+)
+
 # Generate site config from template (before official entrypoint runs)
 if [ -f /etc/nginx/templates/kvs.conf.tpl ]; then
     # shellcheck disable=SC2016
     envsubst '${DOMAIN} ${MAIN_SERVER_NAME} ${PUBLIC_SERVER_NAMES} ${PUBLIC_HOST_RULES} ${REDIRECT_HOST} ${PROJECT_HTTPS_PORT} ${HTTPS_PORT_SUFFIX} ${WWW_REDIRECT_BLOCK} ${KVS_ROOT} ${PHP_FPM_UPSTREAM} ${RESOLVER_LINE}' \
         < /etc/nginx/templates/kvs.conf.tpl \
         > /etc/nginx/conf.d/kvs.conf
+    if [ -n "$HTTPS_EXTRA_PORT" ]; then
+        add_https_port_listeners /etc/nginx/conf.d/kvs.conf
+    fi
     echo "Generated kvs.conf for domain: ${DOMAIN} (USE_WWW=${USE_WWW})"
 fi
 

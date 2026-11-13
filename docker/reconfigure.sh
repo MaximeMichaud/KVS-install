@@ -1854,8 +1854,9 @@ fi
 
 if [ "$MODE" = single ] && [ "$SSL_PROVIDER" = selfsigned ]; then
     # Prove the actual PHP/cURL trust store in both application containers
-    # before removing the old database workaround. Use the internal TLS port;
-    # PROJECT_HTTPS_PORT describes the host mapping, not NGINX's listener.
+    # before removing the old database workaround. Use port 443, which NGINX
+    # always serves inside the network: PROJECT_HTTPS_PORT is the host
+    # mapping, which NGINX serves too unless it is one of its HTTP ports.
     for tls_container in "$PHP_CONTAINER" "${CONTAINER_PREFIX}-cron"; do
         if ! docker exec -e KVS_TLS_HOST="$DOMAIN" "$tls_container" php -r '
             $url = "https://" . getenv("KVS_TLS_HOST") . "/";

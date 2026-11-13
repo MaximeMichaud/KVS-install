@@ -853,6 +853,26 @@ jq -e '.services.nginx.environment.SSL_PROVIDER == "none"' "$multi_json" >/dev/n
     fail "multi mode did not disable direct Nginx TLS"
 jq -e '.services.nginx.networks["kvs-proxy"].aliases | index("n.first.example.com")' \
     "$multi_json" >/dev/null || fail "primary Nginx is missing its Caddy alias"
+# KVS fetches its own https:// URLs from inside the site network. In multi
+# mode this Nginx has no TLS listener, so the site's names must resolve to
+# Caddy, not to it; a single site keeps them on its Nginx, which serves
+# TLS (tests/integration_internal_site_url.sh runs both).
+jq -e '.services.nginx.networks["kvs-network"].aliases == ["manticore-api"]' \
+    "$multi_json" >/dev/null || fail "multi mode leaves the site's names as aliases of its Nginx"
+jq -e '.services.nginx.networks["kvs-network"].aliases | sort == ["first.example.com", "manticore-api", "www.first.example.com"]' \
+    "$single_json" >/dev/null || fail "single mode lost an alias of its Nginx"
+# PHP-FPM and cron, which are not on Caddy's network, reach it through the
+# host: the site's names lead there instead of to the DNS of the host. A
+# single site needs no such entry. Compose writes host=address or
+# host:address depending on its version.
+for json in "$multi_json" "$override_json"; do
+    jq -e '[.services["php-fpm"].extra_hosts, .services.cron.extra_hosts] | map(map(sub("="; ":")) | sort) ==
+        [["first.example.com:host-gateway", "www.first.example.com:host-gateway"],
+         ["first.example.com:host-gateway", "www.first.example.com:host-gateway"]]' \
+        "$json" >/dev/null || fail "multi mode does not lead the site's names to Caddy through the host for PHP-FPM and cron"
+done
+jq -e '.services["php-fpm"].extra_hosts == null and .services.cron.extra_hosts == null' \
+    "$single_json" >/dev/null || fail "single mode maps the site's names away from its Nginx"
 jq -e '.services.nginx.volumes[] | select(.target == "/etc/nginx/templates/kvs.conf.tpl") | .source | endswith("/docker/multi-site/nginx/kvs-caddy.conf.template")' \
     "$multi_json" >/dev/null || fail "multi mode did not replace the Nginx site template"
 jq -e '.services.nginx.depends_on.acme == null' "$multi_json" >/dev/null ||

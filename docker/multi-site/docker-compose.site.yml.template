@@ -91,6 +91,14 @@ services:
     # setgid file grants it none.
     security_opt:
       - no-new-privileges:true
+    # KVS fetches its own https:// URLs, the storage server checks among
+    # them: the site's names lead to the host, where Docker forwards port
+    # 443 to Caddy, and not to whatever the DNS of the host says (a name of
+    # the LAN or .test, a proxy, a NAT without hairpin). host-gateway needs
+    # Docker Engine 20.10 or newer.
+    extra_hosts:
+      - "${DOMAIN}:host-gateway"
+      - "www.${DOMAIN}:host-gateway"
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - manticore-api:/var/www/manticore-api
@@ -237,6 +245,10 @@ services:
     # cron runs them as: a setuid or setgid file grants them none.
     security_opt:
       - no-new-privileges:true
+    # The site's own URLs lead to Caddy, as in PHP-FPM.
+    extra_hosts:
+      - "${DOMAIN}:host-gateway"
+      - "www.${DOMAIN}:host-gateway"
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       # yt-dlp-update installs the newer yt-dlp releases here, for both

@@ -506,6 +506,33 @@ run_public_port_case() {
         fail "FastCGI HTTP_HOST is not normalized without the public port"
     [ "$(grep -Fc 'fastcgi_param SERVER_PORT 18445;' "$generated_config")" -eq 2 ] ||
         fail "FastCGI SERVER_PORT does not expose the custom public HTTPS port"
+    # PHP and cron reach https://<domain>:18445 inside the Docker network,
+    # where the name leads to this container: the TLS servers listen there
+    # as on 443, the catch-all included (integration_internal_site_url.sh).
+    [ "$(grep -Ec '^[[:space:]]*listen[[:space:]]+18445 ssl;' "$generated_config")" -eq 1 ] &&
+        [ "$(grep -Ec '^[[:space:]]*listen[[:space:]]+18445 ssl default_server;' "$generated_config")" -eq 1 ] &&
+        [ "$(grep -Ec '^[[:space:]]*listen[[:space:]]+443 ssl;' "$generated_config")" -eq 1 ] ||
+        fail "the TLS servers do not listen on the custom public HTTPS port inside the container"
+}
+
+# The site template is bind-mounted from the checkout while the entrypoint
+# that renders it is part of the nginx image, and a git pull lands before
+# setup.sh rebuilds that image: the entrypoint of the image in place then
+# renders the newer template. envsubst leaves a variable it was not given as
+# it is, which Nginx refuses as an unknown directive, so the container
+# restarts in a loop. The template therefore names only variables the
+# entrypoint of 26.11.0 substitutes; anything newer, such as the listeners
+# of a custom HTTPS port, the entrypoint adds to the rendered file.
+assert_template_renders_with_older_entrypoints() {
+    local known=' DOMAIN MAIN_SERVER_NAME PUBLIC_SERVER_NAMES PUBLIC_HOST_RULES REDIRECT_HOST PROJECT_HTTPS_PORT HTTPS_PORT_SUFFIX WWW_REDIRECT_BLOCK KVS_ROOT PHP_FPM_UPSTREAM RESOLVER_LINE '
+    local variable
+
+    # shellcheck disable=SC2016 # The template's placeholders, literally.
+    while IFS= read -r variable; do
+        [[ "$known" == *" ${variable} "* ]] ||
+            fail "kvs.conf.tpl names \${${variable}}, which the entrypoint of an older nginx image leaves in place"
+    done < <(grep -o '\${[A-Za-z_][A-Za-z0-9_]*}' "${ROOT_DIR}/conf/nginx/templates/kvs.conf.tpl" |
+        sed 's/^\${//; s/}$//' | sort -u)
 }
 
 assert_invalid_public_port() {
@@ -682,6 +709,7 @@ run_certificate_case extra-san extra-san
 run_certificate_case expired expired
 run_certificate_case future future
 run_public_port_case
+assert_template_renders_with_older_entrypoints
 assert_invalid_public_port 0
 assert_invalid_public_port 65536
 assert_invalid_public_port invalid
