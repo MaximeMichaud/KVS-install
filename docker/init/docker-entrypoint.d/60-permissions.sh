@@ -124,25 +124,26 @@ if ! chown_errors=$(find "$KVS_PATH" \( ! -uid 1000 -o ! -gid 1000 \) -exec chow
 fi
 
 # Run the archive's permission script once at the end, on a site this
-# init extracted from the KVS archive (the cleanup step removes _INSTALL
-# right after). An imported site that kept its _INSTALL directory brings
-# the script along, and it sets 666 and 777 with chmod on every file and
-# directory of contents, template, static, admin/data and admin/logs,
-# whatever their mode: on a large site, millions of inode writes from
-# this short-lived container for modes this stack does not need (see
-# above). KVS releases use xargs without --no-run-if-empty, which calls
-# chmod with no operands on fresh sites. Patch only that portability
-# issue in the disposable _INSTALL copy.
-if [ -f "$KVS_PATH/_INSTALL/install_permissions.sh" ]; then
-    if [ -f "$KVS_PATH/.kvs-extraction-complete" ]; then
-        sed -E -i 's/\|[[:space:]]*xargs[[:space:]]+chmod/| xargs -r chmod/g' \
-            "$KVS_PATH/_INSTALL/install_permissions.sh"
-        if ! (cd "$KVS_PATH/_INSTALL" && bash install_permissions.sh); then
-            log_warn "KVS permission script reported an error after container safeguards were applied"
-        fi
-    else
-        log_info "Not running _INSTALL/install_permissions.sh: the site was not extracted from the archive here, and the script would rewrite the mode of every file"
+# run extracted from the KVS archive (the cleanup step removes _INSTALL
+# right after), from the copy the extraction kept outside the site. The
+# copy in _INSTALL belongs to uid 1000, as the whole site does: PHP-FPM or
+# cron could have put any script there, and this container runs as root.
+# An imported site that kept its _INSTALL directory brings the script
+# along, and it sets 666 and 777 with chmod on every file and directory of
+# contents, template, static, admin/data and admin/logs, whatever their
+# mode: on a large site, millions of inode writes from this short-lived
+# container for modes this stack does not need (see above). KVS releases
+# use xargs without --no-run-if-empty, which calls chmod with no operands
+# on fresh sites. Patch only that portability issue in the kept copy. The
+# script starts with cd .., from _INSTALL to the site.
+if [ -f "$KVS_INIT_RUN_DIR/install_permissions.sh" ]; then
+    sed -E -i 's/\|[[:space:]]*xargs[[:space:]]+chmod/| xargs -r chmod/g' \
+        "$KVS_INIT_RUN_DIR/install_permissions.sh"
+    if ! (cd "$KVS_PATH/_INSTALL" && bash "$KVS_INIT_RUN_DIR/install_permissions.sh"); then
+        log_warn "KVS permission script reported an error after container safeguards were applied"
     fi
+elif [ -f "$KVS_PATH/_INSTALL/install_permissions.sh" ]; then
+    log_info "Not running _INSTALL/install_permissions.sh: this run did not extract the site from the archive, and the script would rewrite the mode of every file"
 fi
 
 # The archive permission script makes most PHP files world-readable. Database

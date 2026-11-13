@@ -80,6 +80,10 @@ services:
     container_name: ${SITE_PREFIX:-kvs}-php
     restart: unless-stopped
     logging: *default-logging
+    # PHP keeps the privileges of the site's owner, uid 1000: a setuid or
+    # setgid file grants it none.
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - manticore-api:/var/www/manticore-api
@@ -314,6 +318,10 @@ services:
     init: true
     restart: unless-stopped
     logging: *default-logging
+    # The KVS tasks keep the privileges of the site's owner, uid 1000, that
+    # cron runs them as: a setuid or setgid file grants them none.
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - ./geoip:/usr/share/geoip:ro
@@ -378,6 +386,10 @@ services:
       # Empty, the vendor's address and no check.
       - MANTICORE_PLUGIN_URL=${MANTICORE_PLUGIN_URL:-}
       - MANTICORE_PLUGIN_SHA256=${MANTICORE_PLUGIN_SHA256:-}
+      # The sha256 of the rules an import wrote to _INSTALL/nginx_config.txt,
+      # exported by setup.sh for its own run of the init and never in .env:
+      # without it the init leaves that file aside (50-nginx-rewrites.sh).
+      - KVS_NGINX_REWRITES_SHA256=${KVS_NGINX_REWRITES_SHA256:-}
     depends_on:
       mariadb:
         condition: service_healthy

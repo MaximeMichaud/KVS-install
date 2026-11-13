@@ -40,7 +40,7 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 # shellcheck source=/dev/null
 source "$ROOT_DIR/docker/lib/import.sh"
-for name in import_prepare_source_nginx_rewrites import_ensure_nginx_rewrites; do
+for name in import_prepare_source_nginx_rewrites import_vouch_nginx_rewrites import_ensure_nginx_rewrites; do
     awk -v signature="$name() {" '
         $0 == signature { capture = 1 }
         capture { print }

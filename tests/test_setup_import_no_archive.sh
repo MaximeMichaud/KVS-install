@@ -46,7 +46,9 @@ functions_file="$TEST_DIR/functions.sh"
     extract_function import_check_kvs_archive_version
     extract_function detect_ioncube
     extract_function import_save_nginx_config
+    extract_function import_vouch_nginx_rewrites
     extract_function import_ensure_nginx_rewrites
+    extract_function import_resume_nginx_rewrites
 } > "$functions_file"
 # shellcheck source=/dev/null
 source "$functions_file"
@@ -276,10 +278,152 @@ EOF
     pass "the rewrites come from the site, the operator, the archive or the old server"
 }
 
+# The site belongs to the account PHP-FPM and cron run as: the init takes
+# _INSTALL/nginx_config.txt only with the sha256 the setup exports for the
+# rules it has just written there, never for a file it found and left.
+test_the_init_gets_the_sha256_of_the_rules_written_for_it() {
+    local site="$TEST_DIR/site"
+
+    vouched_for() {
+        [ "${KVS_NGINX_REWRITES_SHA256:-}" = "$(sha256sum < "$1" | cut -d' ' -f1)" ] ||
+            fail "$2: the init gets ${KVS_NGINX_REWRITES_SHA256:-no sha256}, not that of $1"
+    }
+    fresh_workdir
+    rm -rf "$site" "$IMPORT_STAGING"
+    IMPORT_NGINX_CONFIG=""
+    IMPORT_NGINX_REWRITES=""
+    mkdir -p "$site/_INSTALL"
+    echo "rewrite ^/shipped$ /shipped.php last;" > "$site/_INSTALL/nginx_config.txt"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "a shipped file is enough"
+    vouched_for "$site/_INSTALL/nginx_config.txt" "the file the imported site shipped"
+
+    rm -rf "$site/_INSTALL"
+    echo "rewrite ^/given$ /given.php last;" > "$TEST_DIR/given.txt"
+    IMPORT_NGINX_REWRITES="$TEST_DIR/given.txt"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "the operator's file is taken"
+    vouched_for "$TEST_DIR/given.txt" "the operator's file"
+    IMPORT_NGINX_REWRITES=""
+    rm -rf "$site/_INSTALL"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "the kept copy is enough"
+    vouched_for "$TEST_DIR/given.txt" "the copy kept from the earlier pass"
+    rm -f "$IMPORT_STAGING/example.com.nginx_config.txt"
+    rm -rf "$site/_INSTALL"
+
+    # Rules the init takes from the archive: nothing to vouch for, and a
+    # sha256 left in the environment is not passed on.
+    : > "kvs-archive/KVS_7.0.2_[example.com].zip"
+    export KVS_NGINX_REWRITES_SHA256=stale
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "an archive is enough"
+    [ -z "${KVS_NGINX_REWRITES_SHA256+set}" ] || fail "the rules of the archive need no sha256: $KVS_NGINX_REWRITES_SHA256"
+    rm -f "kvs-archive/KVS_7.0.2_[example.com].zip"
+
+    cat > "$TEST_DIR/old-nginx.conf" <<'NGINX'
+server {
+    root /var/www/website;
+    rewrite ^/videos/$ /videos.php last;
+}
+NGINX
+    IMPORT_NGINX_CONFIG="$TEST_DIR/old-nginx.conf"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "the old server's rules are enough"
+    cmp "$IMPORT_STAGING/example.com.nginx_config.txt" "$site/_INSTALL/nginx_config.txt" ||
+        fail "the recovered rules are written to the site as kept"
+    vouched_for "$IMPORT_STAGING/example.com.nginx_config.txt" "the recovered rules"
+    IMPORT_NGINX_CONFIG=""
+
+    # Outside an import: a file in the site is not the setup's to vouch for.
+    IMPORT_MODE=false
+    rm -f "$IMPORT_STAGING/example.com.nginx_config.txt"
+    echo "rewrite ^/found$ /found.php last;" > "$site/_INSTALL/nginx_config.txt"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "outside an import the function is a no-op"
+    [ -z "${KVS_NGINX_REWRITES_SHA256+set}" ] || fail "a file the setup did not write was vouched for"
+    mkdir -p "$site/admin/include" "$IMPORT_STAGING"
+    : > "$site/admin/include/setup.php"
+    echo "rewrite ^/kept$ /kept.php last;" > "$IMPORT_STAGING/example.com.nginx_config.txt"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "a re-run restores the kept rules"
+    vouched_for "$IMPORT_STAGING/example.com.nginx_config.txt" "the kept rules a re-run restores"
+    IMPORT_MODE=true
+    unset KVS_NGINX_REWRITES_SHA256
+    rm -rf "$site" "$IMPORT_STAGING"
+    pass "the init gets the sha256 of the rules written for it, and only of those"
+}
+
+# --resume-import selects no rules: the init must still get the sha256 of
+# the rules the interrupted pass wrote, from the record that pass kept
+# where the site's owner cannot reach it, and the rules go back into
+# _INSTALL when the site lost or changed them in the meantime.
+test_a_resumed_import_gives_the_init_the_rules_of_the_interrupted_pass() {
+    local site="$TEST_DIR/site" vouched
+
+    fresh_workdir
+    rm -rf "$site" "$IMPORT_STAGING"
+    IMPORT_NGINX_CONFIG=""
+    IMPORT_SITE_DIR=$site
+    echo "rewrite ^/given$ /given.php last;" > "$TEST_DIR/given.txt"
+    IMPORT_NGINX_REWRITES="$TEST_DIR/given.txt"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "the operator's file is taken"
+    IMPORT_NGINX_REWRITES=""
+    vouched=$KVS_NGINX_REWRITES_SHA256
+    unset KVS_NGINX_REWRITES_SHA256
+    import_resume_nginx_rewrites "$IMPORT_STAGING" > "$TEST_DIR/out" || fail "a resume takes the rules of the interrupted pass"
+    [ "${KVS_NGINX_REWRITES_SHA256:-}" = "$vouched" ] ||
+        fail "the resumed init gets ${KVS_NGINX_REWRITES_SHA256:-no sha256}, not that of the interrupted pass ($vouched)"
+    [ ! -s "$TEST_DIR/out" ] || fail "the site still has the rules, nothing is put back: $(cat "$TEST_DIR/out")"
+    cmp "$TEST_DIR/given.txt" "$site/_INSTALL/nginx_config.txt" || fail "the site's rules are left as they are"
+
+    # The file in the site changed since that pass: the record goes back.
+    echo "rewrite ^/planted$ /planted.php last;" > "$site/_INSTALL/nginx_config.txt"
+    unset KVS_NGINX_REWRITES_SHA256
+    import_resume_nginx_rewrites "$IMPORT_STAGING" > "$TEST_DIR/out" || fail "a changed file is replaced"
+    cmp "$TEST_DIR/given.txt" "$site/_INSTALL/nginx_config.txt" || fail "the rules of the interrupted pass are put back"
+    [ "${KVS_NGINX_REWRITES_SHA256:-}" = "$vouched" ] || fail "and vouched for after a change"
+    grep -q "put back into $site/_INSTALL/nginx_config.txt" "$TEST_DIR/out" || fail "the restore is announced: $(cat "$TEST_DIR/out")"
+    rm -rf "$site/_INSTALL"
+    unset KVS_NGINX_REWRITES_SHA256
+    import_resume_nginx_rewrites "$IMPORT_STAGING" > "$TEST_DIR/out" || fail "a missing _INSTALL is recreated"
+    cmp "$TEST_DIR/given.txt" "$site/_INSTALL/nginx_config.txt" || fail "the rules are put back into a recreated _INSTALL"
+    [ "${KVS_NGINX_REWRITES_SHA256:-}" = "$vouched" ] || fail "and vouched for without _INSTALL"
+
+    # The rules the site shipped are recorded from the copy the setup
+    # hashed, not hashed in the site.
+    rm -rf "$site/_INSTALL" "$IMPORT_STAGING"
+    mkdir -p "$site/_INSTALL"
+    echo "rewrite ^/shipped$ /shipped.php last;" > "$TEST_DIR/shipped.txt"
+    cp "$TEST_DIR/shipped.txt" "$site/_INSTALL/nginx_config.txt"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "a shipped file is enough"
+    vouched=$KVS_NGINX_REWRITES_SHA256
+    rm -rf "$site/_INSTALL"
+    unset KVS_NGINX_REWRITES_SHA256
+    import_resume_nginx_rewrites "$IMPORT_STAGING" > "$TEST_DIR/out" || fail "a resume takes the shipped rules back"
+    cmp "$TEST_DIR/shipped.txt" "$site/_INSTALL/nginx_config.txt" || fail "the shipped rules are put back"
+    [ "${KVS_NGINX_REWRITES_SHA256:-}" = "$vouched" ] || fail "the shipped rules are vouched for on a resume"
+
+    # A pass that vouched for nothing (the archive's rules) drops the record
+    # of an earlier one: the resumed init gets no sha256, even a stale one.
+    rm -rf "$site/_INSTALL"
+    : > "kvs-archive/KVS_7.0.2_[example.com].zip"
+    import_ensure_nginx_rewrites "$site" > "$TEST_DIR/out" || fail "an archive is enough"
+    export KVS_NGINX_REWRITES_SHA256=stale
+    import_resume_nginx_rewrites "$IMPORT_STAGING" > "$TEST_DIR/out" || fail "a resume without a record goes on"
+    [ -z "${KVS_NGINX_REWRITES_SHA256+set}" ] || fail "a pass that vouched for nothing gives no sha256: $KVS_NGINX_REWRITES_SHA256"
+    [ ! -e "$site/_INSTALL/nginx_config.txt" ] || fail "and writes nothing"
+    rm -f "kvs-archive/KVS_7.0.2_[example.com].zip"
+
+    # A record that cannot be read stops the recovery.
+    mkdir -p "$IMPORT_STAGING"
+    : > "$IMPORT_STAGING/example.com.nginx_config.vouched"
+    (import_resume_nginx_rewrites "$IMPORT_STAGING") > "$TEST_DIR/out" 2>&1 && fail "an empty record must stop the recovery"
+    grep -q "recovery stopped" "$TEST_DIR/out" || fail "the stop is explained: $(cat "$TEST_DIR/out")"
+    unset KVS_NGINX_REWRITES_SHA256 IMPORT_SITE_DIR
+    rm -rf "$site" "$IMPORT_STAGING"
+    pass "a resumed import gives the init the rules of the interrupted pass"
+}
+
 test_the_archive_is_optional_but_must_match_the_site
 test_the_encoding_of_the_imported_site_decides
 test_unknown_archive_keeps_the_existing_loader_setting
 test_the_old_configuration_is_saved_next_to_the_import_marker
 test_the_rewrites_come_from_the_site_the_operator_the_archive_or_the_old_server
+test_the_init_gets_the_sha256_of_the_rules_written_for_it
+test_a_resumed_import_gives_the_init_the_rules_of_the_interrupted_pass
 
 echo "All $TESTS_RUN import-without-archive tests passed."

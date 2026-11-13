@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 source = Path(sys.argv[1]).read_text()
 names = ('validate_domain', 'check_mariadb_stop_grace_period', 'check_cloudflare_configuration', 'parse_publish_endpoint',
-         'resolve_public_port_configuration', 'setup_resume_import',
+         'resolve_public_port_configuration', 'import_resume_nginx_rewrites', 'setup_resume_import',
          'setup_resume_assert_database', 'setup_start_runtime_services', 'setup_start_cron', 'import_count_rows',
          'setup_resume_docker_query', 'setup_resume_database_snapshot', 'import_finish', 'remove_env_value', 'set_env_value')
 with open(sys.argv[2], 'w') as target:

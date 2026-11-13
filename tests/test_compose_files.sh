@@ -17,7 +17,8 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 # Settings exported by the caller would hide what the files say.
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
-    PHP_VERSION PHP_FPM_BASE PHP_CLI_BASE MANTICORE_PLUGIN_URL MANTICORE_PLUGIN_SHA256
+    PHP_VERSION PHP_FPM_BASE PHP_CLI_BASE MANTICORE_PLUGIN_URL MANTICORE_PLUGIN_SHA256 \
+    KVS_NGINX_REWRITES_SHA256
 real_docker=$(type -P docker) || fail 'docker is required to render the compose files'
 
 compose_files=(
@@ -120,6 +121,22 @@ for layout in single multi site; do
         .services.cron.build.args.PHP_BASE == $cli' "$TEST_DIR/set.json" > /dev/null ||
         fail "$layout: the bases of .env must reach the build: $(jq -c '[.services["php-fpm"].build.args, .services.cron.build.args]' "$TEST_DIR/set.json")"
 
+    # What PHP runs, in PHP-FPM or as a KVS task of cron, keeps the
+    # privileges of the site's owner: a setuid file in the site, which both
+    # can write, grants it none.
+    jq -e '[.services["php-fpm"], .services.cron] | all(.security_opt == ["no-new-privileges:true"])' \
+        "$TEST_DIR/plain.json" > /dev/null ||
+        fail "$layout: PHP-FPM and cron must run with no-new-privileges: $(jq -c '[.services["php-fpm"].security_opt, .services.cron.security_opt]' "$TEST_DIR/plain.json")"
+    # The sha256 of the rules an import wrote for the init comes from the
+    # environment of setup.sh alone, never from .env.
+    if [ "$layout" != site ]; then
+        jq -e '.services["kvs-init"].environment.KVS_NGINX_REWRITES_SHA256 == ""' "$TEST_DIR/plain.json" > /dev/null ||
+            fail "$layout: kvs-init must get an empty KVS_NGINX_REWRITES_SHA256 outside setup.sh: $(jq -c '.services["kvs-init"].environment' "$TEST_DIR/plain.json")"
+        KVS_NGINX_REWRITES_SHA256=$(printf '%064d' 0 | tr 0 d) render "$TEST_DIR/vouched.json" "$TEST_DIR/plain.env" "${files[@]}"
+        jq -e --arg sha "$(printf '%064d' 0 | tr 0 d)" '.services["kvs-init"].environment.KVS_NGINX_REWRITES_SHA256 == $sha' \
+            "$TEST_DIR/vouched.json" > /dev/null ||
+            fail "$layout: kvs-init must get the KVS_NGINX_REWRITES_SHA256 setup.sh exports"
+    fi
     jq -e '.services["kvs-init"].environment.MANTICORE_PLUGIN_URL == "" and
         .services["kvs-init"].environment.MANTICORE_PLUGIN_SHA256 == ""' "$TEST_DIR/plain.json" > /dev/null ||
         fail "$layout: kvs-init must get empty Manticore plugin settings by default: $(jq -c '.services["kvs-init"].environment' "$TEST_DIR/plain.json")"

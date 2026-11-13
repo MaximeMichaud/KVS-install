@@ -8,9 +8,10 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 # shellcheck source=/dev/null
 source "$ROOT_DIR/docker/lib/import.sh"
 awk '
+    /^import_vouch_nginx_rewrites\(\) \{/ { capture = 1 }
     /^import_ensure_nginx_rewrites\(\) \{/ { capture = 1 }
     capture { print }
-    capture && /^}$/ { exit }
+    capture && /^}$/ { capture = 0 }
 ' "$ROOT_DIR/docker/setup.sh" > "$TEST_DIR/setup-functions.sh"
 # shellcheck source=/dev/null
 source "$TEST_DIR/setup-functions.sh"

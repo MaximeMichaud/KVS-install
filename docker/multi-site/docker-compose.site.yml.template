@@ -87,6 +87,10 @@ services:
     container_name: ${SITE_PREFIX}-php
     restart: unless-stopped
     logging: *default-logging
+    # PHP keeps the privileges of the site's owner, uid 1000: a setuid or
+    # setgid file grants it none.
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - manticore-api:/var/www/manticore-api
@@ -228,6 +232,10 @@ services:
     init: true
     restart: unless-stopped
     logging: *default-logging
+    # The KVS tasks keep the privileges of the site's owner, uid 1000, that
+    # cron runs them as: a setuid or setgid file grants them none.
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       # yt-dlp-update installs the newer yt-dlp releases here, for both

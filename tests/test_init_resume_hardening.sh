@@ -42,6 +42,7 @@ make_common_mock() {
     cat > "$destination" <<'EOF'
 KVS_PATH=${TEST_KVS_PATH:?}
 KVS_ARCHIVE_DIR=${TEST_ARCHIVE_DIR:-}
+KVS_INIT_RUN_DIR=${TEST_KVS_INIT_RUN_DIR:-$KVS_PATH.init-run}
 
 log_info() { printf '[INFO] %s\n' "$1"; }
 log_warn() { printf '[WARN] %s\n' "$1"; }
@@ -223,6 +224,8 @@ make_archive() {
 $config['project_url'] = "https://licensed.example";
 EOF
     printf '%s\n' 'archive-version' > "$payload/version.txt"
+    printf '%s\n' 'rewrite ^/archive/ /archive.php last;' > "$payload/_INSTALL/nginx_config.txt"
+    printf '%s\n' 'cd ..' 'chmod 777 tmp' > "$payload/_INSTALL/install_permissions.sh"
     cat > "$payload/_INSTALL/install_db.sql" <<'EOF'
 CREATE TABLE `ktvs_options` (`variable` VARCHAR(255), `value` TEXT);
 INSERT INTO storage VALUES ('https://licensed.example/contents/videos');
@@ -391,7 +394,17 @@ EOF
         fail "resumed extraction left its in-progress marker"
     assert_file_contains "$site_dir/version.txt" "archive-version"
     assert_file_contains "$case_dir/resume.log" "Resuming interrupted KVS extraction"
+    # The later steps of the run take the archive's permission script and
+    # nginx rules from copies outside the site, which uid 1000 owns.
+    for name in install_permissions.sh nginx_config.txt; do
+        cmp "$case_dir/archive-payload/_INSTALL/$name" "$site_dir.init-run/$name" ||
+            fail "the extraction kept no copy of _INSTALL/$name for the steps after it"
+        [ "$(stat -c '%a' "$site_dir.init-run/$name")" = 600 ] ||
+            fail "the copy of _INSTALL/$name is open to other accounts"
+    done
 
+    # The next run, in a new container: an extraction it skips gives it no copy.
+    rm -rf "$site_dir.init-run"
     printf '%s\n' 'site-customization' > "$site_dir/version.txt"
     TEST_KVS_PATH="$site_dir" \
         TEST_ARCHIVE="$archive" \
@@ -399,6 +412,7 @@ EOF
     assert_file_contains "$site_dir/version.txt" "site-customization"
     assert_file_contains "$case_dir/completed-rerun.log" \
         "KVS extraction is complete, skipping extraction"
+    [ ! -e "$site_dir.init-run" ] || fail "a run that skips the extraction kept copies of the archive's files"
 
     pass "KVS extraction resumes a marked promotion and preserves the completed site"
 }

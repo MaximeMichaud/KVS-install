@@ -1207,6 +1207,36 @@ check_cloudflare_configuration() {
     fi
 }
 
+# import_resume_nginx_rewrites <staging directory>
+# --resume-import skips the transfer and the choice of rules
+# (import_ensure_nginx_rewrites, which records them), so the init
+# gets the rules the interrupted pass vouched for from its record. They go
+# back into _INSTALL/nginx_config.txt when the site no longer has them as
+# they were. Without a record that pass vouched for none, and the init
+# takes the rules of the archive or the include already in place.
+import_resume_nginx_rewrites() {
+    local record="$1/${DOMAIN}.nginx_config.vouched" target="$IMPORT_SITE_DIR/_INSTALL/nginx_config.txt" sum current=""
+
+    unset KVS_NGINX_REWRITES_SHA256
+    [ -e "$record" ] || [ -L "$record" ] || return 0
+    if [ ! -f "$record" ] || [ ! -s "$record" ] || ! sum=$(sha256sum < "$record"); then
+        echo "ERROR: the nginx rewrite rules kept for this import ($record) are unreadable or empty; recovery stopped." >&2
+        return 1
+    fi
+    sum=${sum%% *}
+    if [ -f "$target" ]; then
+        current=$(sha256sum < "$target") || current=""
+    fi
+    if [ "${current%% *}" != "$sum" ]; then
+        if ! mkdir -p "${target%/*}" || ! cp -- "$record" "$target"; then
+            echo "ERROR: the nginx rewrite rules of this import could not be put back into $target; recovery stopped." >&2
+            return 1
+        fi
+        echo "  Nginx rewrites:  the rules of the interrupted pass put back into $target"
+    fi
+    export KVS_NGINX_REWRITES_SHA256="$sum"
+}
+
 setup_resume_import() {
     local key site_info snapshot state project marker resume_library wait_budget="${MARIADB_WAIT_SECONDS:-0}" compose_version
     # The initializers run with "docker compose run --pull missing", which
@@ -1300,6 +1330,7 @@ setup_resume_import() {
         return 1
     }
     import_resume_verify "$DOMAIN" "$TABLES_PREFIX" "$IMPORT_TOKEN" || return 1
+    import_resume_nginx_rewrites "$(pwd)/import" || return 1
     setup_resume_assert_database
 }
 
@@ -2450,6 +2481,26 @@ import_prepare_source_nginx_rewrites() {
     fi
 }
 
+# import_vouch_nginx_rewrites <file>
+# The rules just written to _INSTALL/nginx_config.txt are copied to a
+# record the setup owns, import/<domain>.nginx_config.vouched in the 0700
+# staging directory, and hashed from that copy: the init of this run takes
+# _INSTALL/nginx_config.txt with that sha256 only
+# (init/docker-entrypoint.d/50-nginx-rewrites.sh), as the site belongs to
+# the account PHP-FPM and cron run as. --resume-import, which selects no
+# rules, hands the init that record again (import_resume_nginx_rewrites).
+import_vouch_nginx_rewrites() {
+    local record="$IMPORT_STAGING/${DOMAIN}.nginx_config.vouched" temporary sum
+
+    mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
+    temporary=$(mktemp "$IMPORT_STAGING/.nginx-rewrites.XXXXXX") || exit 1
+    if ! cp -- "$1" "$temporary" || ! sum=$(sha256sum < "$temporary") || ! mv -f -- "$temporary" "$record"; then
+        rm -f -- "$temporary"
+        exit 1
+    fi
+    export KVS_NGINX_REWRITES_SHA256="${sum%% *}"
+}
+
 # import_ensure_nginx_rewrites [site directory]
 # The KVS rewrite rules the vhost includes, as _INSTALL/nginx_config.txt
 # of the imported site: IMPORT_NGINX_REWRITES first; else the copy kept
@@ -2465,6 +2516,12 @@ import_prepare_source_nginx_rewrites() {
 import_ensure_nginx_rewrites() {
     local site="${1:-/var/www/$DOMAIN}" target kept previous from rules count temporary
 
+    unset KVS_NGINX_REWRITES_SHA256
+    # The record of a sha256 vouched for by an earlier run: this run
+    # writes its own, or none when the init takes the archive's rules.
+    if [ -n "$IMPORT_STAGING" ]; then
+        rm -f -- "$IMPORT_STAGING/${DOMAIN}.nginx_config.vouched" || exit 1
+    fi
     target="$site/_INSTALL/nginx_config.txt"
     kept="$IMPORT_STAGING/${DOMAIN}.nginx_config.txt"
     if [ "$IMPORT_NGINX_REWRITES" = source ]; then
@@ -2475,6 +2532,7 @@ import_ensure_nginx_rewrites() {
             fi
             mkdir -p "$site/_INSTALL" || exit 1
             cp -- "$kept" "$target" || exit 1
+            import_vouch_nginx_rewrites "$kept"
             echo "  Nginx rewrites:  restored the saved source fragment"
             return 0
         fi
@@ -2488,6 +2546,7 @@ import_ensure_nginx_rewrites() {
             rm -f -- "$temporary"
             exit 1
         fi
+        import_vouch_nginx_rewrites "$kept"
         echo "  Nginx rewrites:  complete source fragments recovered, PHP backend adapted and rules saved for later runs"
         return 0
     fi
@@ -2504,6 +2563,7 @@ import_ensure_nginx_rewrites() {
             rm -f -- "$temporary"
             exit 1
         fi
+        import_vouch_nginx_rewrites "$kept"
         echo "  Nginx rewrites:  from $IMPORT_NGINX_REWRITES (kept in $kept for the next pass)"
         return 0
     fi
@@ -2513,6 +2573,7 @@ import_ensure_nginx_rewrites() {
         if [ -f "$site/admin/include/setup.php" ] && [ -s "$kept" ]; then
             mkdir -p "$site/_INSTALL" || exit 1
             cp -- "$kept" "$target" || exit 1
+            import_vouch_nginx_rewrites "$kept"
         fi
         return 0
     fi
@@ -2525,10 +2586,12 @@ import_ensure_nginx_rewrites() {
         mkdir -p "$site/_INSTALL" || exit 1
         cp -- "$from" "$target" || exit 1
         [ "$from" = "$kept" ] || cp -- "$from" "$kept" || exit 1
+        import_vouch_nginx_rewrites "$kept"
         echo "  Nginx rewrites:  from the earlier pass ($from)"
         return 0
     done
     if [ -s "$target" ]; then
+        import_vouch_nginx_rewrites "$target"
         echo "  Nginx rewrites:  from the site's _INSTALL/nginx_config.txt"
         return 0
     fi
@@ -2551,8 +2614,9 @@ import_ensure_nginx_rewrites() {
                 echo "# ($IMPORT_NGINX_CONFIG, the server blocks serving the site). The KVS package ships"
                 echo "# this file as _INSTALL/nginx_config.txt; replace it with that one to be exact."
                 printf '%s\n' "$rules"
-            } > "$target" || exit 1
-            cp -- "$target" "$kept" || exit 1
+            } > "$kept" || exit 1
+            cp -- "$kept" "$target" || exit 1
+            import_vouch_nginx_rewrites "$kept"
             echo "  Nginx rewrites:  $count rules recovered from the old server's nginx configuration, written to $target (check them; kept in $kept for the next pass)"
             return 0
         fi

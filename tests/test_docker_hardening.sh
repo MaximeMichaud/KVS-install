@@ -356,9 +356,11 @@ make_init_common_mock() {
     cat > "$destination" <<'EOF'
 KVS_PATH=${TEST_KVS_PATH:?}
 KVS_ARCHIVE_DIR=${TEST_ARCHIVE_DIR:-}
+KVS_INIT_RUN_DIR=${TEST_KVS_INIT_RUN_DIR:-$KVS_PATH.init-run}
 log_info() { printf '[INFO] %s\n' "$1"; }
 log_warn() { printf '[WARN] %s\n' "$1"; }
 log_error() { printf '[ERROR] %s\n' "$1"; }
+log_step() { printf '[STEP] %s\n' "$1"; }
 get_tables_prefix() { printf '%s\n' "${TEST_TABLES_PREFIX:-ktvs_}"; }
 db_query() {
     if [[ "$1" == *"INITIAL_VERSION"* ]]; then
@@ -758,10 +760,10 @@ test_permission_script_skips_empty_xargs_batches() {
         "$site_dir/static"
     printf '%s\n' 'database credential fixture' > "$site_dir/admin/include/setup_db.php"
     chmod 755 "$site_dir/admin/include/setup_db.php"
-    # A site the init extracted from the archive, the only kind it runs
-    # the archive's script on.
-    printf '%s\n' 'archive=KVS_7.0.2_[example.com].zip' > "$site_dir/.kvs-extraction-complete"
-    cat > "$site_dir/_INSTALL/install_permissions.sh" <<'EOF'
+    # The copy of the archive's script the extraction of this run kept,
+    # the only one the init runs.
+    mkdir -p "$site_dir.init-run"
+    cat > "$site_dir.init-run/install_permissions.sh" <<'EOF'
 #!/bin/bash
 cd ..
 find admin/logs -type f -iname '*.never-present' | xargs chmod 666
@@ -772,7 +774,7 @@ EOF
 
     TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/output.log" 2>&1
     assert_file_not_contains "$case_dir/output.log" "missing operand"
-    assert_file_contains "$site_dir/_INSTALL/install_permissions.sh" "xargs -r chmod"
+    assert_file_contains "$site_dir.init-run/install_permissions.sh" "xargs -r chmod"
     [ "$(stat -c '%a' "$site_dir/admin/include/setup_db.php")" = 600 ] ||
         fail "setup_db.php credentials remain readable by other local users"
     assert_file_not_contains "$REPO_ROOT/docker/init/docker-entrypoint.d/00-extract.sh" \
@@ -875,8 +877,11 @@ test_a_second_permission_pass_changes_nothing() {
 # install_permissions.sh along, and the script sets 666 and 777 with
 # chmod on every file and directory of the content trees whatever their
 # mode: millions of inode writes from the init container on a large site.
-# The init runs it only on a site it extracted from the archive.
-test_an_imported_site_keeps_its_install_script_unrun() {
+# And the whole site belongs to uid 1000, which PHP-FPM and cron run as,
+# extraction marker included: a script found there may have been put
+# there since, and the init runs as root. It runs only the copy the
+# extraction of the same run kept outside the site.
+test_the_init_runs_only_the_install_script_it_extracted() {
     local case_dir="$TMP_ROOT/permissions-imported"
     local site_dir="$case_dir/site"
     local common_mock="$case_dir/common.sh"
@@ -888,14 +893,8 @@ test_an_imported_site_keeps_its_install_script_unrun() {
     chmod 644 "$site_dir/contents/videos_screenshots/0/1/1.jpg"
     chmod 755 "$site_dir/contents/videos_screenshots/0/1"
     printf 'credentials\n' > "$site_dir/admin/include/setup_db.php"
-    # What KVS's script does to the content tree, without its empty-list
-    # failure.
-    cat > "$site_dir/_INSTALL/install_permissions.sh" <<'EOF'
-cd ..
-find contents -type d | xargs chmod 777
-find contents -type f \( ! -iname ".htaccess" \) | xargs chmod 666
-chmod 755 contents
-EOF
+    # A script in the site that says whether it ran.
+    printf '%s\n' 'cd ..' "id -u > '$case_dir/site-script-ran'" > "$site_dir/_INSTALL/install_permissions.sh"
     make_init_common_mock "$common_mock"
     owner="$(id -u):$(id -g)"
     sed -e "s|source /init/lib/common.sh|source ${common_mock}|" \
@@ -905,17 +904,119 @@ EOF
     before=$(stat -c '%Z.%z %a' "$site_dir/contents/videos_screenshots/0/1/1.jpg")
     TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/imported.log" 2>&1 ||
         fail "the permission pass over an imported site failed: $(cat "$case_dir/imported.log")"
+    [ ! -e "$case_dir/site-script-ran" ] || fail "the init ran the install script an imported site brought"
     [ "$(stat -c '%Z.%z %a' "$site_dir/contents/videos_screenshots/0/1/1.jpg")" = "$before" ] ||
-        fail "the archive's permission script ran over an imported site"
+        fail "the permission pass rewrote the modes of an imported site"
     assert_file_contains "$case_dir/imported.log" "Not running _INSTALL/install_permissions.sh"
 
+    # The extraction marker of an earlier run is no reason either.
     printf '%s\n' 'archive=KVS_7.0.2_[example.com].zip' > "$site_dir/.kvs-extraction-complete"
+    TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/marked.log" 2>&1 ||
+        fail "the permission pass over a marked site failed: $(cat "$case_dir/marked.log")"
+    [ ! -e "$case_dir/site-script-ran" ] ||
+        fail "the init ran the install script found in the site next to the extraction marker"
+    assert_file_contains "$case_dir/marked.log" "Not running _INSTALL/install_permissions.sh"
+
+    # What KVS's script does to the content tree, without its empty-list
+    # failure, kept by the extraction of this run.
+    mkdir -p "$site_dir.init-run"
+    printf '%s\n' 'cd ..' 'find contents -type d | xargs chmod 777' \
+        'find contents -type f \( ! -iname ".htaccess" \) | xargs chmod 666' 'chmod 755 contents' \
+        > "$site_dir.init-run/install_permissions.sh"
     TEST_KVS_PATH="$site_dir" bash "$script_copy" > "$case_dir/extracted.log" 2>&1 ||
         fail "the permission pass over an extracted site failed: $(cat "$case_dir/extracted.log")"
     [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1/1.jpg")" = 666 ] &&
         [ "$(stat -c '%a' "$site_dir/contents/videos_screenshots/0/1")" = 777 ] ||
-        fail "the archive's permission script must still run on a site extracted from the archive"
-    pass "the archive's permission script runs on an extracted site only"
+        fail "the archive's permission script must still run on a site this run extracted"
+    [ ! -e "$case_dir/site-script-ran" ] || fail "the init ran the site's script instead of the extracted copy"
+    pass "the init runs the install script of its own extraction only"
+}
+
+# The site belongs to uid 1000, which PHP-FPM and cron run as, so the
+# root init does not put a _INSTALL/nginx_config.txt it finds there into
+# the nginx include: only with the sha256 setup.sh exports for the rules
+# an import wrote, and otherwise the rules of the archive this run
+# extracted, the include in place, or the archive.
+test_nginx_rewrites_come_from_this_run_only() {
+    local case_dir="$TMP_ROOT/rewrites-trust"
+    local site_dir="$case_dir/site"
+    local includes_dir="$case_dir/includes"
+    local mock_bin="$case_dir/bin"
+    local common_mock="$case_dir/common.sh"
+    local script_copy="$case_dir/50-nginx-rewrites.sh"
+    local archive="$case_dir/KVS_7.0.2_example.com.zip"
+    local include="$case_dir/includes/kvs-rewrites.conf"
+    local sum
+
+    mkdir -p "$site_dir/_INSTALL" "$includes_dir" "$mock_bin"
+    touch "$archive"
+    make_init_common_mock "$common_mock"
+    sed \
+        -e "s|source /init/lib/common.sh|source ${common_mock}|" \
+        -e "s|NGINX_INCLUDES=\"/nginx-includes\"|NGINX_INCLUDES=\"${includes_dir}\"|" \
+        "$REPO_ROOT/docker/init/docker-entrypoint.d/50-nginx-rewrites.sh" > "$script_copy"
+    printf '%s\n' '#!/bin/bash' "echo 'rewrite ^/archive/ /archive.php last;'" > "$mock_bin/unzip"
+    chmod +x "$mock_bin/unzip"
+    run_rewrites() {
+        PATH="$mock_bin:/usr/bin:/bin" TEST_KVS_PATH="$site_dir" TEST_ARCHIVE="$archive" \
+            KVS_NGINX_REWRITES_SHA256="${1:-}" bash "$script_copy" > "$case_dir/output.log" 2>&1
+    }
+
+    echo 'rewrite ^/current/ /current.php last;' > "$include"
+    echo 'rewrite ^/found/ /found.php last;' > "$site_dir/_INSTALL/nginx_config.txt"
+    run_rewrites || fail "the init stopped over a file it leaves aside: $(cat "$case_dir/output.log")"
+    assert_file_contains "$include" "/current.php"
+    assert_file_contains "$case_dir/output.log" "Not using _INSTALL/nginx_config.txt"
+    rm -f "$include"
+    run_rewrites || fail "the archive is enough without an include: $(cat "$case_dir/output.log")"
+    assert_file_contains "$include" "/archive.php"
+
+    mkdir -p "$site_dir.init-run"
+    echo 'rewrite ^/extracted/ /extracted.php last;' > "$site_dir.init-run/nginx_config.txt"
+    run_rewrites || fail "the rules this run extracted are enough: $(cat "$case_dir/output.log")"
+    assert_file_contains "$include" "/extracted.php"
+    rm -rf "$site_dir.init-run"
+
+    sum=$(sha256sum < "$site_dir/_INSTALL/nginx_config.txt" | cut -d' ' -f1)
+    run_rewrites "$sum" || fail "the rules setup.sh wrote are taken: $(cat "$case_dir/output.log")"
+    assert_file_contains "$include" "/found.php"
+    echo 'rewrite ^/current/ /current.php last;' > "$include"
+    echo 'rewrite ^/changed/ /changed.php last;' > "$site_dir/_INSTALL/nginx_config.txt"
+    if run_rewrites "$sum"; then
+        fail "the init took rules setup.sh did not write"
+    fi
+    assert_file_contains "$include" "/current.php"
+    assert_file_contains "$case_dir/output.log" "is not the file setup.sh wrote for this run"
+    if find "$includes_dir" -type f -name '.kvs-rewrites.conf.*' | grep -q .; then
+        fail "a refused copy left a temporary rewrite file"
+    fi
+    pass "the nginx rewrites come from this run only"
+}
+
+# An init runs in a new container, whose /tmp starts empty, but one
+# started again keeps its /tmp: what an earlier run kept from the archive
+# is not what this run extracted.
+test_an_init_run_starts_without_the_copies_of_an_earlier_one() {
+    local case_dir="$TMP_ROOT/init-run-reset"
+    local steps="$case_dir/steps"
+    local common_mock="$case_dir/common.sh"
+    local runner="$case_dir/init-kvs.sh"
+
+    mkdir -p "$steps" "$case_dir/site.init-run"
+    echo 'rewrite ^/earlier/ /earlier.php last;' > "$case_dir/site.init-run/nginx_config.txt"
+    make_init_common_mock "$common_mock"
+    cat > "$steps/10-check.sh" <<EOF
+source '$common_mock'
+[ ! -e "\$KVS_INIT_RUN_DIR" ]
+EOF
+    sed -e "s|source /init/lib/common.sh|source ${common_mock}|" \
+        -e "s|/init/docker-entrypoint.d/|${steps}/|" \
+        "$REPO_ROOT/docker/init/init-kvs.sh" > "$runner"
+    DOMAIN=example.com MARIADB_PASSWORD=fixture TEST_KVS_PATH="$case_dir/site" \
+        bash "$runner" > "$case_dir/output.log" 2>&1 ||
+        fail "an init run found the copies an earlier run kept: $(cat "$case_dir/output.log")"
+    assert_file_contains "$case_dir/output.log" "10-check.sh completed"
+    pass "an init run starts without the copies of an earlier one"
 }
 
 test_final_compose_failure_is_fatal() {
@@ -2255,11 +2356,13 @@ test_selfsigned_headless_accepts_empty_email
 test_database_import_failure_is_fatal
 test_database_import_normalizes_archive_urls
 test_nginx_rewrites_are_atomic_and_non_empty
+test_nginx_rewrites_come_from_this_run_only
 test_manticore_scripts_support_numeric_domains_and_internal_api
 test_project_url_uses_validated_public_https_port
 test_permission_script_skips_empty_xargs_batches
 test_a_second_permission_pass_changes_nothing
-test_an_imported_site_keeps_its_install_script_unrun
+test_the_init_runs_only_the_install_script_it_extracted
+test_an_init_run_starts_without_the_copies_of_an_earlier_one
 test_setup_rebuilds_init_and_optional_manticore_images
 test_final_compose_failure_is_fatal
 test_optional_gum_install_failure_is_nonfatal

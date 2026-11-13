@@ -9,8 +9,10 @@ TEST_DIR=$(mktemp -d /tmp/kvs-nginx-recovery-hosts.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT
 # shellcheck source=/dev/null
 source "$ROOT_DIR/docker/lib/import.sh"
-awk '$0 == "import_ensure_nginx_rewrites() {" { capture = 1 } capture { print } capture && /^}$/ { exit }' \
-    "$ROOT_DIR/docker/setup.sh" > "$TEST_DIR/functions.sh"
+for name in import_vouch_nginx_rewrites import_ensure_nginx_rewrites; do
+    awk -v signature="$name() {" '$0 == signature { capture = 1 } capture { print } capture && /^}$/ { exit }' \
+        "$ROOT_DIR/docker/setup.sh"
+done > "$TEST_DIR/functions.sh"
 # shellcheck source=/dev/null
 source "$TEST_DIR/functions.sh"
 # shellcheck disable=SC2034  # Read by the extracted function.

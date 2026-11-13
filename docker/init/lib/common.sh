@@ -4,6 +4,12 @@
 # Paths
 export KVS_PATH="/var/www/kvs"
 export KVS_ARCHIVE_DIR="/kvs-archive"
+# The files of the KVS archive the steps after the extraction use,
+# install_permissions.sh and nginx_config.txt, as this run extracted them.
+# The site belongs to uid 1000, which PHP-FPM and cron run as, so a file
+# found there may have been put there since; this directory of the
+# container's own /tmp may not. init-kvs.sh empties it when a run starts.
+export KVS_INIT_RUN_DIR="/tmp/kvs-init-run"
 
 # Colors for output
 RED='\033[0;31m'

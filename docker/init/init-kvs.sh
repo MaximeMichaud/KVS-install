@@ -28,6 +28,10 @@ log_info "SSL_PROVIDER: ${SSL_PROVIDER:-letsencrypt}"
 log_info "ENABLE_MANTICORE: ${ENABLE_MANTICORE:-false}"
 echo ""
 
+# What an earlier run in this container kept from the archive is not what
+# this one extracts (00-extract.sh).
+rm -rf "$KVS_INIT_RUN_DIR"
+
 # Track execution
 SCRIPTS_RUN=0
 SCRIPTS_FAILED=0

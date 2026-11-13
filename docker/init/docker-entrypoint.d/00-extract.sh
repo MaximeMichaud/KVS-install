@@ -128,6 +128,16 @@ if ! cp -a "$STAGING_DIR"/. "$KVS_PATH"/; then
     exit 1
 fi
 
+# The archive's permission script and nginx rules, for the steps of this run
+# that use them: their copies in the site belong to uid 1000 from the chown
+# below on, and the staging directory goes when this step ends.
+install -d -m 0700 "$KVS_INIT_RUN_DIR"
+for name in install_permissions.sh nginx_config.txt; do
+    if [ -f "$STAGING_DIR/_INSTALL/$name" ]; then
+        install -m 0600 "$STAGING_DIR/_INSTALL/$name" "$KVS_INIT_RUN_DIR/$name"
+    fi
+done
+
 # Set initial permissions
 chown -R 1000:1000 "$KVS_PATH"
 chmod -R 755 "$KVS_PATH"

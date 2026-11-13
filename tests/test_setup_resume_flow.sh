@@ -33,6 +33,7 @@ case "$*" in
         echo phpmyadmin-init >> "$CALLS" ;;
     'compose --profile setup run --rm --no-deps --pull missing kvs-init')
         echo kvs-init >> "$CALLS"
+        printf 'kvs-init-rewrites-sha256:%s\n' "${KVS_NGINX_REWRITES_SHA256:-}" >> "$CALLS"
         [ "${FAIL_KVS_INIT:-no}" != yes ] || { echo 'Simulated KVS initialization failure' >&2; exit 8; }
         ;;
     'compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm'|\
@@ -203,6 +204,32 @@ positions = [calls.index(item) for item in expected]
 assert positions == sorted(positions), calls
 PY
 echo 'PASS: full --resume-import runs both initializers, preserves MariaDB, starts runtime services and records completion before cleanup.'
+grep -Fxq 'kvs-init-rewrites-sha256:' "$fixture/success/calls" ||
+    { echo 'FAIL: a resume whose pass vouched for no rewrites passed a sha256 to the init' >&2; exit 1; }
+
+# The interrupted pass wrote the operator's rewrites into _INSTALL and kept
+# the record of them in import/; the site's copy changed since. The resumed
+# init must get the rules of that pass and their sha256 (C2), not fall back
+# to the archive's stock rules or stop for want of any.
+make_case "$fixture/rewrites"
+mkdir -p "$fixture/rewrites/import" "$fixture/rewrites/site/resume.example.com/_INSTALL"
+chmod 700 "$fixture/rewrites/import"
+echo 'rewrite ^/custom-seo/(.*)$ /view_video.php?dir=$1 last;' > "$fixture/rewrites/import/resume.example.com.nginx_config.vouched"
+echo 'rewrite ^/planted$ /planted.php last;' > "$fixture/rewrites/site/resume.example.com/_INSTALL/nginx_config.txt"
+if ! run_case "$fixture/rewrites" no; then
+    cat "$fixture/rewrites/output.log" >&2
+    exit 1
+fi
+rules_sha=$(sha256sum < "$fixture/rewrites/import/resume.example.com.nginx_config.vouched" | cut -d' ' -f1)
+if ! grep -Fxq "kvs-init-rewrites-sha256:$rules_sha" "$fixture/rewrites/calls" ||
+    ! cmp -s "$fixture/rewrites/import/resume.example.com.nginx_config.vouched" \
+        "$fixture/rewrites/site/resume.example.com/_INSTALL/nginx_config.txt"; then
+    grep '^kvs-init-rewrites-sha256:' "$fixture/rewrites/calls" >&2 || true
+    echo 'FAIL: the resumed init did not get the rewrites the interrupted pass wrote for it' >&2
+    exit 1
+fi
+grep -q '^KVS_IMPORT_COMPLETED=' "$fixture/rewrites/.env"
+echo 'PASS: --resume-import gives the init the rewrites of the interrupted pass and their sha256.'
 
 make_case "$fixture/slow-count"
 if ! SLOW_ROW_COUNT=yes run_case "$fixture/slow-count" no; then
