@@ -277,6 +277,48 @@ status=$?
 set -e
 [ "$status" -ne 0 ] || fail "primary-remove accepted a path traversal domain"
 
+# The loop above cannot tell whether stop and remove validate the domain:
+# sites/../../escape.example only resolves when sites/ exists, and that fixture
+# never creates it, so the script stops on "does not exist" either way. Here
+# sites/ exists and the traversal target is a real directory holding a site
+# configuration and a sentinel. stop and remove must refuse the name itself,
+# before any Docker call: without validate_domain, remove would run
+# 'docker compose down -v' there and delete the directory.
+create_fixture traversal
+traversal_root="${TEST_DIR}/traversal/docker"
+traversal_log="${TEST_DIR}/traversal/docker.log"
+mkdir -p "${traversal_root}/multi-site/sites" "${traversal_root}/escape.example"
+printf 'DOMAIN=escape.example\nSITE_PREFIX=kvs-escape\nCOMPOSE_PROJECT_NAME=kvs-escape\n' \
+    > "${traversal_root}/escape.example/.env"
+printf 'keep\n' > "${traversal_root}/escape.example/sentinel"
+: > "$traversal_log"
+for command in stop remove; do
+    set +e
+    printf 'yes\nn\n' | MOCK_DOCKER_LOG="$traversal_log" \
+        KVS_WEBROOT_BASE="${TEST_DIR}/traversal/webroots" \
+        bash "${traversal_root}/multi-site/site-manager.sh" "$command" '../../escape.example' \
+        > "${TEST_DIR}/traversal/out" 2>&1
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] || fail "${command} accepted a traversal domain whose target exists"
+    grep -Fq 'Invalid domain' "${TEST_DIR}/traversal/out" ||
+        fail "${command} did not refuse the traversal domain itself: $(cat "${TEST_DIR}/traversal/out")"
+    [ -f "${traversal_root}/escape.example/sentinel" ] ||
+        fail "${command} deleted the directory a traversal domain points at"
+    [ ! -s "$traversal_log" ] || fail "${command} called Docker for a traversal domain: $(cat "$traversal_log")"
+done
+
+# And stop of a real site does reach 'docker compose down' (remove of a real
+# site is covered by the R1 and R5 cases below).
+mkdir -p "${traversal_root}/multi-site/sites/real.example"
+printf 'DOMAIN=real.example\nSITE_PREFIX=kvs-real-example\n' \
+    > "${traversal_root}/multi-site/sites/real.example/.env"
+MOCK_DOCKER_LOG="$traversal_log" KVS_WEBROOT_BASE="${TEST_DIR}/traversal/webroots" \
+    bash "${traversal_root}/multi-site/site-manager.sh" stop real.example >/dev/null 2>&1 ||
+    fail "stop of a real site failed"
+grep -Fxq 'compose down' "$traversal_log" || fail "stop of a real site did not run 'docker compose down'"
+echo "PASS: stop and remove refuse a traversal domain whose target exists"
+
 printf -v mariadb_oversized_label '%*s' 61 ''
 mariadb_oversized_label=${mariadb_oversized_label// /a}
 set +e
