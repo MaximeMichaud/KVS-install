@@ -160,6 +160,13 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     configured_project_path=$(setup_php_value project_path)
     configured_project_path=${configured_project_path%/}
 
+    # A fresh archive names the site "KVS": the domain takes its place while
+    # project_path is still the placeholder, which only a fresh archive has.
+    # An imported site keeps the title it was given, and so does a rerun.
+    if [ -n "$DOMAIN" ] && [ "$configured_project_path" = /PATH ]; then
+        sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH/admin/include/setup.php"
+    fi
+
     # Replace /PATH placeholder (fresh archives)
     sed -i "s|/PATH|$KVS_PATH|g" "$KVS_PATH/admin/include/setup.php"
 
@@ -171,11 +178,6 @@ if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     if [ -n "$old_project_path" ] && [ "$old_project_path" != "$KVS_PATH" ]; then
         adopt_user_ini_paths "$old_project_path"
         adopt_plugin_setting_paths "$old_project_path"
-    fi
-
-    # Update project title with domain
-    if [ -n "$DOMAIN" ]; then
-        sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH/admin/include/setup.php"
     fi
 
     # Configure project_url based on USE_WWW

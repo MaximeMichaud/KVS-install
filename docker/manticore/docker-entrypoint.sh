@@ -217,9 +217,16 @@ else
     fi
 fi
 
-# Start cron for hourly updates
+# Start cron for hourly updates. Without it the indexes would never follow
+# the database until the next start, while searchd and the health check
+# look fine: the start fails instead, and Docker shows it. The init script
+# of cron exits 0 when the daemon is not installed, so the daemon itself is
+# looked for (procps ships with the base image).
 echo "Starting cron for hourly index updates..."
-service cron start || echo "⚠ Cron not available (may need to install)"
+if ! service cron start || ! pgrep -x cron > /dev/null; then
+    echo "ERROR: cron did not start, so the hourly index rotation would never run" >&2
+    exit 1
+fi
 
 echo "=== Starting Manticore Search ==="
 

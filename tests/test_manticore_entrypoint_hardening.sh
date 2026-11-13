@@ -43,6 +43,7 @@ export CHOWN_LOG="${TEST_DIR}/chown.log"
 export CHMOD_LOG="${TEST_DIR}/chmod.log"
 export GOSU_LOG="${TEST_DIR}/gosu.log"
 export INDEXER_LOG="${TEST_DIR}/indexer.log"
+export SERVICE_LOG="${TEST_DIR}/service.log"
 export MARIADB_LOG="${TEST_DIR}/mariadb.log"
 # One line per probe and per indexer run, in the order they happen.
 export EVENTS_LOG="${TEST_DIR}/events.log"
@@ -130,8 +131,17 @@ indexer() {
     return 37
 }
 
+# cron, which the hourly rotation needs. TEST_SERVICE_EXIT makes its start
+# fail; TEST_CRON_RUNNING=no leaves no daemon behind a start that exits 0, as
+# the init script of cron does when the daemon is not installed.
 service() {
-    return 0
+    printf '%s\n' "$*" >> "$SERVICE_LOG"
+    return "${TEST_SERVICE_EXIT:-0}"
+}
+
+pgrep() {
+    [ "$*" = '-x cron' ] || return 2
+    [ "${TEST_CRON_RUNNING:-yes}" = yes ]
 }
 
 chown() {
@@ -152,10 +162,10 @@ gosu() {
     TEST_EFFECTIVE_USER="$target_user" "$@"
 }
 
-export -f mariadb indexer service chown chmod gosu
+export -f mariadb indexer service pgrep chown chmod gosu
 
 reset_logs() {
-    rm -f "$CHOWN_LOG" "$CHMOD_LOG" "$GOSU_LOG" "$INDEXER_LOG" "$MARIADB_LOG" \
+    rm -f "$CHOWN_LOG" "$CHMOD_LOG" "$GOSU_LOG" "$INDEXER_LOG" "$MARIADB_LOG" "$SERVICE_LOG" \
         "$EVENTS_LOG" "$REBUILD_PARENT_LOG" "$SEARCHD_PROBES" "$INDEXER_SAW_LOG" \
         "$INDEXER_SAW_REQUESTED_LOG" "${TEST_DIR}/var/log/manticore/indexer-init.log"
     touch "$EVENTS_LOG" "$INDEXER_LOG"
@@ -254,6 +264,37 @@ grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z Initial indexing failed on some
 [ ! -e "$REBUILD_FAILED" ] ||
     fail "a failed build before searchd was recorded as a failed rebuild behind it"
 rm -f "$BUILD_FAILED"
+
+# searchd starts with cron, which runs the hourly rotation. Without it the
+# indexes would never follow the database until the next start while the
+# health check stays green, so a cron that does not start stops the start.
+output=$(
+    reset_logs
+    TEST_INDEXER_EXIT=0 \
+    DOMAIN=example.com \
+    MARIADB_PASSWORD=test-password \
+    bash "${TEST_DIR}/docker-entrypoint.sh" true 2>&1
+) || fail "a clean first build did not start searchd: ${output}"
+grep -Fq '=== Starting Manticore Search ===' <<< "$output" ||
+    fail "a clean first build did not reach searchd: ${output}"
+[ "$(cat "$SERVICE_LOG")" = 'cron start' ] ||
+    fail "searchd started without starting cron: $(cat "$SERVICE_LOG" 2>&1)"
+for cron_failure in TEST_SERVICE_EXIT=1 TEST_CRON_RUNNING=no; do
+    if output=$(
+        reset_logs
+        env "$cron_failure" TEST_INDEXER_EXIT=0 \
+        DOMAIN=example.com \
+        MARIADB_PASSWORD=test-password \
+        bash "${TEST_DIR}/docker-entrypoint.sh" true 2>&1
+    ); then
+        fail "${cron_failure}: searchd started although cron did not: ${output}"
+    fi
+    grep -Fxq 'ERROR: cron did not start, so the hourly index rotation would never run' <<< "$output" ||
+        fail "${cron_failure}: a cron that did not start was not reported: ${output}"
+    if grep -Fq '=== Starting Manticore Search ===' <<< "$output"; then
+        fail "${cron_failure}: searchd started although cron did not"
+    fi
+done
 
 # The prefix of an imported site reaches every query of the indexer.
 prefixed=$(
