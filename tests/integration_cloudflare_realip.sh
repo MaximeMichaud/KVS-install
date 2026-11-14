@@ -106,12 +106,22 @@ ready() {
 address() {
     local expected=$1
     shift
-    local actual
+    local actual before line attempt
+    before=$(docker exec "$container" sh -c 'wc -l < /var/log/nginx/cloudflare-test.access.log 2>/dev/null || echo 0')
     actual=$(docker exec "$container" curl -fsS --max-time 5 -H 'Host: example.test' "$@" http://127.0.0.1/)
     [ "$actual" = "$expected" ] || fail "PHP received $actual, expected $expected"
     # Nginx and PHP must agree, rather than just exposing the raw header.
-    docker exec "$container" tail -n 1 /var/log/nginx/cloudflare-test.access.log |
-        grep -Fq "$expected -" || fail 'the access log did not use the visitor IP'
+    # Nginx writes the access log line once the response has gone out, so on
+    # a loaded host curl can return before the line is there: wait for the
+    # line of this request instead of reading whatever line came last.
+    line=""
+    for ((attempt=0; attempt<50; attempt++)); do
+        line=$(docker exec "$container" sed -n "$((before + 1))p" /var/log/nginx/cloudflare-test.access.log)
+        [ -n "$line" ] && break
+        sleep 0.1
+    done
+    [ -n "$line" ] || fail 'the request never reached the access log'
+    grep -Fq "$expected -" <<<"$line" || fail 'the access log did not use the visitor IP'
 }
 
 rejected() {
