@@ -122,19 +122,30 @@ func (r *runner) settings() Result {
 	return good("Domain, ports, profiles and stack settings are valid")
 }
 
+// composeRelease is the Compose release at the head of a version semver
+// does not read: Docker Desktop (2.29.7-desktop.1) and the distribution
+// packages (2.27.1-1, 2.24.6+ds1-0ubuntu1~22.04.1) follow it with a suffix
+// of their own.
+var composeRelease = regexp.MustCompile(`^((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))[-+~]`)
+
 func (r *runner) composeVersion(ctx context.Context) Result {
 	v, err := r.probe.version(ctx)
 	if err != nil {
 		return failure("Docker Compose is unavailable", "Check 'docker compose version' and the Docker CLI permissions")
 	}
+	release := v
 	if _, err := semver.Parse(v); err != nil {
-		return failure("Docker Compose returned an unreadable version", "Check 'docker compose version'")
+		m := composeRelease.FindStringSubmatch(v)
+		if m == nil {
+			return failure("Docker Compose returned an unreadable version", "Check 'docker compose version'")
+		}
+		release = m[1]
 	}
 	minimum := "2.10.0"
 	if _, err := os.Stat(filepath.Join(r.inst.DockerDir, "docker-compose.release.yml")); err == nil {
 		minimum = "2.19.0"
 	}
-	if semver.Less(v, minimum) {
+	if semver.Less(release, minimum) {
 		return failure("Docker Compose "+v+" is older than required "+minimum, "Update the Docker Compose plugin")
 	}
 	return good("Docker Compose " + v + " is compatible")

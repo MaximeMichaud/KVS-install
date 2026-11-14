@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,6 +95,48 @@ func TestStackSettings(t *testing.T) {
 			writeFile(t, r.inst.EnvPath, string(data)+tc.settings)
 			if got := resultByID(t, r.run(context.Background()), "config.settings"); got.Status != tc.want {
 				t.Fatalf("%+v", got)
+			}
+		})
+	}
+}
+
+// Docker Desktop and the distribution packages follow the Compose release
+// with a suffix of their own, and doctor compares that release with the
+// minimum. docker.compose gates the Compose configuration, and through it
+// every runtime check.
+func TestComposeVersionOfDistributionsAndDesktop(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		release bool
+		status  string
+		message string
+	}{
+		{"2.40.0", false, OK, "Docker Compose 2.40.0 is compatible"},
+		{"2.29.7-desktop.1", true, OK, "Docker Compose 2.29.7-desktop.1 is compatible"},
+		{"2.27.1-1", true, OK, "Docker Compose 2.27.1-1 is compatible"},
+		{"2.24.6+ds1-0ubuntu1~22.04.1", true, OK, "Docker Compose 2.24.6+ds1-0ubuntu1~22.04.1 is compatible"},
+		{"2.9.0-1", false, Fail, "Docker Compose 2.9.0-1 is older than required 2.10.0"},
+		{"2.18.1+ds1-1", true, Fail, "Docker Compose 2.18.1+ds1-1 is older than required 2.19.0"},
+		{"2.18.1+ds1-1", false, OK, "is compatible"},
+		{"2.21", false, Fail, "unreadable version"},
+		{"2.21.0desktop", false, Fail, "unreadable version"},
+		{"2.021.0-1", false, Fail, "unreadable version"},
+		{"desktop-2.29.7-1", false, Fail, "unreadable version"},
+	} {
+		t.Run(fmt.Sprintf("%s release=%t", tc.version, tc.release), func(t *testing.T) {
+			r, _ := fixture(t)
+			r.opts.Only = []string{"services"}
+			if tc.release {
+				writeFile(t, filepath.Join(r.inst.DockerDir, "docker-compose.release.yml"), "services: {}\n")
+			}
+			r.probe.version = func(context.Context) (string, error) { return tc.version, nil }
+			report := r.run(context.Background())
+			result := resultByID(t, report, "docker.compose")
+			if result.Status != tc.status || !strings.Contains(result.Message, tc.message) {
+				t.Fatalf("%+v", result)
+			}
+			if services := resultByID(t, report, "services"); (tc.status == OK) != (services.Status == OK) {
+				t.Fatalf("services after docker.compose %s: %+v", result.Status, services)
 			}
 		})
 	}
