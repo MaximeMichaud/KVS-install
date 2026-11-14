@@ -89,6 +89,7 @@ def generate(directory, prefix, domain=DOMAIN):
 try:
     for image in IMAGES.values():
         run("docker", "image", "inspect", image)
+    run("openssl", "dhparam", "-dsaparam", "-out", WORK / "dhparam.pem", "2048")
     generate(WORK, "unknown")
     generate(WORK, "wrong", domain="wrong.fixture.test")
     run("openssl", "req", "-new", "-key", WORK / "unknown.key", "-subj", f"/CN={DOMAIN}",
@@ -176,10 +177,13 @@ server {
         service["restart"] = "no"
         service["environment"].update(KVS_MEMCACHE_LOOPBACK="false", CERTIFICATE_RELOAD_INTERVAL="1")
         service["volumes"] = [v for v in service["volumes"] if v["target"] in
-                              {"/etc/nginx/ssl", "/run/kvs-internal-tls", "/usr/local/lib/kvs-tls"}]
+                              {"/etc/nginx/nginx.conf", "/etc/nginx/ssl",
+                               "/run/kvs-internal-tls", "/usr/local/lib/kvs-tls"}]
         service["volumes"].append({"type": "bind", "source": str(WORK), "target": "/fixture", "read_only": True})
         service["depends_on"].pop("mariadb", None)
         if name == "nginx":
+            service["volumes"].append({"type": "bind", "source": str(WORK / "dhparam.pem"),
+                                       "target": "/etc/nginx/dhparam.pem", "read_only": True})
             service["networks"]["kvs-network"]["aliases"].append("wrong.fixture.test")
             service["volumes"].append({"type": "bind", "source": str(WORK / "site.tpl"),
                                        "target": "/etc/nginx/templates/kvs.conf.tpl", "read_only": True})
@@ -227,7 +231,10 @@ server {
         assert refused.returncode != 0
         assert good()
     record("publisher rejects expired and wrong-host certificates without replacing valid trust")
-    compose("restart", "nginx", "php-fpm", "cron")
+    # NGINX resolves php-fpm at startup. Finish restarting the dependencies
+    # first so that their names are present in Docker DNS when NGINX starts.
+    compose("restart", "php-fpm", "cron")
+    compose("restart", "nginx")
     eventually(good)
     assert fingerprint() == before
     record("container restart retains the certificate and strict verification")
@@ -289,11 +296,22 @@ server {
                               "-noout", "-checkend", "604800", check=False).returncode == 0)
     eventually(good)
     record("self-signed certificate nearing expiry is renewed automatically and trusted")
+    # NGINX's inherited SSL object cache keys files by inode and mtime, not
+    # contents. Preserve both to reproduce an in-place replacement within
+    # the same second, regardless of how fast this runner reaches the copy.
     execute("nginx", "sh", "-c", f'''
         set -eu
         d=/etc/nginx/ssl/{DOMAIN}
-        cp /fixture/issued.key "$d/key.pem"
-        cp /fixture/issued.pem "$d/cert.pem"
+        before=$(stat -c '%i %Y' "$d/key.pem" "$d/cert.pem")
+        replace_preserving_metadata() {{
+            cp "$1" "$2.next"
+            touch -r "$2" "$2.next"
+            cp -p "$2.next" "$2"
+            rm "$2.next"
+        }}
+        replace_preserving_metadata /fixture/issued.key "$d/key.pem"
+        replace_preserving_metadata /fixture/issued.pem "$d/cert.pem"
+        test "$before" = "$(stat -c '%i %Y' "$d/key.pem" "$d/cert.pem")"
     ''')
     eventually(lambda: all(execute(s, "test", "-e", "/usr/local/share/ca-certificates/kvs-internal-site.crt",
                                    check=False).returncode != 0 for s in ("php-fpm", "cron")))
@@ -301,7 +319,7 @@ server {
     after = fingerprint()
     assert execute("nginx", "openssl", "x509", "-in", f"/etc/nginx/ssl/{DOMAIN}/cert.pem",
                    "-noout", "-issuer").stdout.strip() == "issuer=CN=Fixture private CA"
-    record("retained CA-issued certificate uses operator-provided CA trust and revokes the self-signed leaf")
+    record("in-place replacement with unchanged inode and mtime serves the CA-issued certificate and revokes the self-signed leaf")
     compose("down")
     compose("up", "-d", "--no-build")
     eventually(good)
