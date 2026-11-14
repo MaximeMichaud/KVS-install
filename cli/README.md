@@ -425,7 +425,8 @@ The checks cover:
 - Docker Engine, Compose, expected containers, health checks and completed
   initialization jobs. Disabled optional services are skipped.
 - PHP-FPM and cron PHP versions, extensions, ionCube and media executables.
-- A `SELECT 1` query from PHP using `setup_db.php`, restricted to the local
+- A query from PHP using `setup_db.php`, of the admin users and videos tables
+  under the `tables_prefix` of `setup.php`, restricted to the local
   MariaDB service, a read-only cache protocol query and optional Manticore
   status. Database credentials are never printed or passed in arguments.
 - The cron daemon and KVS schedule, without running a scheduled job, and
@@ -444,8 +445,11 @@ The checks cover:
 Doctor does not change configuration, acquire the maintenance lock, create
 a backup, restart containers or download images. Its HTTP requests may
 produce normal application access logs. It does not load the application
-bootstrap for its database probe. An unadopted installation or missing local
-backups produces a warning; neither establishes that the site is broken.
+bootstrap for its database probe. That probe runs as `www-data`, the user
+of PHP-FPM, and the cron check reads `cron.php` as `www-data` when the KVS
+task runs as that user: a file only root can read fails them, as it fails
+the site. An unadopted installation or missing local backups produces a
+warning; neither establishes that the site is broken.
 A legacy root cron schedule is also reported as a warning.
 
 Each check reports `OK`, `WARN`, `FAIL` or `SKIP`, with a next step when

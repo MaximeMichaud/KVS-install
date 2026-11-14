@@ -47,6 +47,22 @@ func TestDiagnosticProbeKeepsInputOutOfArgumentsAndBoundsExec(t *testing.T) {
 	}
 }
 
+// docker exec reads --user only before the container name; after it, the
+// option would be the command.
+func TestDiagnosticProbeAsRunsAsTheUserItNames(t *testing.T) {
+	log := installFakeDocker(t, "stdin")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := ProbeAs(ctx, "test-container", "www-data", strings.NewReader("private-input"), "php", "-r", "fixed-script")
+	if err != nil || string(out) != "private-input" {
+		t.Fatalf("output=%q error=%v", out, err)
+	}
+	args := logged(readLog(t, log), "args")
+	if !strings.HasPrefix(args, "exec -i --user www-data test-container timeout -s KILL ") || !strings.HasSuffix(args, " php -r fixed-script") {
+		t.Fatalf("unexpected exec arguments: %s", args)
+	}
+}
+
 func TestDiagnosticCancellationKillsAnUnresponsiveCLI(t *testing.T) {
 	log := installFakeDocker(t, "stubborn")
 	ctx, cancel := context.WithCancel(context.Background())

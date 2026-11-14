@@ -87,6 +87,7 @@ type probes struct {
 	compose func(context.Context, string) (*dockerx.ProjectConfig, error)
 	version func(context.Context) (string, error)
 	exec    func(context.Context, string, io.Reader, ...string) ([]byte, error)
+	execAs  func(context.Context, string, string, io.Reader, ...string) ([]byte, error)
 	space   func(string) (diskspace.Space, error)
 	client  *http.Client
 }
@@ -178,7 +179,7 @@ func newRunner(opts Options) *runner {
 		ready: map[string]bool{}, now: time.Now(),
 		probe: probes{
 			engine: func() (engine, error) { return dockerx.New() }, compose: dockerx.ReadProject,
-			version: dockerx.DiagnosticComposeVersion, exec: dockerx.Probe, space: diskspace.Measure,
+			version: dockerx.DiagnosticComposeVersion, exec: dockerx.Probe, execAs: dockerx.ProbeAs, space: diskspace.Measure,
 			client: &http.Client{Timeout: opts.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		},
 	}

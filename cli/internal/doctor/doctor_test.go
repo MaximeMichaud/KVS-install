@@ -119,7 +119,7 @@ func fixture(t *testing.T) (*runner, *fakeEngine) {
 		switch last {
 		case phpProbe:
 			return json.Marshal(phpInfo{Version: "8.1.34", IonCube: true, Extensions: []string{"mysqli", "pdo_mysql", "curl", "mbstring", "gd", "imagick", "zip", "memcached"}})
-		case databaseProbe, cacheProbe:
+		case cacheProbe:
 			return []byte("ok"), nil
 		case cronProbe:
 			return []byte("www-data"), nil
@@ -132,7 +132,39 @@ func fixture(t *testing.T) (*runner, *fakeEngine) {
 			return nil, errors.New("unexpected command")
 		}
 	}
+	r.probe.execAs = func(_ context.Context, _, user string, _ io.Reader, args ...string) ([]byte, error) {
+		switch last := args[len(args)-1]; {
+		case user == "www-data" && last == databaseProbe:
+			return []byte("ok"), nil
+		case user == "www-data" && last == cronScript:
+			return []byte("readable"), nil
+		}
+		t.Errorf("unexpected container command as %q: %v", user, args)
+		return nil, errors.New("unexpected command")
+	}
 	return r, f
+}
+
+// newRunner hands its container probes to docker exec: execAs with the user
+// it names, before the container, exec with none.
+func TestRunnerProbesReachDockerExecWithTheirUser(t *testing.T) {
+	bin, args := t.TempDir(), filepath.Join(t.TempDir(), "args")
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_ARGS\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_DOCKER_ARGS", args)
+	probe := newRunner(Options{}).probe
+	if _, err := probe.execAs(context.Background(), "php", "www-data", nil, "test", "-r", cronScript); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := probe.exec(context.Background(), "php", nil, "test", "-r", cronScript); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(args)
+	if want := "exec -i --user www-data php test -r " + cronScript + "\nexec -i php test -r " + cronScript + "\n"; err != nil || string(data) != want {
+		t.Fatalf("docker ran with %q (%v), want %q", data, err, want)
+	}
 }
 
 func testCertificate(t *testing.T, names []string, before, after time.Time) (tls.Certificate, []byte) {
@@ -312,6 +344,9 @@ func TestReadOnlyRuntimeFailures(t *testing.T) {
 				f.states = append(f.states, dockerx.ContainerState{ID: "search", Service: "manticore", State: "running"})
 			}
 			r.probe.exec = func(context.Context, string, io.Reader, ...string) ([]byte, error) {
+				return nil, errors.New("credentials-must-not-appear")
+			}
+			r.probe.execAs = func(context.Context, string, string, io.Reader, ...string) ([]byte, error) {
 				return nil, errors.New("credentials-must-not-appear")
 			}
 			report := r.run(context.Background())

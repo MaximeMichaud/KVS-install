@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"slices"
 	"strings"
@@ -136,7 +137,7 @@ func TestCacheProfilesAndSearch(t *testing.T) {
 func TestDatabaseProbeReceivesLocalHostsOnly(t *testing.T) {
 	r, _ := fixture(t)
 	r.opts.Only = []string{"database"}
-	r.probe.exec = func(_ context.Context, _ string, input io.Reader, args ...string) ([]byte, error) {
+	r.probe.execAs = func(_ context.Context, container, user string, input io.Reader, args ...string) ([]byte, error) {
 		var hosts []string
 		if err := json.NewDecoder(input).Decode(&hosts); err != nil {
 			t.Fatal(err)
@@ -144,9 +145,101 @@ func TestDatabaseProbeReceivesLocalHostsOnly(t *testing.T) {
 		if strings.Join(hosts, ",") != "mariadb,custom-mariadb" || args[len(args)-1] != databaseProbe {
 			t.Fatalf("hosts=%v args=%v", hosts, args)
 		}
+		// As the PHP-FPM pool reads the site: root reads files www-data
+		// cannot.
+		if container != "php-fpm" || user != "www-data" {
+			t.Fatalf("the database probe ran in %q as %q", container, user)
+		}
 		return []byte("ok"), nil
 	}
 	if resultByID(t, r.run(context.Background()), "database").Status != OK {
 		t.Fatal("local database probe failed")
+	}
+}
+
+// Only "ok" passes. A configuration www-data cannot read and a missing KVS
+// table fail with what to look at; anything else, a table name that is not
+// one included, is the generic failure and never reaches the report.
+func TestDatabaseProbeFindings(t *testing.T) {
+	lock := "Reading ktvs_videos failed with MariaDB error 2006: the connection ended, which a lock, a long write or an ALTER holding the table past the 3 s read timeout also causes"
+	for _, tc := range []struct {
+		name, out string
+		err       error
+		status    string
+		message   string
+		details   []string
+	}{
+		{"the KVS tables", "ok", nil, OK, "read the KVS tables", nil},
+		{"an empty database", "no-table:ktvs_admin_users", nil, Fail, "no ktvs_admin_users table", nil},
+		{"another prefix", "no-table:kvs7_videos\n", nil, Fail, "no kvs7_videos table", nil},
+		{"setup_db.php only root reads", "config-unreadable", nil, Fail, "www-data, cannot read admin/include/setup_db.php", nil},
+		{"not a table name", "no-table:x`; DROP", nil, Fail, "could not query", nil},
+		{"an empty table name", "no-table:", nil, Fail, "could not query", nil},
+		{"no connection", "", errors.New("exit status 1"), Fail, "could not query", nil},
+		{"a word after a failure", "config-unreadable", errors.New("exit status 1"), Fail, "could not query", nil},
+		// The tables are there: a lock held past the read timeout is no
+		// missing table.
+		{"a lock past the read timeout", "query-failed:2006:ktvs_videos\n", nil, Fail, "could not query", []string{lock}},
+		{"a lost connection", "query-failed:2013:ktvs_videos", nil, Fail, "could not query", []string{strings.Replace(lock, "2006", "2013", 1)}},
+		{"another refusal", "query-failed:1045:ktvs_admin_users", nil, Fail, "could not query", []string{"Reading ktvs_admin_users failed with MariaDB error 1045"}},
+		{"a refusal after a failure", "query-failed:2006:ktvs_videos", errors.New("exit status 1"), Fail, "could not query", nil},
+		{"a refusal that is not a table", "query-failed:2006:x`; DROP", nil, Fail, "could not query", nil},
+		{"a refusal without a number", "query-failed::ktvs_videos", nil, Fail, "could not query", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := fixture(t)
+			r.opts.Only = []string{"database"}
+			r.probe.execAs = func(context.Context, string, string, io.Reader, ...string) ([]byte, error) {
+				return []byte(tc.out), tc.err
+			}
+			report := r.run(context.Background())
+			result := resultByID(t, report, "database")
+			if result.Status != tc.status || !strings.Contains(result.Message, tc.message) || strings.Join(result.Details, "|") != strings.Join(tc.details, "|") {
+				t.Fatalf("%+v", result)
+			}
+			if tc.status == Fail && report.ExitCode == 0 {
+				t.Fatalf("a failing database check left exit code 0: %+v", report)
+			}
+			if strings.Contains(result.Message+strings.Join(result.Details, ""), "DROP") {
+				t.Fatalf("the probe's output reached the report: %+v", result)
+			}
+		})
+	}
+}
+
+// cronProbe runs as root, which reads any file: cron.php is read again as
+// www-data, the user the KVS task runs as. Only the probe's own word says
+// the file is unreadable; a docker exec that fails says nothing of it.
+func TestCronReadsTheScriptAsWwwData(t *testing.T) {
+	for _, tc := range []struct {
+		name, out string
+		err       error
+		status    string
+		message   string
+	}{
+		{"readable", "readable\n", nil, OK, "KVS schedule are present"},
+		{"unreadable", "unreadable\n", nil, Fail, "www-data, cannot read admin/include/cron.php"},
+		{"the exec failed", "", errors.New("exit status 1"), Fail, "Could not check that www-data can read"},
+		{"a container restarting", "", errors.New("exit status 125"), Fail, "Could not check that www-data can read"},
+		{"a word after a failure", "unreadable", errors.New("exit status 137"), Fail, "Could not check that www-data can read"},
+		{"readable after a failure", "readable", errors.New("exit status 137"), Fail, "Could not check that www-data can read"},
+		{"another answer", "maybe", nil, Fail, "Could not check that www-data can read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := fixture(t)
+			r.opts.Only = []string{"cron"}
+			var asked []string
+			r.probe.execAs = func(_ context.Context, container, user string, _ io.Reader, args ...string) ([]byte, error) {
+				asked = append(asked, container+" "+user+" "+strings.Join(args, " "))
+				return []byte(tc.out), tc.err
+			}
+			result := resultByID(t, r.run(context.Background()), "cron")
+			if want := "cron www-data sh -c " + cronReadable + " sh " + cronScript; strings.Join(asked, ",") != want {
+				t.Fatalf("asked %q, want %q", asked, want)
+			}
+			if result.Status != tc.status || !strings.Contains(result.Message, tc.message) {
+				t.Fatalf("%+v", result)
+			}
+		})
 	}
 }

@@ -81,6 +81,13 @@ func ReadProject(ctx context.Context, dir string) (*ProjectConfig, error) {
 // fixed, read-only commands; application settings and credentials go on stdin,
 // never in command arguments. Output is capped and is not included in errors.
 func Probe(ctx context.Context, container string, stdin io.Reader, args ...string) ([]byte, error) {
+	return ProbeAs(ctx, container, "", stdin, args...)
+}
+
+// ProbeAs is Probe run as user, the --user of docker exec, so that the
+// diagnostic sees the files as that user does; an empty user keeps the user
+// of the image, as Probe does.
+func ProbeAs(ctx context.Context, container, user string, stdin io.Reader, args ...string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -90,7 +97,11 @@ func Probe(ctx context.Context, container string, stdin io.Reader, args ...strin
 		seconds := strconv.FormatFloat(max(time.Until(deadline).Seconds(), 0.001), 'f', 3, 64)
 		args = append([]string{"timeout", "-s", "KILL", seconds}, args...)
 	}
-	cmd := diagnosticCommand(ctx, append([]string{"exec", "-i", container}, args...)...)
+	exec := []string{"exec", "-i"}
+	if user != "" {
+		exec = append(exec, "--user", user)
+	}
+	cmd := diagnosticCommand(ctx, append(append(exec, container), args...)...)
 	cmd.Stdin = stdin
 	return diagnosticOutput(cmd)
 }

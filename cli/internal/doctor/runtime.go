@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -161,26 +162,51 @@ func (r *runner) tools(ctx context.Context) Result {
 	return good("Media tool executables are present", checked...)
 }
 
-// Only setup_db.php is loaded. Loading the application's bootstrap would run
-// application code and could write sessions, caches or scheduled jobs. Error
-// text is deliberately not emitted: database errors can contain credentials.
+// Only setup_db.php is loaded; setup.php is read as text, one line at a time
+// as kvs-init's get_tables_prefix reads it, for its tables prefix. Loading
+// the application's bootstrap would run application code and could write
+// sessions, caches or scheduled jobs. Error text is deliberately not
+// emitted: database errors can contain credentials. What the probe found
+// is a fixed word on stdout with exit status 0, followed for a table by its
+// name, made of identifier characters only, and for a failed query by the
+// MariaDB error number. Only "no such table" (1146) and "SELECT denied"
+// (1142) say the table is missing: a lock held past the read timeout, for
+// one, fails the query too.
 const databaseProbe = `mysqli_report(MYSQLI_REPORT_OFF);
 $allowed = json_decode(stream_get_contents(STDIN), true);
-if (!is_readable('/var/www/kvs/admin/include/setup_db.php')) { echo 'config-missing'; exit(1); }
-require '/var/www/kvs/admin/include/setup_db.php';
+$include = '/var/www/kvs/admin/include/';
+if (!is_readable($include . 'setup_db.php') || !is_readable($include . 'setup.php')) { echo 'config-unreadable'; exit; }
+require $include . 'setup_db.php';
 foreach (['DB_HOST','DB_LOGIN','DB_PASS','DB_DEVICE'] as $key) { if (!defined($key)) { echo 'config-incomplete'; exit(1); } }
 $host = preg_replace('/:[0-9]+$/', '', DB_HOST);
 if (!is_array($allowed) || !in_array($host, $allowed, true)) { echo 'nonlocal-database'; exit(1); }
+$prefix = 'ktvs_';
+if (preg_match('/^[^\S\n]*\$config\[[^\S\n]*[\'"]tables_prefix[\'"][^\S\n]*\][^\S\n]*=[^\S\n]*[\'"]([^\'"\n]*)[\'"]/m', (string) file_get_contents($include . 'setup.php'), $match) && preg_match('/^[A-Za-z0-9_]{1,32}$/', $match[1])) { $prefix = $match[1]; }
 try {
   $db = mysqli_init();
   $db->options(MYSQLI_OPT_CONNECT_TIMEOUT, 3);
   $db->options(MYSQLI_OPT_READ_TIMEOUT, 3);
   if (!@$db->real_connect(DB_HOST, DB_LOGIN, DB_PASS, DB_DEVICE)) { exit(1); }
-  $result = $db->query('SELECT 1');
-  if (!$result || $result->fetch_row()[0] != 1) { exit(1); }
+  foreach (['admin_users', 'videos'] as $table) {
+    if ($db->query('SELECT 1 FROM ' . chr(96) . $prefix . $table . chr(96) . ' LIMIT 1') === false) {
+      if (in_array($db->errno, [1142, 1146], true)) { echo 'no-table:' . $prefix . $table; exit; }
+      echo 'query-failed:' . (int) $db->errno . ':' . $prefix . $table; exit;
+    }
+  }
   $db->close(); echo 'ok';
 } catch (Throwable $e) { exit(1); }`
 
+// tableName is what a table named by the database probe may be.
+var tableName = regexp.MustCompile(`^[A-Za-z0-9_]{1,64}$`)
+
+// queryFailed is the probe's answer for a query MariaDB refused for another
+// reason than a missing table: its error number and the table.
+var queryFailed = regexp.MustCompile(`^query-failed:([0-9]{1,5}):([A-Za-z0-9_]{1,64})$`)
+
+// database runs its probe as www-data, the user of the PHP-FPM pool, so it
+// reads the files the site reads, not what root could read, and it reads
+// two tables every KVS database has, so a database that holds no site, or
+// not under the tables prefix of setup.php, fails as well.
 func (r *runner) database(ctx context.Context) Result {
 	c := r.running("php-fpm")
 	if c == nil {
@@ -191,11 +217,28 @@ func (r *runner) database(ctx context.Context) Result {
 		return skipped("Database query requires the configured local MariaDB container", true)
 	}
 	allowed, _ := json.Marshal([]string{"mariadb", db.Name})
-	out, err := r.probe.exec(ctx, c.ID, strings.NewReader(string(allowed)), "php", "-d", "display_errors=0", "-r", databaseProbe)
-	if err != nil || strings.TrimSpace(string(out)) != "ok" {
-		return failure("PHP could not query the site's configured database", "Check setup_db.php, database access and "+r.command("logs mariadb --tail 100"))
+	out, err := r.probe.execAs(ctx, c.ID, "www-data", strings.NewReader(string(allowed)), "php", "-d", "display_errors=0", "-r", databaseProbe)
+	answer := strings.TrimSpace(string(out))
+	if err == nil {
+		if answer == "ok" {
+			return good("PHP, as www-data, read the KVS tables with the site's database credentials")
+		}
+		if answer == "config-unreadable" {
+			return failure("PHP-FPM's user, www-data, cannot read admin/include/setup_db.php or setup.php", "Check that both files exist and that uid 1000 (www-data) can read them, as kvs-init leaves them")
+		}
+		if table, found := strings.CutPrefix(answer, "no-table:"); found && tableName.MatchString(table) {
+			return failure("The site's database has no "+table+" table its credentials can read: it holds no KVS site, or setup.php names another tables prefix", "Import the site's database, or check tables_prefix in admin/include/setup.php")
+		}
 	}
-	return good("SELECT 1 succeeded from PHP with the site's database credentials")
+	var details []string
+	if m := queryFailed.FindStringSubmatch(answer); err == nil && m != nil {
+		detail := "Reading " + m[2] + " failed with MariaDB error " + m[1]
+		if m[1] == "2006" || m[1] == "2013" {
+			detail += ": the connection ended, which a lock, a long write or an ALTER holding the table past the 3 s read timeout also causes"
+		}
+		details = append(details, detail)
+	}
+	return failure("PHP could not query the site's configured database", "Check setup_db.php, database access and "+r.command("logs mariadb --tail 100"), details...)
 }
 
 const cacheProbe = `$s = @fsockopen('cache', 11211, $errno, $error, 3);
@@ -269,6 +312,29 @@ for user in www-data root; do
 done
 exit 1`
 
+// cronScript is the file the KVS task runs.
+const cronScript = "/var/www/kvs/admin/include/cron.php"
+
+// cronReadable prints whether the file it is given is readable: a word on
+// stdout, so that the answer of test is never taken for a docker exec that
+// failed (a container restarting, the deadline).
+const cronReadable = `if test -r "$1"; then echo readable; else echo unreadable; fi`
+
+// cronScriptReadable reads cron.php as www-data, the user the KVS task runs
+// as since e3a1dd3; cronProbe runs as root, which reads any file. It
+// returns false and the result to report when www-data cannot read it, or
+// when the check itself did not run.
+func (r *runner) cronScriptReadable(ctx context.Context, container string) (Result, bool) {
+	out, err := r.probe.execAs(ctx, container, "www-data", nil, "sh", "-c", cronReadable, "sh", cronScript)
+	switch answer := strings.TrimSpace(string(out)); {
+	case err == nil && answer == "readable":
+		return Result{}, true
+	case err == nil && answer == "unreadable":
+		return failure("The KVS cron task's user, www-data, cannot read admin/include/cron.php", "Check that uid 1000 (www-data) can read it, as kvs-init leaves the site"), false
+	}
+	return failure("Could not check that www-data can read admin/include/cron.php", r.command("logs cron --tail 100")), false
+}
+
 func (r *runner) cron(ctx context.Context) Result {
 	c := r.running("cron")
 	if c == nil {
@@ -285,6 +351,9 @@ func (r *runner) cron(ctx context.Context) Result {
 	}
 	if user != "www-data" {
 		return failure("The KVS cron schedule could not be identified", r.command("logs cron --tail 100"))
+	}
+	if result, readable := r.cronScriptReadable(ctx, c.ID); !readable {
+		return result
 	}
 	if len(lines) < 2 {
 		// An image older than kvs-cron-health records no cron.php result.
