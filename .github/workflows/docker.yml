@@ -56,7 +56,7 @@ jobs:
           # Word splitting is what passes one argument per Dockerfile.
           # shellcheck disable=SC2086
           docker run --rm -v "$PWD:/repo:ro" -w /repo \
-            hadolint/hadolint:v2.14.0@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e hadolint $files
+            hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d hadolint $files
 
   build:
     name: build ${{ matrix.service }}${{ matrix.php && format(' php{0}', matrix.php) || '' }}${{ matrix.arch && format(' {0}', matrix.arch) || '' }}
@@ -101,7 +101,7 @@ jobs:
       # is moby/buildkit:buildx-stable-1, a tag that moves.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
-          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
       - name: build arguments
         id: args
         env:
