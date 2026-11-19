@@ -3,7 +3,7 @@
 # The base is pinned by digest: a tag moves, a digest does not, so this build
 # and the release CI resolve the same bytes. Refresh it with
 # docker/bin/resolve-bases.sh, which rewrites docker/images.lock.
-ARG NGINX_BASE=nginx:mainline@sha256:5ab5b0b01097420873a3f3330f44248e34a3c2a3e8d5ee30658aeae8cb7435da
+ARG NGINX_BASE=nginx:mainline@sha256:689fbc6acfefc8a172d86d5779265fd52dd82e8c6b0c68c7d4aa35734340eb2a
 FROM ${NGINX_BASE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]

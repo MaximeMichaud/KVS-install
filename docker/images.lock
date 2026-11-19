@@ -16,26 +16,26 @@
 # packages the PHP-FPM and cron images install, and receive no security
 # update. setup.sh refuses a KVS archive that needs it.
 #
-# Resolved on 2026-11-04.
+# Resolved on 2026-11-19.
 
 # Build bases
 php-fpm	8.1	php:8.1-fpm@sha256:a3118db1911fdd3b3ac66605122ddc859286688ced86fc860fec6d19cc2d6c55
-php-fpm	8.2	php:8.2-fpm@sha256:ddd9658a2a569e3b5ec568beb9e5a532fb25ad0255f16712ff13ea3f03e01c28
-php-fpm	8.3	php:8.3-fpm@sha256:7c6bba25ec696f21a2e3ca0b7d3e4282c899095e7e628c1851b0432f14a49d76
-php-fpm	8.4	php:8.4-fpm@sha256:3a6527017daca7917709afa08a37388ec108db093857f31d642cfff2e6f0449e
+php-fpm	8.2	php:8.2-fpm@sha256:8438f8ea8465dda86393dd84f91da5a02cd5555e494a1000a98112c830669299
+php-fpm	8.3	php:8.3-fpm@sha256:03af352853b05e35ee15ab898a2755532573684c7d1120b246dbd4e3c90f5007
+php-fpm	8.4	php:8.4-fpm@sha256:212c3c9fc09d58f6b1a12b0b4a6a90fd44a209299a67633c2bccbc1dd53c55e0
 php-cli	8.1	php:8.1-cli@sha256:76e563191d1ade120313a8736df24154d21da5155c0756f147c0b01bd19d9087
-php-cli	8.2	php:8.2-cli@sha256:a76ea7d3dd8f65eefff85e9c883f4d146808e0075c30ae6bccbb2a3753d373b8
-php-cli	8.3	php:8.3-cli@sha256:600bce7c7acf524756e5aac989f4a763aed709960d7326970bb670f46efee53a
-php-cli	8.4	php:8.4-cli@sha256:7e7413ed31b8c42b31c939cc83b3758b1cd618f7bf3803f5a0c39f98d4adcbee
-nginx	-	nginx:mainline@sha256:5ab5b0b01097420873a3f3330f44248e34a3c2a3e8d5ee30658aeae8cb7435da
-debian	-	debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
-manticore	-	manticoresearch/manticore:29.9.0@sha256:461b419739a2bbbffb4be0b32db26c41d7b435bf7fd1fce95b414ca5ccbb3775
+php-cli	8.2	php:8.2-cli@sha256:604de2f0cba9e9dde16cf717c2f03b0948c99949bdf7c11cdf76326e0da7d2ea
+php-cli	8.3	php:8.3-cli@sha256:628102249d93494233b54490b785f12db9cd60f4dc89416dfca15973f2125f10
+php-cli	8.4	php:8.4-cli@sha256:d63e8b80cd4c6cfd01cfa7c910522e299cdc7ca1a2b6d6563db48df3c17e6c55
+nginx	-	nginx:mainline@sha256:689fbc6acfefc8a172d86d5779265fd52dd82e8c6b0c68c7d4aa35734340eb2a
+debian	-	debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+manticore	-	manticoresearch/manticore:29.9.0@sha256:b42044f30fbf2f39c65b9e523e4219667ed3b33b9598d72dfd92833a4c49657e
 
 # Images the compose file runs unchanged
-mariadb	11.4	mariadb:11.4.13@sha256:d1891ede5a559f1086f55053bb8cc1569b0298338c4d72d71725a7f74f6ba620
-mariadb	11.8	mariadb:11.8.9@sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd
-mariadb	12.3	mariadb:12.3.3@sha256:d46e102fa8b9b72bfcdeb56f9dd538742092119dc8b11f31fe662605cd234cd9
-memcached	-	memcached:1.6.45-alpine@sha256:6a089e37cbb8acd75c80c6c0667fe57ec54db68782fb1b3afb1d0eb265e50070
+mariadb	11.4	mariadb:11.4.13@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
+mariadb	11.8	mariadb:11.8.9@sha256:d36f18d65a0459510b8b0f643b226a6d299e3206486e2b64ff20754a6d291707
+mariadb	12.3	mariadb:12.3.3@sha256:4ebbcf100a3ba320766dfa0e1af008df12261301db6ef72798c7650f70794aed
+memcached	-	memcached:1.6.45-alpine@sha256:084fb554292d1447bc2c68b80c2331b98834514f56c866bc21a61be3c2ee376d
 dragonfly	-	docker.dragonflydb.io/dragonflydb/dragonfly:v1.35.1@sha256:af7f7f1143269c7ffe4128451dff8f8fc09e157d885abcc9bafeec832d2928e6
-acme	-	neilpang/acme.sh:3.1.6@sha256:92b201ade090fb8551e221fba553fd7d7167628284cb28fe73bd64ec4a7f3a2b
+acme	-	neilpang/acme.sh:3.1.6@sha256:fd072646a6acf330795e63ff231ec9fd65d80ca00ddaa83ca10617ab7fd48a9b
 alpine	-	alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6

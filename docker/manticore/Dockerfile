@@ -5,7 +5,7 @@
 # this used to follow: a tag moves, a digest does not, so this build and the
 # release CI resolve the same bytes. Refresh it with
 # docker/bin/resolve-bases.sh, which rewrites docker/images.lock.
-ARG MANTICORE_BASE=manticoresearch/manticore:29.9.0@sha256:461b419739a2bbbffb4be0b32db26c41d7b435bf7fd1fce95b414ca5ccbb3775
+ARG MANTICORE_BASE=manticoresearch/manticore:29.9.0@sha256:b42044f30fbf2f39c65b9e523e4219667ed3b33b9598d72dfd92833a4c49657e
 FROM ${MANTICORE_BASE}
 
 # Install mariadb-client for indexer to access database.
