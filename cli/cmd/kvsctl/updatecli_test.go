@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -456,5 +458,199 @@ func TestUpdateCLIUsesStateWithBrokenEnv(t *testing.T) {
 	}
 	if err := cmd.RunE(cmd, nil); err == nil || !errors.Is(err, syscall.ENOTDIR) {
 		t.Errorf("unusable root: %v", err)
+	}
+}
+
+// documentedInstallKey finds the independently authenticated key the example
+// uses among the release build's keys, including during a rotation.
+func documentedInstallKey(t *testing.T, script, specs string) string {
+	t.Helper()
+	keys, err := manifest.ParseKeys(strings.Split(specs, ","))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range keys {
+		encoded := base64.StdEncoding.EncodeToString(key)
+		if strings.Contains(script, "\nkey = "+strconv.Quote(encoded)+" ") {
+			return encoded
+		}
+	}
+	t.Fatal("the documented key is absent from the embedded release keys")
+	return ""
+}
+
+func TestDocumentedFirstInstall(t *testing.T) {
+	readme := readFile(t, "../../README.md")
+	_, section, ok := strings.Cut(readme, "## Installing kvsctl\n")
+	if !ok {
+		t.Fatal("missing installation instructions")
+	}
+	section, _, _ = strings.Cut(section, "\n## ")
+	_, block, ok := strings.Cut(section, "```sh\n")
+	script, _, end := strings.Cut(block, "```")
+	if !ok || !end {
+		t.Fatal("missing installation commands")
+	}
+
+	const invocation = "sh kvsctl-install.sh"
+	if !strings.Contains(section, "`"+invocation+"`") || !strings.HasPrefix(script, "#!/bin/sh\n") {
+		t.Fatal("missing instructions to save and invoke the script with sh")
+	}
+	callers := map[string]string{"sh": "sh"}
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		if exe, err := exec.LookPath(shell); err == nil {
+			callers[shell] = exe
+		}
+	}
+	realInstall, err := exec.LookPath("install")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The documented block has only the utilities available to a fresh server.
+	tools := t.TempDir()
+	for _, name := range []string{"sh", "mktemp", "rm", "cp", "python3", "openssl", "sha256sum", "chmod", "cat", "timeout", "mv"} {
+		exe, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(exe, filepath.Join(tools, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Limit only the final copy, after the signature and version checks.
+	wrapper := `#!/usr/bin/env python3
+import os, resource, signal, sys
+with open(os.environ["KVSCTL_COPY_LOG"], "w") as log:
+    print(os.path.abspath(sys.argv[-1]), file=log)
+if os.environ.get("KVSCTL_LIMIT_INSTALL") == "1":
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (40, 40))
+os.execv(os.environ["KVSCTL_REAL_INSTALL"], sys.argv)
+`
+	if err := os.WriteFile(filepath.Join(tools, "install"), []byte(wrapper), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KVSCTL_REAL_INSTALL", realInstall)
+	t.Setenv("PATH", tools)
+	t.Setenv("TMPDIR", t.TempDir())
+	rel := testRelease("1.2.0", "2026-10-01", "")
+	build := fakeBuild(t, "echo 'kvsctl 1.2.0 (linux/amd64)'")
+	binary := strings.TrimPrefix(build.URL, "file://")
+	original := readFile(t, binary)
+	build.URL = "https://downloads.example.invalid/kvsctl-linux-amd64"
+	rel.CLI = map[string]manifest.Asset{"linux-amd64": build}
+	url := signedManifest(t, rel)
+	documented := documentedInstallKey(t, script, ReleasePublicKey)
+	newKey := func() (string, ed25519.PrivateKey) {
+		t.Helper()
+		pub, priv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(pub), priv
+	}
+	oldKey, oldPrivate := newKey()
+	nextKey, nextPrivate := newKey()
+	// Keep this check active between rotations, in either key order.
+	for _, specs := range []string{ReleasePublicKey + "," + nextKey, nextKey + "," + ReleasePublicKey} {
+		if got := documentedInstallKey(t, script, specs); got != documented {
+			t.Fatalf("documented key changed during rotation: %s", got)
+		}
+	}
+	if strings.Count(script, "/usr/local/bin/kvsctl") != 1 {
+		t.Fatal("expected one install destination")
+	}
+	script = strings.Replace(script, "/usr/local/bin/kvsctl", `"$KVSCTL_TEST_INSTALL"`, 1)
+	manifestPath := strings.TrimPrefix(url, "file://")
+	raw := readFile(t, manifestPath)
+	untrusted := readFile(t, manifestPath+".sig") // signed by the unrelated lab key
+	sign := func(private ed25519.PrivateKey, body string) string {
+		t.Helper()
+		data, err := json.Marshal(manifest.Signature{Alg: manifest.AlgEd25519, Sig: base64.StdEncoding.EncodeToString(ed25519.Sign(private, []byte(body)))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	sig := sign(oldPrivate, raw)
+	rotation := "[" + sig + "," + sign(nextPrivate, raw) + "]"
+	candidate := strings.Replace(raw, `"channel":"stable"`, `"channel":"candidate"`, 1)
+	wrongVersion := strings.Replace(raw, `"version":"1.2.0"`, `"version":"2.0.0"`, 1)
+	for _, tc := range []struct{ name, key, signature, manifest, asset, wantError string }{
+		{"write error", oldKey, sig, raw, original, "File too large"},
+		{"single signature", oldKey, sig, raw, original, ""},
+		{"rotation old key", oldKey, rotation, raw, original, ""},
+		{"rotation new key", nextKey, rotation, raw, original, ""},
+		{"wrong version", oldKey, sign(oldPrivate, wrongVersion), wrongVersion, original, "unexpected binary version"},
+		{"candidate list", oldKey, sign(oldPrivate, candidate), candidate, original, "expected a stable release"},
+		{"untrusted signer", oldKey, untrusted, raw, original, "signature verification failed"},
+		{"changed manifest", oldKey, sig, raw + "\n", original, "signature verification failed"},
+		{"changed binary", oldKey, sig, raw, original + ": > \"$KVSCTL_TEST_PROBE\"\n", "FAILED"},
+	} {
+		block := strings.Replace(script, documented, tc.key, 1)
+		for shell, exe := range callers {
+			contexts := map[string]string{"standalone": invocation}
+			if shell != "fish" {
+				contexts["if"] = "if " + invocation + "; then exit 0; else exit 1; fi"
+				contexts["or"] = invocation + " || exit 1"
+			}
+			for context, command := range contexts {
+				t.Run(tc.name+"/"+shell+"/"+context, func(t *testing.T) {
+					dir := t.TempDir()
+					destination := filepath.Join(dir, "installed")
+					copyLog := filepath.Join(dir, "install-target")
+					t.Setenv("KVSCTL_COPY_LOG", copyLog)
+					t.Setenv("KVSCTL_TEST_INSTALL", destination)
+					if tc.name == "write error" {
+						t.Setenv("KVSCTL_LIMIT_INSTALL", "1")
+						t.Setenv("LC_ALL", "C")
+					}
+					if err := os.WriteFile(filepath.Join(dir, "kvsctl-install.sh"), []byte(block), 0600); err != nil {
+						t.Fatal(err)
+					}
+					probe := filepath.Join(dir, "probe-ran")
+					t.Setenv("KVSCTL_TEST_PROBE", probe)
+					if err := os.WriteFile(destination, []byte("previous install"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					for name, data := range map[string]string{
+						"manifest.json": tc.manifest, "manifest.json.sig": tc.signature, "kvsctl-linux-amd64": tc.asset,
+						"SHA256SUMS": fmt.Sprintf("%x  kvsctl-linux-amd64\n", sha256.Sum256([]byte(tc.asset))),
+					} {
+						if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cmd := exec.Command(exe, "-c", command)
+					cmd.Dir = dir
+					out, err := cmd.CombinedOutput()
+					if tc.wantError == "" || tc.name == "write error" {
+						copied := strings.TrimSuffix(readFile(t, copyLog), "\n")
+						if copied == destination || filepath.Dir(copied) != filepath.Dir(destination) {
+							t.Errorf("copy went to %q, want a temporary beside %q", copied, destination)
+						}
+					}
+					leftovers, globErr := filepath.Glob(filepath.Join(dir, ".kvsctl.*"))
+					if globErr != nil || len(leftovers) != 0 {
+						t.Fatalf("temporary files: %v, %v", leftovers, globErr)
+					}
+					if tc.wantError == "" {
+						if err != nil || readFile(t, destination) != original {
+							t.Fatalf("valid install: %v, %s", err, out)
+						}
+						return
+					}
+					if err == nil || !strings.Contains(string(out), tc.wantError) {
+						t.Errorf("expected %q: %v, %s", tc.wantError, err, out)
+					}
+					if got := readFile(t, destination); got != "previous install" {
+						t.Error("destination changed after failed verification")
+					}
+					if _, err := os.Stat(probe); !os.IsNotExist(err) {
+						t.Errorf("unverified asset ran: %v", err)
+					}
+				})
+			}
+		}
 	}
 }

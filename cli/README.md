@@ -60,21 +60,82 @@ reaches its engine over TLS, or through ssh, is refused: set `DOCKER_HOST`
 to the engine of the stack. `kvsctl status` and `kvsctl check` name the
 engine when it is not `unix:///var/run/docker.sock`.
 
-As root, take the binary of the latest stable release with the checksums
-published next to it, and check it before installing it:
+Download `manifest.json`, `manifest.json.sig` and `kvsctl-linux-amd64`
+from the same stable release on the project's Releases page. Save them
+together. From that directory, save the script below as
+`kvsctl-install.sh`, then run `sh kvsctl-install.sh` as root on linux/amd64
+with Python 3.6+, OpenSSL 3 and GNU coreutils.
+
+Before running the script, compare its full base64 public key with one of
+the keys in `ReleasePublicKey` in `cli/cmd/kvsctl/main.go` on a previously
+authenticated source checkout, or confirm it with a maintainer through an
+independently authenticated channel. Confirm a replacement key the same
+way on rotation.
 
 ```sh
-cd "$(mktemp -d)"
-curl -fsSLO https://github.com/MaximeMichaud/KVS-install/releases/latest/download/kvsctl-linux-amd64
-curl -fsSLO https://github.com/MaximeMichaud/KVS-install/releases/latest/download/SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS
-install -m 0755 kvsctl-linux-amd64 /usr/local/bin/kvsctl
-kvsctl version
+#!/bin/sh
+set -eu
+work=$(mktemp -d)
+dest=/usr/local/bin/kvsctl
+pending=
+trap 'rm -rf "$work"; if [ -n "$pending" ]; then rm -f "$pending"; fi' 0
+cp manifest.json manifest.json.sig kvsctl-linux-amd64 "$work/"
+cd "$work"
+python3 -I - <<'PYTHON'
+import base64
+import json
+import re
+import subprocess
+from pathlib import Path
+
+key = "7WdTh7yZdgLKTLRLGdglgcvayrU7J5Hgbp5nWJuef7A="  # pragma: allowlist secret
+# SubjectPublicKeyInfo header for a raw Ed25519 public key.
+Path("key.der").write_bytes(bytes.fromhex("302a300506032b6570032100") + base64.b64decode(key))
+signatures = json.loads(Path("manifest.json.sig").read_text())
+if isinstance(signatures, dict):
+    signatures = [signatures]
+for entry in signatures:
+    if entry.get("alg", "ed25519") != "ed25519":
+        continue
+    try:
+        signature = base64.b64decode(entry["sig"], validate=True)
+    except (ValueError, KeyError):
+        continue
+    Path("sig.bin").write_bytes(signature)
+    result = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
+                             "-inkey", "key.der", "-rawin", "-in", "manifest.json",
+                             "-sigfile", "sig.bin"], stdout=subprocess.DEVNULL)
+    if result.returncode == 0:
+        break
+else:
+    raise SystemExit("manifest signature verification failed")
+
+manifest = json.loads(Path("manifest.json").read_text())
+latest = manifest["releases"][0]  # The publisher sorts releases newest first.
+version = latest["version"]
+if manifest["channel"] != "stable" or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    raise SystemExit("expected a stable release")
+digest = latest["cli"]["linux-amd64"]["sha256"]
+if not re.fullmatch(r"[0-9a-f]{64}", digest):
+    raise SystemExit("invalid signed checksum")
+Path("checksum").write_text(digest + "  kvsctl-linux-amd64\n")
+Path("version").write_text(version)
+PYTHON
+sha256sum -c checksum
+chmod 0700 kvsctl-linux-amd64
+expected=$(cat version)
+reported=$(timeout 10 ./kvsctl-linux-amd64 version)
+case "$reported" in
+  "kvsctl $expected ("*) ;;
+  *) echo "unexpected binary version" >&2; exit 1 ;;
+esac
+pending=$(mktemp "${dest%/*}/.kvsctl.XXXXXXXXXX")
+install -m 0755 kvsctl-linux-amd64 "$pending"
+mv -fT "$pending" "$dest"
+pending=
 ```
 
-`sha256sum` must answer `kvsctl-linux-amd64: OK`; on any other answer, do
-not install the file. GitHub never marks a release candidate as the latest
-release, so these URLs serve the latest stable one. From then on,
+From then on,
 `kvsctl update-cli` replaces the binary with the build of the latest stable
 release (see [Commands that write](#commands-that-write)), and
 `kvsctl version --check` says whether that one is newer.
