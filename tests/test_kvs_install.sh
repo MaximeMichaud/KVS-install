@@ -263,33 +263,6 @@ test_certificate_names_follow_the_www_record() {
   USE_WWW=false
 }
 
-test_yt_dlp_step_is_repeatable() {
-  local temp_dir
-  local status
-  temp_dir=$(mktemp -d)
-  trap 'rm -rf "$temp_dir"' RETURN
-  YT_DLP_BIN_DIR="$temp_dir"
-
-  curl() {
-    local output=""
-    while (($# > 0)); do
-      [[ "$1" == -o ]] && output="$2"
-      shift
-    done
-    printf 'binary\n' >"$output"
-  }
-
-  install_yt-dlp >/dev/null 2>&1 || fail "first yt-dlp installation failed" || return 1
-  [[ -L "$temp_dir/youtube-dl" ]] || fail "youtube-dl link was not created" || return 1
-  install_yt-dlp >/dev/null 2>&1
-  status=$?
-  assert_equal "0" "$status" "a second yt-dlp installation must succeed with the link present" || return 1
-  [[ -x "$temp_dir/yt-dlp" ]] || fail "yt-dlp is not executable after the second run" || return 1
-
-  unset -f curl
-  unset YT_DLP_BIN_DIR
-}
-
 test_package_steps_stop_when_apt_fails() {
   local temp_dir
   local status
@@ -1308,7 +1281,11 @@ EOF
     fail "KVS cron still runs from root's crontab"
     return 1
   fi
-  count=$(grep -Fc "yt-dlp/releases/latest/download/yt-dlp" "$root_state" || true)
+  if grep -Fq "yt-dlp/releases/latest/download/yt-dlp" "$root_state"; then
+    fail "an old in-place yt-dlp updater survived the migration"
+    return 1
+  fi
+  count=$(grep -Fc "/usr/local/bin/kvs-update-yt-dlp" "$root_state" || true)
   assert_equal "1" "$count" "root yt-dlp updater is not idempotent" || return 1
   active_count=$(grep -v '^[[:space:]]*#' "$www_data_state" | grep -Fc "cron.php" || true)
   assert_equal "5" "$active_count" "www-data KVS cron did not preserve all active site jobs" || return 1
@@ -2488,7 +2465,6 @@ run_test "visual progress failures are non-fatal" test_visual_progress_failure_i
 run_test "headless PHP detection" test_headless_php_detection || failures=$((failures + 1))
 run_test "PHP choice for unencoded archives" test_php_version_choice_for_unencoded_archive || failures=$((failures + 1))
 run_test "certificate names follow the www record" test_certificate_names_follow_the_www_record || failures=$((failures + 1))
-run_test "yt-dlp step is repeatable" test_yt_dlp_step_is_repeatable || failures=$((failures + 1))
 run_test "package steps stop when apt fails" test_package_steps_stop_when_apt_fails || failures=$((failures + 1))
 run_test "nginx step needs a usable mime.types" test_nginx_step_needs_a_usable_mime_types || failures=$((failures + 1))
 run_test "nginx files come from the checkout or the branch" test_nginx_files_come_from_the_checkout_or_the_branch || failures=$((failures + 1))

@@ -826,16 +826,76 @@ function aptinstall() {
     apt_install "${packages[@]}"
 }
 
-function install_yt-dlp() {
-  local bin_dir="${YT_DLP_BIN_DIR:-/usr/local/bin}"
-
-  curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$bin_dir/yt-dlp" || return $?
-  chmod a+rx "$bin_dir/yt-dlp" || return $?
-  # Keep the legacy name. A link left by an earlier run is not a failure.
-  if [[ ! -e "$bin_dir/youtube-dl" ]]; then
-    ln -s "$bin_dir/yt-dlp" "$bin_dir/youtube-dl" || return $?
-  fi
+yt_dlp_bin_dir() {
+    local path="${YT_DLP_BIN_DIR:-/usr/local/bin}" physical
+    if [[ "$path" != *$'\n'* && -d "$path" ]] &&
+        IFS= read -r -d '' physical < <(realpath -ze -- "$path") && [[ "$physical" != *$'\n'* ]]; then
+        printf '%s\n' "$physical"
+    else
+        echo "yt-dlp requires an existing bin directory with no newline in its path" >&2
+        return 1
+    fi
 }
+
+yt_dlp_reports_version() {
+    local version
+    local -a runner=()
+    if ((EUID == 0)); then
+        runner=(setpriv --reuid=www-data --regid=www-data --clear-groups --no-new-privs --)
+    fi
+    version=$(cd / && "${runner[@]}" "$1" --version) && [[ "$version" =~ ^[0-9]+([.][0-9]+)+$ ]]
+}
+
+# Also written into the nightly updater so a standalone run from a pipe
+# does not need a checkout or a persistent copy of this installer.
+update_yt_dlp() (
+    local bin_dir="$1" release temp manifest expected actual
+    release=https://github.com/yt-dlp/yt-dlp/releases/latest/download
+    temp=$(mktemp "$bin_dir/.yt-dlp.XXXXXX") || return 1
+    trap 'rm -f -- "$temp"' EXIT
+    curl -fsSL "$release/yt-dlp" -o "$temp" || return 1
+    manifest=$(curl -fsSL "$release/SHA2-256SUMS") || return 1
+    expected=$(awk '$2 == "yt-dlp" { print $1; exit }' <<< "$manifest")
+    actual=$(sha256sum < "$temp") || return 1
+    if [[ "$expected" != "${actual%% *}" ]]; then
+        echo "yt-dlp failed its release checksum" >&2
+        return 1
+    fi
+    chmod 755 "$temp" || return 1
+    yt_dlp_reports_version "$temp" || return 1
+    mv -fT -- "$temp" "$bin_dir/yt-dlp"
+)
+
+function install_yt-dlp() (
+    local bin_dir helper current migrated
+    bin_dir=$(yt_dlp_bin_dir) || return 1
+    helper=$(mktemp "$bin_dir/.yt-dlp.XXXXXX") || return 1
+    trap 'rm -f -- "$helper"' EXIT
+    # shellcheck disable=SC2016 # The nightly script expands its own path.
+    {
+        printf '%s\n' '#!/bin/bash' &&
+        declare -f yt_dlp_reports_version update_yt_dlp &&
+        printf '%s\n' 'update_yt_dlp "$(dirname -- "$0")"'
+    } > "$helper" && chmod 755 "$helper" && mv -fT -- "$helper" "$bin_dir/kvs-update-yt-dlp" || return 1
+
+    # Replace an older direct-download job before attempting today's update.
+    # The site's PHP jobs are installed later, after KVS is configured.
+    current=$(read_crontab root) || return 1
+    if [[ "$current" == *'yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp'* ]]; then
+        migrated=$(with_yt_dlp_cronjob "$current") || return 1
+        printf '%s\n' "$migrated" | crontab - || return 1
+    fi
+    if ! update_yt_dlp "$bin_dir"; then
+        if [[ ! -f "$bin_dir/yt-dlp" ]] || ! yt_dlp_reports_version "$bin_dir/yt-dlp"; then
+            echo "yt-dlp update failed and no usable installed version is available" >&2
+            return 1
+        fi
+        echo "Update failed; keeping the installed yt-dlp" >&2
+    fi
+    if [[ ! -e "$bin_dir/youtube-dl" ]]; then
+        ln -s "$bin_dir/yt-dlp" "$bin_dir/youtube-dl" || return 1
+    fi
+)
 
 validate_kvs_domain() {
   local domain="${1,,}"
@@ -1851,6 +1911,26 @@ read_crontab() {
   return "$status"
 }
 
+# Render the updater separately so a migration does not start PHP jobs early.
+with_yt_dlp_cronjob() {
+  local current="$1" bin_dir helper
+  bin_dir=$(yt_dlp_bin_dir) || return 1
+  helper="$bin_dir/kvs-update-yt-dlp"
+  # Single-quote the path for /bin/sh. Escape percent outside the quotes
+  # so both cron and a shell running the command directly treat it literally.
+  helper=${helper//\'/\'\\\'\'}
+  helper=${helper//%/\'\\%\'}
+  awk '
+    $0 == "# BEGIN KVS YT-DLP UPDATE" { skip = 1; next }
+    $0 == "# END KVS YT-DLP UPDATE" { skip = 0; next }
+    skip || $0 == "#yt-dlp Automatic Update" { next }
+    /^0 0 [*] [*] [*] / && index($0, "yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp") { next }
+    { print }
+  ' <<< "$current" || return 1
+  printf '%s\n' "# BEGIN KVS YT-DLP UPDATE" \
+    "0 0 * * * '$helper' > /dev/null 2>&1" "# END KVS YT-DLP UPDATE"
+}
+
 insert_cronjob() {
   local original_root_crontab
   local original_www_data_crontab
@@ -1886,12 +1966,9 @@ insert_cronjob() {
     $0 == "# END KVS CRON" { skip = 0; next }
     $0 ~ /^# BEGIN KVS CRON: / { skip = 1; next }
     $0 ~ /^# END KVS CRON: / { skip = 0; next }
-    $0 == "# BEGIN KVS YT-DLP UPDATE" { skip = 1; next }
-    $0 == "# END KVS YT-DLP UPDATE" { skip = 0; next }
     skip { next }
-    $0 == "#KVS" || $0 == "#yt-dlp Automatic Update" { next }
+    $0 == "#KVS" { next }
     kvs_domain($0) != "" { next }
-    index($0, "yt-dlp/releases/latest/download/yt-dlp") { next }
     { print }
   ')
 
@@ -1969,18 +2046,15 @@ insert_cronjob() {
     }
   ')
 
+  new_root_crontab=$(with_yt_dlp_cronjob "$new_root_crontab") || return 1
+
   # Install the unprivileged jobs first. If updating root fails, restore the
   # previous www-data snapshot so the migration is not left half-applied.
   printf '%s\n' "$new_www_data_crontab" | crontab -u www-data -
   status=$?
   [ "$status" -eq 0 ] || return "$status"
 
-  {
-    [[ -n "$new_root_crontab" ]] && printf '%s\n' "$new_root_crontab"
-    echo "# BEGIN KVS YT-DLP UPDATE"
-    echo "0 0 * * * /bin/bash -c 'curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp' > /dev/null 2>&1"
-    echo "# END KVS YT-DLP UPDATE"
-  } | crontab -
+  printf '%s\n' "$new_root_crontab" | crontab -
   status=$?
   if ((status != 0)); then
     printf '%s\n' "$original_www_data_crontab" | crontab -u www-data - \
