@@ -2084,7 +2084,10 @@ test_install_rerun_keeps_setup_db_restricted() {
   printf "<?php\ndefine('DB_LOGIN','site.example.com');\ndefine('DB_PASS','RealPass123');\ndefine('DB_DEVICE','site.example.com');\n" \
     >"$site/admin/include/setup_db.php"
   chmod 600 "$site/admin/include/setup_db.php"
-  chown() { :; }
+  mkdir "$temp_dir/bin"
+  printf '#!/bin/sh\nexit 0\n' >"$temp_dir/bin/chown"
+  chmod +x "$temp_dir/bin/chown"
+  local PATH="$temp_dir/bin:$PATH"
   mariadb() {
     [ -f "$temp_dir/db_down" ] && return 1
     case "$*" in

@@ -12,9 +12,14 @@ site="$KVS_WWW_ROOT/$DOMAIN"
 rules="$KVS_NGINX_DIR/globals/kvs.conf"
 archive="$KVS_ARCHIVE_DIR/KVS_7.0_[example.test].zip"
 mkdir -p "$site/admin/include" "$KVS_ARCHIVE_DIR" "$KVS_NGINX_DIR/globals" "$work/payload/_INSTALL"
-echo 'existing settings' > "$site/admin/include/setup.php"
+printf '%s\n' '<?php' "\$config['project_url'] = 'https://example.test';" > "$site/admin/include/setup.php"
 touch "$site/admin/include/setup_db.php"
 chown() { :; }
+# find runs chown as a program: accept the change to the site's account.
+mkdir "$work/bin"
+printf '%s\n' '#!/bin/sh' 'case " $* " in *" www-data:www-data "*) exit 0 ;; esac' 'exec /usr/bin/chown "$@"' > "$work/bin/chown"
+chmod +x "$work/bin/chown"
+PATH="$work/bin:$PATH"
 provision_kvs_database() { touch "$work/db"; }
 make_archive() {
     rm -f "$archive"
@@ -114,7 +119,8 @@ rm "$rules"
 # A fresh installation consumes its archive and uses the extracted member.
 rm -r "$site"
 mkdir -p "$work/payload/admin/include"
-touch "$work/payload/admin/include/"{setup,setup_db}.php
+printf '%s\n' '<?php' "\$config['project_url'] = 'https://example.test';" > "$work/payload/admin/include/setup.php"
+touch "$work/payload/admin/include/setup_db.php"
 echo 'fresh archive rules' > "$work/payload/_INSTALL/nginx_config.txt"
 make_archive
 install_KVS || fail "fresh installation failed"

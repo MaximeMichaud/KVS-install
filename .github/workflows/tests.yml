@@ -39,7 +39,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            gettext-base uidmap python3-yaml gnutls-bin
+            gettext-base uidmap python3-yaml gnutls-bin acl
           if sort --version | grep -q uutils; then
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
               --allow-remove-essential coreutils-from-gnu coreutils-from-uutils-

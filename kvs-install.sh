@@ -1511,6 +1511,210 @@ read_kvs_database_password() {
   grep -oP "(?<=define\('DB_PASS',')[^']+" "$file" || true
 }
 
+# PHP's tokenizer distinguishes quoted literals from interpolation and ignores
+# comments. Parse the site's text as data, including when checking its scope.
+kvs_project_url_literal() {
+    local php_cli="php${PHP:-}"
+    command -v "$php_cli" >/dev/null || php_cli=php
+    "$php_cli" -- "$@" <<'PHP'
+<?php
+list(, $mode, $file, $target, $displayPath) = $argv;
+function refuse($reason) {
+    global $displayPath;
+    file_put_contents('php://stderr', "ERROR: project_url in $displayPath: $reason\n");
+    exit(1);
+}
+
+// Only numeric escapes in a double-quoted key can spell letters or underscores.
+// Preserve all other escapes so that a different key cannot become project_url.
+function isProjectUrlKey($token) {
+    if ($token[0] !== T_CONSTANT_ENCAPSED_STRING) return false;
+    $quoted = ltrim($token[1], 'bB');
+    $key = substr($quoted, 1, -1);
+    if ($quoted[0] === '"' && strpos($key, '\\') !== false) {
+        $key = preg_replace_callback('~\\\\(?:[0-7]{1,3}|[xX][\da-fA-F]{1,2}|u\{[\da-fA-F]+\}|.)~s', function ($m) {
+            $escape = substr($m[0], 1);
+            if ($escape[0] === 'u' && strlen($escape) > 1) {
+                $code = hexdec(substr($escape, 2, -1));
+                return $code < 128 ? chr($code) : $m[0];
+            }
+            if (strlen($escape) > 1 && in_array($escape[0], ['x', 'X'], true)) return chr(hexdec(substr($escape, 1)));
+            if ($escape[0] >= '0' && $escape[0] <= '7') return chr(octdec($escape) & 255);
+            return $m[0];
+        }, $key);
+    }
+    return $key === 'project_url';
+}
+
+function parses($source) {
+    try {
+        token_get_all($source, TOKEN_PARSE);
+        return true;
+    } catch (ParseError $error) {
+        return false;
+    }
+}
+
+// A prefix ending at a statement boundary can be followed by a file-scope
+// declaration. Keeping only the prefix also rules out unclosed outer blocks.
+function atFileScope($prefix) {
+    return parses($prefix . 'const KVS_SCOPE_PROBE = 0;');
+}
+
+function inIfBody($source, $tokens, $at) {
+    for ($head = $at - 1; $head >= 0; --$head) {
+        $kind = $tokens[$head][0];
+        if (!in_array($kind, [T_IF, T_ELSEIF, T_ELSE], true)) continue;
+        $body = $head + 1;
+        if ($kind !== T_ELSE) {
+            // Skip the balanced condition, including any nested expressions.
+            $depth = 0;
+            do {
+                list($type, $text) = $tokens[$body++];
+                if ($type === null && $text === '(') ++$depth;
+                if ($type === null && $text === ')') --$depth;
+            } while ($depth && $body <= $at);
+            if ($depth) continue;
+        }
+        // The prefix of a braced or alternative body must be a complete
+        // statement list. An unbraced body starts at the candidate itself.
+        $opener = $tokens[$body][1];
+        if ($opener === '{' || $opener === ':') {
+            $from = $tokens[$body][2] + 1;
+            if ($body >= $at || !atFileScope('<?php ' . substr($source, $from, $tokens[$at][2] - $from))) continue;
+        } elseif ($body !== $at) {
+            continue;
+        }
+        if ($kind !== T_IF) {
+            // The nearest if that parses with this else owns the branch,
+            // including PHP's dangling else in nested unbraced statements.
+            $end = $tokens[$head][2];
+            $tail = $opener === ':' ? 'else: endif;' : 'else {}';
+            do {
+                --$head;
+                if ($head < 0) return false;
+                $start = $tokens[$head][2];
+            } while ($tokens[$head][0] !== T_IF ||
+                !parses('<?php ' . substr($source, $start, $end - $start) . $tail));
+        }
+        return atFileScope(substr($source, 0, $tokens[$head][2])) || inIfBody($source, $tokens, $head);
+    }
+    return false;
+}
+
+$source = file_get_contents($file);
+if ($source === false) refuse('could not read the configuration');
+try {
+    $parsed = token_get_all($source, TOKEN_PARSE);
+} catch (ParseError $error) {
+    refuse('could not parse the configuration');
+}
+$tokens = [];
+$offset = 0;
+foreach ($parsed as $token) {
+    list($kind, $text) = is_array($token) ? $token : [null, $token];
+    if (!in_array($kind, [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+        $tokens[] = [$kind, $text, $offset];
+    }
+    $offset += strlen($text);
+}
+
+$main = [];
+$assignments = 0;
+$compound = [T_CONCAT_EQUAL, T_PLUS_EQUAL, T_MINUS_EQUAL, T_MUL_EQUAL, T_DIV_EQUAL,
+    T_MOD_EQUAL, T_POW_EQUAL, T_AND_EQUAL, T_OR_EQUAL, T_XOR_EQUAL, T_SL_EQUAL, T_SR_EQUAL, T_COALESCE_EQUAL];
+foreach ($tokens as $i => $token) {
+    if ($token[0] !== T_VARIABLE || $token[1] !== '$config') continue;
+    $start = $end = $i;
+    while (($tokens[$start-1][1] ?? '') === '(' && ($tokens[$end+1][1] ?? '') === ')') {
+        --$start;
+        ++$end;
+    }
+    if (($tokens[$end+1][1] ?? '') !== '[') continue;
+    $key = $end + 2;
+    while (($tokens[$key][1] ?? '') === '(') ++$key;
+    if (!isProjectUrlKey($tokens[$key])) continue;
+    $close = $key + 1;
+    while (($tokens[$close][1] ?? '') === ')') ++$close;
+    if (($tokens[$close][1] ?? '') !== ']') continue;
+    $operator = $tokens[$close+1][1] ?? '';
+    if ($operator !== '=' && !in_array($tokens[$close+1][0] ?? null, $compound, true)) continue;
+    if ($start !== $i) {
+        // Grouping parentheses can be removed. Function-call parentheses cannot.
+        if (!parses(substr_replace($source, ' $config ', $tokens[$start][2],
+                $tokens[$end][2] + 1 - $tokens[$start][2]))) continue;
+    }
+    if ($operator !== '=') refuse('computed assignment (compound operator ' . $operator . ')');
+    ++$assignments;
+    if (!atFileScope(substr($source, 0, $tokens[$start][2]))) {
+        if (!inIfBody($source, $tokens, $start)) refuse('ambiguous assignment (expected a standalone if, elseif or else override)');
+        // Stop at the end of this statement, including when its RHS contains a closure.
+        $braces = 0;
+        for ($rhs = $close + 2; $rhs < count($tokens); ++$rhs) {
+            list($type, $text) = $tokens[$rhs];
+            if (($type === null && $text === '{') || $type === T_CURLY_OPEN || $type === T_DOLLAR_OPEN_CURLY_BRACES) ++$braces;
+            if ($type === null && $text === '}') --$braces;
+            if (!$braces && (($type === null && $text === ';') || $type === T_CLOSE_TAG)) break;
+            if (($type === null && $text === '=') || in_array($type, $compound, true)) {
+                refuse('ambiguous chained assignment');
+            }
+        }
+        continue;
+    }
+    $main[] = $close + 2;
+}
+if (count($main) > 1 || (!$main && $assignments > 1)) refuse('ambiguous main assignment');
+if (!$main) refuse('missing main assignment');
+$i = $main[0];
+list($kind, $literal, $offset) = $tokens[$i];
+$end = $tokens[$i+1];
+if ($kind !== T_CONSTANT_ENCAPSED_STRING || ($end[1] !== ';' && $end[0] !== T_CLOSE_TAG)) {
+    refuse('computed main assignment');
+}
+$expected = var_export($target, true);
+if ($mode === 'verify') {
+    if ($literal !== $expected) refuse('verification failed');
+    exit;
+}
+
+// Address the literal's line and retain its exact prefix, even if the same
+// quoted value occurs earlier on that line. N also handles multiline literals.
+$before = substr($source, 0, $offset);
+$line = substr_count($before, "\n") + 1;
+$prefix = substr(strrchr("\n" . $before, "\n"), 1);
+function sedPattern($text) {
+    $escapes = ["\n" => '\n'];
+    foreach (str_split('.[]{}()*+?^$|\\~') as $char) $escapes[$char] = '\\' . $char;
+    return strtr($text, $escapes);
+}
+$replacement = strtr($expected, ['\\' => '\\\\', '&' => '\\&', '~' => '\\~']);
+echo $line, "{\n", str_repeat("N\n", substr_count($literal, "\n")),
+    's~^(', sedPattern($prefix), ')', sedPattern($literal), '~\1', $replacement, "~\n}\n";
+PHP
+}
+
+set_kvs_project_url() (
+    local file=$1 target=$2 stage
+    local -a edits
+    if [[ ! -f $file ]]; then
+        echo "ERROR: project_url in $file: missing setup.php" >&2
+        return 1
+    fi
+    stage=$(mktemp -d) || return $?
+    trap 'rm -rf -- "$stage"' EXIT
+    kvs_project_url_literal script "$file" "$target" "$file" >"$stage/edit.sed" || return $?
+    edits=(-E -f "$stage/edit.sed")
+    if [[ -n ${3:-} ]]; then
+        edits+=(-e "s|/PATH|$3|" -e 's|/usr/local/bin/|/usr/bin/|'
+            -e "s|/usr/bin/php[0-9.]*|/usr/bin/php$PHP|"
+            -e "/\\\$config\[.project_title.\]=/s/KVS/${DOMAIN}/")
+    fi
+    LC_ALL=C sed "${edits[@]}" -- "$file" >"$stage/setup.php" || return $?
+    kvs_project_url_literal verify "$stage/setup.php" "$target" "$file" || return $?
+    LC_ALL=C sed -i --follow-symlinks "${edits[@]}" -- "$file" || return $?
+    kvs_project_url_literal verify "$file" "$target" "$file"
+)
+
 configure_kvs_database_file() {
   local file="$1"
   local domain="$2"
@@ -1703,12 +1907,21 @@ install_kvs_rewrites() (
 function install_KVS() {
     KVS_PATH="${KVS_WWW_ROOT:-/var/www}/$DOMAIN"
     local archive_dir="${KVS_ARCHIVE_DIR:-/root}" fresh_archive=""
+    local setup="$KVS_PATH/admin/include/setup.php" db_setup="$KVS_PATH/admin/include/setup_db.php"
+    local -a keep_setup=()
+    if [[ -f "$db_setup" && -f "$setup" ]]; then
+        keep_setup=('!' -samefile "$(realpath -e -- "$setup")")
+    fi
     extract_kvs_archive "$KVS_PATH" "$archive_dir" fresh_archive || return $?
-    chown -R www-data:www-data "$KVS_PATH"
-    chmod -R 755 "$KVS_PATH"
-    # The blanket chmod opened setup_db.php, which holds the password on a
-    # re-run: close it again before any step can stop the install.
-    restrict_setup_db_file "$KVS_PATH/admin/include/setup_db.php"
+    restrict_setup_db_file "$db_setup" || return $?
+    set_kvs_project_url "$setup" "https://$URL" "$KVS_PATH" || return $?
+    # An installed site's setup.php retains its owner and mode across a re-run.
+    find -H "$KVS_PATH" "${keep_setup[@]}" -exec chown -h www-data:www-data {} + || return $?
+    # Keep the database password restricted even if a later chmod fails.
+    if [[ -f "$db_setup" ]]; then
+        keep_setup+=('!' -samefile "$(realpath -e -- "$db_setup")")
+    fi
+    find -H "$KVS_PATH" ! -type l "${keep_setup[@]}" -exec chmod 755 {} + || return $?
 
     # The _INSTALL directory only exists right after the extraction.
     if [ -f "$KVS_PATH"/_INSTALL/install_permissions.sh ]; then
@@ -1717,12 +1930,6 @@ function install_KVS() {
     fi
     install_kvs_rewrites "$KVS_PATH" "$archive_dir" || return $?
     if [[ -n "$fresh_archive" ]]; then rm -- "$fresh_archive" || return 1; fi
-    sed -i "s|/PATH|$KVS_PATH|
-             s|/usr/local/bin/|/usr/bin/|
-             s|/usr/bin/php[0-9.]*|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
-    sed -i "/\$config\[.project_title.\]=/s/KVS/${DOMAIN}/" "$KVS_PATH"/admin/include/setup.php
-    # Set project_url based on USE_WWW setting (format: https://domain or https://www.domain)
-    sed -i "/^\\\$config\['project_url'\]=/s|\"https://[^\"]*\"|\"https://$URL\"|" "$KVS_PATH"/admin/include/setup.php
     # An installed site keeps the password KVS already connects with.
     existing_password=$(read_kvs_database_password "$KVS_PATH/admin/include/setup_db.php")
     if [[ -n "$existing_password" ]]; then
