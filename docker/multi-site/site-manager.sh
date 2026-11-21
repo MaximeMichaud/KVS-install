@@ -856,6 +856,9 @@ add_site() {
         return 1
     fi
 
+    local mariadb_series=12.3 mariadb_image
+    mariadb_image=$("$resolver" --get mariadb "$mariadb_series") || return 1
+
     # Create site directory
     mkdir -p "$SITES_DIR" "$CADDY_SITES_DIR"
     mkdir -p "${site_dir}"
@@ -884,7 +887,8 @@ USE_WWW=false
 TABLES_PREFIX=${tables_prefix}
 
 # Database
-MARIADB_VERSION=12.3
+# Tag and digest from the lock. A different MARIADB_VERSION still selects that image.
+MARIADB_VERSION=${mariadb_image#mariadb:}
 # Per-site budgets; adjust before start instead of claiming half the host per site.
 MARIADB_BUFFER_POOL_SIZE=128M
 MARIADB_REDO_LOG_SIZE=128M
@@ -915,7 +919,6 @@ EOF
     )
     log_success "Generated .env file"
 
-    # Copy docker-compose template
     cp "${SCRIPT_DIR}/docker-compose.site.yml.template" "${site_dir}/docker-compose.yml"
     log_success "Created docker-compose.yml"
 

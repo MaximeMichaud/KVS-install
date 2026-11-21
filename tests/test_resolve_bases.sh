@@ -58,7 +58,7 @@ copy_files() {
         mkdir -p "$docker_dir/$image"
         cp "$ROOT_DIR/docker/$image/Dockerfile" "$docker_dir/$image/Dockerfile"
     done
-    for file in "${compose_files[@]}"; do
+    for file in "${compose_files[@]}" multi-site/docker-compose.caddy.yml; do
         mkdir -p "$(dirname "$docker_dir/$file")"
         cp "$ROOT_DIR/docker/$file" "$docker_dir/$file"
     done
@@ -99,6 +99,11 @@ tag=${ref%@*}
 resolve --check > "$TEST_DIR/out" 2>&1 || fail "a lock fresh from the registry must pass --check: $(cat "$TEST_DIR/out")"
 grep -Fxq 'images.lock matches the registry' "$TEST_DIR/out" || fail "--check must say the lock matches"
 cp "$lock" "$TEST_DIR/images.lock.good"
+caddy=$(resolve --get caddy)
+[ "$caddy" = "caddy:2-alpine@sha256:$(manifest caddy:2-alpine | sha256sum | cut -d' ' -f1)" ] ||
+    fail "the Caddy lock entry must use the registry digest"
+grep -Fxq "    image: $caddy" "$docker_dir/multi-site/docker-compose.caddy.yml" ||
+    fail "the generated Caddy lock and Compose image must follow the registry manifest"
 echo "PASS: the lock is written from the registry and checked against it"
 
 # A refused answer stops the write with the image named; the lock stays.
@@ -150,12 +155,20 @@ for image in php cron nginx init manticore; do
 done
 grep -Fxq 'updated nginx/Dockerfile' "$TEST_DIR/out" || fail "a write must name the Dockerfiles it updated: $(cat "$TEST_DIR/out")"
 # The compose files run the Alpine of the lock for phpmyadmin-init, and the
-# write changed that line and no other: memcached:alpine stays.
+# site template also follows the lock for both cache profiles.
 for file in "${compose_files[@]}"; do
     grep -Fxq "updated $file" "$TEST_DIR/out" || fail "a write must name $file: $(cat "$TEST_DIR/out")"
     changed=$(diff "$ROOT_DIR/docker/$file" "$docker_dir/$file" | grep -c '^>' || true)
-    if [ "$changed" -ne 1 ] || ! grep -Fxq "    image: $(resolve --get alpine -)" "$docker_dir/$file"; then
-        fail "the write must move only the phpmyadmin-init image of $file to the lock: $(diff "$ROOT_DIR/docker/$file" "$docker_dir/$file")"
+    expected=1
+    if [[ "$file" == multi-site/* ]]; then
+        expected=3
+        for cache in dragonfly memcached; do
+            grep -Fxq "    image: $(resolve --get "$cache")" "$docker_dir/$file" ||
+                fail "the refreshed template lost the locked $cache image"
+        done
+    fi
+    if [ "$changed" -ne "$expected" ] || ! grep -Fxq "    image: $(resolve --get alpine -)" "$docker_dir/$file"; then
+        fail "the write must align the locked images of $file to the lock: $(diff "$ROOT_DIR/docker/$file" "$docker_dir/$file")"
     fi
 done
 resolve --check-dockerfiles > "$TEST_DIR/out" 2>&1 || fail "aligned Dockerfiles must pass: $(cat "$TEST_DIR/out")"

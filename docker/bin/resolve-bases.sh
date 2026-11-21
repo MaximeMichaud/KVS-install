@@ -56,7 +56,10 @@ DOCKERFILES=(
 # with and a release pins: a stack without a release would otherwise run
 # whatever alpine:latest is on the day it pulls.
 COMPOSE_IMAGES=(
+    "multi-site/docker-compose.caddy.yml	caddy	caddy	-"
     "docker-compose.yml	phpmyadmin-init	alpine	-"
+    "multi-site/docker-compose.site.yml.template	dragonfly	dragonfly	-"
+    "multi-site/docker-compose.site.yml.template	memcached	memcached	-"
     "multi-site/docker-compose.site.yml.template	phpmyadmin-init	alpine	-"
 )
 
@@ -84,6 +87,7 @@ BUILD_BASES=(
 # newest patch tag of its series: a stack keeps its series across releases,
 # so a series missing here is a stack no release can upgrade.
 RUNTIME_IMAGES=(
+    "caddy	-	caddy:2-alpine"
     "mariadb	11.4	mariadb:11.4.13"
     "mariadb	11.8	mariadb:11.8.9"
     "mariadb	12.3	mariadb:12.3.3"

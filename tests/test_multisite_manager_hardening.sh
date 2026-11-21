@@ -520,6 +520,24 @@ example_config=$(
 [ "$(jq -r '.services.cron.build.args.PHP_BASE' <<< "$example_config")" = "$pinned_cli" ] ||
     fail "the cron of a new site does not build from its pinned base"
 
+# Compose must run the locked runtime images with either cache profile.
+for phase in added refreshed; do
+    if [ "$phase" = refreshed ]; then
+        cp "$ROOT_DIR/docker/multi-site/docker-compose.site.yml.template" "$(dirname "$example_env")/docker-compose.yml"
+    fi
+    site_images=$(
+        cd "$(dirname "$example_env")"
+        "$REAL_DOCKER" compose --profile dragonfly --profile memcached config --format json
+    )
+    for service in mariadb dragonfly memcached; do
+        series=-
+        [ "$service" != mariadb ] || series=12.3
+        pinned=$("${ROOT_DIR}/docker/bin/resolve-bases.sh" --get "$service" "$series")
+        [ "$(jq -r --arg service "$service" '.services[$service].image' <<< "$site_images")" = "$pinned" ] ||
+            fail "the $phase site's $service image differs from the lock"
+    done
+done
+
 # A series the lock does not know stops the addition before anything exists.
 create_fixture unpinned
 unpinned_root="${TEST_DIR}/unpinned/docker"
@@ -858,6 +876,9 @@ MOCK_NETWORK_EXISTS=false \
 MOCK_DOCKER_LOG="$caddy_start_log" \
 KVS_WEBROOT_BASE="$valid_webroot" \
     bash "$valid_script" caddy-start >/dev/null
+if grep -Eq '^image inspect |^run | config --images caddy($| )' "$caddy_start_log"; then
+    fail "caddy-start must leave image acquisition to Compose"
+fi
 network_create_line=$(grep -nF 'network create kvs-proxy' "$caddy_start_log" | cut -d: -f1)
 compose_up_line=$(grep -nF 'compose -p multi-site -f docker-compose.caddy.yml up -d' \
     "$caddy_start_log" | cut -d: -f1)

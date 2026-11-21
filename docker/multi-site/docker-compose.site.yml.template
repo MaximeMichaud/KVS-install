@@ -195,7 +195,7 @@ services:
   # Cache - Dragonfly (default)
   # ===========================================================================
   dragonfly:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.35.1@sha256:af7f7f1143269c7ffe4128451dff8f8fc09e157d885abcc9bafeec832d2928e6
     container_name: ${SITE_PREFIX}-cache
     restart: unless-stopped
     logging: *default-logging
@@ -213,7 +213,7 @@ services:
   # Cache - Memcached (alternative)
   # ===========================================================================
   memcached:
-    image: memcached:alpine
+    image: memcached:1.6.45-alpine@sha256:6a089e37cbb8acd75c80c6c0667fe57ec54db68782fb1b3afb1d0eb265e50070
     container_name: ${SITE_PREFIX}-memcached
     restart: unless-stopped
     logging: *default-logging

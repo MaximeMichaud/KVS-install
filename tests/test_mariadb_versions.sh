@@ -39,8 +39,8 @@ for file in docker/docker-compose.yml docker/multi-site/docker-compose.site.yml.
 done
 grep -Fqx "MARIADB_VERSION=${EXPECTED_DEFAULT}" "$ROOT_DIR/docker/.env.example" ||
     fail "docker/.env.example does not carry MARIADB_VERSION=${EXPECTED_DEFAULT}"
-grep -Fq "MARIADB_VERSION=${EXPECTED_DEFAULT}" "$ROOT_DIR/docker/multi-site/site-manager.sh" ||
-    fail "site-manager.sh does not write MARIADB_VERSION=${EXPECTED_DEFAULT}"
+grep -Fq "mariadb_series=${EXPECTED_DEFAULT} " "$ROOT_DIR/docker/multi-site/site-manager.sh" ||
+    fail "site-manager.sh does not select MariaDB ${EXPECTED_DEFAULT}"
 
 # A stack keeps its MariaDB series across releases, and a release publishes
 # the series docker/images.lock pins: every series setup.sh offers needs its
