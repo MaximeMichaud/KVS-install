@@ -287,8 +287,8 @@ func failure(message, next string, details ...string) Result {
 	return Result{Status: Fail, Message: message, Next: next, Details: details}
 }
 
-func skipped(message string, incomplete bool) Result {
-	return Result{Status: Skip, Message: message, Incomplete: incomplete}
+func skipped(message string, incomplete bool, details ...string) Result {
+	return Result{Status: Skip, Message: message, Details: details, Incomplete: incomplete}
 }
 
 // command preserves the selected installation in every suggested kvsctl action.

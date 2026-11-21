@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/dockerx"
+	"github.com/MaximeMichaud/KVS-install/cli/internal/upgrade"
 )
 
 func (r *runner) services(ctx context.Context) Result {
@@ -138,9 +139,7 @@ func (r *runner) phpRuntime(ctx context.Context) Result {
 		return failure("PHP runtime differs from the configured requirements", "Inspect PHP and cron logs; apply configuration changes by recreating the affected services", append(problems, details...)...)
 	}
 	if missing {
-		result := skipped("PHP runtime could not be checked in every required container", true)
-		result.Details = details
-		return result
+		return skipped("PHP runtime could not be checked in every required container", true, details...)
 	}
 	return good("PHP versions, required extensions and IonCube match the configuration", details...)
 }
@@ -241,35 +240,88 @@ func (r *runner) database(ctx context.Context) Result {
 	return failure("PHP could not query the site's configured database", "Check setup_db.php, database access and "+r.command("logs mariadb --tail 100"), details...)
 }
 
-const cacheProbe = `$s = @fsockopen('cache', 11211, $errno, $error, 3);
-if (!$s) { exit(1); } stream_set_timeout($s, 3); fwrite($s, "version\r\n");
-$line = fgets($s, 256); fclose($s); if (!is_string($line) || strpos($line, 'VERSION ') !== 0) { exit(1); } echo 'ok';`
+var cacheLintError = regexp.MustCompile("^lint-error: (Parse|Fatal) error on line [0-9]+$")
 
 func (r *runner) cache(ctx context.Context) Result {
+	if problems := r.layoutProblems(); len(problems) > 0 {
+		return skipped("Cache probing requires a single-site installation", true, problems...)
+	}
 	var backends []string
 	for _, name := range []string{"dragonfly", "memcached"} {
 		if _, active := r.project.Services[name]; active {
 			backends = append(backends, name)
 		}
 	}
-	if len(backends) == 0 {
-		return skipped("No cache backend is enabled in the active Compose configuration", false)
-	}
-	if len(backends) > 1 {
-		return failure("Both cache backends are enabled on the cache endpoint", "Select either dragonfly or memcached in COMPOSE_PROFILES")
-	}
-	if r.running(backends[0]) == nil {
-		return skipped("The configured cache container is not running", true)
+	var service, container string
+	if len(backends) == 1 {
+		if backend := r.running(backends[0]); backend != nil {
+			service, container = backends[0], backend.Name
+		}
 	}
 	c := r.running("php-fpm")
 	if c == nil {
 		return skipped("Cache query requires a running PHP-FPM container", true)
 	}
-	out, err := r.probe.exec(ctx, c.ID, nil, "php", "-d", "display_errors=0", "-r", cacheProbe)
-	if err != nil || strings.TrimSpace(string(out)) != "ok" {
-		return failure("PHP could not read the cache protocol version", r.command("logs "+backends[0]+" --tail 100"))
+	var localNames []string
+	if service == "" {
+		// A stopped container can have a name set by a Compose override.
+		for _, state := range r.containers {
+			if !state.OneShot && (state.Service == "dragonfly" || state.Service == "memcached") {
+				localNames = append(localNames, state.Name)
+			}
+		}
 	}
-	return good(backends[0] + " answered the read-only cache probe from PHP")
+	out, err := r.probe.execAs(ctx, c.ID, "www-data", nil, upgrade.CacheProbeCommand(service, container, r.inst.ContainerPrefix(), localNames...)...)
+	if err != nil {
+		return failure("Could not run the site's cache probe in PHP-FPM", "Check the PHP-FPM container and its logs")
+	}
+	answer := strings.TrimSpace(string(out))
+	var details []string
+	if strings.HasPrefix(answer, "alias-") {
+		var reason string
+		answer, reason, _ = strings.Cut(answer, "\n")
+		detail := "The route was not read from setup.php. This check uses the Compose cache alias (cache:11211)."
+		if reason == "other" {
+			detail = "The configured host is outside the local cache routes. This check uses the Compose cache alias (cache:11211)."
+		} else if reason == "lint-error" || cacheLintError.MatchString(reason) {
+			detail += " setup.php failed the PHP compile check" + strings.TrimPrefix(reason, "lint-error") + "."
+		}
+		details = []string{detail}
+		switch answer {
+		case "alias-ok":
+			return good("The Compose cache alias answered the read-only probe from PHP", detail)
+		case "alias-failed":
+			return failure("PHP could not read the cache protocol version on the Compose alias", r.command("logs "+service+" --tail 100"), detail)
+		case "alias-no-backend":
+			if len(backends) == 0 {
+				return skipped("No cache backend is enabled in the active Compose configuration", false, details...)
+			}
+			answer = "no-backend"
+		}
+	}
+	switch answer {
+	case "ok":
+		return good("The site's configured cache answered the read-only probe from PHP")
+	case "disabled":
+		return skipped("The site disables its cache in setup.php", false)
+	case "invalid-port":
+		return failure("The site's cache port is invalid", "Check memcache_port in admin/include/setup.php")
+	case "no-backend":
+		switch len(backends) {
+		case 0:
+			return failure("The site uses a local cache but no cache backend is enabled", "Check setup.php and COMPOSE_PROFILES")
+		case 1:
+			return skipped("The configured cache container is not running", true, details...)
+		default:
+			return failure("Both cache backends are enabled on the cache endpoint", "Select either dragonfly or memcached in COMPOSE_PROFILES", details...)
+		}
+	case "loopback-failed":
+		return failure("PHP could not read the cache protocol version on the site's loopback route", "Check the PHP-FPM cache relay and the port in admin/include/setup.php")
+	case "failed":
+		return failure("PHP could not verify the site's configured cache", "Check admin/include/setup.php and "+r.command("logs "+service+" --tail 100"))
+	default:
+		return failure("Unexpected reply from the PHP-FPM cache probe", "Check the PHP-FPM container and its logs")
+	}
 }
 
 const searchProbe = `test ! -e /var/run/manticore/kvs-build-failed && test ! -e /var/run/manticore/kvs-rebuild-failed && mariadb --skip-ssl --connect-timeout=3 -h 127.0.0.1 -P 9306 -e 'SHOW STATUS' >/dev/null`

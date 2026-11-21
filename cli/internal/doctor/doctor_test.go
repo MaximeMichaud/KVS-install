@@ -119,8 +119,6 @@ func fixture(t *testing.T) (*runner, *fakeEngine) {
 		switch last {
 		case phpProbe:
 			return json.Marshal(phpInfo{Version: "8.1.34", IonCube: true, Extensions: []string{"mysqli", "pdo_mysql", "curl", "mbstring", "gd", "imagick", "zip", "memcached"}})
-		case cacheProbe:
-			return []byte("ok"), nil
 		case cronProbe:
 			return []byte("www-data"), nil
 		case searchProbe, toolsProbe:
@@ -134,6 +132,11 @@ func fixture(t *testing.T) (*runner, *fakeEngine) {
 	}
 	r.probe.execAs = func(_ context.Context, _, user string, _ io.Reader, args ...string) ([]byte, error) {
 		switch last := args[len(args)-1]; {
+		case user == "www-data" && slices.Contains(args, "probe"):
+			if args[slices.Index(args, "probe")+1] == "" {
+				return []byte("no-backend"), nil
+			}
+			return []byte("ok"), nil
 		case user == "www-data" && last == databaseProbe:
 			return []byte("ok"), nil
 		case user == "www-data" && last == cronScript:

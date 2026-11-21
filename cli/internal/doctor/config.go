@@ -77,18 +77,24 @@ func validPort(value string, publish bool) bool {
 	return err == nil && n > 0 && n <= 65535
 }
 
+func (r *runner) layoutProblems() []string {
+	var problems []string
+	if mode := r.inst.Env["MODE"]; mode != "" && mode != "single" {
+		problems = append(problems, "MODE must be single; kvsctl does not support multi-site installations")
+	}
+	if entries, _ := os.ReadDir(filepath.Join(r.inst.DockerDir, "multi-site", "sites")); len(entries) > 0 {
+		problems = append(problems, "A multi-site sites directory is populated; kvsctl does not support this layout")
+	}
+	return problems
+}
+
 func (r *runner) settings() Result {
 	env := r.inst.Env
 	var problems []string
 	if !validDomain(r.inst.Domain()) {
 		problems = append(problems, "DOMAIN must be a hostname of at most 64 characters, without a scheme, path or port")
 	}
-	if mode := env["MODE"]; mode != "" && mode != "single" {
-		problems = append(problems, "MODE must be single; kvsctl does not support multi-site installations")
-	}
-	if entries, _ := os.ReadDir(filepath.Join(r.inst.DockerDir, "multi-site", "sites")); len(entries) > 0 {
-		problems = append(problems, "A multi-site sites directory is populated; kvsctl does not support this layout")
-	}
+	problems = append(problems, r.layoutProblems()...)
 	for _, key := range []string{"HTTP_PORT", "HTTPS_PORT", "PROJECT_HTTPS_PORT", "MARIADB_HOST_PORT", "CACHE_HOST_PORT", "MANTICORE_MYSQL_HOST_PORT", "MANTICORE_HTTP_HOST_PORT"} {
 		if !validPort(env[key], key == "HTTP_PORT" || key == "HTTPS_PORT") {
 			problems = append(problems, key+" is not a valid port or supported published endpoint")

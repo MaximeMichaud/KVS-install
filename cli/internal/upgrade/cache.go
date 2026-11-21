@@ -19,6 +19,13 @@ import (
 //go:embed cache_config.php
 var cacheConfigPHP string
 
+// CacheProbeCommand reads the site's settings inside PHP-FPM and queries the
+// configured local cache. An empty service checks the route without opening a socket.
+func CacheProbeCommand(service, container, prefix string, localNames ...string) []string {
+	args := []string{"php", "-d", "display_errors=0", "-r", strings.TrimPrefix(cacheConfigPHP, "<?php\n"), "--", "probe", service, container, prefix}
+	return append(args, localNames...)
+}
+
 type cacheConfig struct {
 	Host      string `json:"host"`
 	Port      int    `json:"port"`

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -121,9 +124,7 @@ func TestCacheProfilesAndSearch(t *testing.T) {
 			p.Services["manticore"] = dockerx.ServiceConfig{}
 			f.states = append(f.states, dockerx.ContainerState{ID: "manticore", Service: "manticore", State: "running"})
 			want := OK
-			if backend == "disabled" {
-				want = Skip
-			} else if backend == "both" {
+			if backend == "disabled" || backend == "both" {
 				want = Fail
 			}
 			report := r.run(context.Background())
@@ -241,5 +242,336 @@ func TestCronReadsTheScriptAsWwwData(t *testing.T) {
 				t.Fatalf("%+v", result)
 			}
 		})
+	}
+}
+
+func TestCacheUsesSiteRoute(t *testing.T) {
+	php, err := exec.LookPath("php")
+	if err != nil {
+		t.Skip("PHP is needed to run the cache probe against setup.php fixtures")
+	}
+	const direct = "$config['memcache_server']='cache';"
+	const loopback = "$config['memcache_server']='127.0.0.1';"
+	for _, tc := range []struct{ name, settings, endpoint, response, status string }{
+		{"direct", direct, "cache:11211", "VERSION fixture", OK},
+		{"backend service", "$config['memcache_server']='dragonfly';", "dragonfly:11211", "VERSION fixture", OK},
+		{"backend container", "$config['memcache_server']='custom-dragonfly';", "custom-dragonfly:11211", "VERSION fixture", OK},
+		{"IPv6 loopback", "$config['memcache_server']='::1';", "[::1]:11211", "VERSION fixture", OK},
+		{"localhost", "$config['memcache_server']='localhost';", "localhost:11211", "VERSION fixture", OK},
+		{"missing relay", loopback, "cache:11211", "VERSION fixture", Fail},
+		{"relay on custom port", loopback + "$config['memcache_port']=11212;", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"invalid port", direct + "$config['memcache_port']='11211x';", "cache:11211", "VERSION fixture", Fail},
+		{"port out of range", direct + "$config['memcache_port']=65536;", "cache:65536", "VERSION fixture", Fail},
+		{"port zero", direct + "$config['memcache_port']=0;", "cache:0", "VERSION fixture", Fail},
+		{"invalid response", direct, "cache:11211", "ERROR", Fail},
+		{"disabled", "$config['memcache_server']='';", "", "", Skip},
+		{"strict types", "declare(strict_types=1);" + loopback, "127.0.0.1:11211", "VERSION fixture", OK},
+		{"negative port", direct + "$config['memcache_port']=-1;", "cache:11211", "VERSION fixture", Fail},
+		{"invalid string port", direct + "$config['memcache_port']='bad port!';", "cache:11211", "VERSION fixture", Fail},
+		{"computed", "$config['memcache_server']=getenv('CACHE');", "cache:11211", "VERSION fixture", OK},
+		{"fallback protocol failure", "$config['memcache_server']=getenv('CACHE');", "cache:11211", "ERROR", Fail},
+		{"other host", "$config['memcache_server']='elsewhere.test';", "cache:11211", "VERSION fixture", OK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := fixture(t)
+			r.opts.Only = []string{"cache"}
+			path := filepath.Join(t.TempDir(), "setup.php")
+			writeFile(t, path, "<?php\n"+tc.settings+"\nthrow new Exception('site code must not run');")
+			useCacheProbe(t, r, php, path, tc.endpoint, tc.response)
+			result := resultByID(t, r.run(context.Background()), "cache")
+			if result.Status != tc.status {
+				t.Errorf("got %+v, want %s", result, tc.status)
+			}
+			if tc.name == "computed" || tc.name == "fallback protocol failure" {
+				if !strings.Contains(strings.Join(result.Details, " "), "route was not read from setup.php") {
+					t.Errorf("missing fallback detail: %+v", result)
+				}
+				attempt, err := os.ReadFile(path + ".attempt")
+				if err != nil || string(attempt) != "cache:11211" {
+					t.Errorf("fallback endpoint %q, %v", attempt, err)
+				}
+			}
+			if tc.name == "negative port" || tc.name == "invalid string port" {
+				if !strings.Contains(result.Message, "port is invalid") {
+					t.Errorf("missing invalid port diagnostic: %+v", result)
+				}
+				if _, err := os.Stat(path + ".attempt"); !os.IsNotExist(err) {
+					t.Error("attempted a connection with an invalid port")
+				}
+			}
+			if tc.name == "missing relay" && !strings.Contains(result.Next, "PHP-FPM cache relay") {
+				t.Errorf("missing relay diagnostic: %+v", result)
+			}
+			if tc.status == Skip {
+				if result.Incomplete != (tc.name != "disabled") {
+					t.Errorf("unexpected completeness: %+v", result)
+				}
+				if _, err := os.Stat(path + ".attempt"); !os.IsNotExist(err) {
+					t.Error("attempted a connection without a supported local cache route")
+				}
+			}
+		})
+	}
+}
+
+func useCacheProbe(t *testing.T, r *runner, php, path, endpoint, response string) {
+	t.Helper()
+	// The PHP probe runs as shipped, with the site mount and socket
+	// replaced by fixtures. Only the named endpoint can reply.
+	r.probe.execAs = func(ctx context.Context, container, user string, _ io.Reader, args ...string) ([]byte, error) {
+		at := slices.Index(args, "-r")
+		if user != "www-data" || container != "php-fpm" || at < 0 || at+1 >= len(args) {
+			t.Fatalf("expected a PHP probe in php-fpm as www-data, got container %q, user %q, script index %d", container, user, at)
+		}
+		script := strings.ReplaceAll(args[at+1], "'/var/www/kvs/admin/include/setup.php'", "getenv('FIXTURE_SETUP')")
+		const socket = `function fsockopen($host, $port, &$errno, &$error, $timeout) {
+    file_put_contents(getenv('FIXTURE_ATTEMPT'), "$host:$port");
+    if ("$host:$port" !== getenv('FIXTURE_ENDPOINT')) { return false; }
+    $s = fopen('php://temp', 'w+');
+    fwrite($s, "version\r\n" . getenv('FIXTURE_RESPONSE') . "\r\n");
+    rewind($s);
+    return $s;
+}
+`
+		cmd := exec.CommandContext(ctx, php, append([]string{"-d", "disable_functions=fsockopen", "-r", socket + script}, args[at+2:]...)...)
+		cmd.Env = append(os.Environ(), "FIXTURE_SETUP="+path, "FIXTURE_ENDPOINT="+endpoint, "FIXTURE_RESPONSE="+response, "FIXTURE_ATTEMPT="+path+".attempt")
+		return cmd.CombinedOutput()
+	}
+}
+
+func TestCacheRoutePrerequisites(t *testing.T) {
+	php, err := exec.LookPath("php")
+	if err != nil {
+		t.Skip("PHP is needed to run the cache probe")
+	}
+	const direct = "$config['memcache_server']='cache';"
+	const disabled = "$config['memcache_server']='';"
+	const computedPort = "$config['memcache_port']=intval(getenv('PORT'));"
+	cases := []struct {
+		name, settings, link, backend, status string
+		incomplete                            bool
+	}{
+		{"invalid syntax", direct + "\n$label=\"\"FixtureMarker\"\";", "", "running", OK, false},
+		{"invalid break", direct + "break;", "", "running", OK, false},
+		{"global override", direct + "$GLOBALS['config']['memcache_server']='127.0.0.1';", "", "running", OK, false},
+		{"aliased host", direct + "$alias=&$config['memcache_server']; $alias='127.0.0.1';", "", "running", OK, false},
+		{"variable variable", direct + "$name='config'; $$name=['memcache_server'=>'localhost'];", "", "running", OK, false},
+		{"extract", direct + "extract(['config'=>['memcache_server'=>'localhost']]);", "", "running", OK, false},
+		{"unknown constructor", direct + "new SiteSettings();", "", "running", OK, false},
+		{"side effect", direct + "file_put_contents(__FILE__.'.executed','yes');", "", "running", OK, false},
+		{"dynamic call", direct + "$fn='extract'; $fn(['config'=>[]]);", "", "running", OK, false},
+		{"list assignment", direct + "list($config)=[[]];", "", "running", OK, false},
+		{"destructured port", disabled + "[$config['memcache_port']]=[11212];", "", "running", OK, false},
+		{"literal setup", "if (!isset($config)) { $config=[]; } $config['path']='/site'; $config['derived']=\"$config[path]/data\";" + disabled, "", "running", Skip, false},
+		{"symlinked file", direct, "file", "running", OK, false},
+		{"symlinked directory", direct, "directory", "running", OK, false},
+		{"disabled with computed port", disabled + computedPort, "", "running", Skip, false},
+		{"enabled with computed port", direct + computedPort, "", "running", OK, false},
+		{"disabled without profile", disabled, "", "absent", Skip, false},
+		{"enabled without profile", direct, "", "absent", Fail, false},
+		{"computed port without profile", direct + computedPort, "", "absent", Fail, false},
+		{"container without profile", "$config['memcache_server']='kvs-dragonfly';", "", "absent", Fail, false},
+		{"custom project prefix", "$config['memcache_server']='second_site-memcached';", "", "absent", Fail, false},
+		{"existing project container", "$config['memcache_server']='custom-dragonfly';", "", "absent", Fail, false},
+		{"other project container", "$config['memcache_server']='foreign-dragonfly';", "", "absent", Skip, false},
+		{"unknown without profile", "$config['memcache_server']=getenv('CACHE');", "", "absent", Skip, false},
+		{"disabled with stopped backend", disabled, "", "stopped", Skip, false},
+		{"enabled with stopped backend", direct, "", "stopped", Skip, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, f := fixture(t)
+			r.opts.Only = []string{"cache"}
+			project, _ := r.probe.compose(context.Background(), "")
+			if tc.name == "custom project prefix" {
+				writeFile(t, r.inst.EnvPath, "DOMAIN=example.test\nSITE_PREFIX=second_site\nCOMPOSE_PROJECT_NAME=kvs\n")
+			}
+			switch tc.backend {
+			case "absent":
+				delete(project.Services, "dragonfly")
+			case "stopped":
+				for i := range f.states {
+					if f.states[i].Service == "dragonfly" {
+						f.states[i].State = "exited"
+					}
+				}
+			}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "setup.php")
+			writeFile(t, path, "<?php "+tc.settings)
+			if tc.link != "" {
+				target := path
+				if tc.link == "directory" {
+					target = dir
+				}
+				link := filepath.Join(t.TempDir(), "link")
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+				path = link
+				if tc.link == "directory" {
+					path = filepath.Join(link, "setup.php")
+				}
+			}
+			useCacheProbe(t, r, php, path, "cache:11211", "VERSION fixture")
+			result := resultByID(t, r.run(context.Background()), "cache")
+			if tc.backend == "absent" && tc.status == Fail && !strings.Contains(result.Message, "no cache backend is enabled") {
+				t.Errorf("missing profile diagnostic: %+v", result)
+			}
+			if _, err := os.Stat(path + ".executed"); !os.IsNotExist(err) {
+				t.Error("executed the site configuration")
+			}
+			detail := strings.Join(result.Details, " ")
+			if tc.name == "invalid syntax" && (!strings.Contains(detail, "Parse error on line 2") || strings.Contains(result.Message+detail+result.Next, "FixtureMarker")) {
+				t.Errorf("expected only PHP error category and line: %+v", result)
+			}
+			if tc.name == "invalid break" && !strings.Contains(detail, "Fatal error on line 1") {
+				t.Errorf("missing PHP compile error: %+v", result)
+			}
+			if result.Status != tc.status || result.Incomplete != tc.incomplete {
+				t.Errorf("got %+v, want %s and incomplete=%t", result, tc.status, tc.incomplete)
+			}
+			if tc.status == OK {
+				attempt, err := os.ReadFile(path + ".attempt")
+				if err != nil || string(attempt) != "cache:11211" || !strings.Contains(detail, "route was not read from setup.php") {
+					t.Errorf("expected a reported Compose alias probe, got %q, %v, %+v", attempt, err, result)
+				}
+			} else if _, err := os.Stat(path + ".attempt"); !os.IsNotExist(err) {
+				t.Error("unexpected connection attempt")
+			}
+		})
+	}
+	for _, keyword := range []string{"include", "include_once", "require", "require_once"} {
+		t.Run(keyword, func(t *testing.T) {
+			r, _ := fixture(t)
+			r.opts.Only = []string{"cache"}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "setup.php")
+			writeFile(t, path, "<?php "+direct+keyword+" __DIR__.'/local.php';")
+			writeFile(t, filepath.Join(dir, "local.php"), "<?php $config['memcache_server']='127.0.0.1';")
+			useCacheProbe(t, r, php, path, "cache:11211", "VERSION fixture")
+			result := resultByID(t, r.run(context.Background()), "cache")
+			if result.Status != OK || !strings.Contains(strings.Join(result.Details, " "), "route was not read from setup.php") {
+				t.Errorf("ambiguous route: %+v", result)
+			}
+			attempt, err := os.ReadFile(path + ".attempt")
+			if err != nil || string(attempt) != "cache:11211" {
+				t.Errorf("expected only the Compose alias, got %q, %v", attempt, err)
+			}
+		})
+	}
+}
+
+func TestCacheOnlyRequiresSingleSite(t *testing.T) {
+	for _, layout := range []string{"multi", "populated"} {
+		t.Run(layout, func(t *testing.T) {
+			r, _ := fixture(t)
+			r.opts.Only = []string{"cache"}
+			if layout == "multi" {
+				writeFile(t, r.inst.EnvPath, "DOMAIN=example.test\nMODE=multi\n")
+			} else {
+				writeFile(t, filepath.Join(r.inst.DockerDir, "multi-site", "sites", "second.example", "docker-compose.yml"), "services: {}\n")
+			}
+			r.probe.execAs = func(context.Context, string, string, io.Reader, ...string) ([]byte, error) {
+				t.Error("probed a single project on a multi-site installation")
+				return []byte("ok"), nil
+			}
+			report := r.run(context.Background())
+			cache := resultByID(t, report, "cache")
+			if cache.Status != Skip || !cache.Incomplete || report.ExitCode == 0 || report.Complete {
+				t.Errorf("cache=%+v, complete=%t, exit=%d", cache, report.Complete, report.ExitCode)
+			}
+		})
+	}
+}
+
+func TestCacheStockLayout(t *testing.T) {
+	php, err := exec.LookPath("php")
+	if err != nil {
+		t.Skip("PHP is needed to run the cache probe")
+	}
+	// Synthetic site with the distribution's delegation guard, version
+	// include, request setup and literal cache settings.
+	const setup = `<?php
+if (isset($_SERVER['KVS_DEV_PATH']) && is_dir($_SERVER['KVS_DEV_PATH'])) {
+    require_once "{$_SERVER['KVS_DEV_PATH']}/fixture.php";
+    return;
+}
+include_once 'version.php';
+umask(0022);
+error_reporting(E_ERROR | E_WARNING);
+ini_set('session.cookie_domain', str_replace('www.', '', 'site.example'));
+if (isset($_SERVER['HTTP_HOST'])) { $name = 'fixture'; }
+elseif (strpos('site.example', '.') !== false) { $name = trim(substr(' fixture ', 0)); }
+if (!isset($config)) { $config = []; }
+$config['project_path'] = '/site';
+$config['files'] = "$config[project_path]/files";
+$config['label'] = (strpos($config['files'], '/files') !== false ? 'site' : 'fixture') . '.example';
+$config['memcache_server'] = 'localhost';
+$config['memcache_port'] = 11212;
+`
+	const version = "<?php /* fixture */ $config['project_version'] = '7.0.0';"
+	for _, tc := range []struct {
+		name, version       string
+		delegated, fallback bool
+	}{
+		{"stock", version, false, false},
+		{"active delegation", version, true, true},
+		{"relative delegation", version, false, true},
+		{"missing version", "", false, true},
+		{"shadowed version", version, false, true},
+		{"version with another write", version + "$config['memcache_server']='cache';", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := fixture(t)
+			r.opts.Only = []string{"cache"}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "setup.php")
+			writeFile(t, path, setup)
+			if tc.version != "" {
+				writeFile(t, filepath.Join(dir, "version.php"), tc.version)
+			}
+			if tc.name == "shadowed version" {
+				shadow := t.TempDir()
+				writeFile(t, filepath.Join(shadow, "version.php"), "<?php $config['memcache_server']='cache';")
+				t.Chdir(shadow)
+			}
+			devPath := filepath.Join(dir, "absent")
+			if tc.delegated {
+				devPath = dir
+			} else if tc.name == "relative delegation" {
+				devPath = "relative/site"
+			}
+			t.Setenv("KVS_DEV_PATH", devPath)
+			endpoint := "localhost:11212"
+			if tc.fallback {
+				endpoint = "cache:11211"
+			}
+			useCacheProbe(t, r, php, path, endpoint, "VERSION fixture")
+			report := r.run(context.Background())
+			cache := resultByID(t, report, "cache")
+			detail := strings.Join(cache.Details, " ")
+			attempt, err := os.ReadFile(path + ".attempt")
+			if cache.Status != OK || report.ExitCode != 0 || !report.Complete || err != nil || string(attempt) != endpoint ||
+				strings.Contains(detail, "route was not read from setup.php") != tc.fallback {
+				t.Fatalf("cache=%+v exit=%d complete=%t endpoint=%q err=%v", cache, report.ExitCode, report.Complete, attempt, err)
+			}
+		})
+	}
+}
+
+func TestCacheOnlyIgnoresUnrelatedSettings(t *testing.T) {
+	r, _ := fixture(t)
+	r.opts.Only = []string{"cache"}
+	writeFile(t, r.inst.EnvPath, "DOMAIN=example.test\nYT_DLP_AUTO_UPDATE=weekly\n")
+	calls := 0
+	r.probe.execAs = func(context.Context, string, string, io.Reader, ...string) ([]byte, error) {
+		calls++
+		return []byte("ok"), nil
+	}
+	report := r.run(context.Background())
+	cache := resultByID(t, report, "cache")
+	if cache.Status != OK || report.ExitCode != 0 || !report.Complete || calls != 1 {
+		t.Errorf("cache=%+v exit=%d complete=%t calls=%d", cache, report.ExitCode, report.Complete, calls)
 	}
 }
