@@ -166,6 +166,9 @@ ENVIRONMENT VARIABLES:
                           of the two, and IMPORT_SSH_ACCEPT_NEW=y to trust a
                           host key that is not in known_hosts yet. A supplied
                           password requires a known key unless you opt in.
+    IMPORT_SSH_LEGACY_ALGORITHMS=yes
+                          Allow RSA/SHA-1 for old SSH servers. Key login
+                          needs an RSA key authorized on the source.
     IMPORT_SIZE_TIMEOUT=S Seconds the old server spends measuring the site
                           size (300); past that the import goes on with what
                           was counted and the space used on the old server's
@@ -3100,9 +3103,9 @@ import_inspect_remote() {
     # Its value only, before the detection: no link is known yet.
     import_confirm_external_links /dev/null "" || exit 1
     # The questionnaire can select another port after .env was read.
-    if [ "${IMPORT_RUN_ACCEPT_NEW_SET:-}" != x ] && [[ -v IMPORT_SAVED_HOST ]] &&
-        [ "$IMPORT_REMOTE_HOST:$IMPORT_REMOTE_PORT" != "$IMPORT_SAVED_HOST:$IMPORT_SAVED_PORT" ]; then
-        IMPORT_SSH_ACCEPT_NEW=""
+    if [[ -v IMPORT_SAVED_HOST ]] && [ "$IMPORT_REMOTE_HOST:$IMPORT_REMOTE_PORT" != "$IMPORT_SAVED_HOST:$IMPORT_SAVED_PORT" ]; then
+        IMPORT_SSH_ACCEPT_NEW=${IMPORT_RUN_ACCEPT_NEW:-}
+        IMPORT_SSH_LEGACY_ALGORITHMS=${IMPORT_RUN_LEGACY:-}
     fi
     case "${IMPORT_SSH_ACCEPT_NEW,,}" in
         y|yes|true) accept_new=yes ;;
@@ -4441,6 +4444,8 @@ IMPORT_RUN_HOST=${IMPORT_REMOTE_HOST:-}
 IMPORT_RUN_PORT=${IMPORT_REMOTE_PORT:-}
 IMPORT_RUN_ACCEPT_NEW=${IMPORT_SSH_ACCEPT_NEW-}
 IMPORT_RUN_ACCEPT_NEW_SET=${IMPORT_SSH_ACCEPT_NEW+x}
+IMPORT_RUN_LEGACY=${IMPORT_SSH_LEGACY_ALGORITHMS-}
+IMPORT_RUN_LEGACY_SET=${IMPORT_SSH_LEGACY_ALGORITHMS+x}
 KVS_EMAIL_OVERRIDE_SET=false
 KVS_EMAIL_OVERRIDE=""
 if [[ -v EMAIL ]]; then
@@ -4471,7 +4476,7 @@ chmod 600 .env
 # Load environment
 unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED KVS_IMPORT_PENDING_RETIREMENT MANTICORE_REBUILD_PENDING
 unset SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT HTTPS_PORT PROJECT_HTTPS_PORT PROJECT_HTTPS_PORT_PINNED TABLES_PREFIX
-unset IMPORT_REMOTE_HOST IMPORT_REMOTE_PORT IMPORT_SSH_ACCEPT_NEW
+unset IMPORT_REMOTE_HOST IMPORT_REMOTE_PORT IMPORT_SSH_ACCEPT_NEW IMPORT_SSH_LEGACY_ALGORITHMS
 source .env
 IMPORT_SAVED_HOST=${IMPORT_REMOTE_HOST:-}
 IMPORT_SAVED_PORT=${IMPORT_REMOTE_PORT:-22}
@@ -4482,11 +4487,12 @@ else
     IMPORT_REMOTE_PORT=${IMPORT_RUN_PORT:-22}
 fi
 IMPORT_SSH_ACCEPT_NEW=${IMPORT_SSH_ACCEPT_NEW:-}
-if [ "${IMPORT_RUN_ACCEPT_NEW_SET:-}" = x ]; then
-    IMPORT_SSH_ACCEPT_NEW=$IMPORT_RUN_ACCEPT_NEW
-elif [ -z "$IMPORT_SAVED_HOST" ] || [ "$IMPORT_REMOTE_HOST:$IMPORT_REMOTE_PORT" != "$IMPORT_SAVED_HOST:$IMPORT_SAVED_PORT" ]; then
+if [ -z "$IMPORT_SAVED_HOST" ] || [ "$IMPORT_REMOTE_HOST:$IMPORT_REMOTE_PORT" != "$IMPORT_SAVED_HOST:$IMPORT_SAVED_PORT" ]; then
     IMPORT_SSH_ACCEPT_NEW=""
+    IMPORT_SSH_LEGACY_ALGORITHMS=""
 fi
+if [ "${IMPORT_RUN_ACCEPT_NEW_SET:-}" = x ]; then IMPORT_SSH_ACCEPT_NEW=$IMPORT_RUN_ACCEPT_NEW; fi
+if [ "${IMPORT_RUN_LEGACY_SET:-}" = x ]; then IMPORT_SSH_LEGACY_ALGORITHMS=$IMPORT_RUN_LEGACY; fi
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
 # Capture the parsed saved domain before explicit overrides change it.

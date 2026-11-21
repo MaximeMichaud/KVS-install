@@ -21,11 +21,18 @@ cat > "$tmp/bin/ssh" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$LOG.args"
 # A permissive user configuration makes a missing explicit policy visible.
-policy=no
+policy=no host_rsa=no user_rsa=no key=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        -o) case "$2" in StrictHostKeyChecking=*) policy=${2#*=} ;; esac; shift 2 ;;
-        -p|-i) shift 2 ;;
+        -o)
+            case "$2" in
+                StrictHostKeyChecking=*) policy=${2#*=} ;;
+                HostKeyAlgorithms=+ssh-rsa) host_rsa=yes ;;
+                PubkeyAcceptedAlgorithms=+ssh-rsa) user_rsa=yes ;;
+            esac
+            shift 2 ;;
+        -i) key=$2; shift 2 ;;
+        -p) shift 2 ;;
         *) break ;;
     esac
 done
@@ -37,7 +44,26 @@ case "$KEY_STATE:$policy" in
         exit 255 ;;
     changed:yes|changed:accept-new) echo 'REMOTE HOST IDENTIFICATION HAS CHANGED!' >&2; exit 255 ;;
 esac
+[ "${BANNER:-no}" != yes ] || echo 'Previous client: no matching host key type found. Their offer: ssh-rsa' >&2
+[ "${QUOTED_ERROR:-no}" != yes ] || echo 'Unable to negotiate with old.test port 22: no matching host key type found. Their offer: ssh-rsa' >&2
+case "${SERVER:-modern}" in
+    legacy)
+        if [ "$host_rsa" != yes ]; then
+            echo 'Unable to negotiate: no matching host key type found. Their offer: ssh-rsa,ssh-dss' >&2
+            exit 255
+        fi
+        if [ -z "${SSHPASS:-}" ] && { [ "$user_rsa" != yes ] || [ "$key" != "$RSA_KEY" ]; }; then
+            echo 'Permission denied (publickey).' >&2
+            exit 255
+        fi
+        ;;
+    modern) [ "$host_rsa$user_rsa" = nono ] || exit 255 ;;
+    denied) echo 'deploy@old.test: Permission denied (publickey).' >&2; exit 255 ;;
+    offline) echo 'Connection timed out' >&2; exit 255 ;;
+    no-rsa) echo 'Unable to negotiate: no matching host key type found. Their offer: ssh-dss' >&2; exit 255 ;;
+esac
 echo authenticated >> "$LOG"
+case "$*" in *" id -u") echo 0 ;; esac
 STUB
 chmod +x "$tmp/bin/"*
 PATH="$tmp/bin:$PATH"
@@ -64,6 +90,10 @@ check_setting() (
     # shellcheck source=/dev/null
     source "$tmp/connect"
     [ "$IMPORT_SSH_TARGET" = "deploy@$host" ] && [ "$IMPORT_SSH_PORT" = "${interactive_port:-$port}" ] || fail 'wrong SSH endpoint'
+    if [ "$expected" = modern ]; then
+        [[ "${IMPORT_SSH_OPTS[*]}" != *ssh-rsa* ]] || fail "unexpected RSA opt-in for $host:$port"
+        return
+    fi
     [[ " ${IMPORT_SSH_OPTS[*]} " == *" $expected "* ]] || fail "$option for $host:$port ($explicit): ${IMPORT_SSH_OPTS[*]}"
 )
 check_setting IMPORT_SSH_ACCEPT_NEW y n old.test 2222 old.test StrictHostKeyChecking=yes
@@ -96,3 +126,42 @@ for accept in no yes; do
     done
 done
 echo 'PASS: password authentication honors the host key policy'
+
+check_setting IMPORT_SSH_LEGACY_ALGORITHMS yes no old.test 2222 old.test modern
+check_setting IMPORT_SSH_LEGACY_ALGORITHMS yes unset old.test 2222 old.test HostKeyAlgorithms=+ssh-rsa
+check_setting IMPORT_SSH_LEGACY_ALGORITHMS yes unset other.test 2222 old.test modern
+check_setting IMPORT_SSH_LEGACY_ALGORITHMS yes unset old.test 22 old.test modern
+check_setting IMPORT_SSH_LEGACY_ALGORITHMS yes unset old.test 2222 '' modern
+check_setting IMPORT_SSH_LEGACY_ALGORITHMS yes yes other.test 22 old.test HostKeyAlgorithms=+ssh-rsa no
+check_setting IMPORT_SSH_LEGACY_ALGORITHMS yes unset old.test 2222 old.test modern yes 22
+unset SSHPASS IMPORT_SSH_LEGACY_ALGORITHMS
+export SERVER=legacy RSA_KEY="$tmp/rsa key"
+touch "$RSA_KEY"
+KEY_STATE=known
+import_ssh_setup old.test 22 deploy "$RSA_KEY" yes
+if import_remote_privileges 2> "$tmp/error"; then fail 'legacy algorithms were enabled by default'; fi
+grep -Fq 'no matching host key type' "$tmp/error" || fail 'the original SSH error was lost'
+grep -Fq 'IMPORT_SSH_LEGACY_ALGORITHMS=yes' "$tmp/error" || fail 'missing RSA compatibility hint'
+for advice in 'weakens the SSH policy' 'Host block' 'only' 'upgrade'; do
+    grep -Fq "$advice" "$tmp/error" || fail "missing RSA compatibility advice: $advice"
+done
+if SERVER=offline import_remote_privileges 2> "$tmp/error"; then fail 'unreachable host connected'; fi
+if grep -q 'LEGACY_ALGORITHMS' "$tmp/error"; then fail 'network timeout triggered an RSA hint'; fi
+if SERVER=no-rsa import_remote_privileges 2> "$tmp/error"; then fail 'unmatched host key connected'; fi
+if grep -q LEGACY_ALGORITHMS "$tmp/error"; then fail 'RSA hint for a server without RSA'; fi
+if BANNER=yes SERVER=offline import_remote_privileges 2> "$tmp/error"; then fail 'offline source connected'; fi
+if grep -q LEGACY_ALGORITHMS "$tmp/error"; then fail 'quoted banner masked a network failure'; fi
+for terminal in denied offline no-rsa; do
+    if QUOTED_ERROR=yes SERVER=$terminal import_remote_privileges 2> "$tmp/error"; then fail "$terminal source connected"; fi
+    if grep -q LEGACY_ALGORITHMS "$tmp/error"; then fail "quoted RSA diagnostic masked $terminal"; fi
+done
+grep -Fq 'Their offer: ssh-dss' "$tmp/error" || fail 'the final negotiation diagnostic was lost'
+QUOTED_ERROR=yes SERVER=modern import_remote_privileges 2> "$tmp/error" || fail 'modern source with a banner refused'
+if grep -q LEGACY_ALGORITHMS "$tmp/error"; then fail 'successful SSH triggered an RSA hint'; fi
+SERVER=modern import_remote_privileges || fail 'modern key authentication failed'
+IMPORT_SSH_LEGACY_ALGORITHMS=yes import_ssh_setup old.test 22 deploy "$RSA_KEY" yes
+import_remote_privileges || fail 'RSA key authentication to the legacy source failed'
+[ "$IMPORT_REMOTE_PRIVILEGES" = root ] || fail 'the probe result was lost'
+IMPORT_SSH_LEGACY_ALGORITHMS=yes import_ssh_setup old.test 22 deploy '' no no fixture
+import_remote_privileges || fail 'password authentication to the legacy source failed'
+echo 'PASS: RSA compatibility is opt-in and negotiation failures explain it'

@@ -2132,6 +2132,9 @@ import_ssh_setup() {
         -o ConnectTimeout=20
         -p "$port"
     )
+    if [ "${IMPORT_SSH_LEGACY_ALGORITHMS:-no}" = yes ]; then
+        IMPORT_SSH_OPTS+=(-o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa)
+    fi
     IMPORT_SSH_COMMAND=(ssh)
     if [ -n "$password" ]; then
         # sshpass answers ssh's password prompt from SSHPASS, so ssh's
@@ -2207,8 +2210,21 @@ import_remote_privileges() {
                 kind=""
                 while IFS= read -r line || [ -n "$line" ]; do
                     printf '%s\n' "$line" >&2
+                    line=${line%$'\r'}
+                    [[ "$line" =~ [^[:space:]] ]] || continue
+                    # Bash 4.2 parses a case inside a command substitution
+                    # only when every pattern opens with a parenthesis.
                     case "$line" in
-                        'No '*' host key is known for '*) kind=unknown ;;
+                        ('Host key verification failed.')
+                            # OpenSSH follows the unknown-key detail with this line.
+                            [ "$kind" = unknown ] || kind="" ;;
+                        ('No '*' host key is known for '*) kind=unknown ;;
+                        ('Unable to negotiate'*': no matching host key type found. Their offer: '*)
+                            case ",${line##*Their offer: }," in
+                                (*,ssh-rsa,*) kind=rsa ;;
+                                (*) kind="" ;;
+                            esac ;;
+                        (*) kind="" ;;
                     esac
                 done
                 printf '%s' "$kind"
@@ -2216,6 +2232,9 @@ import_remote_privileges() {
         ); then exit 0; else status=$?; fi
         if [ "${IMPORT_SSH_COMMAND[0]:-}" = sshpass ] && { [ "$failure" = unknown ] || [ "$status" = 6 ]; }; then
             echo "  Verify the host key and record it in known_hosts for $IMPORT_SSH_TARGET (port $IMPORT_SSH_PORT), or set IMPORT_SSH_ACCEPT_NEW=y for this run." >&2
+        fi
+        if [ "$status" = 255 ] && [ "$failure" = rsa ]; then
+            echo "  Enabling RSA/SHA-1 weakens the SSH policy. Prefer to upgrade the old server. If needed, set IMPORT_SSH_LEGACY_ALGORITHMS=yes for this import only, or limit the SSH option to that server's Host block. For key login, use an RSA identity only if the source refuses your modern key." >&2
         fi
         exit 1
     ) || return 1
