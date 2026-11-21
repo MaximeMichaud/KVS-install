@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +18,9 @@ import (
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/manifest"
 )
+
+var digestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var localRegistryRe = regexp.MustCompile(`^(localhost|127\.0\.0\.1)(:[0-9]+)?$`)
 
 var refRe = regexp.MustCompile(`^(?:([^/]+\.[^/]+|[^/]+:[0-9]+|localhost)/)?([^:@]+)(?::([^@]+))?$`)
 
@@ -78,7 +80,7 @@ func imageLocation(ref string) (host, base, tag string, err error) {
 		if !strings.Contains(name, "/") {
 			name = "library/" + name
 		}
-	case strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1"):
+	case localRegistryRe.MatchString(host):
 		scheme = "http"
 	}
 	return host, fmt.Sprintf("%s://%s/v2/%s", scheme, host, name), tag, nil
@@ -123,21 +125,11 @@ func explainRefusal(host string, err error) error {
 // readImage reads one image of the repository at base ("https://host/v2/name").
 func readImage(base, tag string) (string, int64, []manifest.Layer, error) {
 	accept := "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
-	body, headers, err := registryGet(base+"/manifests/"+tag, accept)
+	body, digest, err := registryObject(base+"/manifests/", tag, accept, false)
 	if err != nil {
 		return "", 0, nil, err
 	}
-	digest := headers.Get("Docker-Content-Digest")
-	var doc struct {
-		MediaType string `json:"mediaType"`
-		Config    struct {
-			Digest string `json:"digest"`
-			Size   int64  `json:"size"`
-		} `json:"config"`
-		Layers []struct {
-			Digest string `json:"digest"`
-			Size   int64  `json:"size"`
-		} `json:"layers"`
+	var index struct {
 		Manifests []struct {
 			Digest   string `json:"digest"`
 			Platform struct {
@@ -145,20 +137,17 @@ func readImage(base, tag string) (string, int64, []manifest.Layer, error) {
 			} `json:"platform"`
 		} `json:"manifests"`
 	}
-	if err := json.Unmarshal(body, &doc); err != nil {
+	if err := json.Unmarshal(body, &index); err != nil {
 		return "", 0, nil, err
 	}
-	if len(doc.Manifests) > 0 {
+	if len(index.Manifests) > 0 {
 		// A multi-platform index: keep the index digest (what docker pull
 		// records) and read the linux/amd64 manifest for the layers.
 		found := false
-		for _, entry := range doc.Manifests {
+		for _, entry := range index.Manifests {
 			if entry.Platform.OS == "linux" && entry.Platform.Architecture == "amd64" {
-				sub, _, err := registryGet(base+"/manifests/"+entry.Digest, accept)
+				body, _, err = registryObject(base+"/manifests/", entry.Digest, accept, true)
 				if err != nil {
-					return "", 0, nil, err
-				}
-				if err := json.Unmarshal(sub, &doc); err != nil {
 					return "", 0, nil, err
 				}
 				found = true
@@ -169,14 +158,23 @@ func readImage(base, tag string) (string, int64, []manifest.Layer, error) {
 			return "", 0, nil, errors.New("the index lists no linux/amd64 image")
 		}
 	}
-	if digest == "" {
-		sum := sha256.Sum256(body)
-		digest = "sha256:" + hex.EncodeToString(sum[:])
+	var doc struct {
+		Config struct {
+			Digest string `json:"digest"`
+			Size   int64  `json:"size"`
+		} `json:"config"`
+		Layers []struct {
+			Digest string `json:"digest"`
+			Size   int64  `json:"size"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return "", 0, nil, err
 	}
 	if doc.Config.Digest == "" || len(doc.Layers) == 0 {
 		return "", 0, nil, errors.New("the image manifest lists no configuration or no layer")
 	}
-	config, _, err := registryGet(base+"/blobs/"+doc.Config.Digest, "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json, application/octet-stream")
+	config, _, err := registryObject(base+"/blobs/", doc.Config.Digest, "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json, application/octet-stream", true)
 	if err != nil {
 		return "", 0, nil, fmt.Errorf("image configuration: %w", err)
 	}
@@ -194,10 +192,35 @@ func readImage(base, tag string) (string, int64, []manifest.Layer, error) {
 	size := doc.Config.Size
 	var layers []manifest.Layer
 	for n, l := range doc.Layers {
+		if !digestRe.MatchString(l.Digest) || !digestRe.MatchString(cfg.RootFS.DiffIDs[n]) {
+			return "", 0, nil, fmt.Errorf("layer %d has an invalid digest or diff ID", n)
+		}
 		size += l.Size
 		layers = append(layers, manifest.Layer{Digest: l.Digest, DiffID: cfg.RootFS.DiffIDs[n], Size: l.Size})
 	}
 	return digest, size, layers, nil
+}
+
+// registryObject reads a manifest by tag, or a manifest or blob by its parent
+// descriptor. Check the raw bytes before using any metadata they contain.
+func registryObject(base, ref, accept string, byDigest bool) ([]byte, string, error) {
+	if byDigest && !digestRe.MatchString(ref) {
+		return nil, "", fmt.Errorf("invalid registry descriptor digest %q", ref)
+	}
+	body, headers, err := registryGet(base+ref, accept)
+	if err != nil {
+		return nil, "", err
+	}
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
+	if byDigest && ref != digest {
+		return nil, "", fmt.Errorf("registry object %s hashes to %s", ref, digest)
+	}
+	for _, claimed := range headers.Values("Docker-Content-Digest") {
+		if claimed != digest {
+			return nil, "", fmt.Errorf("registry claims %q for %s, body hashes to %s", claimed, ref, digest)
+		}
+	}
+	return body, digest, nil
 }
 
 // registryGet reads url, tried again as the comment on registryAttempts

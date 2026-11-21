@@ -630,6 +630,18 @@ so a failed run is fixed and run again.
   - "GHCR does not show this image to an anonymous reader": the package is
     private. Make it public (step 5 of the one-time setup) and re-run the
     failed job.
+  - "registry claims ... body hashes to ..." means the registry sent a
+    `Docker-Content-Digest` header that disagrees with the response body.
+    The publisher hashes the raw bytes of the image index (when present),
+    the image manifest (linux/amd64 for an index), and the image configuration.
+    The header is optional. An object requested by digest must also match
+    its parent descriptor, even without a header. A mismatch there reports
+    "registry object ... hashes to ...". Investigate the registry or its
+    cache and retry once it serves consistent content. Keep the lock intact.
+  - Digests, including layer digests and diff IDs, must be `sha256:`
+    followed by exactly 64 lowercase hexadecimal digits. Registry requests
+    use HTTPS except for the exact hosts `localhost` and `127.0.0.1`,
+    which use plain HTTP with or without a port.
   - "the build reported sha256:... and the registry answers sha256:..." for
     MariaDB, memcached, Dragonfly, acme.sh or Alpine: the tag was rebuilt
     upstream since the lock was written. Refresh the lock, commit it and

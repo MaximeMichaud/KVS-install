@@ -429,7 +429,7 @@ func parseDigests(spec string) (map[string]string, error) {
 			return nil, fmt.Errorf("digest %q is not service[@series]=sha256:...", item)
 		}
 		service, series, _ := strings.Cut(left, "@")
-		if service == "" || !strings.HasPrefix(digest, "sha256:") {
+		if service == "" || !digestRe.MatchString(digest) {
 			return nil, fmt.Errorf("digest %q is not service[@series]=sha256:...", item)
 		}
 		out[variantKey(service, series)] = digest
@@ -666,7 +666,7 @@ func pinnedRefs(specs []imageSpec, digests map[string]string) (map[string]string
 		given := digests[key]
 		_, inRef, hasDigest := strings.Cut(s.Ref, "@")
 		switch {
-		case hasDigest && !strings.HasPrefix(inRef, "sha256:"):
+		case hasDigest && !digestRe.MatchString(inRef):
 			return nil, fmt.Errorf("image %s: %s does not end with a sha256 digest", key, s.Ref)
 		case hasDigest && given != "" && given != inRef:
 			return nil, fmt.Errorf("image %s: the reference carries %s and --digests gives %s", key, inRef, given)

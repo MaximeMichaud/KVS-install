@@ -535,7 +535,7 @@ func TestCheckShipped(t *testing.T) {
 			key, ref, _ := strings.Cut(entry, "=")
 			name, tag, _ := strings.Cut(ref, ":")
 			images = append(images, key+"="+host+"/"+ref)
-			d := stubDigest("/v2/" + name + "/manifests/" + tag)
+			d := stubImageDigest("/v2/" + name + "/manifests/" + tag)
 			if given, ok := digest[key]; ok {
 				d = given
 			}
@@ -688,8 +688,8 @@ func TestCheckShipped(t *testing.T) {
 	// The bundle pins an nginx digest the manifest does not sign.
 	other := "sha256:" + strings.Repeat("e", 64)
 	pinImages, pinDigests := specs(stack, map[string]string{"nginx": other})
-	finds("an override pinning another image", shipped("pin", [2]string{pinImages, pinDigests}, [2]string{images, strings.Replace(digests, "nginx="+stubDigest("/v2/kvs-install/nginx/manifests/26.11.0")+",", "", 1)}),
-		"the override runs "+host+"/kvs-install/nginx:26.11.0@"+other+" for nginx, and kvsctl pulls "+host+"/kvs-install/nginx:26.11.0@"+stubDigest("/v2/kvs-install/nginx/manifests/26.11.0"))
+	finds("an override pinning another image", shipped("pin", [2]string{pinImages, pinDigests}, [2]string{images, strings.Replace(digests, "nginx="+stubImageDigest("/v2/kvs-install/nginx/manifests/26.11.0")+",", "", 1)}),
+		"the override runs "+host+"/kvs-install/nginx:26.11.0@"+other+" for nginx, and kvsctl pulls "+host+"/kvs-install/nginx:26.11.0@"+stubImageDigest("/v2/kvs-install/nginx/manifests/26.11.0"))
 
 	// What kvsctl-release refuses to sign is caught on the manifest too,
 	// and so is a kvsctl build longer than the size the manifest signs for
@@ -762,7 +762,7 @@ func TestAReleaseOfThisTreePassesThePublishCheck(t *testing.T) {
 	// What the images job records for each image it pushes.
 	digests := filepath.Join(work, "digests")
 	record := func(file, key, repository, tag string) {
-		write(filepath.Join(digests, file), key+"="+stubDigest("/v2/kvs-install/"+repository+"/manifests/"+tag)+"\n", 0o644)
+		write(filepath.Join(digests, file), key+"="+stubImageDigest("/v2/kvs-install/"+repository+"/manifests/"+tag)+"\n", 0o644)
 	}
 	record("nginx.txt", "nginx", "nginx", version)
 	record("kvs-init.txt", "kvs-init", "init", version)
@@ -903,7 +903,7 @@ func stubLock(t *testing.T, path, host string) string {
 		if m == nil || m[3] == "" {
 			t.Fatalf("%s: %q names no repository and tag", path, fields[2])
 		}
-		fields[2] = host + "/" + m[2] + ":" + m[3] + "@" + stubDigest("/v2/"+m[2]+"/manifests/"+m[3])
+		fields[2] = host + "/" + m[2] + ":" + m[3] + "@" + stubImageDigest("/v2/"+m[2]+"/manifests/"+m[3])
 		lines[i] = strings.Join(fields, "\t")
 	}
 	return strings.Join(lines, "\n")

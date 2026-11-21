@@ -138,12 +138,13 @@ func TestPinnedRefs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	digests := map[string]string{"nginx": "sha256:aaa", "php-fpm@8.1": "sha256:bbb", "mariadb@11.8": "sha256:ccc"}
+	a, b, c := stubDigest("nginx"), stubDigest("php"), stubDigest("db")
+	digests := map[string]string{"nginx": a, "php-fpm@8.1": b, "mariadb@11.8": c}
 	pins, err := pinnedRefs(specs, digests)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"nginx": "r/nginx:1@sha256:aaa", "php-fpm@8.1": "r/php:1-php8.1@sha256:bbb", "mariadb@11.8": "mariadb:11.8.9@sha256:ccc"}
+	want := map[string]string{"nginx": "r/nginx:1@" + a, "php-fpm@8.1": "r/php:1-php8.1@" + b, "mariadb@11.8": "mariadb:11.8.9@" + c}
 	for key, ref := range want {
 		if pins[key] != ref {
 			t.Errorf("pin of %s = %q, want %q", key, pins[key], ref)
@@ -151,12 +152,12 @@ func TestPinnedRefs(t *testing.T) {
 	}
 	// A reference that carries its digest needs no --digests entry, and
 	// one that agrees with it is fine.
-	carried, err := parseImages("nginx=r/nginx:1@sha256:aaa")
+	carried, err := parseImages("nginx=r/nginx:1@" + a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, given := range []map[string]string{nil, {"nginx": "sha256:aaa"}} {
-		if pins, err := pinnedRefs(carried, given); err != nil || pins["nginx"] != "r/nginx:1@sha256:aaa" {
+	for _, given := range []map[string]string{nil, {"nginx": a}} {
+		if pins, err := pinnedRefs(carried, given); err != nil || pins["nginx"] != "r/nginx:1@"+a {
 			t.Errorf("a reference with its digest: %v %v", pins, err)
 		}
 	}
@@ -164,12 +165,13 @@ func TestPinnedRefs(t *testing.T) {
 		images  string
 		digests map[string]string
 	}{
-		"an image without a digest":            {"nginx=r/nginx:1,memcached=memcached:1", map[string]string{"nginx": "sha256:aaa"}},
+		"an image without a digest":            {"nginx=r/nginx:1,memcached=memcached:1", map[string]string{"nginx": a}},
 		"a variant without a digest":           {"php-fpm@8.1=r/php:1", nil},
-		"a digest the reference contradicts":   {"nginx=r/nginx:1@sha256:aaa", map[string]string{"nginx": "sha256:bbb"}},
+		"a digest the reference contradicts":   {"nginx=r/nginx:1@" + a, map[string]string{"nginx": b}},
+		"a reference with a short sha256":      {"nginx=r/nginx:1@sha256:abc", nil},
 		"a reference ending in no sha256":      {"nginx=r/nginx:1@md5:aaa", nil},
-		"a digest that names no listed image":  {"nginx=r/nginx:1", map[string]string{"nginx": "sha256:aaa", "cron@8.1": "sha256:bbb"}},
-		"a digest of a series that is missing": {"mariadb@11.8=m:11.8.9", map[string]string{"mariadb@11.8": "sha256:aaa", "mariadb@12.3": "sha256:bbb"}},
+		"a digest that names no listed image":  {"nginx=r/nginx:1", map[string]string{"nginx": a, "cron@8.1": b}},
+		"a digest of a series that is missing": {"mariadb@11.8=m:11.8.9", map[string]string{"mariadb@11.8": a, "mariadb@12.3": b}},
 	}
 	for name, c := range refused {
 		specs, err := parseImages(c.images)
@@ -184,11 +186,11 @@ func TestPinnedRefs(t *testing.T) {
 
 func TestParseDigests(t *testing.T) {
 	// The workflow writes the services that do not vary as "nginx@=...".
-	digests, err := parseDigests("nginx@=sha256:aaa php-fpm@8.1=sha256:bbb\ncron@8.1=sha256:ccc,mariadb=sha256:ddd")
+	want := map[string]string{"nginx": stubDigest("nginx"), "php-fpm@8.1": stubDigest("php"), "cron@8.1": stubDigest("cron"), "mariadb": stubDigest("db")}
+	digests, err := parseDigests(fmt.Sprintf("nginx@=%s php-fpm@8.1=%s\ncron@8.1=%s,mariadb=%s", want["nginx"], want["php-fpm@8.1"], want["cron@8.1"], want["mariadb"]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"nginx": "sha256:aaa", "php-fpm@8.1": "sha256:bbb", "cron@8.1": "sha256:ccc", "mariadb": "sha256:ddd"}
 	for key, digest := range want {
 		if digests[key] != digest {
 			t.Errorf("digest of %s = %q, want %q", key, digests[key], digest)
@@ -197,7 +199,7 @@ func TestParseDigests(t *testing.T) {
 	if len(digests) != len(want) {
 		t.Errorf("parseDigests = %v", digests)
 	}
-	for _, bad := range []string{"nginx", "nginx=aaa", "=sha256:aaa"} {
+	for _, bad := range []string{"nginx", "nginx=aaa", "=" + stubDigest("x"), "nginx=sha256:aaa", "nginx=sha256:" + strings.Repeat("F", 64)} {
 		if _, err := parseDigests(bad); err == nil {
 			t.Errorf("parseDigests(%q) must fail", bad)
 		}
@@ -209,9 +211,9 @@ func TestRenderOverrideWithVariants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	digests, err := parseDigests("nginx=sha256:aaa,php-fpm@8.1=sha256:bbb,cron@8.1=sha256:ccc,mariadb@11.8=sha256:ddd,mariadb@12.3=sha256:eee,memcached=sha256:fff")
-	if err != nil {
-		t.Fatal(err)
+	digests := map[string]string{
+		"nginx": stubDigest("nginx"), "php-fpm@8.1": stubDigest("php"), "cron@8.1": stubDigest("cron"),
+		"mariadb@11.8": stubDigest("11.8"), "mariadb@12.3": stubDigest("12.3"), "memcached": stubDigest("cache"),
 	}
 	pins, err := pinnedRefs(specs, digests)
 	if err != nil {
@@ -233,7 +235,7 @@ func TestRenderOverrideWithVariants(t *testing.T) {
 	}
 	want := `  nginx:
     build: !reset null
-    image: "r/nginx:26.10.0@sha256:aaa"
+    image: "r/nginx:26.10.0@` + digests["nginx"] + `"
   php-fpm:
     build: !reset null
     image: "${KVS_PHP_FPM_IMAGE:?kvsctl writes it to .env when it applies a release}"
@@ -243,7 +245,7 @@ func TestRenderOverrideWithVariants(t *testing.T) {
   mariadb:
     image: "${KVS_MARIADB_IMAGE:?kvsctl writes it to .env when it applies a release}"
   memcached:
-    image: "memcached:1.6.45-alpine@sha256:fff"
+    image: "memcached:1.6.45-alpine@` + digests["memcached"] + `"
 `
 	if body != want {
 		t.Errorf("override =\n%s\nwant\n%s", body, want)
@@ -1027,28 +1029,37 @@ func TestParseAnnouncedKeys(t *testing.T) {
 	}
 }
 
-// registryStub answers the two distribution API calls registryDigest makes,
-// with a digest derived from the path so every image gets its own.
-func registryStub() *httptest.Server {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v2/", func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.Contains(r.URL.Path, "/manifests/"):
-			w.Header().Set("Docker-Content-Digest", stubDigest(r.URL.Path))
-			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-			fmt.Fprint(w, `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:config","size":3},"layers":[{"digest":"sha256:layer","size":97}]}`)
-		case strings.Contains(r.URL.Path, "/blobs/"):
-			fmt.Fprint(w, `{"rootfs":{"diff_ids":["sha256:diff"]}}`)
-		default:
-			http.NotFound(w, r)
-		}
-	})
-	return httptest.NewServer(mux)
+// Give each image a distinct layer so an expected pin from another tag fails.
+func stubManifest(path string) string {
+	return fmt.Sprintf(`{"config":{"digest":%q,"size":%d},"layers":[{"digest":%q,"size":97}]}`, stubDigest(stubConfig), len(stubConfig), stubDigest(path))
 }
 
-func stubDigest(path string) string {
-	sum := sha256.Sum256([]byte(path))
+var stubConfig = fmt.Sprintf(`{"rootfs":{"diff_ids":[%q]}}`, stubDigest("uncompressed layer"))
+
+func stubImageDigest(path string) string {
+	return stubDigest(stubManifest(path))
+}
+
+func stubDigest(content string) string {
+	sum := sha256.Sum256([]byte(content))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func serveStubImage(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.Contains(r.URL.Path, "/manifests/"):
+		body := stubManifest(r.URL.Path)
+		w.Header().Set("Docker-Content-Digest", stubDigest(body))
+		fmt.Fprint(w, body)
+	case strings.HasSuffix(r.URL.Path, "/blobs/"+stubDigest(stubConfig)):
+		fmt.Fprint(w, stubConfig)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func registryStub() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(serveStubImage))
 }
 
 // tarMember is one file of a .tar.gz a test writes.
@@ -1135,7 +1146,7 @@ func TestManifestCommandWritesVariants(t *testing.T) {
 		"--out", site, "--version", "26.10.0", "--commit", commit,
 		"--bundle", bundlePath, "--bundle-url", "file://" + bundlePath,
 		"--images", fmt.Sprintf("nginx=%s,php-fpm@8.1=%s,cron@8.1=%s,mariadb@11.8=%s,mariadb@12.3=%s", nginx, php, cron, mariadb118, mariadb123),
-		"--digests", "nginx@=" + stubDigest("/v2/kvs-install/nginx/manifests/26.10.0") + ",mariadb@11.8=" + stubDigest("/v2/mariadb/manifests/11.8.9"),
+		"--digests", "nginx@=" + stubImageDigest("/v2/kvs-install/nginx/manifests/26.10.0") + ",mariadb@11.8=" + stubImageDigest("/v2/mariadb/manifests/11.8.9"),
 		"--notes", "Manticore replaces the internal search", "--notes-url", "https://example.test/26.10.0",
 		"--highlight", "Manticore is the default search backend",
 		"--announce-key", nextID + "=" + base64.StdEncoding.EncodeToString(nextPub) + "@2026-11-01",
@@ -1180,7 +1191,7 @@ func TestManifestCommandWritesVariants(t *testing.T) {
 	if len(rel.Images) != 1 || rel.Images[0].Service != "nginx" {
 		t.Errorf("images = %+v, only the service that does not vary belongs there", rel.Images)
 	}
-	if rel.Images[0].Size != 100 || len(rel.Images[0].Layers) != 1 {
+	if rel.Images[0].Size != int64(len(stubConfig)+97) || len(rel.Images[0].Layers) != 1 {
 		t.Errorf("the size and the layers come from the registry: %+v", rel.Images[0])
 	}
 	series := rel.Variants[manifest.VariantPHP]["8.1"]
@@ -1267,7 +1278,7 @@ func TestManifestCommandWritesVariants(t *testing.T) {
 	bad := append([]string{}, args...)
 	for i, a := range bad {
 		if a == "--digests" {
-			bad[i+1] = "nginx@=sha256:0000"
+			bad[i+1] = "nginx@=" + stubDigest("wrong image")
 		}
 	}
 	if err := manifestCmd(bad); err == nil {
@@ -1276,7 +1287,7 @@ func TestManifestCommandWritesVariants(t *testing.T) {
 	unknown := append([]string{}, args...)
 	for i, a := range unknown {
 		if a == "--digests" {
-			unknown[i+1] = "php@8.1=" + stubDigest("/v2/kvs-install/php/manifests/26.10.0-php8.1")
+			unknown[i+1] = "php@8.1=" + stubImageDigest("/v2/kvs-install/php/manifests/26.10.0-php8.1")
 		}
 	}
 	if err := manifestCmd(unknown); err == nil {

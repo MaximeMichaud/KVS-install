@@ -33,22 +33,14 @@ func flakyRegistry(failures int32, status int, retryAfter string) (*httptest.Ser
 	var manifestReads atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v2/", func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.Contains(r.URL.Path, "/manifests/"):
-			if manifestReads.Add(1) <= failures {
-				if retryAfter != "" {
-					w.Header().Set("Retry-After", retryAfter)
-				}
-				w.WriteHeader(status)
-				return
+		if strings.Contains(r.URL.Path, "/manifests/") && manifestReads.Add(1) <= failures {
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
 			}
-			w.Header().Set("Docker-Content-Digest", stubDigest(r.URL.Path))
-			fmt.Fprint(w, `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:config","size":3},"layers":[{"digest":"sha256:layer","size":97}]}`)
-		case strings.Contains(r.URL.Path, "/blobs/"):
-			fmt.Fprint(w, `{"rootfs":{"diff_ids":["sha256:diff"]}}`)
-		default:
-			http.NotFound(w, r)
+			w.WriteHeader(status)
+			return
 		}
+		serveStubImage(w, r)
 	})
 	return httptest.NewServer(mux), &manifestReads
 }
@@ -64,7 +56,7 @@ func TestRegistryRetriesARateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a rate limit that passes must not stop the read: %v", err)
 	}
-	if digest == "" || size != 100 {
+	if digest == "" || size != int64(len(stubConfig)+97) {
 		t.Errorf("read after the retries: digest %q, size %d", digest, size)
 	}
 	if reads.Load() != 3 {
@@ -127,6 +119,8 @@ func TestRegistryKeepsTheTokenOfARepository(t *testing.T) {
 	var tokens atomic.Int32
 	var current atomic.Value
 	current.Store("token-1")
+	image := stubManifest("amd64")
+	index := fmt.Sprintf(`{"manifests":[{"digest":%q,"platform":{"os":"linux","architecture":"amd64"}}]}`, stubDigest(image))
 	mux := http.NewServeMux()
 	var server *httptest.Server
 	mux.HandleFunc("/v2/", func(w http.ResponseWriter, r *http.Request) {
@@ -137,12 +131,12 @@ func TestRegistryKeepsTheTokenOfARepository(t *testing.T) {
 		}
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/manifests/11.8.9"):
-			w.Header().Set("Docker-Content-Digest", "sha256:index")
-			fmt.Fprint(w, `{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"sha256:amd64","platform":{"os":"linux","architecture":"amd64"}}]}`)
-		case strings.HasSuffix(r.URL.Path, "/manifests/sha256:amd64"):
-			fmt.Fprint(w, `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:config","size":3},"layers":[{"digest":"sha256:layer","size":97}]}`)
-		case strings.Contains(r.URL.Path, "/blobs/"):
-			fmt.Fprint(w, `{"rootfs":{"diff_ids":["sha256:diff"]}}`)
+			w.Header().Set("Docker-Content-Digest", stubDigest(index))
+			fmt.Fprint(w, index)
+		case strings.HasSuffix(r.URL.Path, "/manifests/"+stubDigest(image)):
+			fmt.Fprint(w, image)
+		case strings.HasSuffix(r.URL.Path, "/blobs/"+stubDigest(stubConfig)):
+			fmt.Fprint(w, stubConfig)
 		default:
 			http.NotFound(w, r)
 		}
@@ -159,7 +153,7 @@ func TestRegistryKeepsTheTokenOfARepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != "sha256:index" {
+	if digest != stubDigest(index) {
 		t.Errorf("digest %q, want the index digest", digest)
 	}
 	if tokens.Load() != 1 {
@@ -184,34 +178,26 @@ func TestRegistryKeepsTheTokenOfARepository(t *testing.T) {
 // neither the first nor the last, so only its platform can pick it.
 func TestRegistryReadsTheAMD64ImageOfAnIndex(t *testing.T) {
 	recordSleeps(t)
-	images := map[string]string{
-		"sha256:arm64":       `{"config":{"digest":"sha256:config-arm64","size":5},"layers":[{"digest":"sha256:arm-1","size":11},{"digest":"sha256:arm-2","size":12}]}`,
-		"sha256:windows":     `{"config":{"digest":"sha256:config-windows","size":8},"layers":[{"digest":"sha256:win-1","size":21},{"digest":"sha256:win-2","size":22}]}`,
-		"sha256:attestation": `{"config":{"digest":"sha256:config-attestation","size":6},"layers":[{"digest":"sha256:in-toto","size":13}]}`,
-		"sha256:amd64":       `{"config":{"digest":"sha256:config-amd64","size":7},"layers":[{"digest":"sha256:amd-1","size":100},{"digest":"sha256:amd-2","size":200},{"digest":"sha256:amd-3","size":300}]}`,
+	config := fmt.Sprintf(`{"rootfs":{"diff_ids":[%q,%q,%q]}}`, stubDigest("diff1"), stubDigest("diff2"), stubDigest("diff3"))
+	image := fmt.Sprintf(`{"config":{"digest":%q,"size":%d},"layers":[{"digest":%q,"size":100},{"digest":%q,"size":200},{"digest":%q,"size":300}]}`,
+		stubDigest(config), len(config), stubDigest("layer1"), stubDigest("layer2"), stubDigest("layer3"))
+	descriptor := func(body, os, arch string) string {
+		return fmt.Sprintf(`{"digest":%q,"platform":{"os":%q,"architecture":%q}}`, stubDigest(body), os, arch)
 	}
-	configs := map[string]string{
-		"sha256:config-arm64":       `{"rootfs":{"diff_ids":["sha256:arm-diff-1","sha256:arm-diff-2"]}}`,
-		"sha256:config-windows":     `{"rootfs":{"diff_ids":["sha256:win-diff-1","sha256:win-diff-2"]}}`,
-		"sha256:config-attestation": `{"rootfs":{"diff_ids":["sha256:in-toto-diff"]}}`,
-		"sha256:config-amd64":       `{"rootfs":{"diff_ids":["sha256:amd-diff-1","sha256:amd-diff-2","sha256:amd-diff-3"]}}`,
-	}
+	arm, windows, attestation := stubManifest("arm"), stubManifest("windows"), stubManifest("attestation")
+	other := descriptor(arm, "linux", "arm64") + "," + descriptor(windows, "windows", "amd64")
 	index := map[string]string{
-		"11.8.9": `{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[
-			{"digest":"sha256:arm64","platform":{"os":"linux","architecture":"arm64","variant":"v8"}},
-			{"digest":"sha256:windows","platform":{"os":"windows","architecture":"amd64","os.version":"10.0.20348.2340"}},
-			{"digest":"sha256:amd64","platform":{"os":"linux","architecture":"amd64"}},
-			{"digest":"sha256:attestation","platform":{"os":"unknown","architecture":"unknown"}}]}`,
-		"no-linux-amd64": `{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[
-			{"digest":"sha256:arm64","platform":{"os":"linux","architecture":"arm64","variant":"v8"}},
-			{"digest":"sha256:windows","platform":{"os":"windows","architecture":"amd64","os.version":"10.0.20348.2340"}}]}`,
+		"11.8.9":         `{"manifests":[` + other + "," + descriptor(image, "linux", "amd64") + "," + descriptor(attestation, "unknown", "unknown") + "]}",
+		"no-linux-amd64": `{"manifests":[` + other + "]}",
 	}
+	images := map[string]string{stubDigest(image): image, stubDigest(arm): arm, stubDigest(windows): windows, stubDigest(attestation): attestation}
+	configs := map[string]string{stubDigest(config): config, stubDigest(stubConfig): stubConfig}
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, ref, _ := strings.Cut(r.URL.Path, "/manifests/")
 		_, blob, _ := strings.Cut(r.URL.Path, "/blobs/")
 		switch {
 		case index[ref] != "":
-			w.Header().Set("Docker-Content-Digest", "sha256:index")
+			w.Header().Set("Docker-Content-Digest", stubDigest(index[ref]))
 			fmt.Fprint(w, index[ref])
 		case images[ref] != "":
 			fmt.Fprint(w, images[ref])
@@ -228,13 +214,17 @@ func TestRegistryReadsTheAMD64ImageOfAnIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != "sha256:index" {
+	if digest != stubDigest(index["11.8.9"]) {
 		t.Errorf("digest %q, want the digest of the index", digest)
 	}
-	if size != 7+100+200+300 {
-		t.Errorf("size %d, want the configuration and the layers of the amd64 image, 607", size)
+	if size != int64(len(config)+100+200+300) {
+		t.Errorf("size %d, want the configuration and the layers of the amd64 image", size)
 	}
-	want := []string{"sha256:amd-1 sha256:amd-diff-1 100", "sha256:amd-2 sha256:amd-diff-2 200", "sha256:amd-3 sha256:amd-diff-3 300"}
+	want := []string{
+		stubDigest("layer1") + " " + stubDigest("diff1") + " 100",
+		stubDigest("layer2") + " " + stubDigest("diff2") + " 200",
+		stubDigest("layer3") + " " + stubDigest("diff3") + " 300",
+	}
 	var got []string
 	for _, l := range layers {
 		got = append(got, fmt.Sprintf("%s %s %d", l.Digest, l.DiffID, l.Size))
@@ -256,12 +246,13 @@ func TestRegistryRefusesDiffIDsThatDoNotPairWithTheLayers(t *testing.T) {
 		`["sha256:d1","sha256:d2","sha256:d3","sha256:d4"]`,
 		`["sha256:d1","sha256:d2"]`,
 	} {
+		config := fmt.Sprintf(`{"rootfs":{"diff_ids":%s}}`, diffIDs)
 		registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case strings.Contains(r.URL.Path, "/manifests/"):
-				fmt.Fprint(w, `{"config":{"digest":"sha256:config","size":3},"layers":[{"digest":"sha256:l1","size":1},{"digest":"sha256:l2","size":2},{"digest":"sha256:l3","size":3}]}`)
+				fmt.Fprintf(w, `{"config":{"digest":%q,"size":%d},"layers":[{"size":1},{"size":2},{"size":3}]}`, stubDigest(config), len(config))
 			case strings.Contains(r.URL.Path, "/blobs/"):
-				fmt.Fprintf(w, `{"rootfs":{"diff_ids":%s}}`, diffIDs)
+				fmt.Fprint(w, config)
 			default:
 				http.NotFound(w, r)
 			}
@@ -290,12 +281,7 @@ func TestRegistryKeepsATokenPerRepository(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		switch {
-		case strings.Contains(r.URL.Path, "/manifests/"):
-			fmt.Fprint(w, `{"config":{"digest":"sha256:config","size":3},"layers":[{"digest":"sha256:layer","size":97}]}`)
-		default:
-			fmt.Fprint(w, `{"rootfs":{"diff_ids":["sha256:diff"]}}`)
-		}
+		serveStubImage(w, r)
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		tokens.Add(1)
@@ -367,5 +353,75 @@ func TestRetryPauseIsBounded(t *testing.T) {
 	err := &registryError{url: "u", status: http.StatusTooManyRequests, text: "429", retryAfter: "3600"}
 	if wait, ok := retryPause(err, 1); !ok || wait != registryMaxPause {
 		t.Errorf("retryPause = %v, %v; want %v, true", wait, ok, registryMaxPause)
+	}
+}
+
+func TestRegistryVerifiesImageContent(t *testing.T) {
+	for _, fault := range []string{"none", "index header", "manifest header", "config header", "manifest body", "config body", "manifest descriptor", "config descriptor", "layer digest", "diff ID"} {
+		t.Run(fault, func(t *testing.T) {
+			layer, diff := stubDigest("layer"), stubDigest("uncompressed layer")
+			if fault == "layer digest" {
+				layer = "sha256:abc"
+			}
+			if fault == "diff ID" {
+				diff = "sha256:" + strings.ToUpper(strings.TrimPrefix(diff, "sha256:"))
+			}
+			config := fmt.Sprintf(`{"rootfs":{"diff_ids":[%q]}}`, diff)
+			configID := stubDigest(config)
+			if fault == "config descriptor" {
+				configID = "sha256:abc"
+			}
+			image := fmt.Sprintf(`{"config":{"digest":%q,"size":%d},"layers":[{"digest":%q,"size":7}]}`, configID, len(config), layer)
+			imageID := stubDigest(image)
+			if fault == "manifest descriptor" {
+				imageID = "sha256:abc"
+			}
+			index := fmt.Sprintf(`{"manifests":[{"digest":%q,"platform":{"os":"linux","architecture":"amd64"}}]}`, imageID)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var kind, body string
+				switch r.URL.Path {
+				case "/manifests/latest":
+					kind, body = "index", index
+				case "/manifests/" + imageID:
+					kind, body = "manifest", image
+				case "/blobs/" + configID:
+					kind, body = "config", config
+				default:
+					http.NotFound(w, r)
+					return
+				}
+				if fault == kind+" descriptor" {
+					t.Errorf("fetched a malformed %s descriptor", kind)
+				}
+				if fault == kind+" body" {
+					body += "\n"
+				}
+				if fault == kind+" header" {
+					w.Header().Set("Docker-Content-Digest", stubDigest("other"))
+				}
+				fmt.Fprint(w, body)
+			}))
+			defer server.Close()
+			digest, size, layers, err := readImage(server.URL, "latest")
+			if fault != "none" {
+				if err == nil {
+					t.Fatalf("accepted %s", fault)
+				}
+				return
+			}
+			if err != nil || digest != stubDigest(index) || size != int64(len(config)+7) || len(layers) != 1 || layers[0].Digest != layer || layers[0].DiffID != diff {
+				t.Fatalf("readImage = %q, %d, %+v, %v", digest, size, layers, err)
+			}
+		})
+	}
+}
+
+func TestImageLocationKeepsHTTPSForLocalhostPrefixes(t *testing.T) {
+	for _, host := range []string{"localhost.example.com", "localhost.example.com:5000", "127.0.0.1.example.com"} {
+		_, base, _, err := imageLocation(host + "/image:1")
+		if err != nil || base != "https://"+host+"/v2/image" {
+			t.Errorf("registry %s: got %q, %v", host, base, err)
+		}
 	}
 }
