@@ -183,7 +183,7 @@ func saveState(t *testing.T, root string, state *instance.State) *instance.Insta
 func reminded(t *testing.T, command string) string {
 	t.Helper()
 	errOut := useStderr(t)
-	remind(&cobra.Command{Use: command})
+	remind(&cobra.Command{Use: command}, nil)
 	var lines []string
 	for _, line := range strings.Split(strings.TrimSpace(errOut.String()), "\n") {
 		if line != "" && !strings.Contains(line, "release keys from "+releaseKeyEnv) {
@@ -831,6 +831,8 @@ func TestRecordKeepsTheLatestStableRelease(t *testing.T) {
 // its version.
 func TestVersionCheckNamesTheLatestStableRelease(t *testing.T) {
 	useStderr(t)
+	t.Setenv("KVS_INSTALL_DIR", t.TempDir())
+	updated := time.Now().UTC().Format(time.RFC3339)
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -842,12 +844,12 @@ func TestVersionCheckNamesTheLatestStableRelease(t *testing.T) {
 	cli := fmt.Sprintf(`{%q:{"url":"https://example.com/kvsctl","sha256":"%s"}}`, cliPlatform(), strings.Repeat("0", 64))
 	// A new root command sets every flag to its default: --manifest is
 	// given again each time.
-	pointAtSignedRaw(t, fmt.Sprintf(`{"schema":%d,"channel":"stable","updated":"2027-03-01T08:00:00Z","releases":[{"version":"27.4.0-rc1","cli":%s,"images":"elsewhere"},{"version":"27.3.0","cli":%s}]}`, manifest.Schema+1, cli, cli), priv)
+	pointAtSignedRaw(t, fmt.Sprintf(`{"schema":%d,"channel":"stable","updated":%q,"releases":[{"version":"27.4.0-rc1","cli":%s,"images":"elsewhere"},{"version":"27.3.0","cli":%s}]}`, manifest.Schema+1, updated, cli, cli), priv)
 	out, err := runKvsctl(t, "version", "--check", "--manifest", flagManifest)
 	if err != nil || !strings.HasSuffix(out, "\nkvsctl 27.3.0 is the build of release 27.3.0\n") {
 		t.Fatalf("version --check: %v\n%s", err, out)
 	}
-	pointAtSignedRaw(t, fmt.Sprintf(`{"schema":%d,"channel":"candidate","updated":"2027-03-01T08:00:00Z","releases":[{"version":"27.4.0-rc1","cli":%s}]}`, manifest.Schema, cli), priv)
+	pointAtSignedRaw(t, fmt.Sprintf(`{"schema":%d,"channel":"candidate","updated":%q,"releases":[{"version":"27.4.0-rc1","cli":%s}]}`, manifest.Schema, updated, cli), priv)
 	out, err = runKvsctl(t, "version", "--check", "--manifest", flagManifest)
 	if err != nil || !strings.HasSuffix(out, "\nthe manifest lists release candidates only (27.4.0-rc1 is the newest): no stable release ships a kvsctl to compare with\n") {
 		t.Fatalf("version --check on candidates only: %v\n%s", err, out)
@@ -1206,5 +1208,54 @@ func TestManifestFloorInStatusCache(t *testing.T) {
 	}
 	if reads != 4 {
 		t.Fatalf("stale lists must be read again, got %d reads", reads)
+	}
+}
+
+func TestReleaseDisplaysRejectStaleManifest(t *testing.T) {
+	root := newRoot(t, "docker/.env", "DOMAIN=\"incomplete\n")
+	t.Setenv("KVS_INSTALL_DIR", root)
+	inst := &instance.Instance{Root: root}
+	rel := testRelease("1.1.0", "2026-10-01", "")
+	rel.CLI = map[string]manifest.Asset{cliPlatform(): fakeBuild(t, "exit 1")}
+	url := signedManifest(t, rel)
+	updates := &instance.Updates{}
+	updates.For(url).LatestSeen = "2.0.0"
+	if err := inst.SaveUpdates(updates); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(inst.StateDir(), "updates.json")
+	before := readFile(t, path)
+	for _, args := range [][]string{{"releases"}, {"releases", "--json"}, {"version", "--check"}} {
+		args = append(args, "--manifest", url)
+		out, err := runKvsctl(t, args...)
+		if !errors.Is(err, upgrade.ErrStaleManifest) || strings.Contains(out, rel.Version) {
+			t.Errorf("stale %v: %v, %q", args, err, out)
+		}
+		out, err = runKvsctl(t, append(args, "--allow-stale-manifest")...)
+		if err != nil || !strings.Contains(out, rel.Version) {
+			t.Errorf("override %v: %v, %q", args, err, out)
+		}
+	}
+	if after := readFile(t, path); after != before {
+		t.Error("display changed the manifest record")
+	}
+}
+
+func TestReleaseReminderUsesDisplayedList(t *testing.T) {
+	root := newRoot(t)
+	saveState(t, root, &instance.State{Current: "1.0.0"})
+	url := signedManifest(t, testRelease("2.0.0", "2026-10-01", ""))
+	errOut := useStderr(t)
+	for _, args := range [][]string{{"releases"}, {"releases", "--json"}} {
+		errOut.Reset()
+		out, err := runKvsctl(t, append(args, "--root", root, "--manifest", url)...)
+		if err != nil || !strings.Contains(out, "2.0.0") || !strings.Contains(errOut.String(), "2.0.0 is available") {
+			t.Fatalf("release list and reminder: %v, %s, %s", err, out, errOut)
+		}
+		for _, name := range []string{"updates.json", updateCheckFile} {
+			if _, err := os.Stat(filepath.Join(root, "kvsctl", name)); !os.IsNotExist(err) {
+				t.Fatalf("%s after releases: %v", name, err)
+			}
+		}
 	}
 }

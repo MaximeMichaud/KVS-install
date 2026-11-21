@@ -71,7 +71,8 @@ Exit codes:
      restore stopped part way: the stack is in an unknown state, read the log
   6  another kvsctl, or a setup.sh, reconfigure.sh or kvs-install.sh run,
      holds the lock of the installation
-  7  the manifest is older than the one already seen
+  7  the latest stable release is below the installed stable version or the
+     highest seen at this URL, or the stable list predates one seen there
   8  the change succeeded but could not be recorded: run 'kvsctl recover'
 `
 
@@ -122,7 +123,7 @@ func rootCmd() *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	root.SetUsageTemplate(root.UsageTemplate() + exitCodes)
 	root.PersistentPostRunE = func(cmd *cobra.Command, _ []string) error {
-		remind(cmd)
+		remind(cmd, nil)
 		return nil
 	}
 	root.AddCommand(versionCmd(), statusCmd(), checkCmd(), upgradeCmd(), rollbackCmd(), recoverCmd(), backupCmd(), adoptCmd(), updateCLICmd())
@@ -197,7 +198,7 @@ func isUsageText(err error) bool {
 // again for an hour, and none holds the command longer than reminderWait:
 // the reminder is never the command's problem, so a failure is said only
 // when this kvsctl cannot read the manifest any more.
-func remind(cmd *cobra.Command) {
+func remind(cmd *cobra.Command, listed *manifest.Manifest) {
 	if flagQuiet {
 		return
 	}
@@ -218,7 +219,12 @@ func remind(cmd *cobra.Command) {
 	}
 	// The run is over and the guard gave the signals back: manifest.Fetch
 	// ends kvsctl at a Ctrl-C, rather than the reminder holding it.
-	latest, err := latestRelease(inst, reminderWait, manifest.Fetch)
+	var latest latestKnown
+	if listed != nil {
+		latest.record(listed, manifestNow())
+	} else {
+		latest, err = latestRelease(inst, reminderWait, manifest.Fetch)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "'kvsctl update-cli'") {
 			_, _ = fmt.Fprintln(stderr, "kvsctl: "+firstLine(err.Error()))
@@ -685,6 +691,9 @@ func versionCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := inspectManifest(m); err != nil {
+				return err
+			}
 			if m.LatestStable() == nil {
 				_, _ = fmt.Fprintf(stdout, "the manifest lists release candidates only (%s is the newest): no stable release ships a kvsctl to compare with\n", m.Latest().Version)
 				return nil
@@ -705,8 +714,17 @@ func versionCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&check, "check", false, "say whether the latest stable release ships a newer kvsctl")
+	cmd.Flags().BoolVar(&check, "check", false, "compare with the latest stable build after checking the installed stable version and the newest list seen at this URL")
 	return cmd
+}
+
+// inspectManifest checks a list before displaying what its releases offer.
+func inspectManifest(m *manifest.Manifest) error {
+	inst, err := optionalStack()
+	if err != nil {
+		return err
+	}
+	return upgrade.InspectManifest(inst, m, manifestURL(), flagAllowStale)
 }
 
 // cliState compares this binary with the build a release ships. A version

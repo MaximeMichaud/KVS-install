@@ -19,11 +19,14 @@ import (
 func init() { register(releasesCmd) }
 
 func releasesCmd() *cobra.Command {
+	var listed *manifest.Manifest
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "releases",
 		Short: "List the releases the signed manifest offers",
-		Args:  cobra.NoArgs,
+		Long: "List releases after checking the signed manifest against the installed stable version " +
+			"and the newest list seen at this URL. A stale list exits 7 unless --allow-stale-manifest is set.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			keys, err := publicKeys()
 			if err != nil {
@@ -41,11 +44,10 @@ func releasesCmd() *cobra.Command {
 			if err := doc.VerifyAny(keys); err != nil {
 				return err
 			}
-			// A list the URL does not serve, a release candidate marked as
-			// the latest release, is refused as check and upgrade refuse it.
-			if err := doc.Manifest.CheckChannel(manifestURL()); err != nil {
+			if err := inspectManifest(doc.Manifest); err != nil {
 				return err
 			}
+			listed = doc.Manifest
 			if asJSON {
 				encoder := json.NewEncoder(stdout)
 				encoder.SetIndent("", "  ")
@@ -63,6 +65,8 @@ func releasesCmd() *cobra.Command {
 			return nil
 		},
 	}
+	// Reuse the verified list for the reminder instead of refreshing its cache.
+	cmd.PersistentPostRun = func(cmd *cobra.Command, _ []string) { remind(cmd, listed) }
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the releases as JSON")
 	return cmd
 }

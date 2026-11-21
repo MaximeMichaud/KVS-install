@@ -231,7 +231,8 @@ themselves, and `--quiet` skips it. The manifest is read for it at most
 once a day and waited for 5 seconds at most, and a read that failed is not
 tried again by the same `kvsctl` build for an hour. A freshness refusal is
 retried on the next lookup so a corrected mirror can answer immediately.
-The reminder keeps its cache in
+The `releases` reminder uses the list just displayed and writes no record.
+Other reminders keep their cache in
 `kvsctl/update-check.json`.
 
 `KVSCTL_RELEASE_KEY` in the environment replaces the public keys built into
@@ -309,6 +310,9 @@ has no place on a production server.
   oldest version it upgrades from directly (`min_from`), what it does to the
   database and its notes. The latest stable release is marked `latest`,
   each release candidate `release candidate`, and the installed one `*`.
+  Both output formats check the installed stable version and the saved
+  manifest floors for this URL before displaying releases. Exit 7 reports
+  a stale list unless `--allow-stale-manifest` is set.
 - `kvsctl history [--json]`: what `kvsctl` did to this stack, oldest first:
   the adopt, every upgrade and every rollback, one line each with its date
   in UTC, the version the stack was left on and a note. The line
@@ -322,7 +326,8 @@ has no place on a production server.
   service, through `docker compose logs`: the last `N` lines of each (200),
   then, with `-f`, the new ones until Ctrl-C.
 - `kvsctl version [--check]`: the build; with `--check`, whether the latest
-  stable release ships a newer one.
+  stable release ships a newer one. The comparison uses the same read-only
+  freshness checks as `releases`.
 
 ### Commands that write
 
@@ -426,7 +431,7 @@ not see them either (doctor reports no operation running).
 | 4 | the upgrade failed and the previous version is back and healthy |
 | 5 | a rollback failed (the automatic one, or a manual one part way), or a restore stopped part way: the stack is in an unknown state, read the log |
 | 6 | another `kvsctl`, or a run of `setup.sh`, `reconfigure.sh` or `kvs-install.sh`, holds the lock of the installation |
-| 7 | the manifest is older than the one already seen |
+| 7 | the latest stable release is below the installed stable version or the highest seen at this URL, or the stable list predates one seen there |
 | 8 | the change succeeded but could not be recorded: run `kvsctl recover` |
 
 Every command prints this table at the end of its `--help`. A command that
