@@ -973,19 +973,100 @@ import_place_site() {
     rm -f "$destination/.kvs-extraction-in-progress"
 }
 
+# Locate the existing filesystem that will receive a new directory.
+import_space_parent() {
+    local probe="$1"
+    while [ ! -d "$probe" ] && [ "$probe" != / ]; do
+        probe=$(dirname -- "$probe")
+    done
+    printf '%s\n' "$probe"
+}
+
+# A daemon path is meaningful here only for a local engine. A Unix socket
+# can also be forwarded, so match the engine ID to its file on this host.
+import_mariadb_storage_path() {
+    local project="$1" volume="${1}_mariadb-data" endpoint path info engine root missing=no
+    [ -n "$project" ] || return 1
+    if ! path=$(LC_ALL=C docker volume inspect --format '{{.Mountpoint}}' "$volume" 2>&1); then
+        # The CLI may print an empty formatted result before the error.
+        case "${path#$'\n'}" in
+            "Error response from daemon: get $volume: no such volume"|"Error: No such volume: $volume") missing=yes ;;
+            *) return 1 ;;
+        esac
+    elif [[ "$path" != /* || ! -d "$path" ]]; then
+        return 1
+    fi
+
+    # DOCKER_CONTEXT overrides DOCKER_HOST. With neither set, inspect the
+    # active context, which can point to a different machine.
+    if [ -n "${DOCKER_CONTEXT:-}" ] || [ -z "${DOCKER_HOST:-}" ]; then
+        endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || return 1
+    else
+        endpoint=$DOCKER_HOST
+    fi
+    [[ "$endpoint" = unix:///* ]] || return 1
+    info=$(docker info --format '{{.ID}}{{println}}{{.DockerRootDir}}' 2>/dev/null) || return 1
+    engine=${info%%$'\n'*}
+    root=${info#*$'\n'}
+    [[ -n "$engine" && "$root" = /* && -f "$root/engine-id" && -r "$root/engine-id" ]] || return 1
+    [ "$engine" = "$(< "$root/engine-id")" ] || return 1
+    if [ "$missing" = yes ]; then
+        path=$root
+        if [ -d "$root/volumes" ]; then path="$root/volumes"; fi
+    fi
+    printf '%s\n' "$path"
+}
+
+# Check database needs on other devices and return only the database
+# reserve sharing free space with the remaining site files.
+import_remote_database_space_mb() {
+    local report="$1" stage="$2" destination="$3" db volume site_path
+    local site_device path device
+    local -a paths
+    local -A needs=() probes=()
+
+    db=$(import_kv "$report" db_size_mb)
+    if ! [[ "$db" =~ ^[0-9]+$ ]] || (( 10#$db == 0 )); then echo 0; return 0; fi
+    site_path=$(import_space_parent "$destination")
+    paths=("$(import_space_parent mariadb/init)")
+    if [ "$stage" != received ] && [ "${IMPORT_REUSE_DUMP:-no}" != yes ]; then
+        paths+=("$(import_space_parent "${IMPORT_STAGING:-$PWD/import}")")
+    fi
+    if [ "$stage" != before-prefix ]; then
+        if ! volume=$(import_mariadb_storage_path "${IMPORT_VOLUME_PROJECT:-}"); then
+            echo "WARNING: MariaDB volume storage is unknown or not visible here; reserving $db MB on the filesystem holding $destination." >&2
+            volume=$site_path
+        fi
+        paths+=("$volume")
+    fi
+    site_device=$(stat -Lc %d -- "$site_path") || return 1
+    for path in "${paths[@]}"; do
+        device=$(stat -Lc %d -- "$path") || return 1
+        needs[$device]=$(( ${needs[$device]:-0} + 10#$db ))
+        probes[$device]=$path
+    done
+    for device in "${!needs[@]}"; do
+        [ "$device" != "$site_device" ] || continue
+        if ! import_filesystem_space_mb_ok "${needs[$device]}" "${probes[$device]}"; then
+            echo "ERROR: not enough free space for the dumps and loaded database on the filesystem holding ${probes[$device]} (about ${needs[$device]} MB plus a tenth of margin)" >&2
+            return 1
+        fi
+    done
+    echo "${needs[$site_device]:-0}"
+}
+
 # import_free_space_mb_ok <needed MB> <destination>
 # True when the filesystem holding the destination (or its nearest existing
 # parent) has room for that many megabytes, with a tenth of margin.
 import_free_space_mb_ok() {
     local needed="$1"
     local destination="$2"
-    local probe available
+    import_filesystem_space_mb_ok "$needed" "$(import_space_parent "$destination")"
+}
 
-    probe=$destination
-    while [ ! -d "$probe" ] && [ "$probe" != "/" ]; do
-        probe=$(dirname -- "$probe")
-    done
-    available=$(df -Pm -- "$probe" 2>/dev/null | awk 'NR==2 {print $4}')
+import_filesystem_space_mb_ok() {
+    local needed="$1" path="$2" available
+    available=$(df -Pm -- "$path" 2>/dev/null | awk 'NR==2 {print $4}')
     [ -n "$needed" ] && [ -n "$available" ] || return 1
     [ "$available" -ge $(( needed + needed / 10 )) ]
 }
@@ -2401,6 +2482,46 @@ import_count_load() {
     ' "$file"
 }
 
+# Check the estimated remainder when the transport has no usable count.
+# The saved rsync count uses logical bytes per name. A source inspection
+# measures allocated blocks instead, so compare like units on both ends.
+import_check_estimated_transfer_space() {
+    local destination="$1" reserve="$2" saved_bytes="$3" report="${IMPORT_RESUME_SPACE_REPORT:-}"
+    local total held remaining size status stage=received
+    local -a du_args=(-sbl)
+    shift 3
+    if [ -n "$saved_bytes" ]; then
+        total=$saved_bytes
+    elif [ -n "$report" ]; then
+        size=$(import_kv "$report" site_size_mb)
+        status=$(import_kv "$report" site_size_status)
+        if [[ "$size" =~ ^[0-9]+$ && ( "$status" = exact || -z "$status" ) ]]; then
+            total=$((10#$size * 1048576))
+            du_args=(-s -B1)
+        else
+            # Use the first pass's upper-bound check and warning for an
+            # unknown site size. A files-only pass still needs the raw dump.
+            [ "${IMPORT_FILES_ONLY:-no}" != yes ] || stage=pending
+            import_remote_free_space_check "$report" "$destination" '' "$stage"
+            return $?
+        fi
+    else
+        return 0
+    fi
+    if held=$(cd -- "$destination/" && du "${du_args[@]}" "$@" -- . 2>/dev/null); then
+        held=${held%%[[:space:]]*}
+    else
+        echo "  Cannot measure the local site; checking space for the full estimate." >&2
+        held=0
+    fi
+    remaining=$((total > held ? total - held : 0))
+    [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=0
+    if ! import_free_space_mb_ok "$(((remaining + 1048575) / 1048576 + reserve))" "$destination"; then
+        echo "ERROR: not enough free space under $destination for the estimated $(import_bytes_text "$remaining") left and $(import_mb_text "$reserve") reserved for the database and its dumps, with a tenth of margin" >&2
+        return 1
+    fi
+}
+
 # import_rsync_totals <rsync arguments...>
 # The dry run of the transfer, its statistics reduced by
 # import_rsync_stats_totals: a scan of the old server without a byte
@@ -3424,7 +3545,7 @@ import_remote_files() (
     local use_rsync="$3"
     local status=0
     local pattern excluded totals count_status files=0 bytes=0 site_files site_bytes site_entries=0
-    local scope saved saved_files saved_bytes saved_date counted="" sampler="" owner disks="" interval="${IMPORT_DISKSTATS_INTERVAL:-0}"
+    local scope saved saved_files saved_bytes="" saved_date counted="" sampler="" owner disks="" interval="${IMPORT_DISKSTATS_INTERVAL:-0}"
     local count_flag="" skip_count=no
     local jobs="${IMPORT_TRANSFER_JOBS:-1}" chunk="${IMPORT_TRANSFER_CHUNK:-20000}" chunks
     local worker_rsh worker_auth=no plan="" work error_dir remote_plan="" masters="" rsync_host
@@ -3438,6 +3559,7 @@ import_remote_files() (
     local -a patterns=("${@:4}")
     local -a rsync_excludes=()
     local -a tar_excludes=()
+    local -a du_excludes=()
 
     if [[ ! "$jobs" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
         echo "ERROR: IMPORT_TRANSFER_JOBS must be an integer from 1 to 32" >&2
@@ -3466,9 +3588,11 @@ import_remote_files() (
         # included, and reads a backslash as an escape in any other.
         excluded=${pattern%/\*}
         if [ "$excluded" != "$pattern" ]; then
+            du_excludes+=("--exclude=.$(import_glob_escape "$excluded")/*")
             rsync_excludes+=("--exclude=$(import_glob_escape "$excluded")/*")
             tar_excludes+=(--wildcards "$(import_shquote "--exclude=.$(import_glob_escape "$excluded")/*")")
         else
+            du_excludes+=("--exclude=.$(import_glob_escape "$excluded")")
             case "$excluded" in
                 *[\*\?\[]*) rsync_excludes+=("--exclude=$(import_glob_escape "$excluded")") ;;
                 *) rsync_excludes+=("--exclude=$excluded") ;;
@@ -3476,6 +3600,10 @@ import_remote_files() (
             tar_excludes+=(--no-wildcards "$(import_shquote "--exclude=.$excluded")")
         fi
     done
+    scope=$(import_count_scope "${patterns[@]}")
+    if saved=$(import_count_load "$destination" "$scope"); then
+        read -r site_entries saved_files saved_bytes saved_date <<< "$saved"
+    fi
     if [ "$use_rsync" = yes ]; then
         # The chunk lists take about 55 bytes a file, 0.6 GB for ten million
         # files: on disk, not in the RAM of a tmpfs /tmp.
@@ -3490,7 +3618,6 @@ import_remote_files() (
         # must survive a failure; file lists and progress logs stay temporary.
         [ -d "$error_dir" ] || return 1
         umask 077
-        scope=$(import_count_scope "${patterns[@]}")
         # The disks are read from the start, so that two readings are
         # there once the copy shows its progress. The trap stops the
         # sampler; were this shell killed outright, the sampler sees it is
@@ -3539,8 +3666,8 @@ import_remote_files() (
         # time. IMPORT_SIZE_TIMEOUT=0 asks for the whole count anyway.
         count_flag=$(import_count_timeout_file "$destination") || count_flag=""
         if [ -z "$plan" ] && [ "${IMPORT_SIZE_TIMEOUT:-300}" != 0 ] && [ -n "$count_flag" ] && [ -f "$count_flag" ] &&
-            find "$destination" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q . &&
-            import_count_load "$destination" "$scope" > /dev/null; then
+            find "$destination/" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q . &&
+            [ -n "$saved" ]; then
             skip_count=yes
         elif [ -n "$plan" ]; then
             echo "  Planning all files for $jobs parallel workers, in chunks of at most $(import_count_text "$chunk") files (complete scan; no size-count timeout)..."
@@ -3577,14 +3704,10 @@ import_remote_files() (
             sleep "$delay"
             attempt=$((attempt + 1))
         done
-        if [ -n "$totals" ]; then
+        if [[ -n "$totals" && ( "$count_status" = 0 || "$count_status" = 24 ) ]]; then
             IFS=$'\t' read -r files bytes site_files site_bytes site_entries <<< "$totals"
-            case "$count_status" in
-                0|24)
-                    import_count_save "$destination" "$scope" "$site_entries" "$site_files" "$site_bytes"
-                    [ -z "$count_flag" ] || rm -f -- "$count_flag"
-                    ;;
-            esac
+            import_count_save "$destination" "$scope" "$site_entries" "$site_files" "$site_bytes"
+            [ -z "$count_flag" ] || rm -f -- "$count_flag"
             if [ "$files" -eq 0 ] && [ "$bytes" -eq 0 ]; then
                 echo "  To transfer:     nothing, the site's $(import_count_text "$site_files") files ($(import_bytes_text "$site_bytes")) are already here; rsync checks them"
             else
@@ -3598,27 +3721,28 @@ import_remote_files() (
                 if ! import_free_space_mb_ok "$(((bytes + 1048575) / 1048576 + reserve))" "$destination"; then
                     free_mb=$(df -Pm -- "$destination" 2>/dev/null | awk 'NR == 2 { print $4 }')
                     left="the transfer still copies $(import_bytes_text "$bytes")"
-                    [ "$reserve" -eq 0 ] || left="$left and the database takes about $(import_mb_text "$reserve")"
+                    [ "$reserve" -eq 0 ] || left="$left and the database and dump staging need about $(import_mb_text "$reserve")"
                     echo "ERROR: not enough free space under $destination: $left, with a tenth of margin, and $(import_mb_text "$free_mb") is free; free some room, then run the same command again" >&2
                     return 1
                 fi
             fi
-        elif [ "$count_status" -eq 124 ]; then
-            if [ "$skip_count" = no ] && [ -n "$count_flag" ]; then
+        else
+            if [ "$count_status" -eq 124 ] && [ "$skip_count" = no ] && [ -n "$count_flag" ]; then
                 : > "$count_flag" 2>/dev/null || true
             fi
+            import_check_estimated_transfer_space "$destination" "$reserve" "$saved_bytes" "${du_excludes[@]}" || return 1
             # The site of an earlier pass from the same source is the best
             # whole there is, dated: never a guess when there is none.
-            if saved=$(import_count_load "$destination" "$scope"); then
-                read -r site_entries saved_files saved_bytes saved_date <<< "$saved"
+            if [ -n "$saved" ]; then
                 counted=$(date -d "@$saved_date" +%Y-%m-%d 2>/dev/null) || counted="@$saved_date"
                 if [ "$skip_count" = yes ]; then
                     echo "  Not counted: the count of the last pass ran out of its time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 counts anyway); the progress measures against the count of $counted, an estimate (the site then held $(import_count_text "$site_entries") entries, $(import_count_text "$saved_files") files, $(import_bytes_text "$saved_bytes"))"
+                elif [ "$count_status" != 124 ]; then
+                    echo "  No usable rsync count (status $count_status); progress uses the estimate from $counted."
                 else
                     echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit): the progress measures against the count of $counted instead, an estimate (the site then held $(import_count_text "$site_entries") entries, $(import_count_text "$saved_files") files, $(import_bytes_text "$saved_bytes"))"
                 fi
-            else
-                site_entries=0
+            elif [ "$count_status" -eq 124 ]; then
                 echo "  The count did not finish in time (IMPORT_SIZE_TIMEOUT=${IMPORT_SIZE_TIMEOUT:-300}, 0 for no limit) and no earlier pass from this source finished one: the transfer shows its counts without a whole, and what is left stays unknown"
             fi
         fi
@@ -3770,6 +3894,7 @@ import_remote_files() (
         esac
         return "$status"
     fi
+    import_check_estimated_transfer_space "$destination" "$reserve" "$saved_bytes" "${du_excludes[@]}" || return 1
     # The pipeline answers for the local tar alone; the status of the tar
     # on the old server is read from the pipeline itself, since the setup
     # runs without pipefail. 1 is what a live site does (files changed or

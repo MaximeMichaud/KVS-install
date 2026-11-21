@@ -2417,7 +2417,7 @@ test_the_transfer_stops_when_what_is_left_does_not_fit() {
                 import_remote_files "$site" "$TMP_ROOT/fit-dest" yes > "$TMP_ROOT/fit.out" 2>&1; then
                 exit 1
             fi
-            grep -q '^ERROR: not enough free space under .*/fit-dest: the transfer still copies [0-9]* kB and the database takes about 10 MB, with a tenth of margin, and 11 MB is free' \
+            grep -q '^ERROR: not enough free space under .*/fit-dest: the transfer still copies [0-9]* kB and the database and dump staging need about 10 MB, with a tenth of margin, and 11 MB is free' \
                 "$TMP_ROOT/fit.out" || exit 2
             [ -z "$(find "$TMP_ROOT/fit-dest" -type f)" ] || exit 3
             # 13 MB free: it fits.

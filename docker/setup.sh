@@ -2545,7 +2545,7 @@ import_remote_load_excludes() {
     done < <(sed -n 's/^exclude_[0-9]*=//p' "$1")
 }
 
-# import_remote_free_space_check <report> <destination> [source]
+# import_remote_free_space_check <report> <destination> [source] [stage]
 # The site and its dump must fit under the destination. An exact size that
 # does not fit stops the import. A size cut short or skipped is checked
 # through its upper bound, the usage of the old server's filesystem: when
@@ -2559,20 +2559,20 @@ import_remote_free_space_check() {
     local report="$1"
     local destination="$2"
     local source="${3:-}"
-    local status size db used marker
+    local stage="${4:-pending}" status size db used marker hint
 
     status=$(import_kv "$report" site_size_status)
     size=$(import_kv "$report" site_size_mb)
-    db=$(import_kv "$report" db_size_mb)
+    db=$(import_remote_database_space_mb "$report" "$stage" "$destination") || return 1
     used=$(import_kv "$report" site_fs_used_mb)
     [[ "$size" =~ ^[0-9]+$ ]] || size=0
-    [[ "$db" =~ ^[0-9]+$ ]] || db=0
+    if [ "$db" -gt 0 ] && ! import_free_space_mb_ok "$db" "$destination"; then
+        echo -e "${RED}ERROR: not enough free space for the dumps and loaded database under $destination${NC}"
+        return 1
+    fi
     marker=$(import_marker_file "$destination")
     if [ -n "$source" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$source" ]; then
-        if ! import_free_space_mb_ok "$db" "$destination"; then
-            echo -e "${RED}ERROR: not enough free space for the dump under $destination${NC}"
-            return 1
-        fi
+        [ "$stage" != before-prefix ] || return 0
         if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
             echo "  Free space:      an earlier pass from the same source wrote under $destination: the room the dump of the next full pass needs is checked now, the files left to copy once the transfer is planned"
         else
@@ -2583,15 +2583,20 @@ import_remote_free_space_check() {
     case "$status" in
         exact|"")
             if ! import_free_space_mb_ok "$((size + db))" "$destination"; then
-                echo -e "${RED}ERROR: not enough free space for the site and its dump under $destination${NC}"
+                echo -e "${RED}ERROR: not enough free space for the site, dumps and loaded database under $destination${NC}"
                 return 1
             fi
             ;;
         *)
+            # Report an uncertain site size with the final, combined budget.
+            [ "$stage" != before-prefix ] || return 0
             if [[ "$used" =~ ^[0-9]+$ ]] && import_free_space_mb_ok "$((used + db))" "$destination"; then
                 return 0
             fi
-            echo -e "${YELLOW}The site size is not known exactly ($(import_remote_size_text "$report")), so the free space under $destination is not checked against it. IMPORT_SIZE_TIMEOUT=0 measures the whole site.${NC}"
+            # A pass into an earlier one skips the measure whatever the timeout.
+            hint=" IMPORT_SIZE_TIMEOUT=0 measures the whole site."
+            [ "$status" != skipped ] || hint=""
+            echo -e "${YELLOW}The site size is not known exactly ($(import_remote_size_text "$report")), so the free space under $destination is not checked against it.${hint}${NC}"
             ;;
     esac
     return 0
@@ -2615,14 +2620,14 @@ import_remote_earlier_pass() {
     else
         [[ "$marker" == "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT/"* ]] || return 1
     fi
-    [ -d "$destination" ] && find "$destination" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
+    [ -d "$destination" ] && find "$destination/" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
 }
 
 # The old server answers through kvs-export.sh, piped over one SSH
 # connection: what it holds, whether its database answers, what tools it
 # has. Nothing is written or installed there.
 import_inspect_remote() {
-    local batch=no accept_new=no attempt=1 prefix db_ok encoding nginx_lines nginx_files budget
+    local batch=no accept_new=no attempt=1 prefix db_ok encoding nginx_lines nginx_files budget space_stage=before-prefix
 
     if [[ ! "$IMPORT_TRANSFER_JOBS" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
         echo "ERROR: IMPORT_TRANSFER_JOBS must be an integer from 1 to 32" >&2
@@ -2863,8 +2868,10 @@ import_inspect_remote() {
         fi
         import_take_over_site "$IMPORT_REUSE_SITE_DIR" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
     fi
-    import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
-    import_destination_ready "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
+    IMPORT_REMOTE_SPACE_SOURCE="ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR"
+    if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then space_stage=pending; fi
+    import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "$IMPORT_REMOTE_SPACE_SOURCE" "$space_stage" || exit 1
+    import_destination_ready "/var/www/$DOMAIN" "$IMPORT_REMOTE_SPACE_SOURCE" || exit 1
     if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
         import_ensure_tool rsync || exit 1
     fi
@@ -3181,7 +3188,7 @@ import_native_target_supported() {
 }
 
 import_fetch_remote() {
-    local destination="/var/www/$DOMAIN" source dump extension pid transfer_status=0 transfer_logs reserve
+    local destination="/var/www/$DOMAIN" source dump extension pid transfer_status=0 transfer_logs reserve marker resume_report=""
 
     source="ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR"
     extension=gz
@@ -3231,16 +3238,23 @@ import_fetch_remote() {
     fi
     echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR${KVS_INSTALL_VERSION:+ (kvs-install $KVS_INSTALL_VERSION)}...${NC}"
     import_destination_ready "$destination" "$source" || exit 1
+    marker=$(import_marker_file "$destination")
+    if [ -f "$marker" ] && [ "$(cat -- "$marker")" = "$source" ]; then
+        resume_report=${IMPORT_REMOTE_REPORT:-}
+    fi
     if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
         import_mark_destination_files_only "$destination" "$source" "$IMPORT_STAGING/$DOMAIN" || exit 1
     else
         import_mark_destination "$destination" "$source" || exit 1
     fi
     transfer_logs=$(mktemp -d "$LOG_DIR/import-transfer.XXXXXX") || exit 1
-    # The database is loaded after the files, under the same disk as in the
-    # free space check of the inspection.
-    reserve=$(import_kv "${IMPORT_REMOTE_REPORT:-}" db_size_mb) || reserve=0
-    IMPORT_TRANSFER_LOG_DIR="$transfer_logs" IMPORT_TRANSFER_RESERVE_MB="$reserve" \
+    # Recheck other devices and reserve only the copies sharing the site device.
+    if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
+        reserve=$(import_remote_database_space_mb "${IMPORT_REMOTE_REPORT:-}" pending "$destination") || exit 1
+    else
+        reserve=$(import_remote_database_space_mb "${IMPORT_REMOTE_REPORT:-}" received "$destination") || exit 1
+    fi
+    IMPORT_RESUME_SPACE_REPORT="$resume_report" IMPORT_TRANSFER_LOG_DIR="$transfer_logs" IMPORT_TRANSFER_RESERVE_MB="$reserve" \
         import_remote_files "$IMPORT_REMOTE_DIR" "$destination" "$IMPORT_REMOTE_RSYNC" "${IMPORT_EXCLUDE_PATTERNS[@]}" || transfer_status=$?
     # The transfer followed the links it met, hours after the detection on
     # a large site: the same search again, compared with the list shown,
@@ -3263,6 +3277,20 @@ import_fetch_remote() {
     IMPORT_SITE_DIR=$destination
 }
 
+# SITE_PREFIX=kvs is both the legacy prefix (option 2) and the placeholder
+# that .env.example ships and a retirement for a new domain puts back. It is a
+# saved choice when .env records it (SITE_PREFIX_LEGACY=yes) or when this .env
+# has been through a setup already, which generated its MariaDB password; a
+# legacy site from before the record exists is in that case. A selection a
+# retirement left pending (SITE_PREFIX_RESELECT=yes) wins over both. A saved
+# prefix is never chosen again, like any other prefix: renaming it would
+# bring the stack up on new, empty volumes and orphan the database.
+site_prefix_is_saved() {
+    [ "${SITE_PREFIX_RESELECT:-}" != yes ] || return 1
+    [ "${SITE_PREFIX_LEGACY:-}" != yes ] || return 0
+    [ -n "${MARIADB_PASSWORD:-}" ] && [ "$MARIADB_PASSWORD" != CHANGE_ME_KVS_PASSWORD ]  # pragma: allowlist secret
+}
+
 # import_files_only: the pass IMPORT_FILES_ONLY=yes asks for. The old
 # server is inspected as for any import and its site files come into
 # /var/www/<domain> through the same transfer, then the setup stops: no
@@ -3278,6 +3306,13 @@ import_fetch_remote() {
 # the next full pass sets up for this server again.
 import_files_only() {
     local destination="/var/www/$DOMAIN" answer completed="" env_domain project
+    # A files-only pass never selects a prefix. Use an existing choice for
+    # this domain, otherwise budget the future database on the site disk.
+    local IMPORT_VOLUME_PROJECT=""
+    if [ "$PREVIOUS_DOMAIN" = "$DOMAIN" ] && [ -n "${SITE_PREFIX:-}" ] &&
+        [ "${SITE_PREFIX_RESELECT:-}" != yes ] && { [ "$SITE_PREFIX" != kvs ] || site_prefix_is_saved; }; then
+        IMPORT_VOLUME_PROJECT=$SITE_PREFIX
+    fi
 
     if ! declare -F import_validate_site >/dev/null; then
         echo -e "${RED}ERROR: the import library $IMPORT_LIB is missing; run setup.sh from a full checkout of the repository${NC}"
@@ -4353,20 +4388,6 @@ select_site_prefix() {
     remove_env_value SITE_PREFIX_RESELECT || exit 1
 }
 
-# SITE_PREFIX=kvs is both the legacy prefix (option 2) and the placeholder
-# that .env.example ships and a retirement for a new domain puts back. It is a
-# saved choice when .env records it (SITE_PREFIX_LEGACY=yes) or when this .env
-# has been through a setup already, which generated its MariaDB password; a
-# legacy site from before the record exists is in that case. A selection a
-# retirement left pending (SITE_PREFIX_RESELECT=yes) wins over both. A saved
-# prefix is never chosen again, like any other prefix: renaming it would
-# bring the stack up on new, empty volumes and orphan the database.
-site_prefix_is_saved() {
-    [ "${SITE_PREFIX_RESELECT:-}" != yes ] || return 1
-    [ "${SITE_PREFIX_LEGACY:-}" != yes ] || return 0
-    [ -n "${MARIADB_PASSWORD:-}" ] && [ "$MARIADB_PASSWORD" != CHANGE_ME_KVS_PASSWORD ]  # pragma: allowlist secret
-}
-
 # Only ask about prefix if using default
 source .env
 if [ "$KVS_EMAIL_OVERRIDE_SET" = true ]; then
@@ -4396,6 +4417,13 @@ if [ "$COMPOSE_PROJECT_NAME" != "$SITE_PREFIX" ] 2>/dev/null; then
 fi
 COMPOSE_PROJECT_NAME="$SITE_PREFIX"
 export COMPOSE_PROJECT_NAME
+
+if [ "${IMPORT_SOURCE:-}" = remote ]; then
+    # The placeholder in .env may name a different database volume.
+    # shellcheck disable=SC2034  # Read by the space checks in lib/import.sh.
+    IMPORT_VOLUME_PROJECT=$COMPOSE_PROJECT_NAME
+    import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "$IMPORT_REMOTE_SPACE_SOURCE" || exit 1
+fi
 
 warn_if_existing_project_resources "$COMPOSE_PROJECT_NAME"
 

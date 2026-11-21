@@ -61,7 +61,7 @@ pass 'the exporter is asked to skip the size measure, or given the budget'
 # import_inspect_remote against a stub exporter: the budget it hands over
 # and the tools, rewrites and take-over it asks for land in calls. It runs
 # in a directory without .env by default; filter round trips provide one.
-extract remove_env_value set_env_value import_save_nginx_config import_remote_size_text import_remote_earlier_pass import_remote_show_links import_inspect_remote select_import_source import_files_only import_fetch_source > "$TEST_DIR/inspect.sh"
+extract site_prefix_is_saved remove_env_value set_env_value import_save_nginx_config import_remote_size_text import_remote_earlier_pass import_remote_show_links import_inspect_remote select_import_source import_files_only import_fetch_source > "$TEST_DIR/inspect.sh"
 # shellcheck source=/dev/null
 source "$TEST_DIR/inspect.sh"
 inspect() {
@@ -88,7 +88,7 @@ inspect() {
         import_remote_show_entries() { return 0; }
         import_remote_show_servers() { return 0; }
         import_remote_load_excludes() { return 0; }
-        import_remote_free_space_check() { return 0; }
+        import_remote_free_space_check() { echo "space ${4:-pending} ${IMPORT_VOLUME_PROJECT:-unselected}" >> "$TEST_DIR/calls"; }
         import_prepare_source_nginx_rewrites() { echo rewrites >> "$TEST_DIR/calls"; }
         import_take_over_site() { echo take-over >> "$TEST_DIR/calls"; }
         import_check_completed() { return 0; }
@@ -157,6 +157,21 @@ inspect() {
 budget() { sed -n 's/^budget //p' "$TEST_DIR/calls"; }
 FIXTURE_DIGEST_A=$(printf 'a%.0s' {1..64})
 FIXTURE_DIGEST_B=$(printf 'b%.0s' {1..64})
+
+FIXTURE_ENTRY=normal inspect || fail 'normal source inspection failed'
+grep -Fxq 'space before-prefix unselected' "$TEST_DIR/calls" || fail 'inspection must check the site and dumps before prefix selection'
+for project_case in placeholder legacy custom reselect; do
+    expected=unselected
+    case "$project_case" in
+        placeholder) SITE_PREFIX=kvs SITE_PREFIX_LEGACY=no ;;
+        legacy) SITE_PREFIX=kvs SITE_PREFIX_LEGACY=yes expected=kvs ;;
+        custom) SITE_PREFIX=kvs-example expected=kvs-example ;;
+        reselect) SITE_PREFIX=kvs SITE_PREFIX_RESELECT=yes ;;
+    esac
+    FIXTURE_ENTRY=files-only inspect || fail 'files-only inspection failed'
+    grep -Fxq "space pending $expected" "$TEST_DIR/calls" || fail "wrong files-only volume for $project_case"
+done
+unset SITE_PREFIX SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT
 
 # Exercise the real persistence block and loading order for the next pass.
 # The earlier inspection fixtures intentionally have no .env to update.
@@ -632,7 +647,20 @@ source "$TEST_DIR/fetch.sh"
     import_native_target_supported() { return 1; }
     import_remote_dump() { echo dump >> "$TEST_DIR/calls"; }
     import_ssh_close() { return 0; }
-    import_remote_files() { echo "files $2" >> "$TEST_DIR/calls"; echo video > "$2/video.mp4"; }
+    cd "$TEST_DIR"
+    mkdir -p mariadb/init docker-data/volumes
+    IMPORT_VOLUME_PROJECT=kvs-example
+    docker() { [ "$1" = info ] || return 1; echo "$TEST_DIR/docker-data"; }
+    IMPORT_REMOTE_REPORT="$TEST_DIR/space-report"
+    printf 'db_size_mb=4\n' > "$IMPORT_REMOTE_REPORT"
+    import_remote_files() {
+        [ "$IMPORT_RESUME_SPACE_REPORT" = "$IMPORT_REMOTE_REPORT" ] || fail 'missing inspection report for the resumed copy'
+        local expected=8
+        [ "$IMPORT_FILES_ONLY" != yes ] || expected=12
+        [ "$IMPORT_TRANSFER_RESERVE_MB" = "$expected" ] || fail "incorrect reserve: $IMPORT_TRANSFER_RESERVE_MB"
+        echo "files $2" >> "$TEST_DIR/calls"
+        echo video > "$2/video.mp4"
+    }
     import_remote_recheck_links() { echo "links $2" >> "$TEST_DIR/calls"; }
     : > "$TEST_DIR/calls"
     import_fetch_remote > "$TEST_DIR/fetch.out" 2>&1 || fail "the pass of the files alone failed: $(cat "$TEST_DIR/fetch.out")"

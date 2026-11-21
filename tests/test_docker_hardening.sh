@@ -2521,6 +2521,13 @@ test_remote_site_size_bounds_warn_instead_of_blocking() {
         # shellcheck source=/dev/null
         source "$lib"
         printf 'site_size_status=exact\nsite_size_mb=1\ndb_size_mb=1\nsite_fs_used_mb=%s\n' "$((avail * 3))" > "$report"
+        cd "$TMP_ROOT" || exit 1
+        mkdir -p mariadb/init import volumes
+        # shellcheck disable=SC2034  # Read by the sourced space check.
+        IMPORT_VOLUME_PROJECT=kvs-example IMPORT_STAGING="$TMP_ROOT/import"
+        # Use this test disk for the future database volume as well.
+        # shellcheck disable=SC2329  # Called by the sourced space check.
+        docker() { [ "$1" = info ] || return 1; echo "$TMP_ROOT"; }
         [ "$(import_remote_size_text "$report")" = "1 MB" ] || exit 1
         import_remote_free_space_check "$report" "$TMP_ROOT" > /dev/null || exit 2
         # An exact size that does not fit stops the import.

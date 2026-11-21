@@ -542,7 +542,7 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'IMPORT_REUSE_SITE_DIR=DIR' "$setup" || fail "the usage must document IMPORT_REUSE_SITE_DIR"
     grep -Fq 'import_take_over_site "$IMPORT_REUSE_SITE_DIR" "/var/www/$DOMAIN"' "$setup" || fail "the files of an earlier import under another domain must be taken over before the transfer"
     grep -Fq 'IMPORT_REUSE_SITE_DIR goes with IMPORT_REMOTE_HOST' "$setup" || fail "the take-over must be refused with the other sources"
-    grep -Fq 'import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "ssh://' "$setup" || fail "a later pass must check the free space for the dump alone"
+    grep -Fq 'import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "$IMPORT_REMOTE_SPACE_SOURCE"' "$setup" || fail "a later pass must check the free space for the dump alone"
     grep -Fq 'the import completed under the old one does not count' "$setup" || fail "a domain change must forget the completion of the earlier import"
     grep -Fq 'Removing the containers of ${RETIRE_PROJECT} (${RETIRE_OLD_DOMAIN}); its volumes stay' "$setup" || fail "an import under a new domain must retire the earlier stack and say what stays"
     grep -Fq 'retirement_prepare_identity || exit 1' "$setup" || fail "an import under a new domain must prepare a recoverable identity"
