@@ -218,15 +218,22 @@ if [ ! -f ".env" ]; then
 fi
 
 # Load environment
-unset CLOUDFLARE_ENABLED COMPOSE_PROFILES PROJECT_HTTPS_PORT PROJECT_HTTPS_PORT_PINNED
+inherited_tables_prefix=${TABLES_PREFIX:-}
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES PROJECT_HTTPS_PORT PROJECT_HTTPS_PORT_PINNED TABLES_PREFIX
 # shellcheck source=/dev/null
 source .env
 DOMAIN="${DOMAIN:-}"
 # The table prefix of the site, as the setup wrote it from setup.php.
+saved_tables_prefix=${TABLES_PREFIX:-}
+TABLES_PREFIX=${TABLES_PREFIX:-$inherited_tables_prefix}
 TABLES_PREFIX="${TABLES_PREFIX:-ktvs_}"
-if [[ ! "$TABLES_PREFIX" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
-    echo "ERROR: TABLES_PREFIX in .env must be 1 to 32 identifier characters, got '$TABLES_PREFIX'" >&2
-    exit 1
+if [[ ! "$TABLES_PREFIX" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+    if [ -n "$saved_tables_prefix" ] && LC_ALL=C.UTF-8 expr + "$TABLES_PREFIX" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+        echo "WARNING: keeping non-ASCII TABLES_PREFIX '$TABLES_PREFIX' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
+    else
+        echo "ERROR: TABLES_PREFIX in .env must be 1 to 32 identifier characters (ASCII letters, digits or underscores), got '$TABLES_PREFIX'" >&2
+        exit 1
+    fi
 fi
 # Compose reads it as a duration with its unit and rejects anything else
 # for the whole project, so every docker compose command below would fail.
@@ -345,6 +352,7 @@ remove_compose_profile() {
 }
 
 validate_domain() {
+    local LC_ALL=C
     local domain="$1"
     local label
     local -a labels
@@ -519,7 +527,12 @@ refuse_edited_domain() {
 }
 
 if ! validate_domain "${DOMAIN:-}"; then
-    echo -e "${RED}ERROR: DOMAIN is missing or invalid in .env${NC}"
+    echo -e "${RED}ERROR: DOMAIN is missing or invalid in .env. Set DOMAIN to the installed ASCII hostname (punycode for an international domain).${NC}"
+    exit 1
+fi
+if [[ ! "$SITE_PREFIX" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]*$ ]] ||
+    [ "${#SITE_PREFIX}" -gt 235 ]; then
+    echo -e "${RED}ERROR: SITE_PREFIX is invalid in .env. Restore SITE_PREFIX to the existing Compose project name using ASCII lowercase letters, digits, hyphens or underscores.${NC}"
     exit 1
 fi
 if [ -z "${MARIADB_PASSWORD:-}" ]; then
@@ -565,11 +578,6 @@ case "${CLOUDFLARE_ENABLED:-false}" in
 esac
 if [ "${CLOUDFLARE_ENABLED:-false}" = true ] && [ "$MODE" != single ]; then
     echo "ERROR: CLOUDFLARE_ENABLED=true supports single-site mode only; Caddy multi-site is not supported" >&2
-    exit 1
-fi
-if [[ ! "$SITE_PREFIX" =~ ^[a-z0-9][a-z0-9_-]*$ ]] ||
-    [ "${#SITE_PREFIX}" -gt 235 ]; then
-    echo -e "${RED}ERROR: SITE_PREFIX is invalid in .env${NC}"
     exit 1
 fi
 case "$MODE" in

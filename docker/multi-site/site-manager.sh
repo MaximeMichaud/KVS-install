@@ -53,6 +53,7 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 validate_domain() {
+    local LC_ALL=C
     local domain="$1"
     local label
     local -a labels
@@ -81,6 +82,7 @@ validate_domain() {
 }
 
 validate_site_prefix() {
+    local LC_ALL=C
     local prefix="$1"
 
     if [ -z "$prefix" ] || [ "${#prefix}" -gt "$MAX_SITE_PREFIX_LENGTH" ] ||
@@ -148,7 +150,16 @@ site_tables_prefix() {
     local prefix
 
     prefix=$(sed -n 's/^TABLES_PREFIX=//p' .env 2>/dev/null | head -n 1)
-    [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
+    if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+        if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+            echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
+        elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
+            echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables, setup.php and .env together." >&2
+            return 1
+        else
+            prefix=ktvs_
+        fi
+    fi
     printf '%s\n' "$prefix"
 }
 
@@ -156,12 +167,17 @@ site_tables_prefix() {
 # new site starts from, or ktvs_ (the prefix of every archive KVS ships) when
 # there is none to read.
 archive_tables_prefix() {
+    local LC_ALL=C
     local archive="$1" pattern prefix
 
     pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
     prefix=""
     if [ -n "$archive" ] && command -v unzip >/dev/null 2>&1; then
         prefix=$(unzip -p "$archive" admin/include/setup.php 2>/dev/null | sed -n -E "$pattern" | head -n 1)
+    fi
+    if [[ "$prefix" =~ [^[:print:][:cntrl:]] ]]; then
+        echo "ERROR: a new archive table prefix must contain only ASCII letters, digits and underscores." >&2
+        return 1
     fi
     [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
     printf '%s\n' "$prefix"
@@ -907,6 +923,8 @@ add_site() {
     select_site_archive "$domain" || return 1
     site_archive=$(realpath -e -- "$site_archive") || return 1
     select_site_php "$site_archive" "$webroot" || return 1
+    local tables_prefix
+    tables_prefix=$(archive_tables_prefix "$site_archive") || return 1
 
     # The build bases of the PHP series, pinned by digest in
     # docker/images.lock, as setup.sh writes them for the primary site
@@ -961,8 +979,6 @@ add_site() {
     # Generate .env file. The table prefix is the one of the archive's
     # setup.php (ktvs_ for every archive KVS ships); the init reads it from
     # the site itself, .env carries it for the scripts outside the container.
-    local tables_prefix
-    tables_prefix=$(archive_tables_prefix "$site_archive")
     (
         umask 077
         cat > "$ADD_STAGE/.env" << EOF

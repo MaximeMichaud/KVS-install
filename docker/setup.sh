@@ -753,7 +753,15 @@ require_single_kvs_archive() {
     setup_kvs_archive >/dev/null
 }
 
+# Fold only ASCII letters, even when the caller's locale maps other
+# characters to ASCII (for example, the Kelvin sign maps to k).
+lowercase_domain() {
+    local LC_ALL=C
+    DOMAIN=${DOMAIN,,}
+}
+
 validate_domain() {
+    local LC_ALL=C
     local domain="$1"
     local label
     local -a labels
@@ -1766,7 +1774,7 @@ setup_resume_import() {
     # Resume the saved installation. Ignore shell overrides from the initial
     # import command, including alternate Compose files, images and domains.
     unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
-    unset DOMAIN SITE_PREFIX MODE SSL_PROVIDER DEV_SSL_INTELLIGENT KVS_ADMIN_PASSWORD
+    unset DOMAIN SITE_PREFIX TABLES_PREFIX MODE SSL_PROVIDER DEV_SSL_INTELLIGENT KVS_ADMIN_PASSWORD
     while IFS= read -r key; do
         [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
         unset "$key"
@@ -1776,12 +1784,20 @@ setup_resume_import() {
     set +a
     check_cloudflare_configuration || return 1
     MARIADB_WAIT_SECONDS=$wait_budget
-    if ! validate_domain "${DOMAIN:-}" || [[ ! "${TABLES_PREFIX:-}" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
-        echo "ERROR: saved DOMAIN or TABLES_PREFIX is invalid; recovery will not guess the database." >&2
+    if ! validate_domain "${DOMAIN:-}"; then
+        echo "ERROR: restore the installed ASCII hostname (punycode for an international domain) in DOMAIN in .env before recovery." >&2
         return 1
     fi
-    if [[ ! "${COMPOSE_PROJECT_NAME:-}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
-        echo "ERROR: saved COMPOSE_PROJECT_NAME is missing or invalid." >&2
+    if [[ ! "${TABLES_PREFIX:-}" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+        if LC_ALL=C.UTF-8 expr + "${TABLES_PREFIX:-}" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+            echo "WARNING: keeping non-ASCII TABLES_PREFIX '$TABLES_PREFIX' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
+        else
+            echo "ERROR: check TABLES_PREFIX in .env against the installed tables and setup.php before recovery." >&2
+            return 1
+        fi
+    fi
+    if [[ ! "${COMPOSE_PROJECT_NAME:-}" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]*$ ]]; then
+        echo "ERROR: restore the installed ASCII Compose project name in COMPOSE_PROJECT_NAME and SITE_PREFIX in .env before recovery." >&2
         return 1
     fi
     check_mariadb_stop_grace_period || return 1
@@ -1805,7 +1821,7 @@ setup_resume_import() {
     IMPORT_MODE=true
     IMPORT_SOURCE=resume
     IMPORT_SITE_DIR="/var/www/$DOMAIN"
-    if ! site_info=$(import_validate_site "$IMPORT_SITE_DIR"); then
+    if ! site_info=$(import_validate_site "$IMPORT_SITE_DIR" "$TABLES_PREFIX"); then
         echo "ERROR: the previously copied site is unavailable; recovery will not transfer or replace files." >&2
         return 1
     fi
@@ -2172,10 +2188,15 @@ import_check_completed() {
 # setup_php_config_value <key>: the value of $config['<key>'] in a KVS PHP
 # configuration file read on stdin, as KVS writes it.
 setup_php_config_value() {
-    local pattern
-
-    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]$1['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
-    sed -n -E "$pattern" | head -n 1
+    local assignment value
+    assignment="^[[:space:]]*\\\$config\\[[[:space:]]*['\"]$1['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*"
+    value="['\"]([^'\"]*)['\"].*"
+    if [ "${2:-}" = literal ]; then
+        # Only a complete literal assignment determines an installed prefix.
+        # Block comments may stand before its semicolon, as PHP allows.
+        value="['\"]([^'\"$\\\\]*)['\"]([[:space:]]|/[*][^*]*[*]+([^/*][^*]*[*]+)*/)*(;|[?]>).*"
+    fi
+    sed -n -E "s#${assignment}${value}#\\1#p" | head -n 1
 }
 
 # The table prefix the site runs with: the imported site's, the one of a
@@ -2184,19 +2205,45 @@ setup_php_config_value() {
 # container; .env carries the value for the Manticore container and
 # reconfigure.sh. Only identifier characters pass, since it lands in SQL.
 kvs_tables_prefix() {
-    local prefix="" archive
+    local prefix="" archive="" installed=false saved=${TABLES_PREFIX:-}
 
     if [ "$IMPORT_MODE" = true ] && [ -n "$IMPORT_TABLES_PREFIX" ]; then
         prefix=$IMPORT_TABLES_PREFIX
     elif [ -f "/var/www/$DOMAIN/admin/include/setup.php" ]; then
-        prefix=$(setup_php_config_value tables_prefix < "/var/www/$DOMAIN/admin/include/setup.php")
+        installed=true
+        prefix=$(setup_php_config_value tables_prefix literal < "/var/www/$DOMAIN/admin/include/setup.php")
     else
         archive=$(setup_kvs_archive) || return 1
-        if [ -n "$archive" ] && command -v unzip >/dev/null 2>&1; then
-            prefix=$(unzip -p "$archive" admin/include/setup.php 2>/dev/null | setup_php_config_value tables_prefix)
+        if [ -n "$archive" ]; then
+            if command -v unzip >/dev/null 2>&1; then
+                prefix=$(unzip -p "$archive" admin/include/setup.php 2>/dev/null | setup_php_config_value tables_prefix)
+            fi
+        elif [ -n "$saved" ] && [ "${PREVIOUS_DOMAIN:-$DOMAIN}" = "$DOMAIN" ] && [ "$IMPORT_MODE" != true ]; then
+            installed=true
+            prefix=$saved
         fi
     fi
-    [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
+    if [ "$installed" = true ] && [ "${PREVIOUS_DOMAIN:-$DOMAIN}" = "$DOMAIN" ]; then
+        if [ -n "$prefix" ] && [ -n "$saved" ] && [ "$saved" != "$prefix" ]; then
+            echo "ERROR: TABLES_PREFIX in .env differs from tables_prefix in setup.php. Check both against the installed tables before continuing." >&2
+            return 1
+        fi
+        prefix=${prefix:-$saved}
+    fi
+    if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+        if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+            if [ "$installed" != true ]; then
+                echo "ERROR: a new table prefix must contain only ASCII letters, digits and underscores." >&2
+                return 1
+            fi
+            echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
+        elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
+            echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables, setup.php and .env together." >&2
+            return 1
+        else
+            prefix=ktvs_
+        fi
+    fi
     printf '%s\n' "$prefix"
 }
 
@@ -2252,14 +2299,23 @@ import_check_leftover_dump() {
         if [ -L mariadb ] || [ -L mariadb/init ] || ! saved=$(env -i "$BASH" -c '
             source ./.env >/dev/null || exit 1
             LC_ALL=C
-            [[ ${TABLES_PREFIX:-} =~ ^[A-Za-z0-9_]{1,32}$ ]] || exit 1
             [[ ${DOMAIN:-} =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$ ]] || exit 1
-            printf "%s %s" "$DOMAIN" "$TABLES_PREFIX"
+            # Pass exactly two fields to the caller. The saved prefix is
+            # checked there under the same collation as an installed site.
+            [[ ${TABLES_PREFIX:-} != *[[:space:]]* ]] || exit 1
+            printf "%s %s" "$DOMAIN" "${TABLES_PREFIX:-}"
         '); then
             echo "WARNING: cleanup skipped. Check the MariaDB init directory and the saved DOMAIN and TABLES_PREFIX in .env." >&2
             exit 1
         fi
         read -r database prefix <<< "$saved"
+        if ! LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+            echo "WARNING: cleanup skipped. Check the saved TABLES_PREFIX in .env against the installed tables." >&2
+            exit 1
+        fi
+        if [ -f "/var/www/$database/admin/include/setup.php" ]; then
+            DOMAIN=$database PREVIOUS_DOMAIN=$database TABLES_PREFIX=$prefix kvs_tables_prefix >/dev/null || exit 1
+        fi
         import_protect_supplied_dump "${IMPORT_OPERATOR_DUMP:-${IMPORT_DB_DUMP:-}}" || exit 1
         import_remove_transfers validate || exit 1
         for leftover in "${entries[@]}"; do
@@ -2537,8 +2593,10 @@ select_import_source() {
 # matters when the site is tried on a development subdomain before the
 # real domain.
 import_record_source_domain() {
+    local LC_ALL=C
     [ -f .env ] || return 0
     if [[ "$IMPORT_DETECTED_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        IMPORT_DETECTED_DOMAIN=${IMPORT_DETECTED_DOMAIN,,}
         set_env_value IMPORT_SOURCE_DOMAIN "$IMPORT_DETECTED_DOMAIN" || {
             echo "ERROR: Could not save IMPORT_SOURCE_DOMAIN to .env; the import was stopped before transfer." >&2
             exit 1
@@ -3210,7 +3268,7 @@ import_inspect_remote() {
         echo -e "${RED}ERROR: the KVS version or the project path could not be read on the old server${NC}"
         exit 1
     fi
-    if [[ ! "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+    if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
         echo -e "${RED}ERROR: the table prefix read on the old server ('${prefix:-<empty>}') is not a usable identifier${NC}"
         exit 1
     fi
@@ -3283,7 +3341,11 @@ import_check_domain() {
     echo ""
     echo -e "${YELLOW}WARNING: the site is configured for $IMPORT_DETECTED_DOMAIN while this installation is for $DOMAIN.${NC}"
     echo "The KVS license is bound to the domain: the site runs on $DOMAIN only if the license accepts it (a development subdomain of the licensed domain does), otherwise request a new archive from KVS."
-    echo "The project URL and the storage URLs on $IMPORT_DETECTED_DOMAIN become https://$DOMAIN; URLs on other hosts (a CDN) stay."
+    if [[ "$IMPORT_DETECTED_DOMAIN" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-]+$ ]]; then
+        echo "The project URL and the storage URLs on $IMPORT_DETECTED_DOMAIN become https://$DOMAIN; URLs on other hosts (a CDN) stay."
+    else
+        echo "The project URL becomes https://$DOMAIN. Storage URLs on $IMPORT_DETECTED_DOMAIN are kept unchanged."
+    fi
     if [ "${HEADLESS:-}" != "y" ]; then
         echo -n "Continue anyway? [y/N]: "
         read -r answer
@@ -4390,16 +4452,18 @@ chmod 600 .env
 
 # Load environment
 unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED KVS_IMPORT_PENDING_RETIREMENT MANTICORE_REBUILD_PENDING
-unset SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT HTTPS_PORT PROJECT_HTTPS_PORT PROJECT_HTTPS_PORT_PINNED
+unset SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT HTTPS_PORT PROJECT_HTTPS_PORT PROJECT_HTTPS_PORT_PINNED TABLES_PREFIX
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
 # Capture the parsed saved domain before explicit overrides change it.
-PREVIOUS_DOMAIN=${DOMAIN,,}
+lowercase_domain
+PREVIOUS_DOMAIN=$DOMAIN
 
 # Domain validation
 
 validate_site_prefix() {
+    local LC_ALL=C
     local prefix="$1"
 
     [ -n "$prefix" ] && [ "${#prefix}" -le "$MAX_SITE_PREFIX_LENGTH" ] &&
@@ -4628,7 +4692,7 @@ fi
 
 # DNS names are case-insensitive. Keep a single canonical form so the setup
 # and the multi-site manager generate identical paths, aliases, and routes.
-DOMAIN=${DOMAIN,,}
+lowercase_domain
 
 if [ "$KVS_EMAIL_OVERRIDE_SET" = true ]; then
     EMAIL="$KVS_EMAIL_OVERRIDE"
@@ -4660,7 +4724,7 @@ if [ "$DOMAIN" = "example.com" ]; then
     while true; do
         echo -n "Enter your domain (e.g., mysite.com): "
         prompt_read DOMAIN
-        DOMAIN=${DOMAIN,,}
+        lowercase_domain
         if validate_domain "$DOMAIN"; then
             break
         else
@@ -4668,7 +4732,7 @@ if [ "$DOMAIN" = "example.com" ]; then
         fi
     done
 elif ! validate_domain "$DOMAIN"; then
-    echo -e "${RED}ERROR: Invalid domain format: $DOMAIN${NC}"
+    echo -e "${RED}ERROR: Invalid domain format: $DOMAIN. Set DOMAIN in .env to the ASCII hostname (punycode for an international domain).${NC}"
     exit 1
 fi
 
@@ -4833,7 +4897,7 @@ if [ "$SITE_PREFIX" = "kvs" ]; then
 fi
 
 if ! validate_site_prefix "$SITE_PREFIX"; then
-    echo -e "${RED}ERROR: Invalid site prefix in .env: $SITE_PREFIX${NC}"
+    echo -e "${RED}ERROR: Invalid site prefix in .env: $SITE_PREFIX. Restore SITE_PREFIX to the existing Compose project name using ASCII lowercase letters, digits, hyphens or underscores.${NC}"
     exit 1
 fi
 
@@ -5404,7 +5468,8 @@ fi
 require_single_kvs_archive || exit 1
 
 # The table prefix reaches .env once the archive it may come from is here.
-set_env_value TABLES_PREFIX "$(kvs_tables_prefix)" || exit 1
+TABLES_PREFIX=$(kvs_tables_prefix) || exit 1
+set_env_value TABLES_PREFIX "$TABLES_PREFIX" || exit 1
 
 # Auto-detect IonCube encoding
 detect_ioncube

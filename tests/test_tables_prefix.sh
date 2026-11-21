@@ -85,6 +85,12 @@ write_setup "$TEST_DIR/init-site" kvs7_
     fail "setup_php_config_value must match the exact key"
 [ "$(setup_php_config_value tables_prefix_multi < "$TEST_DIR/init-site/admin/include/setup.php")" = wrong_ ] ||
     fail "setup_php_config_value must read the multi prefix on request"
+printf '%s\n' '<?php' "\$config['tables_prefix'] = 'live_' /* set by the installer */;" > "$TEST_DIR/comment-setup.php"
+[ "$(setup_php_config_value tables_prefix literal < "$TEST_DIR/comment-setup.php")" = live_ ] ||
+    fail "a comment before the semicolon must not hide a literal prefix"
+printf '%s\n' '<?php' "\$config['tables_prefix'] = 'live_' /* a */ . 'x' /* b */;" > "$TEST_DIR/comment-setup.php"
+[ -z "$(setup_php_config_value tables_prefix literal < "$TEST_DIR/comment-setup.php")" ] ||
+    fail "a concatenation between comments is not a literal prefix"
 
 mkdir -p "$TEST_DIR/docker/kvs-archive"
 IMPORT_MODE=true
@@ -109,7 +115,7 @@ if [ -d /var/www ]; then
     [ "$output" = placed_ ] || fail "a site already in place must be read before the archive (got '$output')"
     DOMAIN=example.com
 fi
-grep -Fq 'set_env_value TABLES_PREFIX "$(kvs_tables_prefix)"' "$ROOT_DIR/docker/setup.sh" ||
+grep -Fq 'set_env_value TABLES_PREFIX "$TABLES_PREFIX"' "$ROOT_DIR/docker/setup.sh" ||
     fail "the setup must write the prefix to .env"
 grep -Fq 'TABLES_PREFIX=${TABLES_PREFIX:-ktvs_}' "$ROOT_DIR/docker/docker-compose.yml" ||
     fail "the Manticore container must receive the prefix from .env"

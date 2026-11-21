@@ -196,7 +196,7 @@ printf 'exit 91 # This hook must never be executed by recovery.\n' > "$TEST_DIR/
 cat > "$TEST_DIR/init/10-kvs-import-native/kvs-native-export.manifest" <<'MANIFEST'
 format=1
 complete=yes
-source_database=old_source
+source_database=café.test
 tables_prefix=ktvs_
 kvs_version=7.0.2
 tables=2
@@ -206,6 +206,9 @@ discover
 [ "$(import_resume_token "$IMPORT_STAGED_DUMP")" = "$TOKEN" ] || fail 'native finalization token'
 reject import_resume_discover "$TEST_DIR/init" another-site.example ktvs_
 reject import_resume_discover "$TEST_DIR/init" new-site.example other_
+sed -i 's/KVS_INSTALL_IMPORT/DIFFERENT_MARKER/' "$TEST_DIR/init/10-kvs-import-native/finalize.sql"
+discover
+reject import_resume_token "$IMPORT_STAGED_DUMP"
 rm "$TEST_DIR/init/10-kvs-import-native.sh"
 reject discover
 echo 'PASS: import recovery discovers the original artifact without decoding, verifies its final marker and never changes the database.'

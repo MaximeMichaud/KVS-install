@@ -4,10 +4,15 @@
 # shellcheck disable=SC2034  # Discovery returns globals to setup.sh.
 
 import_resume_identifiers() {
-    [[ "$1" =~ ^[A-Za-z0-9_.-]{1,64}$ && "$1" != . && "$1" != .. && "$2" =~ ^[A-Za-z0-9_]{1,32}$ ]] || {
-        echo 'ERROR: the saved database name or table prefix is invalid; import recovery cannot continue.' >&2
-        return 1
-    }
+    local LC_ALL=C
+    if [[ "$1" =~ ^[A-Za-z0-9_.-]{1,64}$ && "$1" != . && "$1" != .. ]]; then
+        [[ "$2" =~ ^[A-Za-z0-9_]{1,32}$ ]] && return 0
+        if LC_ALL=C.UTF-8 expr + "$2" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+            return 0
+        fi
+    fi
+    echo 'ERROR: the saved database name or table prefix is invalid; import recovery cannot continue.' >&2
+    return 1
 }
 
 # import_resume_discover <init directory> <saved database> <saved prefix>
@@ -61,7 +66,7 @@ import_resume_discover() {
                 echo 'ERROR: the native import files do not match the saved destination database.' >&2
                 return 1
             fi
-            native_import_metadata "$manifest" "$prefix" || return 1
+            native_import_metadata "$manifest" "$prefix" resume || return 1
             IMPORT_DUMP_TABLES=$(import_kv "$manifest" tables)
             file="$IMPORT_NATIVE_STAGE/finalize.sql"
             ;;

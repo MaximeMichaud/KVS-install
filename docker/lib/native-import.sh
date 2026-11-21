@@ -92,6 +92,7 @@ native_import_stage_space() {
 
 # native_import_metadata <manifest> <prefix>: validate without sourcing input.
 native_import_metadata() {
+    local LC_ALL=C
     local manifest="$1" prefix="$2" field value
 
     for field in format complete source_database tables_prefix kvs_version tables; do
@@ -105,9 +106,13 @@ native_import_metadata() {
         echo "ERROR: native bundle is incomplete or uses an unsupported format" >&2
         return 1
     }
-    value=$(import_kv "$manifest" source_database)
-    [[ "$value" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ ]] || return 1
-    [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || return 1
+    # Recovery already validated the destination and saved prefix. The
+    # source name is no longer used after the payload has been remapped.
+    if [ "${3:-}" != resume ]; then
+        value=$(import_kv "$manifest" source_database)
+        [[ "$value" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ ]] || return 1
+        [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || return 1
+    fi
     [ "$(import_kv "$manifest" tables_prefix)" = "$prefix" ] || {
         echo "ERROR: native bundle table prefix does not match the site" >&2
         return 1
@@ -273,6 +278,7 @@ native_import_validate_schema() {
 #                       <stage directory> <token> <destination database> <jobs>
 # Publish a read-only payload and a sibling init hook only after full validation.
 native_import_prepare() (
+    local LC_ALL=C
     local archive="$1" prefix="$2" version="$3" old_path="$4" new_path="$5"
     local stage="$6" token="$7" database="$8" requested="${9:-auto}"
     local parent work jobs tables total sql runtime

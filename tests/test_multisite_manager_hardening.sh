@@ -1901,6 +1901,11 @@ w3_plain=$'<?php\n// plain PHP\nfunction kvs_plain() {}\n'
 w3_lock() { "${ROOT_DIR}/docker/bin/resolve-bases.sh" --get "$1" "$2"; }
 w3_inspect_warning='Could not inspect the PHP files of'
 
+w3_fixture unicode_prefix
+w3_zip "${w3_dir}/KVS_7.0.2_[w3.example].zip" "admin/include/setup.php:prefix=café_"
+w3_run
+w3_refused 'ASCII' 'a new non-ASCII archive prefix'
+
 w3_add w3_703 'KVS_7.0.3_[w3.example].zip' encoded
 w3_expect 8.3 YES "an encoded KVS 7.0.3 archive"
 grep -Fxq "PHP_FPM_BASE=$(w3_lock php-fpm 8.3)" "$w3_env" ||

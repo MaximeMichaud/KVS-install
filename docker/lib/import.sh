@@ -44,12 +44,14 @@ import_archive_version() {
 # import_url_domain <url>: the host of a project URL without scheme, port,
 # path or a leading www.
 import_url_domain() {
+    local LC_ALL=C
     local url="$1"
 
     url=${url#*://}
     url=${url%%/*}
     url=${url%%:*}
     url=${url#www.}
+    [[ "$url" =~ ^[A-Za-z0-9.-]+$ ]] || return 0
     printf '%s' "${url,,}"
 }
 
@@ -59,6 +61,7 @@ import_url_domain() {
 # refusal on stderr. The prefix is whatever the site was installed with,
 # limited to identifier characters since it lands inside SQL.
 import_validate_site() {
+    local LC_ALL=C
     local dir="$1"
     local setup prefix multi path version
 
@@ -76,7 +79,7 @@ import_validate_site() {
         return 1
     fi
     prefix=$(import_read_php_config_value "$setup" tables_prefix)
-    if [[ ! "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+    if [[ ! "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] && { [ -z "${2:-}" ] || [ "$prefix" != "$2" ]; }; then
         echo "ERROR: the site's table prefix '${prefix:-<empty>}' (tables_prefix in $setup) is not a usable identifier" >&2
         return 1
     fi

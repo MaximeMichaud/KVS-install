@@ -118,9 +118,16 @@ get_tables_prefix() {
 
     pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
     prefix=$(sed -n -E "$pattern" "$KVS_PATH/admin/include/setup.php" 2>/dev/null | head -n 1)
-    if [[ ! "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
-        log_warn "No usable tables_prefix in setup.php (got '${prefix}'), using ktvs_" >&2
-        prefix=ktvs_
+    if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+        if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+            echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
+        elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
+            echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables, setup.php and .env together." >&2
+            return 1
+        else
+            log_warn "No usable tables_prefix in setup.php (got '${prefix}'), using ktvs_" >&2
+            prefix=ktvs_
+        fi
     fi
     printf '%s\n' "$prefix"
 }

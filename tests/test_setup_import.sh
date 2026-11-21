@@ -509,7 +509,7 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq '{{.RestartCount}} {{.State.Status}}' "$REPO_ROOT/docker/lib/database.sh" || fail "a restarted MariaDB container must be reported"
     grep -Fq "database_root_query -h 127.0.0.1 --protocol=tcp -e 'SELECT 1'" "$REPO_ROOT/docker/lib/database.sh" || fail "the readiness probe must use TCP, the socket answers during the init replay"
     grep -Fq 'IMPORT_MARKER_DIR="$IMPORT_STAGING"' "$setup" || fail "the source marker must live outside the webroot"
-    grep -Fq 'set_env_value TABLES_PREFIX "$(kvs_tables_prefix)"' "$setup" || fail "the table prefix must reach .env for the Manticore container and reconfigure.sh"
+    grep -Fq 'set_env_value TABLES_PREFIX "$TABLES_PREFIX"' "$setup" || fail "the table prefix must reach .env for the Manticore container and reconfigure.sh"
     grep -Fq 'import_prepare_dump "$IMPORT_DB_DUMP" "$IMPORT_TABLES_PREFIX"' "$setup" || fail "the dump must be prepared with the site's own prefix"
     for file in "$setup" "$configure" "$settings" "$REPO_ROOT/docker/init/docker-entrypoint.d/30-import-database.sh" \
         "$REPO_ROOT/docker/init/docker-entrypoint.d/35-harden-admin-users.sh" "$REPO_ROOT/docker/reconfigure.sh" \

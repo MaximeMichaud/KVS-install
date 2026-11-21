@@ -403,7 +403,7 @@ awk '
     $0 == "remove_env_value() {" || $0 == "set_env_value() {" ||
         $0 == "validate_site_prefix() {" || $0 == "select_site_prefix() {" ||
         $0 == "compose_files_for() {" || $0 == "require_compose_config() {" ||
-        $0 == "validate_domain() {" || /^retirement_[a-z_]+\(\) \{$/ { capture = 1 }
+        $0 == "lowercase_domain() {" || $0 == "validate_domain() {" || /^retirement_[a-z_]+\(\) \{$/ { capture = 1 }
     capture { print }
     capture && /^}$/ { capture = 0 }
 ' "$REPO_ROOT/docker/setup.sh" > "$TMP_ROOT/project-functions.sh"

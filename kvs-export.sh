@@ -2094,6 +2094,7 @@ kvs_directory_refuse() {
 }
 
 kvs_select_database_format() {
+    local identifier_chars=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_
     local help metadata metadata_query kind value extra directory_hex="unread" directory="" unsupported="" table_count=""
     local unsupported_details=""
     local mysql_uid mysql_gid owner_uid escaped_path sentinel socket_hex="" socket_path="" datadir_hex=""
@@ -2123,7 +2124,7 @@ kvs_select_database_format() {
         '' | localhost | localhost:* | 127.0.0.1 | 127.0.0.1:*) ;;
         *) kvs_directory_refuse "the database is not local to the export process"; return $? ;;
     esac
-    if [[ ! "$DB_NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ || ! "$TABLES_PREFIX" =~ ^[A-Za-z0-9_]+$ ]]; then
+    if [[ ! "$DB_NAME" =~ ^[$identifier_chars][$identifier_chars.-]{0,63}$ || ! "$TABLES_PREFIX" =~ ^[$identifier_chars]+$ ]]; then
         kvs_directory_refuse "the database name or table prefix is not supported by the native bundle"
         return $?
     fi
@@ -2193,7 +2194,7 @@ SELECT 'instance', CONCAT_WS(':', HEX(@@hostname), @@port, @@server_id, HEX(@@so
             unsupported) unsupported=$value; unsupported_details=$extra ;;
             count) table_count=$value ;;
             table)
-                if [[ ! "$value" =~ ^[A-Za-z0-9_]+$ || -n "$extra" ]]; then
+                if [[ ! "$value" =~ ^[$identifier_chars]+$ || -n "$extra" ]]; then
                     kvs_directory_refuse "a table name is not supported by the native bundle"
                     return $?
                 fi

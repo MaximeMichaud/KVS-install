@@ -383,7 +383,7 @@ pass 'the pass of the files alone ends before .env, the images, the containers a
 {
     printf '%s\n' 'check_mariadb_stop_grace_period() { :; }' 'check_cloudflare_configuration() { :; }'
     awk '$0 == "# Load environment" { capture = 1 } $0 == "# Domain validation" { exit } capture { print }' "$SETUP"
-    awk '$0 == "if [ -n \"$KVS_DOMAIN_OVERRIDE\" ]; then" { capture = 1 } capture { print } $0 == "DOMAIN=${DOMAIN,,}" { exit }' "$SETUP"
+    awk '$0 == "if [ -n \"$KVS_DOMAIN_OVERRIDE\" ]; then" { capture = 1 } capture { print } capture && $0 == "lowercase_domain" { exit }' "$SETUP"
 } > "$TEST_DIR/load-domain.sh"
 awk '/^retirement_load initial / { capture = 1 } /^require_single_kvs_archive / { exit } capture { print }' \
     "$SETUP" > "$TEST_DIR/invalidate-domain.sh"
@@ -393,7 +393,7 @@ cat >> "$TEST_DIR/invalidate-domain.sh" <<'EOF'
 : "${IMPORT_MODE:=false}"
 retirement_prepare_identity || exit 1
 EOF
-extract remove_env_value set_env_value import_protect_supplied_dump import_check_completed validate_domain validate_site_prefix \
+extract remove_env_value set_env_value import_protect_supplied_dump import_check_completed lowercase_domain validate_domain validate_site_prefix \
     retirement_root retirement_ids_ok retirement_engine retirement_load retirement_validate_ids \
     retirement_list retirement_write retirement_mask_completion retirement_prepare_identity retirement_subset \
     retirement_request_prefix_selection > "$TEST_DIR/completed.sh"

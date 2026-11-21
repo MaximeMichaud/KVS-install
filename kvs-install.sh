@@ -909,6 +909,7 @@ function install_yt-dlp() (
 )
 
 validate_kvs_domain() {
+  local LC_ALL=C
   local domain="${1,,}"
   local label
   local -a labels
@@ -935,6 +936,7 @@ email_is_valid() {
 # lowercased, or empty when the name has no [...] part. A renamed archive
 # (KVS_7.0.3.zip) has none, and must not be read as the whole file name.
 archive_domain_from_name() {
+  local LC_ALL=C
   local name="$1" domain
   [[ "$name" == *'['*']'* ]] || return 0
   domain=${name#*[}
@@ -983,6 +985,7 @@ render_nginx_site_config() {
 }
 
 function whatisdomain() {
+  local LC_ALL=C
   local archive setup kvs_file
   archive=$(find_kvs_archive "${KVS_ARCHIVE_DIR:-/root}") || return $?
 
@@ -1565,6 +1568,7 @@ kvs_database_initial_version() {
 provision_kvs_database() {
     local kvs_path="$1" domain="$2" password="$3" table_count prefix version
 
+    prefix=$(KVS_PATH="$kvs_path" kvs_tables_prefix) || return 1
     if ! mariadb -e "USE \`$domain\`" 2>/dev/null; then
         echo "Creating database $domain..."
         if ! mariadb -e "CREATE DATABASE \`$domain\`;"; then
@@ -1595,7 +1599,6 @@ provision_kvs_database() {
         return 1
     fi
 
-    prefix=$(KVS_PATH="$kvs_path" kvs_tables_prefix)
     if ! table_count=$(mariadb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$domain';") ||
         [[ ! "$table_count" =~ ^[0-9]+$ ]]; then
         echo "${red}Could not count the tables of database $domain; _INSTALL/ is kept${normal}" >&2
@@ -2181,7 +2184,16 @@ kvs_tables_prefix() {
 
   pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
   prefix=$(sed -n -E "$pattern" "$setup" 2>/dev/null | head -n 1)
-  [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
+  if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+    if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+      echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
+    elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
+        echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables, setup.php and .env together." >&2
+        return 1
+    else
+      prefix=ktvs_
+    fi
+  fi
   printf '%s\n' "$prefix"
 }
 
@@ -2190,7 +2202,7 @@ configure_kvs_system_settings() {
   local server_type
   local prefix
 
-  prefix=$(kvs_tables_prefix)
+  prefix=$(kvs_tables_prefix) || return 1
   # The heredoc expands the prefix only: a JSON path such as $.server_type
   # has no variable to expand.
   mariadb "$db" <<EOSQL || return $?
@@ -2253,7 +2265,7 @@ configure_kvs_servers() {
   local matching stale mismatch
   local prefix
 
-  prefix=$(kvs_tables_prefix)
+  prefix=$(kvs_tables_prefix) || return 1
   mariadb "$db" <<EOSQL || return $?
 UPDATE ${prefix}admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
 UPDATE ${prefix}admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
@@ -2291,7 +2303,7 @@ configure_kvs_servers_tls() {
       return 1
       ;;
   esac
-  prefix=$(kvs_tables_prefix)
+  prefix=$(kvs_tables_prefix) || return 1
   mariadb "$db" <<EOSQL || return $?
 UPDATE ${prefix}admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
 EOSQL
@@ -3106,11 +3118,12 @@ function dockerInstall() {
   # is renamed, bracket-less or invalid is a warning, not a failure, so it
   # never aborts an install whose domain is otherwise known.
   if [[ -n "${DOMAIN:-}" ]]; then
-    if validate_kvs_domain "${DOMAIN,,}"; then
-      if [[ -n "$archive_domain" && "${DOMAIN,,}" != "$archive_domain" ]]; then
+    if validate_kvs_domain "$DOMAIN"; then
+      DOMAIN=$(LC_ALL=C; printf '%s' "${DOMAIN,,}")
+      if [[ -n "$archive_domain" && "$DOMAIN" != "$archive_domain" ]]; then
         echo "${yellow}Archive name domain '$archive_domain' differs from DOMAIN='$DOMAIN'; keeping DOMAIN${normal}" >&2
       fi
-      export DOMAIN="${DOMAIN,,}"
+      export DOMAIN
       echo "Domain: ${green}${DOMAIN}${normal}"
     fi
   elif [[ -n "$saved_domain" ]]; then
