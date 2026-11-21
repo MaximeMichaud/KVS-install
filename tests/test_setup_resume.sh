@@ -15,7 +15,7 @@ source = Path(sys.argv[1]).read_text()
 names = ('validate_domain', 'check_mariadb_stop_grace_period', 'check_cloudflare_configuration', 'parse_publish_endpoint',
          'resolve_public_port_configuration', 'import_resume_nginx_rewrites', 'setup_resume_import',
          'setup_resume_assert_database', 'setup_start_runtime_services', 'setup_start_cron', 'import_count_rows',
-         'setup_resume_docker_query', 'setup_resume_database_snapshot', 'import_finish', 'remove_env_value', 'set_env_value')
+         'setup_resume_docker_query', 'setup_resume_database_snapshot', 'import_finish', 'import_record_transfers', 'import_remove_transfers', 'import_protect_supplied_dump', 'remove_env_value', 'set_env_value')
 with open(sys.argv[2], 'w') as target:
     # The helpers are named from the directory of the script, here the fixture.
     target.write(re.search(r'^SETUP_SCRIPT_DIR=.*\n', source, re.M).group())
@@ -230,7 +230,7 @@ echo 'PASS: import recovery preserves saved configuration, container identity, s
 # not receipt-looking lines inside other values. Read errors stop cleanup.
 for receipt_case in new exported multiline combined noop_fake wrong_fake write_failure read_failure token_failure; do
     directory="$fixture/receipt-$receipt_case"
-    mkdir -p "$directory/logs" "$directory/native" "$directory/staging"
+    mkdir -p "$directory/logs" "$directory/native" "$directory/import" "$directory/mariadb/init"
     printf 'DOMAIN=example.test\nEXTRA=preserved\n' > "$directory/.env"
     # shellcheck disable=SC2016  # Evaluated once by the fixture's initial source.
     printf '%s\n' 'READ_PROBE=$(printf "evaluated\n" >> parse-count)' >> "$directory/.env"
@@ -243,7 +243,7 @@ for receipt_case in new exported multiline combined noop_fake wrong_fake write_f
     esac
     chmod 600 "$directory/.env"
     cp "$directory/.env" "$directory/before.env"
-    for artifact in token dump raw native/payload staging/kvs-export.manifest; do
+    for artifact in token dump import/raw.sql native/payload import/kvs-export.manifest; do
         echo 'owned placeholder' > "$directory/$artifact"
     done
     status=0
@@ -256,8 +256,13 @@ for receipt_case in new exported multiline combined noop_fake wrong_fake write_f
         # shellcheck source=/dev/null
         source .env
         IMPORT_MODE=true LOG_DIR="$directory/logs" IMPORT_SITE_DIR=/synthetic-site IMPORT_DB_DUMP=dump
-        IMPORT_TABLES_PREFIX=fixture_ IMPORT_STAGED_DUMP=dump IMPORT_RAW_DUMP=raw
-        IMPORT_NATIVE_STAGE=native IMPORT_STAGING=staging
+        IMPORT_TABLES_PREFIX=fixture_ IMPORT_STAGED_DUMP=dump IMPORT_RAW_DUMP="$PWD/import/raw.sql"
+        IMPORT_NATIVE_STAGE=native IMPORT_STAGING=$PWD/import IMPORT_RAW_MANIFEST=$PWD/import/kvs-export.manifest
+        # shellcheck source=/dev/null
+        source <(sed -n '/^import_transfer_identity() {/,/^}/p' "$root/docker/lib/import.sh")
+        IMPORT_RAW_DUMP_ID=$(import_transfer_identity "$IMPORT_RAW_DUMP")
+        IMPORT_RAW_MANIFEST_ID=$(import_transfer_identity "$IMPORT_RAW_MANIFEST")
+        import_record_transfers
         readback_fault_active=no
         date() { printf '2030-01-02T03:04:05Z\n'; }
         import_count_rows() { printf 'fixture_options\t2\n'; }
@@ -299,19 +304,23 @@ for receipt_case in new exported multiline combined noop_fake wrong_fake write_f
     case "$receipt_case" in
         new|exported|multiline|combined)
             [ "$status" -eq 0 ] || { echo "FAIL: completion rejected $receipt_case: $(cat "$directory/output")"; exit 1; }
-            for artifact in token dump raw native staging/kvs-export.manifest; do
+            for artifact in token dump import/raw.sql native import/kvs-export.manifest; do
                 [ ! -e "$directory/$artifact" ] || { echo "FAIL: completion retained $artifact"; exit 1; }
             done
             grep -Fxq delete-token "$directory/calls" ;;
         *)
             [ "$status" -ne 0 ] || { echo "FAIL: completion accepted $receipt_case"; exit 1; }
-            for artifact in token dump raw native/payload staging/kvs-export.manifest; do
+            for artifact in token dump import/raw.sql native/payload import/kvs-export.manifest; do
                 [ -f "$directory/$artifact" ] || { echo "FAIL: $receipt_case removed $artifact"; exit 1; }
             done
             if [ "$receipt_case" != token_failure ] && [ -e "$directory/calls" ]; then
                 echo 'FAIL: failed receipt validation reached token deletion'; exit 1
             fi ;;
     esac
+    if [ "$receipt_case" = token_failure ]; then
+        grep -Fq 'rerun setup without an import source to finish cleanup' "$directory/output" ||
+            { echo 'FAIL: failed token cleanup did not explain how to retry'; exit 1; }
+    fi
     case "$receipt_case" in
         noop_fake|write_failure) cmp -s "$directory/.env" "$directory/before.env" ;;
     esac

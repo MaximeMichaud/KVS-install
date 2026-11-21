@@ -393,7 +393,7 @@ cat >> "$TEST_DIR/invalidate-domain.sh" <<'EOF'
 : "${IMPORT_MODE:=false}"
 retirement_prepare_identity || exit 1
 EOF
-extract remove_env_value set_env_value import_check_completed validate_domain validate_site_prefix \
+extract remove_env_value set_env_value import_protect_supplied_dump import_check_completed validate_domain validate_site_prefix \
     retirement_root retirement_ids_ok retirement_engine retirement_load retirement_validate_ids \
     retirement_list retirement_write retirement_mask_completion retirement_prepare_identity retirement_subset \
     retirement_request_prefix_selection > "$TEST_DIR/completed.sh"

@@ -501,7 +501,6 @@ test_setup_and_init_are_wired_for_imports() {
     grep -Fq 'tables use MyISAM or Aria' "$setup" || fail "non transactional tables must be announced before the remote dump"
     grep -Fq 'the transfer broke off' "$setup" || fail "a remote dump without the completion line must stop the import"
     grep -Fq 'The KVS license is bound to the domain' "$setup" || fail "a domain mismatch must be explained"
-    grep -Fq '[ -n "$IMPORT_RAW_DUMP" ] && rm -f "$IMPORT_RAW_DUMP"' "$setup" || fail "the raw dump must go once the import completed"
     grep -Fq 'docker/import/' "$REPO_ROOT/.gitignore" || fail "raw dumps must be ignored by git"
     grep -A2 -F '[ "${KEEP_EXISTING_DB:-false}" != true ] &&' "$setup" | grep -Fq '[ "$IMPORT_MODE" != true ]; then' ||
         fail "an imported database must keep its admin password instead of getting a one-time one"

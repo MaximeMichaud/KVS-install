@@ -250,6 +250,18 @@ run_case() {
 }
 
 make_case "$fixture/success"
+(
+    cd "$fixture/success"
+    mkdir import
+    touch import/received.sql.gz import/operator.sql.gz
+    # shellcheck source=/dev/null
+    source <(sed -n '/^import_record_transfers() {/,/^}/p' "$root/docker/setup.sh")
+    # shellcheck source=/dev/null
+    source "$root/docker/lib/import.sh"
+    # shellcheck disable=SC2034  # Consumed by the extracted import_record_transfers.
+    IMPORT_RAW_DUMP_ID=$(import_transfer_identity import/received.sql.gz)
+    IMPORT_MODE=true IMPORT_STAGING="$PWD/import" IMPORT_RAW_DUMP="$PWD/import/received.sql.gz" import_record_transfers
+)
 if ! run_case "$fixture/success" no; then
     cat "$fixture/success/output.log" >&2
     exit 1
@@ -266,6 +278,8 @@ fi
 grep -q '^KVS_IMPORT_COMPLETED=' "$fixture/success/.env"
 grep -Fxq $'ktvs_videos\t17' "$fixture/success/logs/import-rows.txt"
 [ ! -e "$fixture/success/mariadb/init/10-kvs-import.sql" ]
+[ ! -e "$fixture/success/import/received.sql.gz" ]
+[ -f "$fixture/success/import/operator.sql.gz" ]
 [ ! -e "$fixture/success/database-marker" ]
 python3 - "$fixture/success/calls" <<'PY'
 from pathlib import Path

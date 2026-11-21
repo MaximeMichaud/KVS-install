@@ -246,6 +246,11 @@ import_is_native_dump() {
     esac
 }
 
+import_transfer_identity() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    TZ=UTC0 LC_ALL=C stat -c '%d:%i:%s:%z' -- "$1"
+}
+
 # The source must still be the file inspected by setup before its full scan
 # can be reused. Include nanosecond timestamps and inode identity.
 import_dump_identity() {
@@ -1505,7 +1510,8 @@ import_archive_extract() {
 # dump staging directory, the site's entries move into the destination
 # (renames on the same filesystem; an entry already there from an earlier
 # attempt is replaced), listing junk and anything else in the archive stay
-# behind and go with the stage. Prints "<dump path><TAB><manifest path>".
+# behind and go with the stage. Print the two paths followed by their
+# receipt-time identities, separated by tabs.
 import_archive_settle() {
     local stage="$1"
     local root="$2"
@@ -1513,7 +1519,7 @@ import_archive_settle() {
     local manifest="$4"
     local staging="$5"
     local destination="$6"
-    local dump_path="" manifest_path="" site entry name member
+    local dump_path="" manifest_path="" dump_identity="" manifest_identity="" site entry name member
 
     # ZIP listings cannot distinguish symlinks from regular files. Check the
     # extracted materials before moving or chmodding anything outside the site.
@@ -1532,11 +1538,14 @@ import_archive_settle() {
     mkdir -p "$staging" "$destination" || return 1
     if [ -n "$dump" ]; then
         dump_path="$staging/$(basename -- "$dump")"
-        mv -f -- "$stage/$dump" "$dump_path" || return 1
+        chmod 600 -- "$stage/$dump" || return 1
+        mv -fT -- "$stage/$dump" "$dump_path" || return 1
+        dump_identity=$(import_transfer_identity "$dump_path") || return 1
     fi
     if [ -n "$manifest" ]; then
         manifest_path="$staging/$(basename -- "$manifest")"
-        mv -f -- "$stage/$manifest" "$manifest_path" || return 1
+        mv -fT -- "$stage/$manifest" "$manifest_path" || return 1
+        manifest_identity=$(import_transfer_identity "$manifest_path") || return 1
     fi
     find "$site" -name .DS_Store -type f -delete 2>/dev/null || true
     while IFS= read -r -d '' entry; do
@@ -1549,7 +1558,7 @@ import_archive_settle() {
         mv -- "$entry" "$destination/" || return 1
     done < <(find "$site" -mindepth 1 -maxdepth 1 -print0)
     rm -rf -- "$stage"
-    printf '%s\t%s\n' "$dump_path" "$manifest_path"
+    printf '%s\t%s\t%s\t%s\n' "$dump_path" "$manifest_path" "$dump_identity" "$manifest_identity"
 }
 
 # import_archive_peek <file> <command> <site root> <output directory>

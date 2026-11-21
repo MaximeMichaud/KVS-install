@@ -1575,6 +1575,8 @@ setup_resume_import() {
         echo "ERROR: run --resume-import from the existing docker directory with its saved .env and recovery helpers." >&2
         return 1
     fi
+    import_protect_supplied_dump || return 1
+    import_remove_transfers validate || return 1
     # Resume the saved installation. Ignore shell overrides from the initial
     # import command, including alternate Compose files, images and domains.
     unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
@@ -1653,6 +1655,70 @@ setup_resume_import() {
     import_resume_verify "$DOMAIN" "$TABLES_PREFIX" "$IMPORT_TOKEN" || return 1
     import_resume_nginx_rewrites "$(pwd)/import" || return 1
     setup_resume_assert_database
+}
+
+import_protect_supplied_dump() {
+    local supplied=${1-${IMPORT_DB_DUMP:-}} match
+    [ -n "$supplied" ] || return 0
+    IMPORT_OPERATOR_DUMP=$supplied
+    [ -d mariadb/init ] && [ -e "$supplied" ] || return 0
+    supplied=$(realpath -e -- "$supplied") || return 1
+    # Include the payload inside a reserved native stage. A second mount
+    # of the init directory can give the same input another absolute path.
+    match=$(find -H mariadb/init -mindepth 1 \
+        ! -path 'mariadb/init/*kvs-import*' ! -path mariadb/init/.import-transfers -prune -o \
+        -samefile "$supplied" -printf x -quit) || return 1
+    if [ -n "$match" ]; then
+        echo "WARNING: keeping IMPORT_DB_DUMP at $IMPORT_OPERATOR_DUMP. Move the supplied dump outside mariadb/init before running setup." >&2
+        return 1
+    fi
+}
+
+# Used by both normal completion and --resume-import.
+import_remove_transfers() {
+    local record=mariadb/init/.import-transfers name expected file identity i
+    local complete=false identity_pattern='^[0-9]+:[0-9]+:[0-9]+:[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9} [+]0000$'
+    local -a names=() identities=()
+    [ -e "$record" ] || [ -L "$record" ] || return 0
+    if [ ! -f "$record" ] || [ -L "$record" ] || [ -L import ]; then
+        echo "ERROR: check $record and the import directory before retrying cleanup." >&2
+        return 1
+    fi
+    while :; do
+        IFS= read -r -d '' name || break
+        if [ -z "$name" ]; then
+            # The empty name terminates the registry. Require EOF after it.
+            if [ "${#names[@]}" -gt 0 ] && ! IFS= read -r -d '' name && [ -z "$name" ]; then
+                complete=true
+            fi
+            break
+        fi
+        if ! IFS= read -r -d '' expected || [[ ! $expected =~ $identity_pattern ]]; then break; fi
+        case "$name" in
+            */*) break ;;
+            *.sql|*.sql.gz|*.sql.xz|*.sql.zst|*.mariadb.tar.gz|*.mariadb.tar.zst|kvs-export.manifest) ;;
+            *) break ;;
+        esac
+        names+=("$name")
+        identities+=("$expected")
+    done < "$record" || return 1
+    if [ "$complete" != true ]; then
+        echo "ERROR: check $record for an incomplete or invalid transfer name or identity before retrying cleanup." >&2
+        return 1
+    fi
+    [ "${1:-}" != validate ] || return 0
+    for i in "${!names[@]}"; do
+        file=import/${names[i]}
+        [ -e "$file" ] || [ -L "$file" ] || continue
+        if [ -f "$file" ] && [ ! -L "$file" ] &&
+            [ ! "$file" -ef "${IMPORT_OPERATOR_DUMP:-}" ] &&
+            identity=$(import_transfer_identity "$file") && [ "$identity" = "${identities[i]}" ]; then
+            rm -f -- "$file" || return 1
+        else
+            echo "WARNING: keeping $file because it changed or was supplied as IMPORT_DB_DUMP." >&2
+        fi
+    done
+    rm -f -- "$record"
 }
 
 if [ "$RESUME_IMPORT" != true ]; then
@@ -1858,6 +1924,7 @@ IMPORT_DUMP_IDENTITY=""
 IMPORT_STAGED_DUMP=""
 IMPORT_NATIVE_STAGE=""
 IMPORT_RAW_DUMP=""
+IMPORT_RAW_MANIFEST=""
 IMPORT_TOKEN=""
 IMPORT_VOLUME_TO_DELETE=""
 IMPORT_ARCHIVE_COMMAND=""
@@ -1890,6 +1957,8 @@ IMPORT_LINKS_SHOWN=""
 import_check_completed() {
     local completed_on answer
 
+    import_protect_supplied_dump || exit 1
+
     [ "$IMPORT_MODE" = true ] || return 0
     completed_on=${KVS_IMPORT_COMPLETED:-}
     [ -n "$completed_on" ] || return 0
@@ -1910,7 +1979,6 @@ import_check_completed() {
     fi
     echo ""
     echo -e "${YELLOW}An import already completed on ${completed_on}; the import source is ignored for this run.${NC}"
-    echo "Run again with VOLUME_CHOICE=1 to replace the database and import again."
     IMPORT_MODE=false
     IMPORT_SOURCE=""
 }
@@ -1946,16 +2014,93 @@ kvs_tables_prefix() {
     printf '%s\n' "$prefix"
 }
 
-# A dump staged for MariaDB and never removed means an import started and
-# did not complete: the database volume may hold part of it, and a run
-# that is not an import must not adopt that database.
+# Keep the names and identities of the private copies that belong to this
+# stage. A local IMPORT_DB_DUMP, even one under import/, has no entry.
+import_record_transfers() {
+    local record=mariadb/init/.import-transfers file identity temporary
+
+    [ "$IMPORT_MODE" = true ] || return 0
+    if [ -z "$IMPORT_RAW_DUMP" ]; then
+        rm -f -- "$record"
+        return
+    fi
+    temporary=$(mktemp mariadb/init/.import-transfers.XXXXXX) || return 1
+    for file in "$IMPORT_RAW_DUMP" "${IMPORT_RAW_MANIFEST:-}"; do
+        [ -n "$file" ] || continue
+        identity=${IMPORT_RAW_DUMP_ID:-}
+        if [ "$file" = "${IMPORT_RAW_MANIFEST:-}" ]; then identity=${IMPORT_RAW_MANIFEST_ID:-}; fi
+        if [ "${file%/*}" != "$IMPORT_STAGING" ] || [ -L import ] || [ -z "$identity" ] ||
+            ! printf '%s\0%s\0' "${file##*/}" "$identity" >> "$temporary"; then
+            rm -f -- "$temporary"
+            return 1
+        fi
+    done
+    printf '\0' >> "$temporary" || { rm -f -- "$temporary"; return 1; }
+    mv -fT -- "$temporary" "$record"
+}
+
+# The receipt is saved before the database marker and init files are removed.
+# Without it, the volume may hold a partial import and must not be adopted.
 import_check_leftover_dump() {
-    local leftover
+    local leftover prefix saved database record=mariadb/init/.import-transfers
+    local scan_complete=false
+    local -a entries=()
 
     [ "$IMPORT_MODE" != true ] || return 0
     [ -d mariadb/init ] || return 0
-    leftover=$(find mariadb/init -maxdepth 1 -name '*kvs-import*' -print -quit 2>/dev/null) || leftover=""
-    [ -n "$leftover" ] || return 0
+    # Only a successful scan emits the empty terminator. Keep the full
+    # list, including dotfiles, before deciding whether cleanup can run.
+    while IFS= read -r -d '' leftover; do
+        if [ -z "$leftover" ]; then scan_complete=true; break; fi
+        entries+=("$leftover")
+    done < <(find -H mariadb/init -maxdepth 1 -name '*kvs-import*' -print0 && printf '\0')
+    [ "$scan_complete" = true ] || exit 1
+    [ "${#entries[@]}" -gt 0 ] || [ -e "$record" ] || [ -L "$record" ] || return 0
+    leftover=${entries[0]:-$record}
+    if [ -n "${KVS_IMPORT_COMPLETED:-}" ]; then
+        echo "Finishing interrupted cleanup of the import completed on $KVS_IMPORT_COMPLETED."
+        # Read only the saved installation's settings. Both a direct shell
+        # override and an inherited variable interpolated by .env can name
+        # another existing options table.
+        # shellcheck disable=SC2016  # The clean child validates its own value.
+        if [ -L mariadb ] || [ -L mariadb/init ] || ! saved=$(env -i "$BASH" -c '
+            source ./.env >/dev/null || exit 1
+            LC_ALL=C
+            [[ ${TABLES_PREFIX:-} =~ ^[A-Za-z0-9_]{1,32}$ ]] || exit 1
+            [[ ${DOMAIN:-} =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$ ]] || exit 1
+            printf "%s %s" "$DOMAIN" "$TABLES_PREFIX"
+        '); then
+            echo "WARNING: cleanup skipped. Check the MariaDB init directory and the saved DOMAIN and TABLES_PREFIX in .env." >&2
+            exit 1
+        fi
+        read -r database prefix <<< "$saved"
+        import_protect_supplied_dump "${IMPORT_OPERATOR_DUMP:-${IMPORT_DB_DUMP:-}}" || exit 1
+        import_remove_transfers validate || exit 1
+        for leftover in "${entries[@]}"; do
+            if [ ! -L "$leftover" ]; then
+                case "${leftover##*/}" in
+                    10-kvs-import.sql|10-kvs-import.sql.gz|10-kvs-import.sql.xz|10-kvs-import.sql.zst|10-kvs-import-native.sh)
+                        [ -f "$leftover" ] && continue ;;
+                    10-kvs-import-native) [ -d "$leftover" ] && continue ;;
+                esac
+            fi
+            echo "ERROR: inspect the unrecognized staged entry $leftover before retrying cleanup." >&2
+            exit 1
+        done
+        if ! run_root_mariadb -u root "$database" -e "DELETE FROM ${prefix}options WHERE variable='KVS_INSTALL_IMPORT';"; then
+            echo "ERROR: restore access to the existing database and rerun setup to finish cleanup. The stage was kept." >&2
+            exit 1
+        fi
+        import_remove_transfers || exit 1
+        for leftover in "${entries[@]}"; do
+            if [ "$leftover" = mariadb/init/10-kvs-import-native ]; then
+                rm -rf -- "$leftover" || exit 1
+            else
+                rm -f -- "$leftover" || exit 1
+            fi
+        done
+        return 0
+    fi
     echo -e "${RED}ERROR: an earlier import did not complete ($leftover is still staged) and the database may be partial.${NC}"
     echo "Run the import again with VOLUME_CHOICE=1 to replace the database, or remove the staged dump to keep the database as it is."
     exit 1
@@ -3208,12 +3353,14 @@ import_fetch_archive() {
         import_archive_settle "$stage" "$IMPORT_ARCHIVE_ROOT" "$IMPORT_ARCHIVE_DUMP" "$IMPORT_ARCHIVE_MANIFEST" "$IMPORT_STAGING" "$destination"
     ) || exit 1
     IMPORT_DB_DUMP=$(import_field "$settled" 1)
-    if [ -s "$(import_field "$settled" 2)" ]; then
-        import_save_nginx_config "$(import_field "$settled" 2)"
+    IMPORT_RAW_MANIFEST=$(import_field "$settled" 2)
+    IMPORT_RAW_DUMP_ID=$(import_field "$settled" 3)
+    IMPORT_RAW_MANIFEST_ID=$(import_field "$settled" 4)
+    if [ -s "$IMPORT_RAW_MANIFEST" ]; then
+        import_save_nginx_config "$IMPORT_RAW_MANIFEST"
     fi
     IMPORT_RAW_DUMP=$IMPORT_DB_DUMP
     IMPORT_SITE_DIR=$destination
-    chmod 600 "$IMPORT_DB_DUMP" 2>/dev/null || true
     echo -e "  ${GREEN}✓${NC} Site files in $destination, dump in $IMPORT_DB_DUMP"
 }
 
@@ -3255,14 +3402,24 @@ import_fetch_remote() {
         echo "  No dump in a pass of the files alone (IMPORT_FILES_ONLY=yes); a dump an earlier run received stays as it is."
     elif [ "${IMPORT_REUSE_DUMP:-no}" = yes ]; then
         echo -e "${CYAN}Checking the database dump an earlier run received...${NC}"
+        IMPORT_RAW_DUMP_ID=$(import_transfer_identity "$dump") || IMPORT_RAW_DUMP_ID=""
         import_reuse_dump "$dump" "$destination" "$source" "$IMPORT_TABLES_PREFIX" || exit 1
+        [ -n "$IMPORT_RAW_DUMP_ID" ] || { echo "ERROR: could not identify the reused dump $dump." >&2; exit 1; }
     else
         if [ -s "$dump" ]; then
             echo "  The dump an earlier run received is replaced by a new export (IMPORT_REUSE_DUMP=yes takes it again when only files are left to copy)."
         fi
         echo -e "${CYAN}Receiving the database dump from $IMPORT_SSH_TARGET...${NC}"
-        rm -f "$dump"
-        import_remote_dump "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$dump" &
+        local temporary dump_fd descriptor metadata
+        temporary=$(mktemp -- "$IMPORT_STAGING/.received.XXXXXXXX") || exit 1
+        # A default ACL can also restrict the owner of a mode-0600 file.
+        if ! chmod 600 -- "$temporary" || ! exec {dump_fd}<>"$temporary" ||
+            ! mv -fT -- "$temporary" "$dump"; then
+            rm -f -- "$temporary"
+            exit 1
+        fi
+        descriptor=/proc/self/fd/$dump_fd
+        import_remote_dump "$IMPORT_EXPORTER" "$IMPORT_REMOTE_DIR" "$descriptor" &
         pid=$!
         if [ -t 1 ]; then
             import_watch_file_size "$dump" "$pid" "Received"
@@ -3271,7 +3428,13 @@ import_fetch_remote() {
             echo -e "${RED}ERROR: the dump of the old database failed (see the messages above)${NC}"
             exit 1
         fi
-        chmod 600 "$dump"
+        metadata=$(TZ=UTC0 LC_ALL=C stat -Lc '%a %d:%i:%s:%z' -- "$descriptor") || exit 1
+        if [ "${metadata%% *}" != 600 ] || [ -L "$dump" ] || [ ! "$dump" -ef "$descriptor" ]; then
+            echo "WARNING: keeping $dump. The received file changed or its mode is not 0600; check it before retrying." >&2
+            exit 1
+        fi
+        IMPORT_RAW_DUMP_ID=${metadata#* }
+        exec {dump_fd}>&-
         echo -e "  ${GREEN}✓${NC} Dump received: $dump ($(du -h -- "$dump" | cut -f1))"
     fi
     echo -e "${CYAN}Transferring the site files from $IMPORT_SSH_TARGET:$IMPORT_REMOTE_DIR${KVS_INSTALL_VERSION:+ (kvs-install $KVS_INSTALL_VERSION)}...${NC}"
@@ -6567,6 +6730,7 @@ import_verify_database() {
 
 progress_bar "Starting MariaDB"
 import_stage_dump
+import_record_transfers || exit 1
 import_replace_database_volume
 # kvs-init clears KVS's cron locks and its cron registration
 # (40-configure-database.sh), and MariaDB restarts under whatever is
@@ -6743,6 +6907,8 @@ import_finish() {
     local report table_list table_name query rows completed_at receipt_line
 
     [ "$IMPORT_MODE" = true ] || return 0
+    import_protect_supplied_dump "${IMPORT_OPERATOR_DUMP:-}" || exit 1
+    import_remove_transfers validate || exit 1
     report="$LOG_DIR/import-rows.txt"
     echo "  MariaDB: listing imported tables for row-count verification..."
     if ! table_list=$(run_root_mariadb -u root -N -e \
@@ -6779,15 +6945,14 @@ import_finish() {
         exit 1
     fi
     KVS_IMPORT_COMPLETED=$completed_at
-    run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';" || exit 1
+    if ! run_root_mariadb -u root "$DOMAIN" -e "DELETE FROM ${IMPORT_TABLES_PREFIX}options WHERE variable='KVS_INSTALL_IMPORT';"; then
+        echo "ERROR: the import receipt was saved. Restore database access and rerun setup without an import source to finish cleanup." >&2
+        exit 1
+    fi
     echo "  Removing temporary import files..."
-    [ -n "$IMPORT_STAGED_DUMP" ] && rm -f "$IMPORT_STAGED_DUMP"
-    [ -n "$IMPORT_NATIVE_STAGE" ] && rm -rf -- "$IMPORT_NATIVE_STAGE"
-    # The raw dump served its purpose; the old server keeps the original.
-    # The source marker stays: a later pass from the same source is how the
-    # changes made on the old server in the meantime are picked up.
-    [ -n "$IMPORT_RAW_DUMP" ] && rm -f "$IMPORT_RAW_DUMP"
-    [ -z "$IMPORT_STAGING" ] || rm -f "$IMPORT_STAGING/kvs-export.manifest"
+    if [ -n "$IMPORT_STAGED_DUMP" ]; then rm -f -- "$IMPORT_STAGED_DUMP" || exit 1; fi
+    if [ -n "$IMPORT_NATIVE_STAGE" ]; then rm -rf -- "$IMPORT_NATIVE_STAGE" || exit 1; fi
+    import_remove_transfers || exit 1
     echo -e "  ${GREEN}✓${NC} Import complete: $(grep -c -v '^#' "$report") tables, row counts in $report"
 }
 
