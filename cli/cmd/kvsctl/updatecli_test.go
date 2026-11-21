@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -370,5 +371,90 @@ func TestUpdateCLIRefusesExplicitDowngrade(t *testing.T) {
 		} else if err != nil {
 			t.Errorf("current %s, target %q: %v", tc.current, tc.target, err)
 		}
+	}
+}
+
+func TestUpdateCLIUsesStateWithBrokenEnv(t *testing.T) {
+	root := newRoot(t)
+	t.Setenv("KVS_INSTALL_DIR", root)
+	inst := saveState(t, root, failedState())
+	rel := testRelease("1.0.0", "2026-10-01", "")
+	rel.CLI = map[string]manifest.Asset{cliPlatform(): fakeBuild(t, "exit 1")}
+	url := signedManifest(t, rel)
+	useFlags(t, "", url, false)
+	old := Version
+	Version = rel.Version
+	t.Cleanup(func() { Version = old })
+	updates := &instance.Updates{}
+	updates.For(url).LatestSeen = "2.0.0"
+	if err := inst.SaveUpdates(updates); err != nil {
+		t.Fatal(err)
+	}
+	interruptedJournal(t, root)
+	if err := os.WriteFile(inst.EnvPath, []byte("DOMAIN=\"unfinished\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := updateCLICmd()
+	if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "recover") {
+		t.Errorf("journal with broken .env: %v", err)
+	}
+	if err := inst.RemoveJournal(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(inst.EnvPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "latest 2.0.0") {
+		t.Errorf("manifest floor with missing .env: %v", err)
+	}
+	compose := filepath.Join(root, "docker", "docker-compose.yml")
+	if err := os.Remove(compose); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing.yml", compose); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("dangling compose link: %v", err)
+	}
+	flagRoot = t.TempDir()
+	docker := filepath.Join(flagRoot, "docker")
+	if err := os.Symlink("missing", docker); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); !errors.Is(err, os.ErrNotExist) || errors.Is(err, instance.ErrNoStack) {
+		t.Errorf("dangling parent link: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(flagRoot, "missing"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Errorf("absent file below a valid directory link: %v", err)
+	}
+	if err := os.Symlink(".", filepath.Join(docker, "docker-compose.yml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("compose resolves to directory: %v", err)
+	}
+	compose = filepath.Join(docker, "docker-compose.yml")
+	if err := os.Remove(compose); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(compose, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("directory at compose path: %v", err)
+	}
+	flagRoot = filepath.Join(t.TempDir(), "empty")
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Errorf("without a stack: %v", err)
+	}
+	if err := os.WriteFile(flagRoot, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err == nil || !errors.Is(err, syscall.ENOTDIR) {
+		t.Errorf("unusable root: %v", err)
 	}
 }

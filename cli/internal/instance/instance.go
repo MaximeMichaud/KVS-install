@@ -174,8 +174,13 @@ func (s *State) Label(version string) string {
 	return "unreleased checkout " + commit
 }
 
-// Detect reads the stack at root, or at $KVS_INSTALL_DIR, or /opt/kvs.
-func Detect(root string) (*Instance, error) {
+// ErrNoStack means that the installation's compose file is absent.
+var ErrNoStack = errors.New("no stack")
+
+// Locate finds the stack paths without reading its site configuration.
+// Commands that only need the journal or manifest record can use these
+// paths even when Detect cannot load the site.
+func Locate(root string) (*Instance, error) {
 	if root == "" {
 		root = os.Getenv("KVS_INSTALL_DIR")
 	}
@@ -188,8 +193,41 @@ func Detect(root string) (*Instance, error) {
 	}
 	inst := &Instance{Root: root, DockerDir: filepath.Join(root, "docker")}
 	inst.EnvPath = filepath.Join(inst.DockerDir, ".env")
-	if _, err := os.Stat(filepath.Join(inst.DockerDir, "docker-compose.yml")); err != nil {
-		return nil, fmt.Errorf("no stack in %s (docker/docker-compose.yml is missing); set KVS_INSTALL_DIR or --root", root)
+	compose := filepath.Join(inst.DockerDir, "docker-compose.yml")
+	entry, err := os.Stat(compose)
+	if errors.Is(err, os.ErrNotExist) {
+		// ENOENT can also mean that an existing link points nowhere.
+		for path := compose; ; path = filepath.Dir(path) {
+			info, linkErr := os.Lstat(path)
+			if errors.Is(linkErr, os.ErrNotExist) {
+				continue
+			}
+			if linkErr != nil {
+				return nil, linkErr
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				if _, err := os.Stat(path); err != nil {
+					return nil, err
+				}
+			}
+			break
+		}
+		return nil, fmt.Errorf("%w in %s (docker/docker-compose.yml is missing); set KVS_INSTALL_DIR or --root", ErrNoStack, root)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !entry.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", compose)
+	}
+	return inst, nil
+}
+
+// Detect reads the stack at root, or at $KVS_INSTALL_DIR, or /opt/kvs.
+func Detect(root string) (*Instance, error) {
+	inst, err := Locate(root)
+	if err != nil {
+		return nil, err
 	}
 	inst.Env, err = ReadEnv(inst.EnvPath)
 	if err != nil {

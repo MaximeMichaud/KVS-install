@@ -43,13 +43,14 @@ func updateCLICmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
 			defer cancel()
-			inst, err := instance.Detect(flagRoot)
+			inst, err := optionalStack()
 			if err != nil {
-				// A machine without an installation may still update its
-				// kvsctl.
-				inst = nil
-			} else if err := refuseInterrupted(inst); err != nil {
 				return err
+			}
+			if inst != nil {
+				if err := refuseInterrupted(inst); err != nil {
+					return err
+				}
 			}
 			m, err := cliManifest(ctx)
 			if ctx.Err() != nil {
@@ -98,6 +99,15 @@ func updateCLICmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&version, "version", "", "the release whose kvsctl to install, a release candidate included; downgrades are refused (default the latest stable release)")
 	return cmd
+}
+
+// optionalStack returns nil only when the compose file is absent.
+func optionalStack() (*instance.Instance, error) {
+	inst, err := instance.Locate(flagRoot)
+	if errors.Is(err, instance.ErrNoStack) {
+		return nil, nil
+	}
+	return inst, err
 }
 
 // cliDetail prints what update-cli did, or that it had nothing to do,

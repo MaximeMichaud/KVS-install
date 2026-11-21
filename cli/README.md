@@ -368,7 +368,9 @@ has no place on a production server.
   on a manifest of a newer format, which `check` and `upgrade` send it to.
   It needs no installation; on a machine that holds one, it refuses while a
   run is interrupted, and holds the manifest to the newest one read from the
-  same URL as `upgrade` does.
+  same URL as `upgrade` does. A missing stack permits standalone use. A
+  dangling link in the stack path, an inaccessible path, or a Compose path
+  that resolves to anything other than a regular file stops the command.
 
 `upgrade`, `rollback`, `recover`, `backup`, `restore`, `adopt` and `clean`
 take the lock of the installation (`kvsctl/lock`) before they read its
