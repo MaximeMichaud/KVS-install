@@ -6784,7 +6784,29 @@ dns_records() {
     ' <<< "$reply"
 }
 
-# DNS Check Function: 0 when every record points here, 1 on a mismatch,
+# Compare every upstream AAAA with all interface addresses, including
+# secondary addresses. An inconclusive IPv6 check is advisory.
+warn_foreign_aaaa() {
+    local name=$1 resolver=$2 records addr assigned
+    if ! records=$(dns_records "$name" AAAA "$resolver"); then
+        echo -e "  ${YELLOW}WARNING: Cannot verify public AAAA records for $name (no conclusive answer from $resolver).${NC}"
+        return 0
+    fi
+    while IFS= read -r addr; do
+        [ -n "$addr" ] || continue
+        if [[ "${addr,,}" =~ ^[0:]*:0*1?$ || "${addr,,}" =~ ^fe[89ab][0-9a-f]: ]]; then
+            echo -e "  ${YELLOW}WARNING: Cannot verify public DNS for $name (local AAAA answer: $addr).${NC}"
+            continue
+        fi
+        if ! assigned=$(ip -6 -o address show to "$addr/128" 2>/dev/null); then
+            echo -e "  ${YELLOW}WARNING: AAAA for $name points to $addr; could not check local IPv6 addresses.${NC}"
+        elif [ -z "$assigned" ]; then
+            echo -e "  ${YELLOW}WARNING: AAAA for $name points to $addr, which is not assigned to this server. Certificate validation may fail.${NC}"
+        fi
+    done <<< "$records"
+}
+
+# DNS Check Function: 0 when every A record points here, 1 on an A mismatch,
 # 2 when the public address or the DNS answer cannot be verified.
 check_dns() {
     local name records resolver candidate status=0
@@ -6797,7 +6819,7 @@ check_dns() {
     echo -e "${CYAN}Checking DNS configuration...${NC}"
     SERVER_IP=$(public_ipv4) || SERVER_IP=""
     if [ -z "$SERVER_IP" ]; then
-        echo -e "  ${YELLOW}Could not determine the public IP of this server (no lookup service answered), the records are not compared${NC}"
+        echo -e "  ${YELLOW}Could not determine the public IP of this server (no lookup service answered), the A records are not compared${NC}"
         status=2
     else
         echo "Server IP: $SERVER_IP"
@@ -6815,6 +6837,7 @@ check_dns() {
             [ "$status" -ne 0 ] || status=2
             continue
         fi
+        warn_foreign_aaaa "$name" "$resolver"
         # A synthesized local address cannot establish a public mismatch.
         if [[ "$records" =~ (^|$'\n')(127\.|169\.254\.|0\.0\.0\.0($|$'\n')) ]]; then
             echo -e "  ${YELLOW}WARNING: Cannot verify public DNS for $name (local A answer: ${records//$'\n'/, }).${NC}"
@@ -6861,7 +6884,7 @@ while true; do
         dns_status=$?
     fi
     if [ "$dns_status" -eq 0 ]; then
-        echo -e "${GREEN}DNS configuration OK${NC}"
+        echo -e "${GREEN}DNS configuration OK (A records)${NC}"
         break
     elif [ "$dns_status" -eq 2 ]; then
         echo -e "${YELLOW}DNS check skipped: the certificate step will show whether the records point here${NC}"

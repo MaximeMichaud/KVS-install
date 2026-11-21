@@ -19,7 +19,7 @@ fail() {
 }
 
 # The functions, as the script defines them.
-awk '/^dns_nameservers\(\) \{/,/^}/; /^dns_records\(\) \{/,/^}/; /^public_ipv4\(\) \{/,/^}/; /^check_dns\(\) \{/,/^}/; /^validate_dns_settings\(\) \{/,/^}/' \
+awk '/^dns_nameservers\(\) \{/,/^}/; /^dns_records\(\) \{/,/^}/; /^public_ipv4\(\) \{/,/^}/; /^warn_foreign_aaaa\(\) \{/,/^}/; /^check_dns\(\) \{/,/^}/; /^validate_dns_settings\(\) \{/,/^}/' \
     "$ROOT_DIR/docker/setup.sh" > "$WORK/dns.sh"
 grep -q 'public_ipv4()' "$WORK/dns.sh" || fail "public_ipv4 is not defined in docker/setup.sh"
 grep -q 'check_dns()' "$WORK/dns.sh" || fail "check_dns is not defined in docker/setup.sh"
@@ -27,9 +27,8 @@ grep -q 'validate_dns_settings()' "$WORK/dns.sh" || fail "validate_dns_settings 
 
 # curl answers with the IP of STUB_IP from the service named in STUB_OK
 # (the trace service answers several lines like the real one) and fails
-# for every other service. getent behaves like glibc's for a name that has
-# an AAAA record besides its A record: "hosts" answers the IPv6 address
-# first, "ahostsv4" the IPv4 address STUB_DNS_IP, one line per socket type.
+# for every other service. getent models a system stub that synthesizes
+# the local host's addresses even when its DNS backend is requested.
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/curl" <<'STUB'
 #!/bin/bash
@@ -42,22 +41,23 @@ esac
 STUB
 cat > "$WORK/bin/getent" <<'STUB'
 #!/bin/bash
-dns=false
-if [ "${1:-} ${2:-}" = "-s dns" ]; then dns=true; shift 2; fi
-case "$2" in
-    example.com) records=${STUB_DNS_IP:-} ;;
-    www.example.com) records=${STUB_WWW_IP-${STUB_DNS_IP:-}} ;;
-    *) exit 2 ;;
-esac
+if [ "$1 $2" = "-s dns" ]; then shift 2; fi
 case "$1" in
-    hosts) printf '%s\t%s\n' "${STUB_DNS_IPV6:-2001:db8::1}" "$2" ;;
-    ahostsv4)
-        if [ "$dns" = false ]; then records=${STUB_HOSTS_IP:-$records}; fi
-        for ip in $records; do
-            printf '%s\tSTREAM %s\n%s\tDGRAM\n%s\tRAW\n' "$ip" "$2" "$ip" "$ip"
-        done ;;
+    hosts) printf '%s %s\n' "${STUB_HOSTS_IPV6:-2001:db8::7}" "$2" ;;
+    ahostsv4) printf '%s STREAM %s\n' "${STUB_HOSTS_IP:-127.0.1.1}" "$2" ;;
     *) exit 2 ;;
 esac
+STUB
+cat > "$WORK/bin/ip" <<'STUB'
+#!/bin/bash
+[ "$1 $2 $3 $4 $5" = '-6 -o address show to' ] && [ "$#" -eq 6 ] || exit 2
+[ "${STUB_IP_FAILURE:-no}" = no ] || exit 1
+for local_ip in ${STUB_LOCAL_IPV6:-}; do
+    if [ "$6" = "$local_ip/128" ]; then
+        printf '3: eth1 inet6 %s/64 scope global\n' "$local_ip"
+    fi
+done
+exit 0
 STUB
 # Both clients print sectioned DNS replies. Glue has the queried type too.
 cat > "$WORK/bin/dig" <<'STUB'
@@ -76,10 +76,13 @@ case "$server" in
     *) exit 2 ;;
 esac
 case "$name $type" in
+    'example.com. AAAA') records=${STUB_DNS_IPV6:-} ;;
+    'www.example.com. AAAA') records=${STUB_WWW_IPV6-${STUB_DNS_IPV6:-}} ;;
     'example.com. A') records=${STUB_DNS_IP:-} ;;
     'www.example.com. A') records=${STUB_WWW_IP-${STUB_DNS_IP:-}} ;;
     *) exit 2 ;;
 esac
+if [ "$type" = AAAA ]; then response=${AAAA_RESPONSE:-$response}; fi
 if [ "${0##*/}" = host ] && [ "${DNS_RCODE:-}" = NXDOMAIN ]; then
     echo "Host $name not found: 3(NXDOMAIN)"
     exit 1
@@ -148,6 +151,10 @@ for client in dig host; do
     grep -Eq '^@?192\.0\.2\.54 example\.com\. A$' "$DNS_CALLS" || fail "$client skipped resolver order"
     grep -Eq '^@?192\.0\.2\.53 www\.example\.com\. A$' "$DNS_CALLS" || fail "$client missed www"
     if grep -Eq '127\.|::1' "$DNS_CALLS"; then fail "$client contacted a loopback stub"; fi
+    out=$(STUB_HOSTS_IPV6=2001:db8::7 STUB_LOCAL_IPV6=2001:db8::7 STUB_DNS_IPV6=2001:db8::9 run_check https 203.0.113.7 203.0.113.7)
+    grep -Fq 'WARNING: AAAA for example.com points to 2001:db8::9' <<< "$out" || fail "$client trusted the stub AAAA: $out"
+    grep -Eq '^@?192\.0\.2\.53 example\.com\. AAAA$' "$DNS_CALLS" || fail "$client used another source for AAAA"
+    if grep -Eq '^@?192\.0\.2\.54 .* AAAA$' "$DNS_CALLS"; then fail "$client retried AAAA on a different resolver"; fi
     for response in referral empty; do
         out=$(FIRST_DNS_RESPONSE=$response run_check https 203.0.113.7 203.0.113.7)
         grep -Fxq 'status=0' <<< "$out" || fail "$client did not retry a $response reply: $out"
@@ -204,6 +211,33 @@ for records in '203.0.113.7 192.0.2.8 192.0.2.8 192.0.2.9' '192.0.2.8 192.0.2.9 
         done
     done
 done
+
+# Local addresses on different interfaces can both serve the site. A hosts-file
+# entry is independent of the AAAA records returned by DNS.
+out=$(STUB_HOSTS_IPV6=2001:db8::bad STUB_LOCAL_IPV6='2001:db8::1 2001:db8::2' \
+    STUB_DNS_IPV6='2001:db8::2 2001:db8::1' run_check https 203.0.113.7 203.0.113.7)
+grep -q 'WARNING' <<< "$out" && fail "local AAAA records caused a warning: $out"
+grep -Fxq 'status=0' <<< "$out" || fail "local AAAA records blocked setup: $out"
+
+out=$(STUB_LOCAL_IPV6='2001:db8::1 2001:db8::2' STUB_DNS_IPV6='2001:db8::2 2001:db8::8 2001:db8::8 2001:db8::9' \
+    STUB_WWW_IPV6='2001:db8::a' run_check https 203.0.113.7 203.0.113.7)
+for pair in 'example.com 2001:db8::8' 'example.com 2001:db8::9' 'www.example.com 2001:db8::a'; do
+    [ "$(grep -Fc "WARNING: AAAA for ${pair% *} points to ${pair##* }" <<< "$out")" -eq 1 ] ||
+        fail "expected one warning for $pair: $out"
+done
+grep -Fq 'points to 2001:db8::2' <<< "$out" && fail "a local address was called foreign: $out"
+grep -Fxq 'status=0' <<< "$out" || fail "foreign AAAA records blocked setup: $out"
+
+out=$(STUB_DNS_IPV6=2001:db8::9 run_check "" "" 203.0.113.7)
+grep -Fq 'A records are not compared' <<< "$out" || fail "the skipped IPv4 comparison was not identified"
+grep -Fq 'AAAA for example.com points to 2001:db8::9' <<< "$out" || fail "unknown public IPv4 hid a foreign AAAA"
+grep -Fxq 'status=2' <<< "$out" || fail "the AAAA warning changed the unknown IPv4 status"
+
+out=$(STUB_IP_FAILURE=yes STUB_DNS_IPV6=2001:db8::1 run_check https 203.0.113.7 203.0.113.7)
+grep -Fq 'could not check local IPv6 addresses' <<< "$out" || fail "failed address inspection went unreported"
+grep -Fxq 'status=0' <<< "$out" || fail "failed address inspection blocked setup"
+out=$(run_check https 203.0.113.7 203.0.113.7)
+grep -q 'WARNING' <<< "$out" && fail "IPv4 fallback from the hosts database counted as AAAA: $out"
 
 # A name with no A record at all: the mismatch names what is missing.
 out=$(run_check "api.ipify.org" 203.0.113.7 "")
@@ -286,9 +320,24 @@ run_loop_env() {
     echo "exit=$?"
 }
 
+out=$(run_loop_env 3 STUB_DNS_IP=203.0.113.7 STUB_DNS_IPV6=2001:db8::9)
+grep -Fq 'WARNING: AAAA for example.com points to 2001:db8::9' <<< "$out" ||
+    fail "no AAAA warning on an IPv4-only host: $out"
+grep -q 'reached the next step' <<< "$out" || fail "DNS_CHOICE=3 stopped on the AAAA warning: $out"
+grep -Fq 'DNS configuration OK (A records)' <<< "$out" || fail "the success message must identify the checked A records"
+
 out=$(run_loop_env 3 STUB_DNS_IP=127.0.1.1)
 { grep -q 'reached the next step' <<< "$out" && grep -q 'Cannot verify public DNS' <<< "$out"; } ||
     fail "a local A answer stopped strict setup: $out"
+
+for addr in :: 0:0:0:0:0:0:0:1 fe80::3 febf::9; do
+    out=$(run_loop_env 3 STUB_DNS_IP=203.0.113.7 STUB_DNS_IPV6="$addr" STUB_LOCAL_IPV6="$addr")
+    { grep -Fq "local AAAA answer: $addr" <<< "$out" && grep -q 'reached the next step' <<< "$out"; } ||
+        fail "local AAAA answer was definitive or blocked setup: $out"
+done
+out=$(run_loop_env 3 STUB_DNS_IP=203.0.113.7 AAAA_RESPONSE=referral)
+{ grep -Fq 'Cannot verify public AAAA records' <<< "$out" && grep -q 'reached the next step' <<< "$out"; } ||
+    fail "failed AAAA lookup was silent or blocked setup: $out"
 
 # A negative DNS answer does not depend on knowing the server address.
 # Use only the fixture clients, including when dig is absent.
@@ -443,7 +492,7 @@ STUB
     chmod 755 "$case_dir/setup.sh" "$case_dir/bin/docker" "$case_dir/bin/curl" "$case_dir/bin/ss"
     cp "$ROOT_DIR/docker/bin/resolve-bases.sh" "$case_dir/bin/"
     cp "$ROOT_DIR/docker/images.lock" "$case_dir/"
-    cp "$WORK/bin/"{getent,dig,host} "$case_dir/bin/"
+    cp "$WORK/bin/"{getent,dig,host,ip} "$case_dir/bin/"
     : > "$case_dir/docker.log"
 }
 
