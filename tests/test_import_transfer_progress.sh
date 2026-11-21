@@ -807,7 +807,7 @@ test_the_sampler_reads_the_disks_and_stops() {
         wait_for 10 grep -q ' 30 sda 100 sdb 0$' "$TEST_DIR/sampler.disks" 2>/dev/null ||
             fail "the sampler must write the busy share of the disks: $(cat "$TEST_DIR/sampler.disks" 2>&1)"
         [[ "$(cat "$TEST_DIR/sampler.disks")" =~ ^[0-9]+\ 30\ sda\ 100\ sdb\ 0$ ]] || fail "epoch, seconds, disks: $(cat "$TEST_DIR/sampler.disks")"
-        grep -q '^-o BatchMode=yes -o ControlPath=/nonexistent/ssh-%C -p 22 root@old.test cat /proc/uptime /proc/diskstats; ' "$FIXTURE_SSH_LOG" ||
+        grep -q "^-o BatchMode=yes -o ControlPath=/nonexistent/ssh-%C -p 22 root@old.test sh -c 'cat /proc/uptime /proc/diskstats; " "$FIXTURE_SSH_LOG" ||
             fail "the reading must never prompt and use the connection options: $(head -n 1 "$FIXTURE_SSH_LOG")"
         stops_within 2 "$pid" || fail "the sampler must stop on TERM"
         [ ! -e "$TEST_DIR/sampler.disks.previous" ] && [ ! -e "$TEST_DIR/sampler.disks.reading" ] ||

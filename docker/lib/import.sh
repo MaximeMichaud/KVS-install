@@ -2797,7 +2797,7 @@ import_remote_plan_room() {
     local free
 
     # shellcheck disable=SC2016  # TMPDIR is the old server's.
-    free=$(import_ssh 'df -Pk "${TMPDIR:-/var/tmp}"' < /dev/null 2>/dev/null | awk 'NR == 2 { print $4 }')
+    free=$(import_ssh sh -c "$(import_shquote 'df -Pk "${TMPDIR:-/var/tmp}"')" < /dev/null 2>/dev/null | awk 'NR == 2 { print $4 }')
     [[ "$free" =~ ^[0-9]+$ ]] || return 1
     printf '%s\n' "$free"
     [ "$free" -ge $(($1 / 1024 + 1048576)) ]
@@ -2806,10 +2806,15 @@ import_remote_plan_room() {
 # import_remote_plan_dir: a new private directory on the old server for
 # the chunk lists, printed.
 import_remote_plan_dir() {
-    local remote
+    local remote script
 
-    # shellcheck disable=SC2016  # TMPDIR is the old server's.
-    remote=$(import_ssh 'umask 077 && mktemp -d "${TMPDIR:-/var/tmp}/kvs-import-plan.XXXXXX"' < /dev/null 2>/dev/null) || return 1
+    # shellcheck disable=SC2016  # The source shell expands TMPDIR and parent.
+    script='export LC_ALL=C; parent=${TMPDIR:-/var/tmp}; '
+    # shellcheck disable=SC2016
+    script+='case "$parent" in /|*[!A-Za-z0-9._/-]*) exit 1 ;; /*) ;; *) exit 1 ;; esac; '
+    # shellcheck disable=SC2016
+    script+='umask 077 && mktemp -d "$parent/kvs-import-plan.XXXXXX"'
+    remote=$(import_ssh sh -c "$(import_shquote "$script")" < /dev/null 2>/dev/null) || return 1
     [[ "$remote" =~ ^/[A-Za-z0-9._/-]+/kvs-import-plan\.[A-Za-z0-9]+$ ]] || return 1
     printf '%s\n' "$remote"
 }
@@ -2940,7 +2945,7 @@ import_rsync_workers() (
         # authenticated, before rsync starts. Wait for it before opening
         # the next connection: established transfers remain concurrent,
         # but our unauthenticated connections never pile up at MaxStartups.
-        rsync_args+=(--rsync-path="printf '%s\\n' KVS_IMPORT_SSH_READY >&2; exec $remote_program")
+        rsync_args+=(--rsync-path="sh -c 'echo KVS_IMPORT_SSH_READY >&2; exec \"\$@\"' sh $remote_program")
     fi
     trap 'for pid in "${pids[@]}"; do [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true; done; wait' EXIT
     trap 'exit 130' INT
@@ -3175,7 +3180,7 @@ import_disk_sampler() {
     # An already-finished probe or pause must not interrupt shutdown under -e.
     trap '[ -z "$probe" ] || kill "$probe" 2>/dev/null || true; [ -z "$nap" ] || kill "$nap" 2>/dev/null || true; rm -f -- "$file.reading" "$file.previous" "$file.tmp"; exit 0' TERM
     while [ -z "$owner" ] || kill -0 "$owner" 2>/dev/null; do
-        timeout 15 "${IMPORT_SSH_COMMAND[@]}" "${batch[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" "$IMPORT_DISKSTATS_COMMAND" \
+        timeout 15 "${IMPORT_SSH_COMMAND[@]}" "${batch[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" "sh -c '$IMPORT_DISKSTATS_COMMAND'" \
             < /dev/null > "$file.reading" 2>/dev/null &
         probe=$!
         if wait "$probe" && [ -s "$file.reading" ]; then
