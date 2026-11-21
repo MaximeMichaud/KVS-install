@@ -241,15 +241,7 @@ jobs:
         env:
           PHP_SERIES: ${{ matrix.php }}
           BASE_NAME: ${{ matrix.base }}
-        run: |
-          {
-            echo 'value<<ARGS_EOF'
-            if [ -n "$PHP_SERIES" ]; then
-              echo "PHP_VERSION=${PHP_SERIES}"
-              echo "PHP_BASE=$(./docker/bin/resolve-bases.sh --get "$BASE_NAME" "$PHP_SERIES")"
-            fi
-            echo 'ARGS_EOF'
-          } >> "$GITHUB_OUTPUT"
+        run: ./.github/scripts/image-build-args.sh >> "$GITHUB_OUTPUT"
 
       - name: tags and labels
         id: meta

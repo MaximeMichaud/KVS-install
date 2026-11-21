@@ -369,6 +369,65 @@ holds "$release" "only a candidate is published by its own step, never as the la
     fail "the candidate must be published after its assets are uploaded (step $assets), not at step $candidate"
 echo "PASS: every asset is uploaded to a draft that is published last"
 
+for event in push pull_request; do
+    holds "$docker" "a change to image-build-args.sh must trigger an image build on $event" \
+        '.on[$event].paths | index(".github/scripts/image-build-args.sh") != null' --arg event "$event"
+done
+
+# Run each build-argument step without starting a builder.
+(
+    cd "$notes_dir"
+    mkdir -p docker/bin .github
+    ln -s "$ROOT_DIR/.github/scripts" .github/scripts
+    cat > docker/bin/resolve-bases.sh <<'STUB'
+#!/bin/bash
+[ "$#" = 3 ] && [ "$1" = --get ] && [ "$2" = php-cli ] && [ "$3" = 8.3 ] || exit 2
+printf '%s\n' "$LOCK_VALUE"
+exit "$LOCK_STATUS"
+STUB
+    chmod +x docker/bin/resolve-bases.sh
+    export BASE_NAME=php-cli PHP_SERIES=8.3 GITHUB_OUTPUT="$notes_dir/args" LOCK_VALUE LOCK_STATUS
+    pin="php:8.3-cli@sha256:$(printf '%064d' 1)"
+    for job in images build; do
+        json=$release
+        [ "$job" != build ] || json=$docker
+        holds "$json" "$job must pass the matrix PHP series and base to the argument step" \
+            'any(.jobs[$job].steps[]; .id == "args" and .env.PHP_SERIES == "${{ matrix.php }}"
+                and .env.BASE_NAME == "${{ matrix.base }}")' --arg job "$job"
+        holds "$json" "$job must pass the resolved arguments to the image builder" \
+            '.jobs[$job].steps | (map(.id) | index("args")) as $args
+                | [to_entries[] | select(.value.uses // "" | startswith("docker/build-push-action@"))]
+                | length > 0 and all(.[]; .key > $args and .value.with["build-args"] == "${{ steps.args.outputs.value }}")' \
+            --arg job "$job"
+        step=$(jq -er --arg job "$job" '.jobs[$job].steps[] | select(.id == "args") | .run' <<<"$json")
+        for bad in missing failed-with-output empty floating short missing-name multiline; do
+            LOCK_STATUS=0
+            case "$bad" in
+                missing) LOCK_VALUE=; LOCK_STATUS=1 ;;
+                failed-with-output) LOCK_VALUE=$pin; LOCK_STATUS=1 ;;
+                empty) LOCK_VALUE= ;;
+                floating) LOCK_VALUE=php:8.3-cli ;;
+                short) LOCK_VALUE=php:8.3-cli@sha256:a ;;
+                missing-name) LOCK_VALUE=@${pin#*@} ;;
+                multiline) LOCK_VALUE=$'other\n'"$pin" ;;
+            esac
+            : > "$GITHUB_OUTPUT"
+            if bash -e -c "$step"; then fail "$job accepted $bad PHP base"; fi
+            [ ! -s "$GITHUB_OUTPUT" ] || fail "$job wrote arguments for a $bad PHP base"
+        done
+        LOCK_VALUE=$pin
+        : > "$GITHUB_OUTPUT"
+        bash -e -c "$step"
+        printf 'value<<ARGS_EOF\nPHP_VERSION=8.3\nPHP_BASE=%s\nARGS_EOF\n' "$pin" > expected
+        cmp expected "$GITHUB_OUTPUT" || fail "$job lost the pinned build arguments"
+        : > "$GITHUB_OUTPUT"
+        PHP_SERIES='' BASE_NAME='' bash -e -c "$step"
+        printf 'value<<ARGS_EOF\nARGS_EOF\n' > expected
+        cmp expected "$GITHUB_OUTPUT" || fail "$job wrote PHP arguments for a non-PHP image"
+    done
+)
+echo "PASS: both image builds require a successful lookup of a pinned PHP base"
+
 # The images job pushes php-fpm and cron for each PHP series of its matrix.
 # A series with only one of them, or without a base in the lock, would fail
 # after the other images were pushed under the version.

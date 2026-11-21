@@ -611,6 +611,12 @@ so a failed run is fixed and run again.
     holding the announced key. Add it and re-run the failed job (see
     [Rotating the signing key](#rotating-the-signing-key)).
 
+- **images** stopped at **build arguments** with "no entry for" or "Expected
+  a SHA-256 pin". Check the named PHP base and series in `docker/images.lock`.
+  Both the PHP-FPM and cron builds require the matching entry to end in
+  `@sha256:` followed by 64 lowercase hexadecimal digits. Correct the lock
+  and release the next patch, since other images may already have been pushed.
+
 - **images** or **kvsctl** failed on something transient, such as a network
   or registry error: re-run the failed jobs. When the fix needs a new commit,
   release the next patch instead. Some images were already pushed under this
