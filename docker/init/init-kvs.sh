@@ -22,6 +22,15 @@ if [ -z "$MARIADB_PASSWORD" ]; then
     exit 1
 fi
 
+# Every init container for the site sees the same mounted directory, even
+# on the first run before extraction has created any files inside it.
+mkdir -p "$KVS_PATH"
+exec 9<"$KVS_PATH"
+if ! flock -n 9; then
+    log_error "Could not lock $KVS_PATH for initialization. Retry after the other init exits."
+    exit 1
+fi
+
 log_info "Domain: $DOMAIN"
 log_info "USE_WWW: ${USE_WWW:-false}"
 log_info "SSL_PROVIDER: ${SSL_PROVIDER:-letsencrypt}"

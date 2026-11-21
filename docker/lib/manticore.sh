@@ -113,8 +113,19 @@ manticore_verify_plugin() {
 }
 
 manticore_configure_plugin() {
+    # The container shell opens the shared site and runs the step under its lock.
+    # shellcheck disable=SC2016
     docker compose --profile setup run --rm --no-deps --build -T \
-        -e "ENABLE_MANTICORE=$1" --entrypoint bash kvs-init /init/docker-entrypoint.d/80-manticore.sh || return 1
+        -e "ENABLE_MANTICORE=$1" --entrypoint bash kvs-init -c '
+            exec 9<"$1" || exit 1
+            flock -n -E 75 9 || {
+                if [ "$?" -eq 75 ]; then
+                    echo "Could not lock $1 for Manticore configuration. Retry after the current init finishes." >&2
+                fi
+                exit 1
+            }
+            exec bash "$2"
+        ' bash /var/www/kvs /init/docker-entrypoint.d/80-manticore.sh || return 1
     manticore_verify_plugin "$1"
 }
 

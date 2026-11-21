@@ -127,7 +127,7 @@ for action in enable disable; do
         fail "$action ran more than the version check on Docker Compose 2.12.2: $(cat "$TEST_CALLS")"
 done
 manage plain 2.13.0 disable || fail "disable failed on Docker Compose 2.13.0: $(cat "$TEST_DIR/out")"
-called 'compose --profile setup run --rm --no-deps --build -T -e ENABLE_MANTICORE=false --entrypoint bash kvs-init /init/docker-entrypoint.d/80-manticore.sh' ||
+grep -Fq 'compose --profile setup run --rm --no-deps --build -T -e ENABLE_MANTICORE=false --entrypoint bash kvs-init' "$TEST_CALLS" ||
     fail "disable did not switch the KVS plugin back: $(cat "$TEST_CALLS")"
 grep -Fq 'Manticore disabled.' "$TEST_DIR/out" || fail "disable did not finish: $(cat "$TEST_DIR/out")"
 echo 'PASS: enable and disable need the Docker Compose of run --build, and say so before anything changes'
