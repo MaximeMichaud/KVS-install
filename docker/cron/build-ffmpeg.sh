@@ -30,10 +30,20 @@ dpkg --compare-versions "$version" ge '7:7.1.5-0+deb13u1'
 
 # The standard flavor already builds shared and static libraries. Do not
 # build Debian's second static flavor or the optional GPLv3 extra packages.
-cat >> debian/rules <<'RULES'
+# Make expands the configure and build prerequisites as it reads the rules.
+sed -i 's/^FLAVORS = standard static$/FLAVORS = standard/' debian/rules
+grep -Fxq 'FLAVORS = standard' debian/rules || {
+    echo 'Unrecognized FFmpeg flavor definition in debian/rules' >&2
+    exit 1
+}
+echo 'CONFIG += --disable-decoder=magicyuv --disable-decoder=tdsc' >> debian/rules
 
-FLAVORS = standard
-CONFIG += --disable-decoder=magicyuv --disable-decoder=tdsc
+# Walk the same prerequisites as packaging, without running their recipes.
+# GNU Make executes recursive make even in a dry run, so give it a no-op.
+make -n -f debian/rules -f - MAKE=: override_dh_auto_configure override_dh_auto_build-arch > /dev/null <<'RULES'
+.PHONY: configure_static build_static
+configure_static build_static:
+	$(error Unexpected FFmpeg prerequisite $@ in debian/rules)
 RULES
 
 stamp=$(dpkg-parsechangelog -S Date)
