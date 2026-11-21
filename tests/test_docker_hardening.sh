@@ -355,6 +355,13 @@ make_init_common_mock() {
 
     cat > "$destination" <<'EOF'
 KVS_PATH=${TEST_KVS_PATH:?}
+# These fixtures run as the test account. Exercise the command on their
+# actual site directory without switching the host user.
+setpriv() {
+    [ "$1 $2 $3 $4" = '--reuid=101 --regid=101 --clear-groups --' ] || return 1
+    shift 4
+    "$@"
+}
 KVS_ARCHIVE_DIR=${TEST_ARCHIVE_DIR:-}
 KVS_INIT_RUN_DIR=${TEST_KVS_INIT_RUN_DIR:-$KVS_PATH.init-run}
 log_info() { printf '[INFO] %s\n' "$1"; }

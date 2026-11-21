@@ -3601,13 +3601,14 @@ import_fetch_archive() {
         trap 'exit 130' INT
         trap 'exit 143' TERM
         rm -rf -- "$stage"
-        mkdir -p "$stage" && chmod 700 "$stage" || exit 1
-        if ! import_archive_extract "$IMPORT_ARCHIVE" "$IMPORT_ARCHIVE_COMMAND" "$stage" >&2; then
+        mkdir -m 700 "$stage" || exit 1
+        # The archive can restore permissions on its own root entry.
+        if ! import_archive_extract "$IMPORT_ARCHIVE" "$IMPORT_ARCHIVE_COMMAND" "$stage/tree" >&2; then
             echo -e "${RED}ERROR: the extraction failed${NC}" >&2
             exit 1
         fi
         mkdir -p "$IMPORT_STAGING" && chmod 700 "$IMPORT_STAGING" || exit 1
-        import_archive_settle "$stage" "$IMPORT_ARCHIVE_ROOT" "$IMPORT_ARCHIVE_DUMP" "$IMPORT_ARCHIVE_MANIFEST" "$IMPORT_STAGING" "$destination"
+        import_archive_settle "$stage" "tree/$IMPORT_ARCHIVE_ROOT" "tree/$IMPORT_ARCHIVE_DUMP" "${IMPORT_ARCHIVE_MANIFEST:+tree/$IMPORT_ARCHIVE_MANIFEST}" "$IMPORT_STAGING" "$destination"
     ) || exit 1
     IMPORT_DB_DUMP=$(import_field "$settled" 1)
     IMPORT_RAW_MANIFEST=$(import_field "$settled" 2)

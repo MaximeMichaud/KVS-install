@@ -47,12 +47,6 @@ fix_file() {
     fi
 }
 
-# --- The site root itself: nginx enters it to serve anything ---
-# An import creates it under the umask of the shell that runs the setup
-# (027 on a hardened host gives 750) and rsync keeps that mode; the
-# passes below start under it. Missing bits only, as below.
-find "$KVS_PATH" -maxdepth 0 -type d ! -perm -0755 -exec chmod u+rwx,go+rx {} + 2>/dev/null || true
-
 # --- Directories that must be 777 ---
 fix_dir "$KVS_PATH/tmp" "777" "true"
 fix_dir "$KVS_PATH/admin/smarty/cache" "777"
@@ -112,7 +106,7 @@ fix_dir "$KVS_PATH/admin/data/engine" "777" "true"
 # old server's modes: admin/include at 750 turned the admin upload scripts
 # into 404s. The search bits only, where one is missing: nothing becomes
 # listable or readable, and a directory that has them is not written.
-find "$KVS_PATH" -type d ! -perm -0011 -exec chmod go+x {} + 2>/dev/null || true
+find "$KVS_PATH" -mindepth 1 -type d ! -perm -0011 -exec chmod go+x {} + 2>/dev/null || true
 
 # Final ownership, as chown -R gives it (-h: a link itself, never what
 # it points to), on the entries owned by anyone else only. A mount that
@@ -148,15 +142,35 @@ fi
 
 # The archive permission script makes most PHP files world-readable. Database
 # credentials only need to be readable by PHP-FPM's owner and root-run cron.
-if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
-    if [ "$(stat -c '%u:%g' "$KVS_PATH/admin/include/setup_db.php")" != 1000:1000 ]; then
-        chown 1000:1000 "$KVS_PATH/admin/include/setup_db.php"
+db_config="$KVS_PATH/admin/include/setup_db.php"
+if [ -f "$db_config" ]; then
+    if [ "$(stat -Lc '%u:%g' "$db_config")" != 1000:1000 ]; then
+        chown 1000:1000 "$db_config"
     fi
-    fix_file "$KVS_PATH/admin/include/setup_db.php" "600"
+    db_mode=$(stat -Lc %a -- "$db_config")
+    if [ "$db_mode" != 600 ]; then
+        chmod 600 "$db_config"
+        db_mode=$(stat -Lc %a -- "$db_config")
+        if [ "$db_mode" = 600 ]; then
+            PERM_FIXED=$((PERM_FIXED + 1))
+        else
+            log_warn "$db_config (mode $db_mode): storage did not apply chmod 600. Run chmod 600 \"$db_config\" on the backing storage. Continuing init."
+        fi
+    fi
 fi
 
-if [ "$PERM_FIXED" -eq 0 ]; then
-    log_info "All permissions OK"
-else
+# Reopen the site after checking its database credentials. Storage
+# can refuse or ignore chmod. Ask the kernel with the nginx worker's
+# numeric identity so the owner, group and any access ACL take effect.
+find "$KVS_PATH" -maxdepth 0 -type d ! -perm -0755 -exec chmod u+rwx,go+rx {} + 2>/dev/null || true
+if ! setpriv --reuid=101 --regid=101 --clear-groups -- test -x "$KVS_PATH"; then
+    root_mode=$(stat -Lc %a -- "$KVS_PATH") || exit 1
+    log_error "nginx cannot traverse the site root $KVS_PATH (mode $root_mode). Grant directory search permission to nginx (UID 101, GID 101) through its mode or ACL, then rerun init."
+    exit 1
+fi
+
+if [ "$PERM_FIXED" -gt 0 ]; then
     log_info "Fixed $PERM_FIXED permission issues"
+elif [ "${db_mode:-600}" = 600 ]; then
+    log_info "All permissions OK"
 fi

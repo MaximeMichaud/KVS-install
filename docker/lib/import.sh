@@ -584,6 +584,14 @@ import_destination_ready() {
     fi
 }
 
+# Keep the old database credentials out of reach until init has rewritten
+# them for PHP and opened the site root for nginx.
+import_private_site_dir() {
+    # shellcheck disable=SC2174  # Only the site root should become private.
+    mkdir -p -m 700 -- "$1" || return 1
+    [ "$(stat -Lc %a -- "$1")" = 700 ] || chmod 700 -- "$1"
+}
+
 # import_mark_destination <destination> <source marker>
 import_mark_destination() {
     local destination="$1"
@@ -591,7 +599,8 @@ import_mark_destination() {
     local marker
 
     marker=$(import_marker_file "$destination")
-    mkdir -p "$destination" "$(dirname -- "$marker")" || return 1
+    import_private_site_dir "$destination" || return 1
+    mkdir -p "$(dirname -- "$marker")" || return 1
     printf '%s\n' "$source" > "$marker"
 }
 
@@ -610,7 +619,7 @@ import_mark_destination_files_only() {
 
     marker=$(import_marker_file "$destination")
     if [ -f "$marker" ] && [ "$(cat -- "$marker")" = "$source" ]; then
-        mkdir -p "$destination"
+        import_private_site_dir "$destination"
         return
     fi
     import_mark_destination "$destination" "$source" || return 1
@@ -951,6 +960,7 @@ import_place_site() {
         resolved_destination=$IMPORT_RESOLVED
     fi
     if [ "$resolved_source" = "$resolved_destination" ]; then
+        import_private_site_dir "$destination" || return 1
         echo "Site files already in place at $destination"
     else
         import_destination_ready "$destination" "$resolved_source" || return 1
@@ -972,9 +982,26 @@ import_place_site() {
             import_ensure_tool rsync || return 1
         fi
         if command -v rsync >/dev/null 2>&1; then
-            rsync -a --no-devices --no-specials --copy-unsafe-links -- "$resolved_source/" "$destination/" || return 1
+            # Copy the entries, including dotfiles, without applying the
+            # source root's permissions to the private destination itself.
+            (set -o pipefail
+                find "$resolved_source" -mindepth 1 -maxdepth 1 -printf './%P\0' |
+                    rsync -ar --no-implied-dirs --from0 --files-from=- --no-devices --no-specials --copy-unsafe-links -- "$resolved_source/" "$destination/"
+            ) || return 1
         else
-            cp -a -- "$resolved_source/." "$destination/" || return 1
+            (
+                shopt -s nullglob dotglob
+                local -a top_entries=("$resolved_source"/*)
+                [ "${#top_entries[@]}" -gt 0 ] || exit 0
+                cp -a -t "$destination/" -- "${top_entries[@]}" && exit 0
+                status=$?
+                [ "$status" -eq 126 ] || exit "$status"
+                # Too many top-level names for exec. Keep one stream so a
+                # hard link across entries still names the same inode.
+                set -o pipefail
+                tar --acls --xattrs --sparse -cf - -C "$resolved_source" . |
+                    tar --acls --xattrs --xattrs-include='*' -xpf - --anchored --no-recursion --exclude=. -C "$destination/"
+            ) || return 1
         fi
         echo "Site files copied from $source to $destination"
     fi
@@ -1538,7 +1565,8 @@ import_archive_settle() {
         echo "ERROR: the extracted archive has no site in ${root:-its top level}" >&2
         return 1
     fi
-    mkdir -p "$staging" "$destination" || return 1
+    import_private_site_dir "$destination" || return 1
+    mkdir -p "$staging" || return 1
     if [ -n "$dump" ]; then
         dump_path="$staging/$(basename -- "$dump")"
         chmod 600 -- "$stage/$dump" || return 1
@@ -3587,7 +3615,7 @@ import_remote_files() (
     [[ "$retries" =~ ^[0-9]{1,3}$ ]] || retries=8
     [[ "$pause" =~ ^[0-9]{1,3}$ ]] || pause=15
     import_remote_path_check "$dir" || return 1
-    mkdir -p "$destination" || return 1
+    import_private_site_dir "$destination" || return 1
     for pattern in ${patterns[@]+"${patterns[@]}"}; do
         case "$pattern" in
             /*) ;;
@@ -3921,7 +3949,7 @@ import_remote_files() (
         remote_tar+=" $pattern"
     done
     remote_tar+=" -chf - ."
-    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" sh -s <<< "$remote_tar" | tar -xf - --no-same-owner -C "$destination"
+    import_ssh "${IMPORT_REMOTE_PREFIX[@]}" sh -s <<< "$remote_tar" | tar -xf - --no-same-owner --anchored --no-recursion --exclude=. -C "$destination"
     pipe_status=("${PIPESTATUS[@]}")
     case "${pipe_status[0]}" in
         0) ;;

@@ -1905,7 +1905,7 @@ test_the_copy_without_rsync_installs_it_for_a_special_file() {
     make_site "$fifo_site" "$fifo_site"
     mkfifo "$fifo_site/contents/pipe"
     mkdir -p "$bin"
-    for tool in readlink find cp rm mkdir cat dirname basename grep; do
+    for tool in readlink find cp rm mkdir cat dirname basename grep stat chmod; do
         ln -s "$(command -v "$tool")" "$bin/$tool"
     done
     (
