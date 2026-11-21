@@ -684,7 +684,7 @@ EOF
         }
         MENU_OPTION=4
         main "$@"
-      ' _ "$script" --dev 'not a setup argument'
+      ' _ "$script" --dev
   ) </dev/null 2>&1 | cat >"$temp_dir/out"
 
   nul_bytes=$(tr -cd '\000' <"$log" | wc -c)
@@ -696,9 +696,8 @@ EOF
     assert_equal "" "$(grep -ax '\(first\|second\) run line [0-9]*' "$file" | sort | uniq -d | head -n 3)" \
       "no line twice in the $what" || return 1
     assert_equal 1 "$(grep -acxF 'Update Done.' "$file")" "the update said once that it was done in the $what" || return 1
-    # Every argument, each as it was given, including one the installer
-    # itself ignores and only the new copy's main can tell from --dev.
-    grep -qxF "second run arguments: [--dev][not a setup argument]" "$file" ||
+    # The new copy receives and forwards the supported development flag.
+    grep -qxF "second run arguments: [--dev]" "$file" ||
       fail "the new copy must get every argument of the run, in the $what: $(grep -a 'second run arguments' "$file")" || return 1
     grep -qxF "second run setup arguments: --dev" "$file" ||
       fail "the new copy must pass --dev on to setup.sh, in the $what: $(grep -a 'second run setup' "$file")" || return 1

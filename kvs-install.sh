@@ -33,20 +33,31 @@ SETUP_ARGS=()
 # The arguments the installer was started with, for the copy the update of
 # the menu runs in its place.
 INSTALLER_ARGS=()
+installer_usage() {
+    cat <<'EOF'
+Usage: bash kvs-install.sh [--dev] [-h | --help]
+
+  -h, --help  Show this help and exit.
+  --dev       Pass development mode to Docker setup. This mode deletes the
+              database volume of an existing Docker installation.
+EOF
+}
+
 parse_arguments() {
-  SETUP_ARGS=()
-  while [[ $# -gt 0 ]]; do
-    case $1 in
-        --dev)
-            SETUP_ARGS+=("$1")
-            shift
-            ;;
-        *)
-            # Unknown args are ignored (for backward compatibility)
-            shift
-            ;;
-    esac
-  done
+    SETUP_ARGS=()
+    INSTALLER_HELP_REQUESTED=false
+    local argument
+    for argument in "$@"; do
+        case "$argument" in
+            --dev) SETUP_ARGS+=("$argument") ;;
+            -h|--help) INSTALLER_HELP_REQUESTED=true ;;
+            *)
+                printf 'Unknown argument: %s\n' "$argument" >&2
+                installer_usage >&2
+                return 2
+                ;;
+        esac
+    done
 }
 
 #################################################################
@@ -3369,7 +3380,11 @@ function updatephpMyAdmin() {
 
 main() {
   INSTALLER_ARGS=("$@")
-  parse_arguments "$@"
+  parse_arguments "$@" || return $?
+  if [[ "$INSTALLER_HELP_REQUESTED" == true ]]; then
+    installer_usage
+    return 0
+  fi
   initialize_runtime_defaults
   initialize_runtime_output
   initialize_runtime_input
