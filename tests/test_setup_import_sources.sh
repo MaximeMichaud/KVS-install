@@ -813,6 +813,7 @@ if [ -n "\${FAKE_SUDO_FAIL:-}" ]; then
     exit 1
 fi
 [ "\$1" != -n ] || shift
+if [ -n "\${FAKE_SUDO_PATH:-}" ]; then export PATH="\$FAKE_SUDO_PATH"; fi
 exec "\$@"
 EOF
     # df -Pk, the free space of the old server's temporary directory, finds
@@ -1285,6 +1286,20 @@ test_a_user_with_sudo_runs_the_remote_side_through_it() {
 
     make_fake_ssh "$bin"
     make_fake_exporter "$exporter"
+    local tools_dir="$bin/editor's (local)&tools\\set!"$'\t'
+    mkdir -p "$tools_dir"
+    cat > "$tools_dir/rsync" <<'EOF'
+#!/bin/sh
+: > "${0%/*}/called"
+exec "$FIXTURE_RSYNC" "$@"
+EOF
+    chmod +x "$tools_dir/rsync"
+    export FIXTURE_RSYNC
+    FIXTURE_RSYNC=$(command -v rsync)
+    if command -v fish >/dev/null; then
+        [ "$(fish --no-config -c "printf %s $(import_shquote "$tools_dir/rsync")")" = "$tools_dir/rsync" ] ||
+            fail "the login shell must receive the literal rsync path"
+    fi
     site="$TMP_ROOT/remote-site-sudo"
     make_site "$site" "$site"
     destination="$TMP_ROOT/remote-dest-sudo"
@@ -1300,8 +1315,10 @@ test_a_user_with_sudo_runs_the_remote_side_through_it() {
         [ "$(import_kv "$TMP_ROOT/detect-sudo.txt" kvs_version)" = 7.0.2 ] || exit 7
         import_remote_dump "$exporter" "$site" "$TMP_ROOT/remote-sudo.sql.gz" || exit 8
         grep -q "^command sudo -n bash -s -- dump $site\$" "$bin/ssh.log" || exit 9
-        import_remote_files "$site" "$destination" yes >/dev/null 2>&1 || exit 10
-        grep -q '^sudo -n rsync --server' "$bin/sudo.log" || exit 11
+        IMPORT_REMOTE_REPORT="$TMP_ROOT/detect-sudo.txt"
+        printf 'rsync_path=%s\n' "$tools_dir/rsync" >> "$IMPORT_REMOTE_REPORT"
+        FAKE_SUDO_PATH="$tools_dir/absent" IMPORT_TRANSFER_RETRIES=0 import_remote_files "$site" "$destination" yes >/dev/null 2>&1 || exit 10
+        [ -f "$tools_dir/called" ] && grep -Fq "sudo -n $tools_dir/rsync --server" "$bin/sudo.log" || exit 11
         [ -f "$destination/contents/videos/1.mp4" ] || exit 12
         rm -rf "$destination"
         import_remote_files "$site" "$destination" no || exit 13
@@ -1315,6 +1332,9 @@ test_a_user_with_sudo_runs_the_remote_side_through_it() {
         [ "$IMPORT_REMOTE_SUDO_ERROR" = "sudo: a password is required" ] || exit 21
         import_remote_detect "$exporter" "$site" "$TMP_ROOT/detect-none.txt" || exit 19
         grep -q "^command bash -s -- detect $site\$" "$bin/ssh.log" || exit 20
+        rm -f "$tools_dir/called" "$destination/contents/videos/1.mp4"
+        import_remote_files "$site" "$destination" yes >/dev/null 2>&1 || exit 22
+        [ -f "$tools_dir/called" ] && [ -f "$destination/contents/videos/1.mp4" ] || exit 23
         exit 0
     ) || fail "a user with passwordless sudo must run the remote side through it, one without runs plain (case $?)"
     pass "a user with passwordless sudo runs the remote side through it"

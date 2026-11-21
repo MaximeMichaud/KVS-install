@@ -17,6 +17,8 @@ EXTRA_BIN="$TMP_ROOT/bin-extra"
 TAR_BIN="$TMP_ROOT/bin-tar"
 STUB_LOG="$TMP_ROOT/stub.log"
 export STUB_LOG
+# Isolate tool discovery from the workstation's local installations.
+export KVS_EXPORT_EXTRA_PATH=
 # Keep the staging directory of the archive inside the fixtures.
 export TMPDIR="$TMP_ROOT"
 export STUB_NATIVE_DATADIR_HEX
@@ -628,6 +630,56 @@ EOF
     assert_key "$out" nginx_site_files ""
     grep -q '^nginx_config_1=' "$out" && fail "no configuration lines without a configuration"
     pass "detect reports the encoding and the web server configuration"
+}
+
+test_tools_outside_the_secure_path_are_reported() {
+    local site="$TMP_ROOT/tool-site" out="$TMP_ROOT/tools.out" err="$TMP_ROOT/tools.err"
+    local bin="$TMP_ROOT/local-tools"
+    make_site "$site"
+    mkdir -p "$bin"
+    ln -s "$STUB_BIN/mariadb" "$bin/mysql"
+    ln -s "$STUB_BIN/mariadb-dump" "$bin/mysqldump"
+    KVS_EXPORT_EXTRA_PATH="$bin:$EXTRA_BIN" run_export "$MIN_BIN" "$out" "$err" --no-size detect "$site" ||
+        fail "detect with tools in local directories failed"
+    assert_key "$out" db_ok yes
+    assert_key "$out" db_client mysql
+    assert_key "$out" db_dump_tool mysqldump
+    assert_key "$out" compressor zstd
+    assert_key "$out" rsync yes
+    assert_key "$out" rsync_path "$EXTRA_BIN/rsync"
+    run_export "$MIN_BIN" "$out" "$err" --no-size detect "$site" || fail "detect without clients failed"
+    [[ $(detect_value "$out" db_error) == *"$MIN_BIN"* ]] || fail "missing-client error must identify the search path"
+    # Record the search path that detect actually gives rsync --version.
+    cat > "$bin/rsync" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$PATH" >> "$STUB_LOG"
+echo 'rsync version 3.2.7'
+EOF
+    chmod +x "$bin/rsync"
+    (
+        unset KVS_EXPORT_EXTRA_PATH
+        run_export "$bin:$MIN_BIN" "$out" "$err" --no-size detect "$site"
+    ) || fail "detect with the default local directories failed"
+    assert_key "$out" rsync_path "$bin/rsync"
+    grep -Fxq "$bin:$MIN_BIN:/usr/local/sbin:/usr/local/bin:/usr/local/mysql/bin" "$STUB_LOG" ||
+        fail "default local tool directories are missing"
+    local multiline="$TMP_ROOT/"$'first\rmiddle\nlast'
+    mkdir "$multiline"
+    ln -s "$bin/rsync" "$multiline/rsync"
+    run_export "$multiline:$MIN_BIN" "$out" "$err" --no-size detect "$site"
+    if detect_value "$out" rsync_path >/dev/null; then fail "a multiline path escaped into the report"; fi
+    assert_key "$out" db_error "no mariadb or mysql client in PATH=$TMP_ROOT/first\rmiddle\nlast:$MIN_BIN"
+    if grep -q '^last:' "$out" || grep -q $'\r' "$out"; then fail "a diagnostic split the report"; fi
+    (
+        source /dev/stdin < <(sed '/^trap kvs_cleanup EXIT/,$d' "$EXPORT_SCRIPT")
+        SITE_DIR=$multiline DB_CLIENT=mysql DB_NAME="" kvs_probe_database
+        [ "$DB_ERROR" = "no DB_DEVICE in $TMP_ROOT/first\rmiddle\nlast/admin/include/setup_db.php" ] ||
+            fail "the missing database name diagnostic split the site path"
+        kvs_directory_refuse "cannot read $multiline"
+        [ "$DB_DIRECTORY_REASON" = "cannot read $TMP_ROOT/first\rmiddle\nlast" ] ||
+            fail "the native format diagnostic split the path"
+    )
+    pass "tools outside the secure path are reported"
 }
 
 test_flat_directories_are_measured_in_batches() {
@@ -3558,6 +3610,7 @@ make_tar_stub
 
 test_detect_reports_the_installation_as_key_value_lines
 test_detect_reports_the_encoding_and_the_web_server_configuration
+test_tools_outside_the_secure_path_are_reported
 test_flat_directories_are_measured_in_batches
 test_the_size_matches_the_selected_transport
 pass "transfer size matches the selected names and transport"

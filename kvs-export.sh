@@ -78,6 +78,10 @@ set -o pipefail
 # places can still be found without editing this file.
 KVS_DEFAULT_SEARCH_ROOTS="/var/www:/home:/srv:/usr/share/nginx:/usr/local/www:/www/wwwroot"
 
+# A non-interactive login or sudo secure_path may omit local installs.
+KVS_EXPORT_EXTRA_PATH=${KVS_EXPORT_EXTRA_PATH-/usr/local/sbin:/usr/local/bin:/usr/local/mysql/bin}
+PATH="${PATH}${KVS_EXPORT_EXTRA_PATH:+:$KVS_EXPORT_EXTRA_PATH}"
+
 # Names the importer looks for inside the archive; changing them breaks it.
 KVS_MANIFEST_NAME="kvs-export.manifest"
 KVS_ARCHIVE_SITE_DIR="www"
@@ -152,6 +156,7 @@ SERVER_LINES=()
 COMPRESSOR=""
 HAS_RSYNC="no"
 RSYNC_VERSION=""
+RSYNC_PATH=""
 HOST_NAME=""
 # The encoding of the site and the web server configuration it runs under:
 # what the new server needs when the KVS archive is not at hand.
@@ -267,6 +272,7 @@ Options
 Environment
   KVS_SITE_DIR              Site directory, same as the argument
   KVS_EXPORT_SEARCH_ROOTS   Colon separated roots to search for the site
+  KVS_EXPORT_EXTRA_PATH     Colon separated local tool directories appended to PATH
   KVS_EXPORT_SIZE_TIMEOUT   Same as --size-timeout
   KVS_EXPORT_SIZE_JOBS      Maximum concurrent listing jobs (up to two).
                             One du counts blocks across the whole list.
@@ -385,6 +391,13 @@ kvs_elapsed() {
     else
         printf '%ss' "$seconds"
     fi
+}
+
+# Keep a path in a diagnostic readable on a single report line.
+kvs_diagnostic_path() {
+    local path=$1
+    path=${path//$'\r'/\\r}
+    printf '%s' "${path//$'\n'/\\n}"
 }
 
 # Collapse a tool's error output into one line: the detect output is parsed
@@ -831,11 +844,15 @@ kvs_detect_tools() {
     elif command -v mysqldump > /dev/null 2>&1; then
         DB_DUMP_TOOL="mysqldump"
     fi
-    if command -v rsync > /dev/null 2>&1; then
+    if RSYNC_PATH=$(type -P rsync); then
+        case "$RSYNC_PATH" in
+            /*) ;;
+            *) RSYNC_PATH="$PWD/$RSYNC_PATH" ;;
+        esac
         HAS_RSYNC="yes"
         # The setup reads it: rsync before 3.1.0 refuses an option its
         # parallel workers pass.
-        RSYNC_VERSION=$(rsync --version 2> /dev/null < /dev/null | sed -n '1s/^rsync[[:space:]]*version[[:space:]]*\([0-9][0-9.]*\).*/\1/p')
+        RSYNC_VERSION=$("$RSYNC_PATH" --version 2> /dev/null < /dev/null | sed -n '1s/^rsync[[:space:]]*version[[:space:]]*\([0-9][0-9.]*\).*/\1/p')
     else
         HAS_RSYNC="no"
     fi
@@ -934,11 +951,11 @@ kvs_probe_database() {
     DB_EVENTS_ERROR=""
     DB_UTF8MB4="yes"
     if [ -z "$DB_CLIENT" ]; then
-        DB_ERROR="no mariadb or mysql client on this server"
+        DB_ERROR="no mariadb or mysql client in PATH=$(kvs_diagnostic_path "$PATH")"
         return 0
     fi
     if [ -z "$DB_NAME" ]; then
-        DB_ERROR="no DB_DEVICE in $SITE_DIR/admin/include/setup_db.php"
+        DB_ERROR="no DB_DEVICE in $(kvs_diagnostic_path "$SITE_DIR")/admin/include/setup_db.php"
         return 0
     fi
     like=$(kvs_sql_like_escape "$TABLES_PREFIX")
@@ -2184,7 +2201,7 @@ kvs_directory_try_root() {
 }
 
 kvs_directory_refuse() {
-    DB_DIRECTORY_REASON=$1
+    DB_DIRECTORY_REASON=$(kvs_diagnostic_path "$1")
     DB_DUMP_FORMAT=sql
     if [ -n "$NATIVE_STAGING_DIR" ]; then
         rm -rf -- "$NATIVE_STAGING_DIR"
@@ -2600,6 +2617,10 @@ kvs_print_detect() {
     printf 'site_total_mb=%s\n' "$SITE_TOTAL_MB"
     printf 'compressor=%s\n' "$COMPRESSOR"
     printf 'rsync=%s\n' "$HAS_RSYNC"
+    # A multiline executable name cannot be represented in the report.
+    if [[ $RSYNC_PATH != *$'\n'* && $RSYNC_PATH != *$'\r'* ]]; then
+        printf 'rsync_path=%s\n' "$RSYNC_PATH"
+    fi
     printf 'rsync_version=%s\n' "$RSYNC_VERSION"
     printf 'hostname=%s\n' "$HOST_NAME"
     printf 'ioncube=%s\n' "$SITE_IONCUBE"

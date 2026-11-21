@@ -2162,17 +2162,19 @@ import_ssh() {
     "${IMPORT_SSH_COMMAND[@]}" "${IMPORT_SSH_OPTS[@]}" "$IMPORT_SSH_TARGET" "$@"
 }
 
-# import_shquote <string>: the string as one token a POSIX shell parses back to
-# its literal value: single quotes, each embedded quote written '\'', hold any
-# byte but NUL there. ssh joins the words of a remote command with spaces and
-# the SSH user's login shell splits them again, and that shell need not be
-# POSIX (fish reads \' inside single quotes as a quote). A command built from
-# data on the old server (a directory name in a tar --exclude) is therefore
-# quoted with this and sent as a script on the standard input of sh -s, never
-# as words for the login shell, or a name like .a\';rm -rf /;# runs there.
+# Quote a literal shell word. Keep apostrophes, backslashes and history
+# expansion outside single quotes, escaped for both sh and login shells.
 import_shquote() {
-    local quoted=${1//\'/\'\\\'\'}
-    printf "'%s'" "$quoted"
+    local rest="$1" prefix quoted="'"
+    local special="[\\\\'!]"
+    while [[ $rest == *$special* ]]; do
+        # shellcheck disable=SC2295  # special is the bracket pattern above.
+        prefix=${rest%%$special*}
+        rest=${rest#"$prefix"}
+        quoted+="$prefix'\\${rest:0:1}'"
+        rest=${rest:1}
+    done
+    printf "%s%s'" "$quoted" "$rest"
 }
 
 # import_ssh_close: end the multiplexed connection.
@@ -3616,6 +3618,7 @@ import_remote_files() (
     local reserve="${IMPORT_TRANSFER_RESERVE_MB:-0}" free_mb left
     local retries="${IMPORT_TRANSFER_RETRIES:-8}" pause="${IMPORT_TRANSFER_RETRY_PAUSE:-15}" attempt delay tries done_bytes done_files
     local -a independent=(-o ControlMaster=auto -o ControlPersist=300 -o Compression=no)
+    local remote_rsync=rsync detected_rsync
     local -a rsync_path=()
     local -a rsync_args=()
     local -a transfer_status=()
@@ -3686,8 +3689,21 @@ import_remote_files() (
             import_disk_sampler "$disks" "$interval" "$owner" 2>/dev/null &
             sampler=$!
         fi
+        # The login shell and sudo can both have a shorter PATH than the
+        # exporter. Only pass an absolute program name safe for that shell.
+        if [ -f "${IMPORT_REMOTE_REPORT:-}" ]; then
+            # import_kv strips control bytes for display; a program path must
+            # round-trip literally, including tabs. The report is line-based.
+            detected_rsync=$(sed -n '/^rsync_path=/{s/^rsync_path=//;p;q;}' "$IMPORT_REMOTE_REPORT")
+            if [[ $detected_rsync == /* && $detected_rsync == */rsync &&
+                $detected_rsync != *$'\r'* && $detected_rsync != *$'\n'* ]]; then
+                remote_rsync=$(import_shquote "$detected_rsync")
+            fi
+        fi
         if [ "$IMPORT_REMOTE_SUDO" = yes ]; then
-            rsync_path=(--rsync-path="sudo -n rsync")
+            rsync_path=(--rsync-path="sudo -n $remote_rsync")
+        elif [ "$remote_rsync" != rsync ]; then
+            rsync_path=(--rsync-path="$remote_rsync")
         fi
         # rsync reads host:path up to the first colon, so an IPv6 address
         # goes in brackets; ssh takes it without them.
