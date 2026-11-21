@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,6 +57,42 @@ func (i *Instance) ReadCheckout() (*Checkout, error) {
 		return nil, err
 	}
 	return &Checkout{Commit: commit, Date: when.UTC(), Tag: releaseTag(strings.Fields(string(tags)))}, nil
+}
+
+// CheckoutVersion is the version adopt records without --version, and
+// where it comes from: docker/RELEASE, which a release bundle carries;
+// else the release tag at HEAD; else 0.0.0, the unreleased checkout.
+func (i *Instance) CheckoutVersion(co *Checkout) (version, source string, err error) {
+	data, err := os.ReadFile(filepath.Join(i.Root, "docker", "RELEASE"))
+	switch {
+	case err == nil:
+		first, _, _ := strings.Cut(string(data), "\n")
+		v, perr := semver.Parse(first)
+		if perr != nil {
+			return "", "", fmt.Errorf("docker/RELEASE holds %q, which is not a version: name the version with --version", strings.TrimSpace(first))
+		}
+		return v.String(), "docker/RELEASE", nil
+	case !errors.Is(err, os.ErrNotExist):
+		return "", "", err
+	}
+
+	// Adopt already read HEAD. A freshness check needs Git only when the
+	// release marker is absent and the installation is a checkout.
+	if co == nil {
+		if _, err := os.Lstat(filepath.Join(i.Root, ".git")); errors.Is(err, os.ErrNotExist) {
+			return Unreleased, "", nil
+		} else if err != nil {
+			return "", "", err
+		}
+		co, err = i.ReadCheckout()
+		if err != nil {
+			return "", "", err
+		}
+	}
+	if co.Tag != "" {
+		return co.Tag, fmt.Sprintf("the tag at commit %.12s", co.Commit), nil
+	}
+	return Unreleased, fmt.Sprintf("no release names commit %.12s", co.Commit), nil
 }
 
 // releaseTag is the newest of tags written exactly the way a release is
@@ -130,7 +168,7 @@ func (i *Instance) HeadChecksums(files []string) (sums map[string]string, absent
 // blobSums hashes the content of git blobs in one git process, streaming
 // each one through sha256 rather than holding it.
 func (i *Instance) blobSums(objects []string) (map[string]string, error) {
-	cmd := exec.Command("git", "-C", i.Root, "cat-file", "--batch")
+	cmd := i.gitCommand("cat-file", "--batch")
 	cmd.Stdin = strings.NewReader(strings.Join(objects, "\n") + "\n")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -191,9 +229,25 @@ func (i *Instance) isCheckout() error {
 	return nil
 }
 
+// gitCommand reads the installed checkout even when called from a Git hook.
+func (i *Instance) gitCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-C", i.Root}, args...)...)
+	cmd.Env = slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+			"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM":
+			return true
+		}
+		return false
+	})
+	return cmd
+}
+
 // git runs a read-only git command in the checkout and returns its output.
 func (i *Instance) git(args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", i.Root}, args...)...)
+	cmd := i.gitCommand(args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

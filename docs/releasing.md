@@ -688,8 +688,11 @@ release over a checkout made after it.
 ## A bad release
 
 Never delete a published release. `kvsctl` remembers the newest manifest it
-has seen and refuses an older one as stale, which protects it from a frozen
-or replayed copy. Deleting the newest release would make `releases/latest`
+has seen at each URL and refuses an older one as stale. From 21 days after
+its signed update time, `check` and `status` warn about its age. A stable
+release stays usable indefinitely. A list whose latest stable version is
+below the installed stable stack is refused even on first contact.
+Deleting the newest release would make `releases/latest`
 serve the previous manifest, which every `kvsctl` that already saw the bad
 one refuses (exit code 7) until a newer release exists. Publish a fix
 release instead, the next patch, and say in its `NOTES` what it replaces:

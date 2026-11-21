@@ -181,8 +181,16 @@ the checkout are kept in `kvsctl/checkout/<version>/` for that rollback.
     what they print without it;
   - the notice that `KVSCTL_RELEASE_KEY` replaces the release keys is
     printed all the same.
-- `--allow-stale-manifest`: accept a manifest older than the newest one
-  already read from the same URL (see [Troubleshooting](#troubleshooting)).
+- `--allow-stale-manifest`: accept a signed list below the installed stable
+  stack version or the highest stable version seen at its URL, or a stable
+  list dated before one seen there. This compares the latest stable release
+  in the list before looking up an explicit target. If Compose is missing,
+  the version in the state, or the starting version in a pending journal
+  when there is no state, still sets the floor. Before adoption, the floor
+  comes from `docker/RELEASE`, then the release tag at HEAD. An installed candidate
+  or unreleased checkout supplies no installed stable floor. On first contact
+  without a local reference, `check` and `status` can only warn about the age
+  of the list, starting at 21 days. Age alone never expires a release.
 
 When `adopt`, `backup`, `clean`, `history`, `logs`, `releases`, `restore`
 or `rollback` succeeds on a recorded stack, it then says on stderr whether a
@@ -203,7 +211,9 @@ manifest, it says so, with `run 'kvsctl update-cli'`. `upgrade`, `recover`,
 `update-cli`, `doctor` and `version` say nothing of it, `status` and `check` say it
 themselves, and `--quiet` skips it. The manifest is read for it at most
 once a day and waited for 5 seconds at most, and a read that failed is not
-tried again by the same `kvsctl` build for an hour, both kept in
+tried again by the same `kvsctl` build for an hour. A freshness refusal is
+retried on the next lookup so a corrected mirror can answer immediately.
+The reminder keeps its cache in
 `kvsctl/update-check.json`.
 
 `KVSCTL_RELEASE_KEY` in the environment replaces the public keys built into
@@ -489,8 +499,8 @@ manifest, queries GitHub releases or writes the update reminder cache.
 ## What an upgrade does
 
 1. **Plan.** `kvsctl` reads the manifest, checks its signature against the
-   keys it carries, refuses a manifest older than the newest one read from
-   that URL, or of a channel that URL does not serve, and takes the target:
+   keys it carries and checks the channel, the installed stable version and
+   the version and date floors for that URL. It then selects the target:
    the latest stable release, or `--version`. A target older than the
    installed version is refused: going back is `kvsctl rollback`. The
    installed version itself is applied again only when the images the stack
@@ -1043,6 +1053,9 @@ keeps `backups/` and `kvsctl/` in its new copy.
 - `this manifest needs a newer kvsctl (schema ..., this build reads ...): run 'kvsctl update-cli'`:
   the manifest has a format this build does not read. `kvsctl update-cli`
   reads it all the same; run it, then the command again.
+- `manifest lists ... as latest stable, below the installed ...` (exit 7):
+  the list predates the installed stable version. Check that the mirror
+  serves the current stable list.
 - `manifest is older than the one seen on ...` (exit 7): the manifest read
   is older than one already read from the same URL, a stale mirror or a
   replayed file; the list of a release candidate is held to the newest

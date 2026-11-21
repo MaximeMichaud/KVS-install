@@ -458,7 +458,8 @@ func TestStatusSaysWhatComesBeforeTheUpgrade(t *testing.T) {
 	useRoot(t, root)
 	inst := saveState(t, root, failedState())
 	const url = "https://example.com/manifest.json"
-	saveLatestKnown(inst, map[string]*latestKnown{url: {Read: time.Now(), Version: "1.1.0", Date: "2026-10-01"}})
+	now := fixedManifestClock(t)
+	saveLatestKnown(inst, map[string]*latestKnown{url: {Read: now, Updated: now.Add(-22 * 24 * time.Hour).Format(time.RFC3339), Version: "1.1.0", Date: "2026-10-01"}})
 	var state atomic.Value
 	state.Store("exited")
 	fakeEngine(t, "site", func() []engineContainer {
@@ -470,6 +471,9 @@ func TestStatusSaysWhatComesBeforeTheUpgrade(t *testing.T) {
 	})
 	check := "kvsctl check --root " + root + " --manifest " + url
 	out, err := runKvsctl(t, "status", "--root", root, "--manifest", url)
+	if !strings.Contains(out, "manifest is 22 days old") {
+		t.Errorf("cached age missing: %s", out)
+	}
 	if err != nil {
 		t.Fatalf("status: %v\n%s", err, out)
 	}
@@ -551,7 +555,8 @@ func TestStatusNamesTheImagesARollbackPulls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	saveLatestKnown(inst, map[string]*latestKnown{url: {Read: time.Now(), Version: "1.1.0"}})
+	now := fixedManifestClock(t)
+	saveLatestKnown(inst, map[string]*latestKnown{url: {Read: now, Updated: now.Format(time.RFC3339), Version: "1.1.0"}})
 	running := func() []engineContainer {
 		return []engineContainer{{name: "site-nginx", service: "nginx", image: "example/nginx:1.1.0", state: "running"}}
 	}

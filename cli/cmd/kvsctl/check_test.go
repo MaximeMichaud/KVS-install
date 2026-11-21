@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MaximeMichaud/KVS-install/cli/internal/instance"
 	"github.com/MaximeMichaud/KVS-install/cli/internal/manifest"
@@ -73,7 +74,8 @@ func TestReadyLine(t *testing.T) {
 func TestPrintPlan(t *testing.T) {
 	root := newRoot(t)
 	inst := saveState(t, root, failedState())
-	m := &manifest.Manifest{Releases: []manifest.Release{
+	now := fixedManifestClock(t)
+	m := &manifest.Manifest{Updated: now.Add(-21 * 24 * time.Hour).Format(time.RFC3339), Releases: []manifest.Release{
 		{Version: "1.1.0", Date: "2026-10-05T18:39:32Z", Notes: "nginx 1.29"},
 		{Version: "1.0.0", Date: "2026-09-01"},
 	}}
@@ -92,6 +94,7 @@ func TestPrintPlan(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"Manifest     2 releases, latest stable 1.1.0 (2026-10-05)\n",
+		"Warning      manifest is 21 days old\n",
 		"Target       1.1.0 (2026-10-05)\n",
 		"Health       " + down + "\n",
 		"Last upgrade to 1.1.0 failed on 2026-10-07 00:57 UTC and was rolled back: not healthy after 1s: kvs-nginx is unhealthy\n",

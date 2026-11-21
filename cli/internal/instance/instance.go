@@ -179,7 +179,8 @@ var ErrNoStack = errors.New("no stack")
 
 // Locate finds the stack paths without reading its site configuration.
 // Commands that only need the journal or manifest record can use these
-// paths even when Detect cannot load the site.
+// paths even when Detect cannot load the site. ErrNoStack also returns the
+// resolved paths so manifest checks can look for an installation record.
 func Locate(root string) (*Instance, error) {
 	if root == "" {
 		root = os.Getenv("KVS_INSTALL_DIR")
@@ -212,7 +213,7 @@ func Locate(root string) (*Instance, error) {
 			}
 			break
 		}
-		return nil, fmt.Errorf("%w in %s (docker/docker-compose.yml is missing); set KVS_INSTALL_DIR or --root", ErrNoStack, root)
+		return inst, fmt.Errorf("%w in %s (docker/docker-compose.yml is missing); set KVS_INSTALL_DIR or --root", ErrNoStack, root)
 	}
 	if err != nil {
 		return nil, err

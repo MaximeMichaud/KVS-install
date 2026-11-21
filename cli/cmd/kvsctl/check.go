@@ -91,6 +91,9 @@ func printPlan(w io.Writer, plan *upgrade.Plan, inst *instance.Instance, state *
 	}
 	line("Installed", "%s", installed)
 	line("Manifest", "%s", manifestSummary(plan.Manifest))
+	if warning := upgrade.ManifestAge(plan.Manifest.Updated, manifestNow()); warning != "" {
+		line("Warning", "%s", warning)
+	}
 	if kvsMin := plan.Target.Requires.KVSMin; kvsMin != "" {
 		site := plan.KVSVersion
 		if site == "" {

@@ -121,6 +121,9 @@ func statusCmd() *cobra.Command {
 					return doc, err
 				})
 				line("Updates", "%s", updatesLine(inst, state, latest, err, first))
+				if warning := upgrade.ManifestAge(latest.Updated, manifestNow()); warning != "" {
+					line("Warning", "%s", warning)
+				}
 				if updates, err := inst.LoadUpdates(); err == nil && updates != nil {
 					printAnnouncedKeys(stdout, updates.Keys)
 				}

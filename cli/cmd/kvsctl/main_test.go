@@ -119,12 +119,26 @@ func signedManifest(t *testing.T, releases ...manifest.Release) string {
 // follows.
 func signedManifestOf(t *testing.T, schema int, releases ...manifest.Release) string {
 	t.Helper()
+	return signedManifestAt(t, schema, manifestNow(), releases...)
+}
+
+func fixedManifestClock(t *testing.T) time.Time {
+	t.Helper()
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	old := manifestNow
+	manifestNow = func() time.Time { return now }
+	t.Cleanup(func() { manifestNow = old })
+	return now
+}
+
+func signedManifestAt(t *testing.T, schema int, updated time.Time, releases ...manifest.Release) string {
+	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(releaseKeyEnv, base64.StdEncoding.EncodeToString(pub))
-	raw, err := json.Marshal(manifest.Manifest{Schema: schema, Channel: "stable", Updated: time.Now().UTC().Format(time.RFC3339), Releases: releases})
+	raw, err := json.Marshal(manifest.Manifest{Schema: schema, Channel: "stable", Updated: updated.UTC().Format(time.RFC3339), Releases: releases})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -960,5 +974,237 @@ esac
 	list, err := backup.List(s.inst.BackupDir())
 	if err != nil || len(list) != 1 || list[0].KVSVersion != "7.0.0" {
 		t.Fatalf("the backup records %+v (%v), want KVS 7.0.0", list, err)
+	}
+}
+
+func TestManifestFloorBeforeExplicitTarget(t *testing.T) {
+	now := fixedManifestClock(t)
+	root := newRoot(t)
+	rel := testRelease("1.0.0", "2026-10-01", "")
+	rel.CLI = map[string]manifest.Asset{cliPlatform(): fakeBuild(t, "exit 1")}
+	newer := rel
+	newer.Version = "2.0.0"
+	url := signedManifestAt(t, manifest.Schema, now.Add(-90*24*time.Hour), newer, rel)
+	useFlags(t, root, url, false)
+	old := Version
+	Version = rel.Version
+	t.Cleanup(func() { Version = old })
+	cmd := updateCLICmd()
+	if err := cmd.Flags().Set("version", rel.Version); err != nil {
+		t.Fatal(err)
+	}
+	inst := saveState(t, root, &instance.State{Current: newer.Version})
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("matching list with an older explicit CLI target: %v", err)
+	}
+	if err := inst.SaveState(&instance.State{Current: "3.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("version", "4.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); exitCode(err) != 7 {
+		t.Fatalf("stale list before target lookup: %v", err)
+	}
+	useRoot(t, root)
+	fakeEngine(t, "site", func() []engineContainer { return nil })
+	for _, name := range []string{"check", "upgrade"} {
+		_, err := runKvsctl(t, name, "--root", root, "--manifest", url, "--version", "4.0.0", "--plain")
+		if exitCode(err) != 7 {
+			t.Fatalf("%s looked up the target before checking the list: %v", name, err)
+		}
+	}
+}
+
+func TestUnadoptedManifestFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name, tag, marker, floor string
+	}{
+		{"stable tag", "26.10.0", "", "26.10.0"},
+		{"marker takes precedence", "1.0.0", "26.11.1", "26.11.1"},
+		{"candidate marker", "26.10.0", "26.11.1-rc1", ""},
+		{"candidate tag", "26.10.0-rc1", "", ""},
+		{"unversioned checkout", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := checkoutRoot(t)
+			if tc.tag != "" {
+				git(t, root, "tag", tc.tag)
+			}
+			if tc.marker != "" {
+				if err := os.WriteFile(filepath.Join(root, "docker", "RELEASE"), []byte(tc.marker+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inst := testSession(t, root).inst
+			m := &manifest.Manifest{Channel: manifest.ChannelStable, Releases: []manifest.Release{{Version: "1.2.0"}}}
+			err := upgrade.InspectManifest(inst, m, "file:///manifest.json", false)
+			if tc.floor == "" && err != nil || tc.floor != "" && (exitCode(err) != 7 || !strings.Contains(err.Error(), tc.floor)) {
+				t.Errorf("expected stable floor %q, got %v", tc.floor, err)
+			}
+		})
+	}
+}
+
+func TestManifestFloorWithoutCompose(t *testing.T) {
+	root := newRoot(t)
+	inst := saveState(t, root, &instance.State{Current: "2.0.0"})
+	rel := testRelease("1.2.0", "2026-10-01", "")
+	url := signedManifest(t, rel)
+	compose := filepath.Join(root, "docker/docker-compose.yml")
+	for _, journal := range []bool{false, true} {
+		if journal {
+			if err := os.Remove(filepath.Join(inst.StateDir(), "state.json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := inst.SaveJournal(&instance.Journal{Action: instance.ActionUpgrade, From: "2.0.0", To: "3.0.0", Phase: instance.PhaseApply}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		commands := [][]string{{"releases"}, {"version", "--check"}, {"update-cli", "--version", "9.0.0"}}
+		withCompose := make([]error, len(commands))
+		for i, args := range commands {
+			commands[i] = append(args, "--root", root, "--quiet", "--manifest", url)
+			_, withCompose[i] = runKvsctl(t, commands[i]...)
+		}
+		if err := os.Rename(compose, compose+".saved"); err != nil {
+			t.Fatal(err)
+		}
+		for i, args := range commands {
+			_, after := runKvsctl(t, args...)
+			if before := withCompose[i]; exitCode(before) != exitCode(after) || fmt.Sprint(before) != fmt.Sprint(after) {
+				t.Errorf("removing Compose changed %v (journal %t): %v -> %v", args, journal, before, after)
+			}
+			if args[0] == "update-cli" {
+				if journal {
+					if after == nil || !strings.Contains(after.Error(), "recover") {
+						t.Fatalf("pending journal: %v", after)
+					}
+				} else if exitCode(after) != 7 {
+					t.Fatalf("stale list before target selection: %v", after)
+				}
+			}
+		}
+		useFlags(t, root, url, false)
+		found, err := optionalStack()
+		if err != nil || found == nil {
+			t.Fatalf("installation records: %v, %v", found, err)
+		}
+		m := &manifest.Manifest{Channel: manifest.ChannelStable, Releases: []manifest.Release{rel}}
+		if err := upgrade.InspectManifest(found, m, url, false); exitCode(err) != 7 || !strings.Contains(err.Error(), "installed 2.0.0") {
+			t.Fatalf("recorded floor (journal %t): %v", journal, err)
+		}
+		if err := os.Rename(compose+".saved", compose); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestStatusCachesStrictlyAcceptableLists(t *testing.T) {
+	for _, tc := range []struct {
+		name, listed, remembered string
+		allow                    bool
+	}{
+		{"current stable with override", "2.0.0", "", true},
+		{"candidates only", "2.1.0-rc1", "", false},
+		{"candidates after an older stable", "2.1.0-rc1", "1.0.0", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := fixedManifestClock(t)
+			root := newRoot(t)
+			inst := saveState(t, root, &instance.State{Current: "2.0.0"})
+			url := signedManifest(t, testRelease(tc.listed, "2026-10-01", ""))
+			useFlags(t, root, url, tc.allow)
+			saveLatestKnown(inst, map[string]*latestKnown{url: {Version: tc.remembered}})
+			reads := 0
+			read := func(url string) (*manifest.Document, error) {
+				reads++
+				return manifest.Fetch(url)
+			}
+			for range 3 {
+				got, err := latestRelease(inst, statusWait, read)
+				want := tc.remembered
+				if tc.listed == "2.0.0" {
+					want = tc.listed
+				}
+				if err != nil || got.Version != want || !got.Read.Equal(now) {
+					t.Fatalf("cached release: %+v, %v", got, err)
+				}
+			}
+			if reads != 1 {
+				t.Errorf("three successful checks made %d reads", reads)
+			}
+		})
+	}
+}
+
+func TestCacheWithoutUpdatedIsReadOnce(t *testing.T) {
+	now := fixedManifestClock(t)
+	root := newRoot(t)
+	inst := saveState(t, root, &instance.State{Current: "1.0.0"})
+	url := signedManifest(t, testRelease("1.1.0", "2026-10-01", ""))
+	useFlags(t, root, url, false)
+	saveLatestKnown(inst, map[string]*latestKnown{url: {Read: now, Version: "1.1.0"}})
+	reads := 0
+	for range 3 {
+		if _, err := latestRelease(inst, statusWait, func(u string) (*manifest.Document, error) { reads++; return manifest.Fetch(u) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("three lookups of a legacy cache made %d manifest reads", reads)
+	}
+}
+
+func TestCacheChecksListedStableAfterOverride(t *testing.T) {
+	now := fixedManifestClock(t)
+	root := newRoot(t)
+	inst := saveState(t, root, &instance.State{Current: "2.0.0"})
+	url := signedManifest(t, testRelease("1.0.0", "2026-10-01", ""))
+	useFlags(t, root, url, true)
+	// An older client kept the highest display version but marked a read
+	// made with the override for a fresh lookup.
+	saveLatestKnown(inst, map[string]*latestKnown{url: {Version: "2.0.0", Updated: now.Format(time.RFC3339), Read: now, Recheck: true}})
+	reads := 0
+	read := func(url string) (*manifest.Document, error) {
+		reads++
+		return manifest.Fetch(url)
+	}
+	if got, err := latestRelease(inst, statusWait, read); err != nil || got.Version != "2.0.0" || reads != 1 {
+		t.Fatalf("override: %+v, %v, %d reads", got, err, reads)
+	}
+	flagAllowStale = false
+	if _, err := latestRelease(inst, statusWait, read); !errors.Is(err, upgrade.ErrStaleManifest) || reads != 2 {
+		t.Fatalf("strict lookup after override: %v, %d reads", err, reads)
+	}
+}
+
+func TestManifestFloorInStatusCache(t *testing.T) {
+	now := fixedManifestClock(t)
+	root := newRoot(t)
+	rel := testRelease("1.0.0", "2026-10-01", "")
+	url := signedManifestAt(t, manifest.Schema, now.Add(-90*24*time.Hour), rel)
+	useFlags(t, root, url, false)
+	inst := saveState(t, root, &instance.State{Current: rel.Version})
+	if _, err := latestRelease(inst, statusWait, manifest.Fetch); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.SaveState(&instance.State{Current: "2.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	read := func(url string) (*manifest.Document, error) {
+		reads++
+		return manifest.Fetch(url)
+	}
+	for _, allow := range []bool{false, false, true, false} {
+		flagAllowStale = allow
+		_, err := latestRelease(inst, statusWait, read)
+		if allow && err != nil || !allow && !errors.Is(err, upgrade.ErrStaleManifest) {
+			t.Fatalf("allow stale %v: %v", allow, err)
+		}
+	}
+	if reads != 4 {
+		t.Fatalf("stale lists must be read again, got %d reads", reads)
 	}
 }

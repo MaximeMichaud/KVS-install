@@ -62,10 +62,8 @@ func updateCLICmd() *cobra.Command {
 			// A replayed manifest would hand out an older binary, so the
 			// same freshness rule as an upgrade applies when this machine
 			// holds an installation to compare against.
-			if inst != nil {
-				if err := upgrade.CheckManifest(inst, m, manifestURL(), flagAllowStale); err != nil {
-					return err
-				}
+			if err := upgrade.CheckManifest(inst, m, manifestURL(), flagAllowStale); err != nil {
+				return err
 			}
 			target, err := cliRelease(m, version)
 			if err != nil {
@@ -101,10 +99,17 @@ func updateCLICmd() *cobra.Command {
 	return cmd
 }
 
-// optionalStack returns nil only when the compose file is absent.
+// optionalStack returns nil when neither Compose nor an installation record exists.
 func optionalStack() (*instance.Instance, error) {
 	inst, err := instance.Locate(flagRoot)
 	if errors.Is(err, instance.ErrNoStack) {
+		for _, name := range []string{"state.json", "journal.json"} {
+			if _, statErr := os.Lstat(filepath.Join(inst.StateDir(), name)); statErr == nil {
+				return inst, nil
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return nil, statErr
+			}
+		}
 		return nil, nil
 	}
 	return inst, err

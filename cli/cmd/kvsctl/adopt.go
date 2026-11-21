@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -91,7 +90,7 @@ func adopt(s *session, version string, force bool) error {
 	}
 	source := "--version"
 	if version == "" {
-		if version, source, err = adoptedVersionOf(inst.Root, co); err != nil {
+		if version, source, err = inst.CheckoutVersion(co); err != nil {
 			return err
 		}
 	}
@@ -213,27 +212,6 @@ var checkoutImages = func(ctx context.Context, dir string) ([]string, error) {
 	}
 	defer docker.Close()
 	return docker.BuiltLocally(ctx, project, refs)
-}
-
-// adoptedVersionOf is the version adopt records without --version, and
-// where it comes from: docker/RELEASE, which a release bundle carries;
-// else the release tag at HEAD; else 0.0.0, the unreleased checkout.
-func adoptedVersionOf(root string, co *instance.Checkout) (version, source string, err error) {
-	data, err := os.ReadFile(filepath.Join(root, "docker", "RELEASE"))
-	switch {
-	case err == nil:
-		first, _, _ := strings.Cut(string(data), "\n")
-		v, perr := semver.Parse(first)
-		if perr != nil {
-			return "", "", fmt.Errorf("docker/RELEASE holds %q, which is not a version: name the version with --version", strings.TrimSpace(first))
-		}
-		return v.String(), "docker/RELEASE", nil
-	case !errors.Is(err, os.ErrNotExist):
-		return "", "", err
-	case co.Tag != "":
-		return co.Tag, "the tag at commit " + shortCommit(co.Commit), nil
-	}
-	return instance.Unreleased, "no release names commit " + shortCommit(co.Commit), nil
 }
 
 // allowJITBlock records the php.ini of the working tree as unchanged when it

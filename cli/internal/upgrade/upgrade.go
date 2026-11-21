@@ -434,6 +434,16 @@ type Runner struct {
 	Opts     Options
 }
 
+// ManifestAge reports the age of a signed list from day 21 onward.
+func ManifestAge(updated string, now time.Time) string {
+	stamp, ok := parseUpdated(updated)
+	days := int(now.Sub(stamp) / (24 * time.Hour))
+	if !ok || days < 21 {
+		return ""
+	}
+	return fmt.Sprintf("manifest is %d days old", days)
+}
+
 // CheckManifest refuses a manifest of a channel its url does not serve
 // (Manifest.CheckChannel), and one older than the newest this instance has
 // already read from the same url: the signature covers the bytes, not
@@ -448,8 +458,20 @@ type Runner struct {
 // neither compared nor kept: it is signed after the stable list it extends,
 // which a mirror may serve again after it.
 func CheckManifest(inst *instance.Instance, m *manifest.Manifest, url string, allowStale bool) error {
+	return checkManifestAt(inst, m, url, allowStale, time.Now(), true)
+}
+
+// InspectManifest applies the same freshness rules without saving a check.
+func InspectManifest(inst *instance.Instance, m *manifest.Manifest, url string, allowStale bool) error {
+	return checkManifestAt(inst, m, url, allowStale, time.Now(), false)
+}
+
+func checkManifestAt(inst *instance.Instance, m *manifest.Manifest, url string, allowStale bool, now time.Time, remember bool) error {
 	if err := m.CheckChannel(url); err != nil {
 		return err
+	}
+	if inst == nil {
+		return nil
 	}
 	updates, err := inst.LoadUpdates()
 	if err != nil {
@@ -469,6 +491,32 @@ func CheckManifest(inst *instance.Instance, m *manifest.Manifest, url string, al
 	if rel := m.LatestStable(); rel != nil {
 		latest = rel.Version
 	}
+	if latest != "" && !allowStale {
+		state, err := inst.LoadState()
+		if err != nil {
+			return err
+		}
+		var installed string
+		if state != nil {
+			installed = state.Current
+		} else {
+			journal, err := inst.LoadJournal()
+			if err != nil {
+				return err
+			}
+			if journal != nil {
+				installed = journal.From
+			} else {
+				installed, _, err = inst.CheckoutVersion(nil)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if !semver.IsPrerelease(installed) && semver.Less(latest, installed) {
+			return &failure{kind: ErrStaleManifest, msg: fmt.Sprintf("manifest lists %s as latest stable, below the installed %s: pass --allow-stale-manifest to accept it", latest, installed)}
+		}
+	}
 	dated := !m.Candidate()
 	seen, seenOK := parseUpdated(record.ManifestUpdated)
 	updated, updatedOK := parseUpdated(m.Updated)
@@ -485,13 +533,16 @@ func CheckManifest(inst *instance.Instance, m *manifest.Manifest, url string, al
 			kind: ErrStaleManifest,
 		}
 	}
+	if !remember {
+		return nil
+	}
 	if dated && updatedOK && (!seenOK || updated.After(seen)) {
 		record.ManifestUpdated = m.Updated
 	}
 	if latest != "" && (record.LatestSeen == "" || semver.Less(record.LatestSeen, latest)) {
 		record.LatestSeen = latest
 	}
-	record.LastCheck = time.Now()
+	record.LastCheck = now
 	updates.Keys = nil
 	for _, k := range m.Keys {
 		updates.Keys = append(updates.Keys, instance.AnnouncedKey{ID: k.ID, ValidFrom: k.ValidFrom})

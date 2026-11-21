@@ -203,26 +203,27 @@ func TestAdoptRefusesABadVersion(t *testing.T) {
 func TestAdoptedVersionOf(t *testing.T) {
 	co := &instance.Checkout{Commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Tag: "26.10.0"}
 	root := t.TempDir()
+	inst := &instance.Instance{Root: root}
 	if err := os.MkdirAll(filepath.Join(root, "docker"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if v, source, err := adoptedVersionOf(root, co); err != nil || v != "26.10.0" || !strings.Contains(source, "tag") {
+	if v, source, err := inst.CheckoutVersion(co); err != nil || v != "26.10.0" || !strings.Contains(source, "tag") {
 		t.Fatalf("the tag: %s, %s, %v", v, source, err)
 	}
-	if v, _, err := adoptedVersionOf(root, &instance.Checkout{Commit: co.Commit}); err != nil || v != instance.Unreleased {
+	if v, _, err := inst.CheckoutVersion(&instance.Checkout{Commit: co.Commit}); err != nil || v != instance.Unreleased {
 		t.Fatalf("no tag: %s, %v", v, err)
 	}
 	release := filepath.Join(root, "docker", "RELEASE")
 	if err := os.WriteFile(release, []byte("26.11.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if v, source, err := adoptedVersionOf(root, co); err != nil || v != "26.11.0" || source != "docker/RELEASE" {
+	if v, source, err := inst.CheckoutVersion(co); err != nil || v != "26.11.0" || source != "docker/RELEASE" {
 		t.Fatalf("docker/RELEASE: %s, %s, %v", v, source, err)
 	}
 	if err := os.WriteFile(release, []byte("latest\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := adoptedVersionOf(root, co); err == nil || !strings.Contains(err.Error(), "--version") {
+	if _, _, err := inst.CheckoutVersion(co); err == nil || !strings.Contains(err.Error(), "--version") {
 		t.Fatalf("a RELEASE that is no version: %v", err)
 	}
 }

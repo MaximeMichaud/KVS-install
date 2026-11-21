@@ -118,7 +118,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "answer yes to every question; without it, a question is answered no unless stdin and stdout are both a terminal")
 	root.PersistentFlags().BoolVar(&flagPlain, "plain", false, "print lines instead of the interactive screen")
 	root.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "skip the reminder that a newer stable release exists, and name the log of a run only when it fails; upgrade, rollback and recover then print lines instead of the screen, only their steps, their failures, their questions, each question after what it asks about, and what the operator must act on (services that could not be started again, a .env taken from an archive), and nothing at all for an upgrade with nothing to do; backup, clean, adopt and update-cli print nothing unless they fail or ask, a question after what it asks about, and clean --dry-run its list; restore prints its warnings, its question, what became of .env and its result line; doctor prints only warnings, failures and incomplete checks, without changing its JSON report; the notice that KVSCTL_RELEASE_KEY replaces the release keys is printed all the same; the other commands print what they print without it")
-	root.PersistentFlags().BoolVar(&flagAllowStale, "allow-stale-manifest", false, "accept a manifest older than the newest one already seen (a stale mirror, a replayed file)")
+	root.PersistentFlags().BoolVar(&flagAllowStale, "allow-stale-manifest", false, "accept a manifest below the installed stable version or older than the newest seen at its URL")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	root.SetUsageTemplate(root.UsageTemplate() + exitCodes)
 	root.PersistentPostRunE = func(cmd *cobra.Command, _ []string) error {
@@ -315,6 +315,7 @@ func firstStop(current string, latest latestKnown) string {
 // Past the wait the read goes on behind and is dropped, and the process
 // ends without it.
 var (
+	manifestNow  = time.Now
 	reminderWait = 5 * time.Second
 	statusWait   = 15 * time.Second
 )
@@ -333,10 +334,18 @@ type latestKnown struct {
 	// and Commit are the newest release it listed, the date and the
 	// commit being what tells a release from the checkout a stack was
 	// adopted from.
-	Read    time.Time `json:"read,omitzero"`
-	Version string    `json:"version,omitempty"`
-	Date    string    `json:"date,omitempty"`
-	Commit  string    `json:"commit,omitempty"`
+	Candidate bool `json:"candidate,omitempty"`
+	Recheck   bool `json:"recheck,omitempty"`
+	// ListedStable is the stable version in this read, empty for an
+	// RC-only list. Version may still name a newer, earlier observation.
+	// When absent, Version is the listed stable unless a legacy cache
+	// explicitly marked the observation for a fresh read.
+	ListedStable *string   `json:"listed_stable,omitempty"`
+	Updated      string    `json:"updated,omitempty"`
+	Read         time.Time `json:"read,omitzero"`
+	Version      string    `json:"version,omitempty"`
+	Date         string    `json:"date,omitempty"`
+	Commit       string    `json:"commit,omitempty"`
 	// MinFrom is the oldest version each release that names one upgrades
 	// from, which tells the releases a stack has to install on its way.
 	MinFrom map[string]string `json:"min_from,omitempty"`
@@ -374,13 +383,25 @@ func latestRelease(inst *instance.Instance, wait time.Duration, read manifestRea
 		seen = &latestKnown{}
 		known[url] = seen
 	}
-	now := time.Now()
-	switch {
+	now := manifestNow()
 	// A release candidate kept by a kvsctl older than this rule is no
 	// answer: upgrade installs one only when it is named.
-	case !semver.IsPrerelease(seen.Version) && within(now, seen.Read, knownFor):
-		return *seen, nil
-	case within(now, seen.Failed, failureFor) && seen.Build == thisBuild():
+	if seen.Updated != "" && !seen.Recheck && !semver.IsPrerelease(seen.Version) && within(now, seen.Read, knownFor) {
+		// The installed version or the per-URL record can advance during the day.
+		channel := manifest.ChannelStable
+		if seen.Candidate {
+			channel = manifest.ChannelCandidate
+		}
+		listed := seen.Version
+		if seen.ListedStable != nil {
+			listed = *seen.ListedStable
+		}
+		cached := &manifest.Manifest{Channel: channel, Updated: seen.Updated, Releases: []manifest.Release{{Version: listed}}}
+		if err := upgrade.InspectManifest(inst, cached, url, false); err == nil {
+			return *seen, nil
+		}
+	}
+	if within(now, seen.Failed, failureFor) && seen.Build == thisBuild() {
 		return latestKnown{}, &earlierFailure{at: seen.Failed, msg: seen.Error}
 	}
 	m, err := readManifest(url, wait, read)
@@ -389,6 +410,9 @@ func latestRelease(inst *instance.Instance, wait time.Duration, read manifestRea
 	}
 	if err == nil {
 		err = upgrade.CheckManifest(inst, m, url, flagAllowStale)
+	}
+	if errors.Is(err, upgrade.ErrStaleManifest) {
+		return latestKnown{}, err
 	}
 	if err != nil {
 		seen.Failed, seen.Error, seen.Build = now, firstLine(err.Error()), thisBuild()
@@ -423,13 +447,21 @@ func (e *earlierFailure) Error() string { return e.msg }
 // through, does not take the latest release back, and a list of release
 // candidates only names none.
 func (k *latestKnown) record(m *manifest.Manifest, now time.Time) {
+	k.Candidate = m.Candidate()
+	k.Updated = m.Updated
 	k.Read, k.Failed, k.Error, k.Build = now, time.Time{}, "", ""
 	if semver.IsPrerelease(k.Version) {
 		// Kept by a kvsctl older than this rule.
 		k.Version, k.Date, k.Commit, k.MinFrom = "", "", "", nil
 	}
 	latest := m.LatestStable()
-	if latest == nil || (k.Version != "" && semver.Less(latest.Version, k.Version)) {
+	k.Recheck, k.ListedStable = false, nil
+	if latest == nil {
+		k.ListedStable = new(string)
+		return
+	}
+	if k.Version != "" && semver.Less(latest.Version, k.Version) {
+		k.ListedStable = new(latest.Version)
 		return
 	}
 	k.Version, k.Date, k.Commit, k.MinFrom = latest.Version, latest.Date, latest.Commit, nil
@@ -456,7 +488,7 @@ func rememberManifest(inst *instance.Instance, m *manifest.Manifest) {
 		seen = &latestKnown{}
 		known[manifestURL()] = seen
 	}
-	seen.record(m, time.Now())
+	seen.record(m, manifestNow())
 	saveLatestKnown(inst, known)
 }
 

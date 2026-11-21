@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +75,45 @@ func TestReadCheckout(t *testing.T) {
 	}
 	if head.Tag != "26.11.0" {
 		t.Errorf("tag = %q, want 26.11.0", head.Tag)
+	}
+}
+
+func TestCheckoutCommandEnvironment(t *testing.T) {
+	variables := strings.Fields("GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM")
+	for _, key := range variables {
+		t.Setenv(key, "caller")
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	inst := &Instance{Root: t.TempDir()}
+	cmd := inst.gitCommand("tag", "--points-at", "HEAD")
+	if !slices.Equal(cmd.Args, []string{"git", "-C", inst.Root, "tag", "--points-at", "HEAD"}) {
+		t.Fatalf("checkout command: %q", cmd.Args)
+	}
+	for _, key := range variables {
+		if slices.Contains(cmd.Env, key+"=caller") {
+			t.Errorf("%s reached Git", key)
+		}
+	}
+	if !slices.Contains(cmd.Env, "GIT_CONFIG_NOSYSTEM=1") {
+		t.Error("lost unrelated Git configuration")
+	}
+}
+
+func TestCheckoutIgnoresCallerRepository(t *testing.T) {
+	const date = "2026-10-01T00:00:00Z"
+	const path = "docker/setup.sh"
+	inst := checkout(t, map[string]string{path: "installed"}, date)
+	other := checkout(t, map[string]string{path: "other"}, date)
+	runGit(t, inst.Root, nil, "tag", "1.0.0")
+	runGit(t, other.Root, nil, "tag", "3.0.0")
+	t.Setenv("GIT_DIR", filepath.Join(other.Root, ".git"))
+	version, _, err := inst.CheckoutVersion(nil)
+	if err != nil || version != "1.0.0" {
+		t.Fatalf("installed version = %s: %v", version, err)
+	}
+	sums, _, err := inst.HeadChecksums([]string{path})
+	if err != nil || sums[path] != fmt.Sprintf("%x", sha256.Sum256([]byte("installed"))) {
+		t.Fatalf("installed blobs = %v: %v", sums, err)
 	}
 }
 

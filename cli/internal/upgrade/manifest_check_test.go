@@ -37,19 +37,23 @@ func record(t *testing.T, inst *instance.Instance, url string) instance.Manifest
 	return *updates.For(url)
 }
 
+func checkOctoberManifest(inst *instance.Instance, m *manifest.Manifest, url string, allowStale bool) error {
+	return checkManifestAt(inst, m, url, allowStale, time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), true)
+}
+
 // A release candidate list read once through --manifest is newer than the
 // stable one in date and in version; the stable list must not look stale
 // after it, and a replayed copy of either is still refused.
 func TestCheckManifestKeepsOneRecordPerURL(t *testing.T) {
 	inst := testInstance(t, "DOMAIN=example.com\n")
 	stable, candidate := "https://example.com/stable/manifest.json", "https://example.com/candidate/manifest.json"
-	if err := CheckManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), stable, false); err != nil {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), stable, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckManifest(inst, datedManifest("2026-10-05T00:00:00Z", "26.11.0"), candidate, false); err != nil {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-05T00:00:00Z", "26.11.0"), candidate, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckManifest(inst, datedManifest("2026-10-02T00:00:00Z", "26.10.1"), stable, false); err != nil {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-02T00:00:00Z", "26.10.1"), stable, false); err != nil {
 		t.Fatalf("the stable list was judged against the candidate one: %v", err)
 	}
 	updates, err := inst.LoadUpdates()
@@ -63,13 +67,13 @@ func TestCheckManifestKeepsOneRecordPerURL(t *testing.T) {
 		t.Errorf("record of the candidate list: %+v", got)
 	}
 
-	if err := CheckManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), stable, false); !errors.Is(err, ErrStaleManifest) {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), stable, false); !errors.Is(err, ErrStaleManifest) {
 		t.Errorf("a replayed copy of the stable list must be refused, got %v", err)
 	}
-	if err := CheckManifest(inst, datedManifest("2026-10-04T00:00:00Z", "26.11.0"), candidate, false); !errors.Is(err, ErrStaleManifest) {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-04T00:00:00Z", "26.11.0"), candidate, false); !errors.Is(err, ErrStaleManifest) {
 		t.Errorf("an older copy of the candidate list must be refused, got %v", err)
 	}
-	if err := CheckManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), stable, true); err != nil {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), stable, true); err != nil {
 		t.Errorf("--allow-stale-manifest accepts it: %v", err)
 	}
 }
@@ -82,17 +86,17 @@ func TestCheckManifestIgnoresCandidates(t *testing.T) {
 	inst := testInstance(t, "DOMAIN=example.com\n")
 	url := "https://example.com/manifest.json"
 	withCandidate := &manifest.Manifest{Channel: manifest.ChannelStable, Updated: "2026-10-05T00:00:00Z", Releases: []manifest.Release{{Version: "26.11.0-rc1"}, {Version: "26.10.0"}}}
-	if err := CheckManifest(inst, withCandidate, url, false); err != nil {
+	if err := checkOctoberManifest(inst, withCandidate, url, false); err != nil {
 		t.Fatal(err)
 	}
 	if got := record(t, inst, url); got.LatestSeen != "26.10.0" || got.ManifestUpdated != "" {
 		t.Errorf("record %+v, want the latest stable release and no date", got)
 	}
-	if err := CheckManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), url, false); err != nil {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), url, false); err != nil {
 		t.Errorf("a list without the candidate, signed before it, was judged against it: %v", err)
 	}
 	candidates := &manifest.Manifest{Channel: manifest.ChannelStable, Updated: "2026-10-07T00:00:00Z", Releases: []manifest.Release{{Version: "26.11.0-rc1"}}}
-	if err := CheckManifest(inst, candidates, url, false); err != nil {
+	if err := checkOctoberManifest(inst, candidates, url, false); err != nil {
 		t.Errorf("a list of candidates only: %v", err)
 	}
 	if got := record(t, inst, url); got.LatestSeen != "26.10.0" || got.ManifestUpdated != "2026-10-01T00:00:00Z" {
@@ -106,23 +110,23 @@ func TestCheckManifestIgnoresCandidates(t *testing.T) {
 // stale when it comes back.
 func TestCheckManifestChecksTheChannel(t *testing.T) {
 	inst := testInstance(t, "DOMAIN=example.com\n")
-	err := CheckManifest(inst, candidateList("2026-10-05T00:00:00Z", "26.11.0-rc1", "26.10.0"), manifest.DefaultURL, false)
+	err := checkOctoberManifest(inst, candidateList("2026-10-05T00:00:00Z", "26.11.0-rc1", "26.10.0"), manifest.DefaultURL, false)
 	if err == nil || !strings.Contains(err.Error(), "is the one of a release candidate (channel candidate), and that URL serves stable releases only") {
 		t.Fatalf("the list of a candidate at the default URL: %v", err)
 	}
 	stamped := &manifest.Manifest{Channel: manifest.ChannelStable, Updated: "2026-10-05T00:00:00Z", Releases: []manifest.Release{{Version: "26.11.0-rc1"}, {Version: "26.10.0"}}}
-	if err := CheckManifest(inst, stamped, manifest.DefaultURL, true); err == nil || !strings.Contains(err.Error(), "names the release candidate 26.11.0-rc1 as its newest release") {
+	if err := checkOctoberManifest(inst, stamped, manifest.DefaultURL, true); err == nil || !strings.Contains(err.Error(), "names the release candidate 26.11.0-rc1 as its newest release") {
 		t.Errorf("a stable list whose newest release is a candidate, with --allow-stale-manifest: %v", err)
 	}
 	nightly := datedManifest("2026-10-05T00:00:00Z", "26.10.0")
 	nightly.Channel = "nightly"
-	if err := CheckManifest(inst, nightly, "https://mirror.example.com/manifest.json", false); err == nil || !strings.Contains(err.Error(), `is of channel "nightly"`) {
+	if err := checkOctoberManifest(inst, nightly, "https://mirror.example.com/manifest.json", false); err == nil || !strings.Contains(err.Error(), `is of channel "nightly"`) {
 		t.Errorf("an unknown channel: %v", err)
 	}
 	if updates, err := inst.LoadUpdates(); err != nil || len(updates.Manifests) != 0 {
 		t.Errorf("a refused list was remembered: %+v, %v", updates, err)
 	}
-	if err := CheckManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), manifest.DefaultURL, false); err != nil {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), manifest.DefaultURL, false); err != nil {
 		t.Errorf("the stable list after them: %v", err)
 	}
 }
@@ -149,7 +153,7 @@ func TestCheckManifestLeavesTheDateOfACandidateListOut(t *testing.T) {
 		{"the list of a candidate with a newer stable release", candidateList("2026-10-20T00:00:00Z", "26.11.0-rc2", "26.10.1"), false},
 		{"the stable list without that release", stable, true},
 	} {
-		err := CheckManifest(inst, step.m, url, false)
+		err := checkOctoberManifest(inst, step.m, url, false)
 		if step.stale != errors.Is(err, ErrStaleManifest) || !step.stale && err != nil {
 			t.Errorf("%s: %v, want stale %v", step.what, err, step.stale)
 		}
@@ -174,23 +178,23 @@ func TestCheckManifestStartsAgainFromARecordOfACandidate(t *testing.T) {
 	}
 	list := candidateList("2026-10-05T00:00:00Z", "26.11.0-rc1", "26.10.0")
 	for i := range 2 {
-		if err := CheckManifest(inst, list, url, false); err != nil {
+		if err := checkOctoberManifest(inst, list, url, false); err != nil {
 			t.Fatalf("read %d of the list the record was made of: %v", i+1, err)
 		}
 	}
 	if got := record(t, inst, url); got.LatestSeen != "26.10.0" || got.ManifestUpdated != "" {
 		t.Errorf("record %+v, want 26.10.0 seen and no date", got)
 	}
-	if err := CheckManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), url, false); err != nil {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-01T00:00:00Z", "26.10.0"), url, false); err != nil {
 		t.Errorf("the stable list: %v", err)
 	}
 
 	mirror := "https://mirror.example.com/manifest.json"
-	if err := CheckManifest(inst, candidateList("2026-10-20T00:00:00Z", "26.11.0-rc2", "26.10.1"), mirror, false); err != nil {
+	if err := checkOctoberManifest(inst, candidateList("2026-10-20T00:00:00Z", "26.11.0-rc2", "26.10.1"), mirror, false); err != nil {
 		t.Fatal(err)
 	}
 	read := record(t, inst, mirror).LastCheck.UTC().Format(time.RFC3339)
-	err := CheckManifest(inst, candidateList("2026-10-21T00:00:00Z", "26.11.0-rc3", "26.10.0"), mirror, false)
+	err := checkOctoberManifest(inst, candidateList("2026-10-21T00:00:00Z", "26.11.0-rc3", "26.10.0"), mirror, false)
 	if want := "manifest is older than the one seen on " + read + " (latest 26.10.1)"; err == nil || !strings.HasPrefix(err.Error(), want) {
 		t.Errorf("a lower list after candidate lists alone: %v, want %q", err, want)
 	}
@@ -203,7 +207,7 @@ func TestCheckManifestRecordsTheAnnouncedKeys(t *testing.T) {
 	url := "https://example.com/manifest.json"
 	m := datedManifest("2026-10-01T00:00:00Z", "26.10.0")
 	m.Keys = []manifest.Key{{ID: "r2", Pub: "unused", ValidFrom: "2026-11-01"}, {ID: "r3"}}
-	if err := CheckManifest(inst, m, url, false); err != nil {
+	if err := checkOctoberManifest(inst, m, url, false); err != nil {
 		t.Fatal(err)
 	}
 	updates, err := inst.LoadUpdates()
@@ -213,10 +217,42 @@ func TestCheckManifestRecordsTheAnnouncedKeys(t *testing.T) {
 	if want := []instance.AnnouncedKey{{ID: "r2", ValidFrom: "2026-11-01"}, {ID: "r3"}}; !slices.Equal(updates.Keys, want) {
 		t.Errorf("announced keys %+v, want %+v", updates.Keys, want)
 	}
-	if err := CheckManifest(inst, datedManifest("2026-10-02T00:00:00Z", "26.10.0"), url, false); err != nil {
+	if err := checkOctoberManifest(inst, datedManifest("2026-10-02T00:00:00Z", "26.10.0"), url, false); err != nil {
 		t.Fatal(err)
 	}
 	if updates, err := inst.LoadUpdates(); err != nil || len(updates.Keys) != 0 {
 		t.Errorf("keys the next list no longer announces: %+v, %v", updates, err)
+	}
+}
+
+func TestManifestAgeAndInstalledFloor(t *testing.T) {
+	inst := testInstance(t, "DOMAIN=example.com\n")
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	const url = "https://mirror.example/manifest.json"
+	m := datedManifest(now.Add(-90*24*time.Hour).Format(time.RFC3339), "1.0.0")
+	for _, root := range []*instance.Instance{nil, inst} {
+		if err := checkManifestAt(root, m, url, false, now, true); err != nil {
+			t.Fatalf("first contact at day 90: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		current string
+		stale   bool
+	}{
+		{"1.0.0", false}, {"2.0.0", true}, {"2.0.0-rc1", false}, {instance.Unreleased, false},
+	} {
+		if err := inst.SaveState(&instance.State{Current: tc.current}); err != nil {
+			t.Fatal(err)
+		}
+		err := checkManifestAt(inst, m, url, false, now, true)
+		if tc.stale != errors.Is(err, ErrStaleManifest) || !tc.stale && err != nil {
+			t.Fatalf("installed %s: %v", tc.current, err)
+		}
+		if err := checkManifestAt(inst, m, url, true, now, true); err != nil {
+			t.Fatalf("override: %v", err)
+		}
+	}
+	if got := ManifestAge(now.Add(-21*24*time.Hour+time.Second).Format(time.RFC3339), now); got != "" {
+		t.Fatalf("warning before day 21: %s", got)
 	}
 }
