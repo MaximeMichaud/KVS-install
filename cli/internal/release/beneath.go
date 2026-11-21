@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -20,10 +20,9 @@ import (
 // link planted there must never make it read, write or change a file
 // elsewhere. Below a root, every path is therefore walked one directory at a
 // time without following a link, a file is only read once it is known to be
-// a regular file, and a file only takes its place by a rename inside its
-// directory, which replaces a link where writing would go through it. The
-// root itself is opened as given: an operator may reach the installation
-// through a link.
+// a regular file, and a file is published inside its directory without
+// writing through an existing link. The root itself is opened as given:
+// an operator may reach the installation through a link.
 
 // errNotLaid marks a path that holds something else than a regular file
 // reached through real directories: a link, a fifo, a device, or a
@@ -209,7 +208,7 @@ func WriteFile(root, rel string, data []byte, mode os.FileMode, prepare func(f *
 	}
 	defer unix.Close(dirfd)
 	name, dir := path.Base(rel), filepath.Join(root, path.Dir(rel))
-	tmpName, tmp, err := createTemp(dirfd, name, dir, false)
+	tmpName, tmp, err := createTemp(dirfd, name)
 	if err != nil {
 		return err
 	}
@@ -256,14 +255,13 @@ func statAt(dirfd int, name, full string) (*unix.Stat_t, error) {
 	return &st, nil
 }
 
+var renameNew = unix.Renameat2
+var linkNew = unix.Linkat
+
 // lay puts a copy of the regular file rel of srcRoot at rel below root,
 // with the mode of the source. The copy is written to a new temporary file
-// in the target directory, flushed, then renamed over the target: a link
-// standing there is replaced, never written through, and an empty directory
-// standing there is removed first. Its callers, Sync and Snapshot, run
-// under the lock of the installation, so the temporary file a killed run
-// left is reclaimed (createTemp).
-func lay(srcRoot, root, rel string) error {
+// in the target directory and published only after it has been flushed.
+func lay(srcRoot, root, rel string, managed bool, journal *SyncJournal) error {
 	src, err := openFile(srcRoot, rel)
 	if err != nil {
 		return err
@@ -280,9 +278,27 @@ func lay(srcRoot, root, rel string) error {
 	}
 	defer unix.Close(dirfd)
 	name := path.Base(rel)
-	tmpName, tmp, err := createTemp(dirfd, name, filepath.Join(root, dir), true)
+	tmpName, tmp, err := createTemp(dirfd, name)
 	if err != nil {
 		return err
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = unix.Unlinkat(dirfd, tmpName, 0)
+		}
+	}()
+	if journal != nil {
+		var st unix.Stat_t
+		if err := unix.Fstat(int(tmp.Fd()), &st); err != nil {
+			tmp.Close()
+			return err
+		}
+		pending := PendingCopy{File: rel, Temporary: path.Join(dir, tmpName), Device: uint64(st.Dev), Inode: st.Ino}
+		if err := journal.Pending(pending); err != nil {
+			tmp.Close()
+			return err
+		}
 	}
 	// No release file is larger than a whole bundle unpacks to.
 	if info.Size() > maxBytes {
@@ -295,7 +311,7 @@ func lay(srcRoot, root, rel string) error {
 		}
 	}
 	if err == nil {
-		err = tmp.Chmod(info.Mode().Perm())
+		err = tmp.Chmod(info.Mode() & 0o755)
 	}
 	if err == nil {
 		err = syncFile(tmp)
@@ -303,101 +319,93 @@ func lay(srcRoot, root, rel string) error {
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil {
+	if err != nil {
+		return err
+	}
+	if managed {
 		err = replace(dirfd, tmpName, name, root, rel)
+	} else {
+		err = renameNew(dirfd, tmpName, dirfd, name, unix.RENAME_NOREPLACE)
+		// ENOTSUP and EOPNOTSUPP are the same errno on Linux.
+		switch err {
+		case unix.ENOSYS, unix.EINVAL, unix.EOPNOTSUPP:
+			err = linkNew(dirfd, tmpName, dirfd, name, 0)
+			if err == nil {
+				// Until unlink completes, both names refer to the journaled inode.
+				err = unix.Unlinkat(dirfd, tmpName, 0)
+			}
+		}
+		if err != nil {
+			err = &os.PathError{Op: "publish new release file without replacing an existing entry", Path: filepath.Join(root, rel), Err: err}
+		}
 	}
 	if err != nil {
-		_ = unix.Unlinkat(dirfd, tmpName, 0)
 		return err
+	}
+	published = true
+	if !managed && journal != nil {
+		return journal.Created(rel)
 	}
 	return nil
 }
 
-// createTemp creates a new file in dirfd for name, and never opens one
-// that exists: a name planted in advance, a link included, is not used.
-// The name starts with a dot and does not end like name, so the include of
-// a configuration directory (conf.d/*.conf) never reads a half written
-// file. With reclaim, for a caller that holds the lock of the installation,
-// the first name tried is always the same and a file a killed run left
-// there is removed, so such files never pile up in the tree. Without it,
-// as for the state files that the commands which only read the manifest
-// write too, a name in use may be the file another kvsctl is writing, and
-// it is left alone: every name is a random one.
-func createTemp(dirfd int, name, dir string, reclaim bool) (string, *os.File, error) {
-	for try := range 100 {
-		tmpName := tempName(name)
-		if !reclaim || try > 1 {
-			tmpName += "-" + fmt.Sprintf("%0*x", tempSuffixLen, rand.Uint64())
-		}
-		fd, err := openat(dirfd, tmpName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC)
-		switch {
-		case err == nil:
-			return tmpName, os.NewFile(uintptr(fd), filepath.Join(dir, tmpName)), nil
-		case errors.Is(err, unix.EEXIST):
-			if reclaim && try == 0 {
-				// Unlinking never follows a link, and a directory
-				// stays: the next names are random ones then.
-				_ = unix.Unlinkat(dirfd, tmpName, 0)
-			}
-		default:
-			return "", nil, &os.PathError{Op: "create", Path: filepath.Join(dir, tmpName), Err: err}
-		}
+// Keep the reservation short and distinct from the destination, even when a
+// release ships a file whose name looks like a temporary.
+func tempPrefix(name string) string {
+	if strings.HasPrefix(name, ".kvsctl-") {
+		return ".kvsctl."
 	}
-	return "", nil, fmt.Errorf("no free temporary name for %s in %s", name, dir)
+	return ".kvsctl-"
 }
 
-// tempName is the first name createTemp gives the temporary file of name.
-func tempName(name string) string { return "." + name + ".kvsctl" }
-
-// tempSuffixLen is the width of the random number createTemp writes after
-// the dash of a temporary name: 64 bits in lowercase hexadecimal, zeros
-// first. Only that exact width is taken for kvsctl's, so a name an operator
-// gives, such as .site.conf.kvsctl-old or .site.conf.kvsctl-20261007, stays
-// the operator's.
-const tempSuffixLen = 16
-
-// temporaryOf reports whether entry is a name createTemp gives a temporary
-// file of name: tempName(name), alone or with a dash and tempSuffixLen
-// lowercase hexadecimal digits. Any other name is the operator's.
-func temporaryOf(entry, name string) bool {
-	rest, ok := strings.CutPrefix(entry, tempName(name))
-	if !ok {
-		return false
-	}
-	if rest == "" {
-		return true
-	}
-	suffix, ok := strings.CutPrefix(rest, "-")
-	if !ok || len(suffix) != tempSuffixLen {
-		return false
-	}
-	return strings.Trim(suffix, "0123456789abcdef") == ""
-}
-
-// dropTemporaries removes from dirfd, dir by name, the temporary files of
-// name: a run killed while it laid name left one there. Sync calls it for
-// the files it removes, which no later lay reclaims, so the directory they
-// leave empty can go, or take the file a release lays in its place. A
-// directory under such a name is not kvsctl's, and stays.
-func dropTemporaries(dirfd int, name, dir string) error {
-	fd, err := openat(dirfd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC)
+// Use the open directory as CreateTemp's parent. Looking it up again
+// through root would let a concurrent directory change redirect the copy.
+func createTemp(dirfd int, name string) (string, *os.File, error) {
+	tmp, err := os.CreateTemp("/proc/self/fd/"+strconv.Itoa(dirfd), tempPrefix(name)+"*")
 	if err != nil {
-		return &os.PathError{Op: "open", Path: dir, Err: err}
+		return "", nil, err
 	}
-	listing := os.NewFile(uintptr(fd), dir)
-	entries, err := listing.Readdirnames(-1)
-	listing.Close()
+	return path.Base(tmp.Name()), tmp, nil
+}
+
+// PendingCopy names the temporary reserved in the destination directory.
+// Its inode distinguishes it from a local file later given the same name.
+type PendingCopy struct {
+	File      string `json:"file"`
+	Temporary string `json:"temporary"`
+	Device    uint64 `json:"device"`
+	Inode     uint64 `json:"inode"`
+}
+
+// RemovePending removes only the file named and identified by this journal.
+func RemovePending(root string, pending PendingCopy) error {
+	file, tmp := pending.File, pending.Temporary
+	base, name := path.Base(tmp), path.Base(file)
+	suffix, ok := strings.CutPrefix(base, tempPrefix(name))
+	if !ok {
+		// Journals from earlier runs used the final name in the prefix.
+		suffix, ok = strings.CutPrefix(base, "."+name+".kvsctl-")
+	}
+	if !IsFile(file) || path.Clean(tmp) != tmp || path.Dir(tmp) != path.Dir(file) || !ok || suffix == "" {
+		return fmt.Errorf("invalid journal temporary %q for %q", tmp, file)
+	}
+	fd, err := openDir(root, path.Dir(tmp), false)
+	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if !temporaryOf(entry, name) {
-			continue
-		}
-		err := unix.Unlinkat(dirfd, entry, 0)
-		if err != nil && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EISDIR) {
-			return &os.PathError{Op: "remove", Path: filepath.Join(dir, entry), Err: err}
-		}
+	defer unix.Close(fd)
+	st, err := statAt(fd, path.Base(tmp), filepath.Join(root, tmp))
+	if err != nil || st == nil {
+		return err
+	}
+	if uint64(st.Dev) != pending.Device || st.Ino != pending.Inode || st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil
+	}
+	if err := unix.Unlinkat(fd, path.Base(tmp), 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return err
 	}
 	return nil
 }
@@ -422,30 +430,34 @@ func replace(dirfd int, from, to, root, rel string) error {
 	return nil
 }
 
-// remove removes the file rel below root, with the temporary files of it a
-// killed run left beside it, and then the directories it leaves empty, up
-// to root; needed are the directories the files being laid need, which
-// stay. A file that is gone, or whose directory is gone or is now a file,
+// remove removes the file rel below root and prunes empty directories up to
+// a directory that the files being laid need. A file that is gone, or whose directory is gone or is now a file,
 // is no error: nothing of it is left to remove. A directory standing where
 // the file was goes when it is empty and stays when it holds something,
 // which is not the release's to remove; Conflicts tells when the release
 // needs its place. A link on the way is an error: kvsctl does not reach
 // through it. It returns the nearest directory still standing, the one that
 // lost an entry.
-func remove(root, rel string, needed map[string]bool) (string, error) {
+func remove(root, rel string, needed, incoming map[string]bool) (string, error) {
 	dir := path.Dir(rel)
 	dirfd, err := openDir(root, dir, false)
-	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOTDIR) {
+	if errors.Is(err, fs.ErrNotExist) {
+		// The leaf directory may already be gone while an empty managed
+		// ancestor still stands where the incoming release needs a file.
+		for ancestor := dir; ancestor != "."; ancestor = path.Dir(ancestor) {
+			if incoming[ancestor] {
+				return pruneParents(root, dir, needed), nil
+			}
+		}
+		return "", nil
+	}
+	if errors.Is(err, unix.ENOTDIR) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
 	name := path.Base(rel)
-	if err := dropTemporaries(dirfd, name, filepath.Join(root, dir)); err != nil {
-		unix.Close(dirfd)
-		return "", err
-	}
 	err = unix.Unlinkat(dirfd, name, 0)
 	if errors.Is(err, unix.EISDIR) {
 		err = nil
@@ -461,22 +473,25 @@ func remove(root, rel string, needed map[string]bool) (string, error) {
 	if err != nil && !errors.Is(err, unix.ENOENT) {
 		return "", &os.PathError{Op: "remove", Path: filepath.Join(root, rel), Err: err}
 	}
+	return pruneParents(root, dir, needed), nil
+}
+
+func pruneParents(root, dir string, needed map[string]bool) string {
 	// The directories the removal left empty go too, nearest first, up to
 	// one the files being laid need.
 	for dir != "." && !needed[dir] {
 		parent, name := path.Dir(dir), path.Base(dir)
 		pfd, err := openDir(root, parent, false)
-		if err != nil {
-			break
+		if err == nil {
+			err = unix.Unlinkat(pfd, name, unix.AT_REMOVEDIR)
+			unix.Close(pfd)
 		}
-		err = unix.Unlinkat(pfd, name, unix.AT_REMOVEDIR)
-		unix.Close(pfd)
-		if err != nil {
+		if err != nil && !errors.Is(err, unix.ENOENT) {
 			break
 		}
 		dir = parent
 	}
-	return filepath.Join(root, dir), nil
+	return filepath.Join(root, dir)
 }
 
 // ConflictError lists what keeps the files of a release from taking their
@@ -489,25 +504,28 @@ func (e *ConflictError) Error() string {
 	return strings.Join(e.Problems, "; ")
 }
 
-// Conflicts lists what keeps files, the release files about to be laid over
-// root, from taking their place, previous being the files of the release in
-// place: a link, or a file the operator keeps, standing where a directory
-// must go; a directory holding anything else than files of previous and
-// the temporary files a killed run left beside them, an empty directory of
-// the operator's included, where a file must go; a link on the way to a
-// file to remove. A file of the release in place is never
-// in the way, since Sync removes the ones the new set drops before it lays
-// it, and a link or a file at the place of a release file is replaced.
-// Sync refuses to start while the list is not empty, so a caller that
-// checks first, such as a plan reading the files of a bundle with
-// ReadBundle, changes nothing either.
+// Conflicts reports obstacles before Sync starts removing or laying files.
+// Only paths owned by the previous release can give way. A directory the
+// release used is replaceable only when it holds no local entries.
 func Conflicts(root string, files, previous []string) []string {
+	// Older state can name local files even when the new bundle is valid.
+	for _, list := range [][]string{files, previous} {
+		for _, name := range list {
+			if !releasePath(name, false) {
+				return []string{fmt.Sprintf("%q is outside the release paths", name)}
+			}
+		}
+	}
 	shipped := map[string]bool{}
 	for _, f := range files {
 		shipped[f] = true
 	}
 	old := map[string]bool{}
+	oldDirs := map[string]bool{}
 	for _, f := range previous {
+		for dir := path.Dir(f); dir != "."; dir = path.Dir(dir) {
+			oldDirs[dir] = true
+		}
 		old[f] = true
 	}
 	var problems []string
@@ -555,11 +573,23 @@ func Conflicts(root string, files, previous []string) []string {
 			continue
 		}
 		info, err := os.Lstat(filepath.Join(root, f))
-		if err != nil || !info.IsDir() {
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				report(fmt.Sprintf("%s cannot be read: %v", filepath.Join(root, f), err))
+			}
 			continue
 		}
-		if other := foreign(root, f, old); other != "" {
-			report(fmt.Sprintf("%s is a directory, where the release lays a file, and it holds %s, which the release does not ship: move it away", filepath.Join(root, f), other))
+		if info.IsDir() {
+			if other := foreign(root, f, old); other != "" {
+				report(fmt.Sprintf("%s is a directory, where the release lays a file, and it holds %s, which the release does not ship: move it away", filepath.Join(root, f), other))
+				continue
+			}
+			if oldDirs[f] {
+				continue
+			}
+		}
+		if !old[f] {
+			report(fmt.Sprintf("%s is a local file the previous release did not own: move it away", filepath.Join(root, f)))
 		}
 	}
 	for _, f := range previous {
@@ -570,32 +600,16 @@ func Conflicts(root string, files, previous []string) []string {
 	return problems
 }
 
-// foreign is the first entry below dir that Sync would leave in place, ""
-// when there is none: anything but a file of old or a temporary file of
-// one, a directory included unless a file of old lies below it. Sync
-// removes the files of old with the temporary files a killed run left
-// beside them (remove), and the directories they leave empty, so dir is
-// then empty and takes a file. A temporary file is kvsctl's own, never the
-// operator's: counting it would refuse every recover of a run killed while
-// it laid a file in a directory that replaced a file.
+// foreign is the first entry in a managed directory that would survive
+// removal of the previous release files. Unrecorded temporaries are local.
 func foreign(root, dir string, old map[string]bool) string {
 	holders := map[string]bool{}
-	laid := map[string][]string{}
 	for f := range old {
 		if strings.HasPrefix(f, dir+"/") {
-			laid[path.Dir(f)] = append(laid[path.Dir(f)], path.Base(f))
 			for d := path.Dir(f); d != dir; d = path.Dir(d) {
 				holders[d] = true
 			}
 		}
-	}
-	temporary := func(rel string) bool {
-		for _, name := range laid[path.Dir(rel)] {
-			if temporaryOf(path.Base(rel), name) {
-				return true
-			}
-		}
-		return false
 	}
 	top := filepath.Join(root, dir)
 	found := ""
@@ -614,8 +628,6 @@ func foreign(root, dir string, old map[string]bool) string {
 		case d.IsDir() && holders[rel]:
 			return nil
 		case d.Type().IsRegular() && old[rel]:
-			return nil
-		case !d.IsDir() && temporary(rel):
 			return nil
 		}
 		found = p

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -643,7 +644,20 @@ func (i *Instance) LoadState() (*State, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("%s: %w", i.statePath(), err)
 	}
+	// Older clients recorded local files when git tracked them. Leave those
+	// files in place and drop their records on the next normal state write.
+	s.Files = managedFiles(s.Files)
+	s.PreviousFiles = managedFiles(s.PreviousFiles)
+	for name := range s.Checksums {
+		if !release.IsFile(name) {
+			delete(s.Checksums, name)
+		}
+	}
 	return &s, nil
+}
+
+func managedFiles(files []string) []string {
+	return slices.DeleteFunc(files, func(name string) bool { return !release.IsFile(name) })
 }
 
 // SaveState writes the state atomically.
@@ -672,7 +686,7 @@ func (i *Instance) TrackedFiles() ([]string, error) {
 	}
 	var files []string
 	for _, f := range strings.Split(string(out), "\x00") {
-		if f != "" {
+		if release.IsFile(f) {
 			files = append(files, f)
 		}
 	}

@@ -211,3 +211,140 @@ func TestChecksumsAndVerify(t *testing.T) {
 		t.Error("a missing release file must fail the checksums")
 	}
 }
+
+func TestBundlePaths(t *testing.T) {
+	for _, name := range []string{
+		"local.txt", "kvsctl/state.json", ".git/config", "docker-extra/file", "README.md/extra",
+		"docker/.env", "docker/.env/extra", "docker/.kvs-scripts.lock",
+		"docker/compose.override.yml", "docker/compose.override.yaml",
+		"docker/docker-compose.override.yml", "docker/docker-compose.override.yaml",
+		"docker/kvs-archive/file", "docker/data/file", "docker/nginx/ssl/file",
+		"docker/nginx/dhparam.pem", "docker/nginx/conf.d/site.conf",
+		"docker/multi-site/sites/site/file", "docker/multi-site/caddy/sites/site.caddy",
+		"docker/import/dump", "docker/mariadb/init/01-kvs-import.sql", "docker/geoip/country.mmdb",
+		"docker/geoip/country.mmdb.gz", "docker/geoip/country.tar.gz", "docker/geoip/.GeoLite2-Country.download.fixture",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			bundle := filepath.Join(dir, "bundle")
+			sum := makeBundle(t, bundle, map[string]string{name: "fixture"})
+			_, _, readErr := ReadBundle(context.Background(), "file://"+bundle, sum, 0, 0)
+			_, extractErr := Extract(bundle, filepath.Join(dir, "stage"))
+			for _, err := range []error{readErr, extractErr} {
+				if err == nil || !strings.Contains(err.Error(), name) {
+					t.Errorf("expected path refusal: %v", err)
+				}
+			}
+		})
+	}
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "allowed")
+	files := map[string]string{"docker/RELEASE": "", "docker/docker-compose.release.yml": "", "docker/.env.example": "", "docker/nginx/conf.d/.gitignore": "", "docker/multi-site/caddy/sites/site.caddy.template": "", "conf/site": "", "README.md": ""}
+	makeBundle(t, bundle, files)
+	if got, err := Extract(bundle, filepath.Join(dir, "stage")); err != nil || len(got) != len(files) {
+		t.Fatalf("release paths: %v, %v", got, err)
+	}
+}
+
+func TestSyncChecksPreviouslyRecordedPaths(t *testing.T) {
+	const local = "docker/.env"
+	root, src := t.TempDir(), t.TempDir()
+	writeTree(t, root, map[string]string{local: "site", "docker/setup.sh": "old"})
+	writeTree(t, src, map[string]string{local: "fixture", "docker/setup.sh": "new"})
+	paths := []string{"docker/setup.sh"}
+	legacy := []string{"docker/setup.sh", local}
+	for _, lists := range [][2][]string{{paths, legacy}, {legacy, paths}} {
+		if err := Sync(src, root, lists[0], lists[1]); err == nil || !strings.Contains(err.Error(), local) {
+			t.Errorf("unsafe saved file list: %v", err)
+		}
+		if got := content(t, filepath.Join(root, "docker/setup.sh")); got != "old" {
+			t.Errorf("other file changed: %q", got)
+		}
+		if got := content(t, filepath.Join(root, local)); got != "site" {
+			t.Errorf("instance file changed: %q", got)
+		}
+	}
+}
+
+func TestExtractChecksAllHeadersBeforeWriting(t *testing.T) {
+	for _, name := range []string{"local.txt", `conf/guide\chapter`, `conf/bad\name/../guide`} {
+		dir := t.TempDir()
+		bundle := filepath.Join(dir, "bundle")
+		makeTar(t, bundle, file("README.md", 0644, "new"), file(name, 0644, "local"))
+		f, err := os.Open(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = listBundle(f, nil, 0)
+		f.Close()
+		if err == nil {
+			t.Fatalf("accepted %q when planning", name)
+		}
+		dest := t.TempDir()
+		writeTree(t, dest, map[string]string{"README.md": "keep"})
+		if _, err := Extract(bundle, dest); err == nil {
+			t.Fatalf("accepted %q when extracting", name)
+		}
+		if got := content(t, filepath.Join(dest, "README.md")); got != "keep" {
+			t.Fatalf("the first entry replaced existing content: %q", got)
+		}
+	}
+}
+
+func TestBundleConflictingTypes(t *testing.T) {
+	f := file("conf/site", 0o644, "policy")
+	child := file("conf/site/local/settings", 0o644, "settings")
+	d := tarEntry{hdr: tar.Header{Name: "conf/site/", Typeflag: tar.TypeDir}}
+	for _, tc := range []struct {
+		name          string
+		first, second tarEntry
+	}{
+		{"file then child", f, child}, {"child then file", child, f},
+		{"file then directory", f, d}, {"directory then file", d, f},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			bundle, stage := filepath.Join(root, "bundle"), filepath.Join(root, "stage")
+			makeTar(t, bundle, file("README.md", 0o644, "first"), tc.first, tc.second)
+			data, err := os.ReadFile(bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := fmt.Sprintf("%x", sha256.Sum256(data))
+			_, _, readErr := ReadBundle(context.Background(), "file://"+bundle, sum, 0, 0)
+			_, extractErr := Extract(bundle, stage)
+			for _, err := range []error{readErr, extractErr} {
+				if err == nil || !strings.Contains(err.Error(), "conf/site") {
+					t.Errorf("expected conflicting path in error, got %v", err)
+				}
+			}
+			if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("staging began before validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewReleaseFileConflictsWithLocalFile(t *testing.T) {
+	const policy = "docker/php/media-security-policy.xml"
+	root, stage := t.TempDir(), t.TempDir()
+	files, previous := []string{"README.md", policy}, []string{"README.md", "LICENSE"}
+	writeTree(t, root, map[string]string{"README.md": "installed", "LICENSE": "installed"})
+	writeTree(t, stage, map[string]string{"README.md": "replacement", policy: "release policy"})
+	if problems := Conflicts(root, files, previous); len(problems) != 0 {
+		t.Fatal(problems)
+	}
+	writeTree(t, root, map[string]string{policy: "local policy"})
+	if problems := Conflicts(root, files, previous); len(problems) != 1 || !strings.Contains(problems[0], policy) {
+		t.Errorf("plan missed local file: %v", problems)
+	}
+	var conflict *ConflictError
+	if err := Sync(stage, root, files, previous); !errors.As(err, &conflict) || !strings.Contains(err.Error(), policy) {
+		t.Errorf("sync missed local file: %v", err)
+	}
+	for name, want := range map[string]string{policy: "local policy", "README.md": "installed", "LICENSE": "installed"} {
+		if got := content(t, filepath.Join(root, name)); got != want {
+			t.Errorf("%s changed to %q", name, got)
+		}
+	}
+}

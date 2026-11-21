@@ -713,8 +713,12 @@ func (r *Runner) planBundle(ctx context.Context, plan *Plan, state *instance.Sta
 		plan.Blockers = append(plan.Blockers, fmt.Sprintf("the bundle of %s could not be read (%s): run the command again once it can be downloaded", plan.Target.Version, firstLine(err.Error())))
 		return nil
 	}
-	if problems := release.Conflicts(r.Inst.Root, files, state.Files); len(problems) > 0 {
-		plan.Blockers = append(plan.Blockers, fmt.Sprintf("%s cannot lay its files: %s", plan.Target.Version, strings.Join(problems, "; ")))
+	// A missing inventory already blocks the plan. Until it is restored,
+	// existing files cannot be classified as managed or local.
+	if len(state.Files) != 0 {
+		if problems := release.Conflicts(r.Inst.Root, files, state.Files); len(problems) > 0 {
+			plan.Blockers = append(plan.Blockers, fmt.Sprintf("%s cannot lay its files: %s", plan.Target.Version, strings.Join(problems, "; ")))
+		}
 	}
 	compose, ok := kept[composeFile]
 	if !ok {

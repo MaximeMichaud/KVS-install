@@ -13,7 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/MaximeMichaud/KVS-install/cli/internal/instance"
+	"github.com/MaximeMichaud/KVS-install/cli/internal/release"
 )
 
 // An upgrade killed while it laid the files: nothing was started, so
@@ -57,7 +60,18 @@ func TestRecoverAfterAKillInATypeChange(t *testing.T) {
 		rel{version: "1.1.0", files: map[string]string{"conf/extra/site.conf": "file in 1.1.0\n"}})
 	s.cutUpgrade(s.runner(quick), isStep(KindStepDone, StepApply))
 	// The tree a SIGKILL during the lay of site.conf leaves.
-	if err := os.Rename(filepath.Join(s.root, "conf/extra/site.conf"), filepath.Join(s.root, "conf/extra/.site.conf.kvsctl")); err != nil {
+	j := s.journal()
+	file := "conf/extra/site.conf"
+	tmp := "conf/extra/.site.conf.kvsctl-1234567890"
+	var st unix.Stat_t
+	if err := unix.Stat(filepath.Join(s.root, file), &st); err != nil {
+		t.Fatal(err)
+	}
+	j.Pending = &release.PendingCopy{File: file, Temporary: tmp, Device: uint64(st.Dev), Inode: st.Ino}
+	if err := s.runner(quick).Inst.SaveJournal(j); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(s.root, file), filepath.Join(s.root, tmp)); err != nil {
 		t.Fatal(err)
 	}
 	if j := s.journal(); j == nil || j.Phase != instance.PhaseApply || !j.Applied {
@@ -74,6 +88,126 @@ func TestRecoverAfterAKillInATypeChange(t *testing.T) {
 	s.fresh()
 	if err := s.recover(s.runner(quick)); err == nil || err.Error() != "nothing to recover: no run was interrupted" {
 		t.Errorf("a second recover: %v", err)
+	}
+}
+
+// A stop between linkat and unlinkat leaves both names and only a pending
+// journal record. Recovery unlinks the temporary and checks the final bytes.
+func TestRecoverAfterLinkBeforeUnlink(t *testing.T) {
+	const file = "conf/extra/site.conf"
+	const tmp = "conf/extra/.kvsctl-1234567890"
+	s := newStack(t, "", rel{version: "1.0.0", files: map[string]string{file: "delivery"}},
+		rel{version: "1.1.0", files: map[string]string{"conf/extra": "installed"}})
+	if err := s.upgrade(s.runner(quick)); err != nil {
+		t.Fatal(err)
+	}
+	s.fresh()
+	s.rep.cut = isStep(KindStepStart, StepApply)
+	cutRun(t, s.rep, func() { _ = s.rollback(s.runner(quick)) })
+	j := s.journal()
+	if j == nil || !j.Applied || j.Pending != nil || len(j.Created) != 0 {
+		t.Fatalf("unexpected journal: %+v", j)
+	}
+	dir := filepath.Join(s.root, "conf/extra")
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	temp := filepath.Join(s.root, tmp)
+	if err := os.WriteFile(temp, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(temp, &st); err != nil {
+		t.Fatal(err)
+	}
+	j.Pending = &release.PendingCopy{File: file, Temporary: tmp, Device: uint64(st.Dev), Inode: st.Ino}
+	if err := s.runner(quick).Inst.SaveJournal(j); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(temp, []byte("delivery"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(temp, filepath.Join(s.root, file)); err != nil {
+		t.Fatal(err)
+	}
+
+	s.fresh()
+	if err := s.recover(s.runner(quick)); err != nil {
+		t.Fatal(err)
+	}
+	s.back("1.1.0")
+	if got := s.file("conf/extra"); got != "installed" {
+		t.Fatalf("restored conf/extra = %q", got)
+	}
+}
+
+func TestRecoverInterruptedRollbackTargetOnly(t *testing.T) {
+	const policy = "docker/policy.xml"
+	for _, kind := range []string{"local", "delivered", "recorded creation"} {
+		t.Run(kind, func(t *testing.T) {
+			s := newStack(t, "", rel{version: "1.0.0", files: map[string]string{policy: "delivered"}}, rel{version: "1.1.0"})
+			if err := s.upgrade(s.runner(quick)); err != nil {
+				t.Fatal(err)
+			}
+			s.fresh()
+			step := KindStepStart
+			if kind == "recorded creation" {
+				step = KindStepDone
+			}
+			s.rep.cut = isStep(step, StepApply)
+			cutRun(t, s.rep, func() { _ = s.rollback(s.runner(quick)) })
+			j := s.journal()
+			if j == nil || !j.Applied || slices.Contains(j.Created, policy) != (kind == "recorded creation") {
+				t.Fatalf("unexpected journal: %+v", j)
+			}
+			data := "local"
+			if kind == "delivered" {
+				data = "delivered"
+			}
+			p := filepath.Join(s.root, policy)
+			if err := os.WriteFile(p, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s.fresh()
+			if err := s.recover(s.runner(quick)); err != nil {
+				t.Fatal(err)
+			}
+			s.back("1.1.0")
+			if kind == "local" {
+				if s.file(policy) != data || !strings.Contains(strings.Join(s.rep.notices(), "\n"), "warning: keeping "+policy) {
+					t.Fatalf("policy=%q, notices=%v", s.file(policy), s.rep.notices())
+				}
+				if err := s.rollback(s.runner(quick)); err == nil || !strings.Contains(err.Error(), policy) {
+					t.Fatalf("next rollback: %v", err)
+				}
+			} else if _, err := os.Lstat(p); !os.IsNotExist(err) {
+				t.Fatalf("owned target remains: %v", err)
+			}
+		})
+	}
+}
+
+// A recovery can itself be interrupted after restoring an old-only file.
+func TestRecoverWithRestoredFileFromInstalledRelease(t *testing.T) {
+	const path = "conf/policy.xml"
+	s := newStack(t, "", rel{version: "1.0.0", files: map[string]string{path: "original"}}, rel{version: "1.1.0"})
+	s.cutUpgrade(s.runner(quick), isStep(KindStepDone, StepApply))
+	if err := os.MkdirAll(filepath.Join(s.root, "conf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.root, path), []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.fresh()
+	if err := s.recover(s.runner(quick)); err != nil {
+		t.Fatal(err)
+	}
+	s.back("1.0.0")
+	if got := s.file(path); got != "original" {
+		t.Fatalf("restored file: %q", got)
 	}
 }
 

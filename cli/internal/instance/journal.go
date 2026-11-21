@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/MaximeMichaud/KVS-install/cli/internal/release"
 )
 
 // The runs a journal records, named the way the history of the state
@@ -83,7 +85,7 @@ type Journal struct {
 	// Env is set on a restore that also puts back the .env the archive
 	// carries.
 	Env bool `json:"env,omitempty"`
-	// Applied is set once release files were laid over the installation.
+	// Applied is set before the first release file may change.
 	Applied bool `json:"applied,omitempty"`
 	// ComposeStarted is set once a docker compose up process started.
 	ComposeStarted bool `json:"compose_started,omitempty"`
@@ -102,6 +104,10 @@ type Journal struct {
 	RestoreDB bool   `json:"restore_db,omitempty"`
 	// Files lists the release files of To, relative to the root.
 	Files []string `json:"files,omitempty"`
+	// Pending is the temporary currently being filled or published.
+	Pending *release.PendingCopy `json:"pending,omitempty"`
+	// Created lists target-only files successfully published by this run.
+	Created []string `json:"created,omitempty"`
 	// ImagesAfter are the variant settings the run writes to .env,
 	// KVS_<SERVICE>_IMAGE to ref@digest and MARIADB_VERSION on a series
 	// change, and ImagesBefore what .env held for those keys and for the
@@ -177,6 +183,7 @@ func (i *Instance) LoadJournal() (*Journal, error) {
 	if err := json.Unmarshal(data, &j); err != nil {
 		return nil, fmt.Errorf("%s: %w", i.journalPath(), err)
 	}
+	j.Files = managedFiles(j.Files)
 	return &j, nil
 }
 

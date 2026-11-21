@@ -647,3 +647,18 @@ func TestPromoteIsIdempotent(t *testing.T) {
 		t.Error("the staging directory is still there")
 	}
 }
+
+func TestLegacySnapshotWithLocalFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "docker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"README.md", "docker/compose.override.yaml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !holds(dir, []string{"README.md"}) {
+		t.Fatal("failed to recognize a legacy snapshot with a local file")
+	}
+}

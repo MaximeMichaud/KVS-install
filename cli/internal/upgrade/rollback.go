@@ -376,7 +376,17 @@ func (r *Runner) putBack(state *instance.State, j *instance.Journal) error {
 		// target ships is what may be on disk.
 		laid, _ = listFiles(r.releaseDir(j.To))
 	}
-	if err := release.Sync(prev, r.Inst.Root, state.Files, laid); err != nil {
+	if j.Pending != nil {
+		if err := release.RemovePending(r.Inst.Root, *j.Pending); err != nil {
+			return err
+		}
+	}
+	target := r.keptDir(j.To, laid)
+	if j.Action == instance.ActionUpgrade && j.To == j.From {
+		target = r.stagingDir(j.To)
+	}
+	owned := release.RecoveryFiles(r.Inst.Root, target, state.Files, laid, j.Created, r.notice)
+	if err := r.syncFiles(prev, state.Files, owned, j); err != nil {
 		return fmt.Errorf("lay the files of %s back: %w", state.Label(j.From), err)
 	}
 	if err := r.setComposeFile(j.ComposeFileBefore); err != nil {
@@ -687,7 +697,13 @@ func (r *Runner) Rollback(ctx context.Context, state *instance.State) (err error
 	}
 
 	r.start(StepApply, "files of "+state.Label(state.Previous))
-	if err := release.Sync(prevDir, r.Inst.Root, state.PreviousFiles, state.Files); err != nil {
+	if err := r.syncFiles(prevDir, state.PreviousFiles, state.Files, j); err != nil {
+		var conflict *release.ConflictError
+		if errors.As(err, &conflict) {
+			r.failStep(StepApply, err)
+			r.giveUp(ctx, j)
+			return fmt.Errorf("no release files were changed, the stack is still on %s: %w", state.Label(state.Current), err)
+		}
 		return partWay(StepApply, err)
 	}
 	if err := r.setComposeFile(composeFile); err != nil {

@@ -69,7 +69,7 @@ func TestExtractSyncAndSnapshotKeepModes(t *testing.T) {
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "b.tar.gz")
 	makeTar(t, bundle,
-		file("docker/phpmyadmin/init.sh", 0o755, "#!/bin/sh\n"),
+		file("docker/phpmyadmin/init.sh", 0o777, "#!/bin/sh\n"),
 		file("docker/php/kvs.ini", 0o644, "memory_limit=512M\n"),
 		file("docker/secret.example", 0o600, "x\n"))
 	rel := filepath.Join(dir, "rel")
@@ -84,6 +84,10 @@ func TestExtractSyncAndSnapshotKeepModes(t *testing.T) {
 		}
 	}
 	root := mkdir(t, filepath.Join(dir, "root"))
+	// A previously staged release may still have a group-writable script.
+	if err := os.Chmod(filepath.Join(rel, "docker/phpmyadmin/init.sh"), 0o777); err != nil {
+		t.Fatal(err)
+	}
 	// The files in place had other modes: the release decides.
 	writeTree(t, root, map[string]string{"docker/phpmyadmin/init.sh": "old", "docker/php/kvs.ini": "old"})
 	os.Chmod(filepath.Join(root, "docker/phpmyadmin/init.sh"), 0o600)
@@ -139,31 +143,31 @@ func TestExtractRefusesABundleOverTheByteBudget(t *testing.T) {
 	maxBytes = 64
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "b.tar.gz")
-	makeTar(t, bundle, file("a", 0o644, strings.Repeat("a", 40)), file("b", 0o644, strings.Repeat("b", 40)))
+	makeTar(t, bundle, file("conf/a", 0o644, strings.Repeat("a", 40)), file("conf/b", 0o644, strings.Repeat("b", 40)))
 	if _, err := Extract(bundle, filepath.Join(dir, "out")); err == nil || !strings.Contains(err.Error(), "bundle unpacks to more than") {
 		t.Errorf("a bundle over the byte budget: %v", err)
 	}
-	makeTar(t, bundle, file("a", 0o644, strings.Repeat("a", 30)), file("b", 0o644, strings.Repeat("b", 30)))
+	makeTar(t, bundle, file("conf/a", 0o644, strings.Repeat("a", 30)), file("conf/b", 0o644, strings.Repeat("b", 30)))
 	if _, err := Extract(bundle, filepath.Join(dir, "fits")); err != nil {
 		t.Errorf("a bundle within the byte budget: %v", err)
 	}
 	// Sync and Snapshot never copy a file larger than a bundle can unpack
 	// to: the release directory or the tree changed since.
 	root := mkdir(t, filepath.Join(dir, "root"))
-	writeTree(t, filepath.Join(dir, "big"), map[string]string{"a": strings.Repeat("x", 65)})
-	if err := Sync(filepath.Join(dir, "big"), root, []string{"a"}, nil); err == nil || !strings.Contains(err.Error(), "larger than any release file") {
+	writeTree(t, filepath.Join(dir, "big"), map[string]string{"conf/a": strings.Repeat("x", 65)})
+	if err := Sync(filepath.Join(dir, "big"), root, []string{"conf/a"}, nil); err == nil || !strings.Contains(err.Error(), "larger than any release file") {
 		t.Errorf("Sync of a file over the budget: %v", err)
 	}
-	if err := Snapshot(filepath.Join(dir, "big"), filepath.Join(dir, "snap"), []string{"a"}); err == nil || !strings.Contains(err.Error(), "larger than any release file") {
+	if err := Snapshot(filepath.Join(dir, "big"), filepath.Join(dir, "snap"), []string{"conf/a"}); err == nil || !strings.Contains(err.Error(), "larger than any release file") {
 		t.Errorf("Snapshot of a file over the budget: %v", err)
 	}
 	// Nor is such a file hashed: Checksums refuses it, and Verify lists it
 	// as changed even when the sum of its content is the one on record.
-	if _, err := Checksums(filepath.Join(dir, "big"), []string{"a"}); !errors.Is(err, errOversized) {
+	if _, err := Checksums(filepath.Join(dir, "big"), []string{"conf/a"}); !errors.Is(err, errOversized) {
 		t.Errorf("Checksums of a file over the budget: %v", err)
 	}
 	whole := sha256.Sum256([]byte(strings.Repeat("x", 65)))
-	if changed, err := Verify(filepath.Join(dir, "big"), map[string]string{"a": hex.EncodeToString(whole[:])}); err != nil || !slices.Equal(changed, []string{"a"}) {
+	if changed, err := Verify(filepath.Join(dir, "big"), map[string]string{"conf/a": hex.EncodeToString(whole[:])}); err != nil || !slices.Equal(changed, []string{"conf/a"}) {
 		t.Errorf("Verify of a file over the budget = %q, %v; want it listed", changed, err)
 	}
 }

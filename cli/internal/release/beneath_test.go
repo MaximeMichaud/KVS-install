@@ -79,8 +79,7 @@ func TestSyncReplacesLinksPlantedInAContainerDirectory(t *testing.T) {
 	writeTree(t, root, map[string]string{conf: "old", "docker/setup.sh": "old setup"})
 	files := []string{conf, "docker/setup.sh"}
 	confDir := filepath.Join(root, "docker/nginx/conf.d")
-	// The temporary name kvsctl used, the first one it uses now, which
-	// anyone can predict, and the file itself.
+	// Two legacy temporary names and the file itself.
 	planted := map[string]string{}
 	for _, name := range []string{".gitignore.kvsctl.tmp", "..gitignore.kvsctl", ".gitignore"} {
 		planted[name] = victim(t, dir, name)
@@ -130,16 +129,16 @@ func TestSyncReplacesLinksPlantedInAContainerDirectory(t *testing.T) {
 func TestSyncRefusesALinkedDirectory(t *testing.T) {
 	dir := t.TempDir()
 	src, root := filepath.Join(dir, "rel"), filepath.Join(dir, "root")
-	writeTree(t, src, map[string]string{"a.txt": "new a", "docker/nginx/conf.d/extra/site.conf": "new site"})
-	writeTree(t, root, map[string]string{"a.txt": "old a"})
+	writeTree(t, src, map[string]string{"README.md": "new a", "docker/nginx/conf.d/extra/site.conf": "new site"})
+	writeTree(t, root, map[string]string{"README.md": "old a"})
 	site := victim(t, dir, "site.conf")
 	old := victim(t, dir, "old.conf")
 	if err := os.MkdirAll(filepath.Join(root, "docker/nginx/conf.d"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	symlink(t, filepath.Dir(site), filepath.Join(root, "docker/nginx/conf.d/extra"))
-	files := []string{"a.txt", "docker/nginx/conf.d/extra/site.conf"}
-	previous := []string{"a.txt", "docker/nginx/conf.d/extra/old.conf", "docker/nginx/conf.d/extra/site.conf"}
+	files := []string{"README.md", "docker/nginx/conf.d/extra/site.conf"}
+	previous := []string{"README.md", "docker/nginx/conf.d/extra/old.conf", "docker/nginx/conf.d/extra/site.conf"}
 	err := Sync(src, root, files, previous)
 	var conflict *ConflictError
 	if !errors.As(err, &conflict) || !strings.Contains(err.Error(), "docker/nginx/conf.d/extra is a symbolic link") {
@@ -147,16 +146,16 @@ func TestSyncRefusesALinkedDirectory(t *testing.T) {
 	}
 	untouched(t, site)
 	untouched(t, old)
-	if got, _ := os.ReadFile(filepath.Join(root, "a.txt")); string(got) != "old a" {
-		t.Errorf("a refused sync changed a.txt to %q", got)
+	if got, _ := os.ReadFile(filepath.Join(root, "README.md")); string(got) != "old a" {
+		t.Errorf("a refused sync changed README.md to %q", got)
 	}
 
 	// Below Sync, a link found on the way is refused too, whoever put it
 	// there after Conflicts looked.
-	if _, err := remove(root, "docker/nginx/conf.d/extra/old.conf", nil); !errors.Is(err, errNotLaid) {
+	if _, err := remove(root, "docker/nginx/conf.d/extra/old.conf", nil, nil); !errors.Is(err, errNotLaid) {
 		t.Errorf("remove through a linked directory: %v", err)
 	}
-	if err := lay(src, root, "docker/nginx/conf.d/extra/site.conf"); !errors.Is(err, errNotLaid) {
+	if err := lay(src, root, "docker/nginx/conf.d/extra/site.conf", false, nil); !errors.Is(err, errNotLaid) {
 		t.Errorf("lay through a linked directory: %v", err)
 	}
 	untouched(t, site)
@@ -317,7 +316,7 @@ func TestSyncRollsBackAHalfLaidTypeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	stubFlushes(t, func(f *os.File) error {
-		if strings.Contains(f.Name(), "z.sh") {
+		if content(t, f.Name()) == "v2" {
 			return errors.New("no space left on device")
 		}
 		return f.Sync()
@@ -337,107 +336,103 @@ func TestSyncRollsBackAHalfLaidTypeChange(t *testing.T) {
 	}
 }
 
-// A run killed while it laid a file leaves its temporary file beside it.
-// When that file is in a directory that replaced a file of the release in
-// place, the recover lays the file back there: the temporary file is
-// kvsctl's own, not something the operator keeps, and goes with the
-// directory. A temporary file of a file the release does not lay there, or
-// a directory under such a name, is not kvsctl's, and is named.
-func TestSyncRecoversFromAKillDuringATypeChange(t *testing.T) {
-	dir := t.TempDir()
-	v1, files1 := writeRelease(t, dir, "1", map[string]string{"conf/extra": "v1 extra", "conf/deep": "v1 deep", "docker/setup.sh": "v1"})
-	v2, files2 := writeRelease(t, dir, "2", map[string]string{"conf/extra/site.conf": "v2 site", "conf/deep/sub/a.conf": "v2 a", "docker/setup.sh": "v2"})
-	// The tree a SIGKILL leaves while the upgrade laid conf/extra/site.conf,
-	// after a run that found the first name taken laid conf/deep/sub/a.conf
-	// up to its rename.
-	killed := func(t *testing.T) string {
-		t.Helper()
-		root := mkdir(t, filepath.Join(t.TempDir(), "root"))
-		if err := Sync(v1, root, files1, nil); err != nil {
+// A journal identifies the exact temporary to reclaim. Other names stay,
+// even when their spelling matches a temporary created by an older build.
+func TestJournalTemporaryCleanup(t *testing.T) {
+	root, src := t.TempDir(), t.TempDir()
+	const name = "conf/policy.xml"
+	writeTree(t, src, map[string]string{name: "release"})
+	local := map[string]string{"conf/.kvsctl-123": "local", "conf/.policy.xml.kvsctl": "fixed", "conf/.policy.xml.kvsctl-0123456789abcdef": "lookalike"}
+	writeTree(t, root, local)
+	var last string
+	for range 2 {
+		var pending PendingCopy
+		journal := &SyncJournal{
+			Pending: func(copy PendingCopy) error {
+				if copy.File != name || copy.Temporary == last {
+					t.Fatalf("pending %+v, previous %q", copy, last)
+				}
+				info, err := os.Lstat(filepath.Join(root, copy.Temporary))
+				if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+					t.Fatalf("journal must identify an empty reservation before copying: %v %v", info, err)
+				}
+				pending = copy
+				return nil
+			},
+			Created: func(string) error { return nil },
+		}
+		stubFlushes(t, func(f *os.File) error {
+			full, err := filepath.EvalSymlinks(f.Name())
+			if err != nil || filepath.Join(root, pending.Temporary) != full {
+				t.Fatalf("unrecorded temporary %s: %v", full, err)
+			}
+			return f.Sync()
+		}, func(string) error { return nil })
+		if err := SyncWithJournal(src, root, []string{name}, nil, journal); err != nil {
 			t.Fatal(err)
 		}
-		os.Remove(filepath.Join(root, "conf/extra"))
-		os.Remove(filepath.Join(root, "conf/deep"))
-		writeTree(t, root, map[string]string{
-			"conf/extra/.site.conf.kvsctl":                  "v2 s",
-			"conf/deep/sub/.a.conf.kvsctl-09f3c2a17b4e6d58": "v2 a",
-		})
-		return root
-	}
-	root := killed(t)
-	if got := Conflicts(root, files1, files2); len(got) != 0 {
-		t.Errorf("Conflicts = %q, want none: the temporary files are kvsctl's", got)
-	}
-	if err := Sync(v1, root, files1, files2); err != nil {
-		t.Fatalf("the rollback of an upgrade killed while it laid a file: %v", err)
-	}
-	for f, want := range map[string]string{"conf/extra": "v1 extra", "conf/deep": "v1 deep", "docker/setup.sh": "v1"} {
-		if got := content(t, filepath.Join(root, f)); got != want {
-			t.Errorf("%s = %q, want %q", f, got, want)
+		tmp := filepath.Join(root, pending.Temporary)
+		writeTree(t, root, map[string]string{pending.Temporary: "reused by operator"})
+		if err := RemovePending(root, pending); err != nil || content(t, tmp) != "reused by operator" {
+			t.Fatalf("reused name: %v", err)
 		}
-	}
-
-	// The upgrade itself, run again over the same tree, lays its files.
-	root = killed(t)
-	if err := Sync(v2, root, files2, files1); err != nil {
-		t.Fatalf("the upgrade run again over a killed one: %v", err)
-	}
-	if got := names(t, filepath.Join(root, "conf/extra")); !slices.Equal(got, []string{"site.conf"}) {
-		t.Errorf("conf/extra holds %q, want site.conf alone", got)
-	}
-
-	// What kvsctl does not lay there is the operator's: a name createTemp
-	// never gives, its random number of another width or written with a
-	// capital, is no temporary file of kvsctl's.
-	for _, planted := range []string{"conf/extra/.mine.conf.kvsctl", "conf/extra/.site.conf.kvsctl/x", "conf/extra/.site.conf.kvsctl-NOT",
-		"conf/extra/.site.conf.kvsctl-backup2026", "conf/extra/.site.conf.kvsctl-old", "conf/extra/.site.conf.kvsctl-09F3C2A17B4E6D58",
-		"conf/extra/.site.conf.kvsctl-09f3c2a17b4e6d5", "conf/extra/.site.conf.kvsctl-09f3c2a17b4e6d580"} {
-		root = killed(t)
-		held := filepath.Join(root, strings.TrimSuffix(planted, "/x"))
-		if held != filepath.Join(root, planted) {
-			// A directory under the name of the temporary file.
-			os.Remove(held)
+		if err := os.Rename(filepath.Join(root, name), tmp); err != nil {
+			t.Fatal(err)
 		}
-		writeTree(t, root, map[string]string{planted: "the operator's"})
-		want := []string{filepath.Join(root, "conf/extra") + " is a directory, where the release lays a file, and it holds " + held + ", which the release does not ship: move it away"}
-		if got := Conflicts(root, files1, files2); !slices.Equal(got, want) {
-			t.Errorf("%s: Conflicts =\n%q\nwant\n%q", planted, got, want)
+		if err := RemovePending(root, pending); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(tmp); !os.IsNotExist(err) {
+			t.Fatalf("temporary remains: %v", err)
+		}
+		last = pending.Temporary
+	}
+	for file, want := range local {
+		if got := content(t, filepath.Join(root, file)); got != want {
+			t.Errorf("%s: %q", file, got)
 		}
 	}
 }
 
-// Every name createTemp gives is taken for a temporary file of kvsctl's:
-// the first one, and 16 hexadecimal digits after a dash. A name of another
-// shape is the operator's, a suffix of a few letters or a date included.
-func TestTemporaryNames(t *testing.T) {
-	for _, entry := range []string{".site.conf.kvsctl", ".site.conf.kvsctl-0000000000000000", ".site.conf.kvsctl-09f3c2a17b4e6d58", ".site.conf.kvsctl-ffffffffffffffff"} {
-		if !temporaryOf(entry, "site.conf") {
-			t.Errorf("%s is a name createTemp gives site.conf", entry)
-		}
-	}
-	for _, entry := range []string{".site.conf.kvsctl-", ".site.conf.kvsctlx", ".site.conf.kvsctl-09f3c2a17b4e6d58.bak", ".other.conf.kvsctl", "site.conf.kvsctl",
-		".site.conf.kvsctl-old", ".site.conf.kvsctl-0", ".site.conf.kvsctl-20261007", ".site.conf.kvsctl-x8kq0", ".site.conf.kvsctl-09F3C2A17B4E6D58",
-		".site.conf.kvsctl-09f3c2a17b4e6d5", ".site.conf.kvsctl-09f3c2a17b4e6d580", ".site.conf.kvsctl-09f3c2a17b4e6d5g"} {
-		if temporaryOf(entry, "site.conf") {
-			t.Errorf("%s is no name createTemp gives site.conf", entry)
-		}
-	}
-	// The names createTemp writes, past the first one taken.
-	dir := t.TempDir()
-	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(fd)
-	for range 20 {
-		name, f, err := createTemp(fd, "site.conf", dir, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		f.Close()
-		if !temporaryOf(name, "site.conf") || len(name) != len(tempName("site.conf"))+1+tempSuffixLen {
-			t.Errorf("createTemp named a temporary file %s", name)
-		}
+func TestNewReleaseEntryRefusals(t *testing.T) {
+	const name = "conf/policy.xml"
+	for _, kind := range []string{"link", "dangling link", "directory", "fifo", "late file"} {
+		t.Run(kind, func(t *testing.T) {
+			root, src := t.TempDir(), t.TempDir()
+			writeTree(t, root, map[string]string{"conf/local": "local", "conf/obsolete": "old"})
+			writeTree(t, src, map[string]string{name: "release"})
+			dest := filepath.Join(root, name)
+			var err error
+			switch kind {
+			case "link":
+				err = os.Symlink("local", dest)
+			case "dangling link":
+				err = os.Symlink("absent", dest)
+			case "directory":
+				err = os.Mkdir(dest, 0700)
+			case "fifo":
+				err = unix.Mkfifo(dest, 0600)
+			case "late file":
+				stubFlushes(t, func(f *os.File) error { return os.WriteFile(dest, []byte("late"), 0600) }, func(string) error { return nil })
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind != "late file" && len(Conflicts(root, []string{name}, []string{"conf/obsolete"})) == 0 {
+				t.Fatal("preflight accepted local entry")
+			}
+			err = Sync(src, root, []string{name}, []string{"conf/obsolete"})
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("unmanaged entry: %v", err)
+			}
+			if kind == "late file" {
+				if content(t, dest) != "late" {
+					t.Fatal("late file overwritten")
+				}
+			} else if !exists(filepath.Join(root, "conf/obsolete")) {
+				t.Fatal("preflight changed the tree")
+			}
+		})
 	}
 }
 
@@ -447,7 +442,7 @@ func TestTemporaryNames(t *testing.T) {
 func TestSyncNamesAnOperatorFileNamedLikeATemporary(t *testing.T) {
 	dir := t.TempDir()
 	v2, files2 := writeRelease(t, dir, "2", map[string]string{"conf/extra": "v2 extra"})
-	for _, name := range []string{".site.conf.kvsctl-old", ".site.conf.kvsctl-backup2026", ".site.conf.kvsctl-20261007"} {
+	for _, name := range []string{".site.conf.kvsctl", ".site.conf.kvsctl-09f3c2a17b4e6d58", ".site.conf.kvsctl-old", ".site.conf.kvsctl-backup2026", ".site.conf.kvsctl-20261007"} {
 		root := mkdir(t, filepath.Join(t.TempDir(), "root"))
 		writeTree(t, root, map[string]string{"conf/extra/site.conf": "v1 site", "conf/extra/" + name: "the operator's"})
 		held := filepath.Join(root, "conf/extra", name)
@@ -460,31 +455,8 @@ func TestSyncNamesAnOperatorFileNamedLikeATemporary(t *testing.T) {
 	}
 }
 
-// A temporary name is kvsctl's only beside the release file it is the
-// temporary file of: in another directory, it is the operator's.
-func TestConflictsNamesATemporaryNameOfAnotherDirectory(t *testing.T) {
-	dir := t.TempDir()
-	_, files1 := writeRelease(t, dir, "1", map[string]string{"conf/extra": "v1 extra"})
-	_, files2 := writeRelease(t, dir, "2", map[string]string{"conf/extra/a.conf": "v2 a", "conf/extra/sub/b.conf": "v2 b"})
-	root := mkdir(t, filepath.Join(dir, "root"))
-	writeTree(t, root, map[string]string{
-		"conf/extra/a.conf":                              "v2 a",
-		"conf/extra/.a.conf.kvsctl-09f3c2a17b4e6d58":     "v2 a, cut short",
-		"conf/extra/sub/b.conf":                          "v2 b",
-		"conf/extra/sub/.a.conf.kvsctl":                  "the operator's",
-		"conf/extra/sub/.b.conf.kvsctl-09f3c2a17b4e6d58": "v2 b, cut short",
-	})
-	want := []string{filepath.Join(root, "conf/extra") + " is a directory, where the release lays a file, and it holds " + filepath.Join(root, "conf/extra/sub/.a.conf.kvsctl") + ", which the release does not ship: move it away"}
-	if got := Conflicts(root, files1, files2); !slices.Equal(got, want) {
-		t.Errorf("Conflicts =\n%q\nwant\n%q", got, want)
-	}
-}
-
-// The temporary file of a release file that the next set drops is taken
-// away with it: no later lay reclaims it. That is the case of a run killed
-// while it laid a file that replaced a directory, rolled back. A directory
-// under such a name is the operator's, and stays, even empty.
-func TestSyncTakesTheTemporaryFilesOfARemovedFileAway(t *testing.T) {
+// Removing an obsolete file leaves its unrecorded neighbors alone.
+func TestSyncKeepsUnrecordedTemporariesOfARemovedFile(t *testing.T) {
 	dir := t.TempDir()
 	_, files1 := writeRelease(t, dir, "1", map[string]string{"conf/extra": "v1 extra", "docker/setup.sh": "v1"})
 	v2, files2 := writeRelease(t, dir, "2", map[string]string{"conf/extra/site.conf": "v2 site", "docker/setup.sh": "v2"})
@@ -499,8 +471,8 @@ func TestSyncTakesTheTemporaryFilesOfARemovedFileAway(t *testing.T) {
 	if err := Sync(v2, root, files2, files1); err != nil {
 		t.Fatalf("the rollback of a killed type change: %v", err)
 	}
-	if got := names(t, filepath.Join(root, "conf")); !slices.Equal(got, []string{"extra"}) {
-		t.Errorf("conf/ holds %q, want the release directory alone", got)
+	if got := names(t, filepath.Join(root, "conf")); !slices.Equal(got, []string{".extra.kvsctl", ".extra.kvsctl-00000000000001a9", "extra"}) {
+		t.Errorf("conf/ holds %q, want both local files and the release directory", got)
 	}
 	if got := content(t, filepath.Join(root, "conf/extra/site.conf")); got != "v2 site" {
 		t.Errorf("conf/extra/site.conf = %q", got)
@@ -541,35 +513,13 @@ func TestSyncRollsBackAnUpgradeThatLaidNothing(t *testing.T) {
 	if err := Sync(v2, root, files2, files1); !errors.As(err, &conflict) {
 		t.Fatalf("the upgrade = %v, want it refused", err)
 	}
-	if err := Sync(v1, root, files1, files2); err != nil {
+	if err := Sync(v1, root, files1, slices.Concat(files1, files2)); err != nil {
 		t.Fatalf("the rollback of an upgrade that laid nothing: %v", err)
 	}
 	for f, want := range map[string]string{"conf/extra": "v1 extra", "conf/deep": "v1 deep", "docker/setup.sh": "v1", "docker/custom": "the operator's"} {
 		if got := content(t, filepath.Join(root, f)); got != want {
 			t.Errorf("%s = %q, want %q", f, got, want)
 		}
-	}
-}
-
-// An empty directory where the release lays a file holds nothing to keep:
-// it gives way to the file.
-func TestSyncLaysAFileOverAnEmptyDirectory(t *testing.T) {
-	dir := t.TempDir()
-	root := mkdir(t, filepath.Join(dir, "root"))
-	v1, files1 := writeRelease(t, dir, "1", map[string]string{"docker/setup.sh": "v1"})
-	v2, files2 := writeRelease(t, dir, "2", map[string]string{"docker/setup.sh": "v2", "conf/extra": "v2 extra"})
-	if err := Sync(v1, root, files1, nil); err != nil {
-		t.Fatal(err)
-	}
-	mkdir(t, filepath.Join(root, "conf/extra"))
-	if got := Conflicts(root, files2, files1); len(got) != 0 {
-		t.Errorf("Conflicts = %q, want none for an empty directory", got)
-	}
-	if err := Sync(v2, root, files2, files1); err != nil {
-		t.Fatalf("a file where an empty directory stands: %v", err)
-	}
-	if got := content(t, filepath.Join(root, "conf/extra")); got != "v2 extra" {
-		t.Errorf("conf/extra = %q", got)
 	}
 }
 
@@ -664,8 +614,8 @@ func TestWriteFileHandsPrepareWhatItReplaces(t *testing.T) {
 func TestSyncRefusesWhatTheOperatorKeepsInTheWay(t *testing.T) {
 	dir := t.TempDir()
 	root := mkdir(t, filepath.Join(dir, "root"))
-	v1, files1 := writeRelease(t, dir, "1", map[string]string{"a.txt": "v1", "conf/site/kvs.conf": "v1 site"})
-	v2, files2 := writeRelease(t, dir, "2", map[string]string{"a.txt": "v2", "conf/site": "v2 site", "docker/custom/extra.conf": "v2 custom"})
+	v1, files1 := writeRelease(t, dir, "1", map[string]string{"README.md": "v1", "conf/site/kvs.conf": "v1 site"})
+	v2, files2 := writeRelease(t, dir, "2", map[string]string{"README.md": "v2", "conf/site": "v2 site", "docker/custom/extra.conf": "v2 custom"})
 	if err := Sync(v1, root, files1, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -682,8 +632,8 @@ func TestSyncRefusesWhatTheOperatorKeepsInTheWay(t *testing.T) {
 	if !errors.As(err, &conflict) || !slices.Equal(conflict.Problems, want) {
 		t.Fatalf("Sync = %v, want the conflicts", err)
 	}
-	if got := content(t, filepath.Join(root, "a.txt")); got != "v1" {
-		t.Errorf("a refused sync changed a.txt to %q", got)
+	if got := content(t, filepath.Join(root, "README.md")); got != "v1" {
+		t.Errorf("a refused sync changed README.md to %q", got)
 	}
 	if got := content(t, filepath.Join(root, "conf/site/kvs.conf")); got != "v1 site" {
 		t.Errorf("a refused sync changed conf/site/kvs.conf to %q", got)
@@ -733,10 +683,7 @@ func TestSyncLeavesWhatIsNotTheRelease(t *testing.T) {
 	}
 }
 
-// The temporary file a killed run left beside a release file is reclaimed
-// by the next Sync, which runs under the lock of the installation. WriteFile
-// also serves commands that take no lock, so it leaves a temporary name in
-// use alone: it may be the file another kvsctl is writing.
+// Both writers leave unrecorded temporaries untouched.
 func TestTemporaryFilesOfAKilledRunAndOfAnotherWriter(t *testing.T) {
 	dir := t.TempDir()
 	src, root := filepath.Join(dir, "rel"), mkdir(t, filepath.Join(dir, "root"))
@@ -745,8 +692,8 @@ func TestTemporaryFilesOfAKilledRunAndOfAnotherWriter(t *testing.T) {
 	if err := Sync(src, root, []string{"docker/setup.sh"}, []string{"docker/setup.sh"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := names(t, filepath.Join(root, "docker")); !slices.Equal(got, []string{"setup.sh"}) {
-		t.Errorf("docker/ holds %q, want the release file alone", got)
+	if got := names(t, filepath.Join(root, "docker")); !slices.Equal(got, []string{".setup.sh.kvsctl", "setup.sh"}) {
+		t.Errorf("docker/ holds %q, want the release file and its local neighbor", got)
 	}
 
 	writeTree(t, root, map[string]string{"kvsctl/updates.json": "{}", "kvsctl/.updates.json.kvsctl": "another kvsctl is writing this"})
@@ -776,4 +723,139 @@ func names(t *testing.T, dir string) []string {
 		out = append(out, e.Name())
 	}
 	return out
+}
+
+func TestNewFilePublicationFallback(t *testing.T) {
+	const file = "conf/policy.xml"
+	for _, tc := range []struct {
+		name                        string
+		renameErr, linkErr, wantErr error
+		late                        bool
+	}{
+		{name: "ENOSYS", renameErr: unix.ENOSYS},
+		{name: "EINVAL", renameErr: unix.EINVAL},
+		{name: "ENOTSUP", renameErr: unix.ENOTSUP},
+		{name: "EOPNOTSUPP", renameErr: unix.EOPNOTSUPP},
+		{name: "late file", renameErr: unix.ENOSYS, wantErr: unix.EEXIST, late: true},
+		{name: "link unsupported", renameErr: unix.ENOSYS, linkErr: unix.EOPNOTSUPP, wantErr: unix.EOPNOTSUPP},
+		{name: "permission denied", renameErr: unix.EACCES, wantErr: unix.EACCES},
+		{name: "existing entry", renameErr: unix.EEXIST, wantErr: unix.EEXIST},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, src := t.TempDir(), t.TempDir()
+			writeTree(t, src, map[string]string{file: "release"})
+			oldRename, oldLink := renameNew, linkNew
+			t.Cleanup(func() { renameNew, linkNew = oldRename, oldLink })
+			renameNew = func(fromFD int, from string, toFD int, to string, flags uint) error {
+				if flags != unix.RENAME_NOREPLACE {
+					t.Fatalf("rename flags = %v", flags)
+				}
+				if tc.late {
+					writeTree(t, root, map[string]string{file: "local"})
+				}
+				return tc.renameErr
+			}
+			var pending PendingCopy
+			linkCalled := false
+			linkNew = func(fromFD int, from string, toFD int, to string, flags int) error {
+				linkCalled = true
+				if fromFD != toFD || from != filepath.Base(pending.Temporary) || to != filepath.Base(file) || flags != 0 {
+					t.Fatalf("linkat arguments: %d, %q, %d, %q, %d", fromFD, from, toFD, to, flags)
+				}
+				if tc.linkErr != nil {
+					return tc.linkErr
+				}
+				if err := unix.Linkat(fromFD, from, toFD, to, flags); err != nil {
+					return err
+				}
+				var final unix.Stat_t
+				if err := unix.Stat(filepath.Join(root, file), &final); err != nil {
+					t.Fatal(err)
+				}
+				if pending.File != file || final.Nlink != 2 || uint64(final.Dev) != pending.Device || final.Ino != pending.Inode {
+					t.Fatalf("linked file does not share the journaled temporary: %+v, links %d", pending, final.Nlink)
+				}
+				return nil
+			}
+			created := false
+			journal := &SyncJournal{
+				Pending: func(copy PendingCopy) error { pending = copy; return nil },
+				Created: func(rel string) error {
+					if rel != file || exists(filepath.Join(root, pending.Temporary)) {
+						t.Fatal("creation recorded before temporary cleanup")
+					}
+					created = true
+					return nil
+				},
+			}
+			err := SyncWithJournal(src, root, []string{file}, nil, journal)
+			wantLink := tc.renameErr != unix.EACCES && tc.renameErr != unix.EEXIST
+			if linkCalled != wantLink {
+				t.Fatalf("linkat called = %v, want %v", linkCalled, wantLink)
+			}
+			if !errors.Is(err, tc.wantErr) || (err != nil && !strings.Contains(err.Error(), file)) {
+				t.Fatalf("publish: %v, want %v for %s", err, tc.wantErr, file)
+			}
+			if created != (err == nil) || exists(filepath.Join(root, pending.Temporary)) {
+				t.Fatalf("unexpected publication state: created=%v, pending=%+v", created, pending)
+			}
+			dest := filepath.Join(root, file)
+			switch {
+			case tc.late:
+				if got := content(t, dest); got != "local" {
+					t.Fatalf("late file = %q", got)
+				}
+			case err == nil:
+				if got := content(t, dest); got != "release" {
+					t.Fatalf("published file = %q", got)
+				}
+			case exists(dest):
+				t.Fatal("failed publication left a final file")
+			}
+		})
+	}
+}
+
+func TestSyncReplacesEmptyManagedAncestor(t *testing.T) {
+	for _, remaining := range []string{"conf/extra", "conf/extra/nested", "conf/extra/nested/deeper"} {
+		t.Run(remaining, func(t *testing.T) {
+			const file = "conf/extra"
+			root, src := t.TempDir(), t.TempDir()
+			old := []string{"conf/obsolete", "conf/extra/nested/deeper/old.conf"}
+			writeTree(t, root, map[string]string{old[0]: "previous release"})
+			writeTree(t, src, map[string]string{file: "present release"})
+			local := mkdir(t, filepath.Join(root, remaining, "local"))
+			var conflict *ConflictError
+			if err := Sync(src, root, []string{file}, old); !errors.As(err, &conflict) || !strings.Contains(err.Error(), local) {
+				t.Fatalf("preflight with a local entry: %v", err)
+			}
+			if got := content(t, filepath.Join(root, old[0])); got != "previous release" {
+				t.Fatalf("preflight changed the obsolete file: %q", got)
+			}
+			if err := os.Remove(local); err != nil {
+				t.Fatal(err)
+			}
+			if problems := Conflicts(root, []string{file}, old); len(problems) != 0 {
+				t.Fatal(problems)
+			}
+			if err := Sync(src, root, []string{file}, old); err != nil {
+				t.Fatal(err)
+			}
+			if got := content(t, filepath.Join(root, file)); got != "present release" {
+				t.Fatalf("published file = %q", got)
+			}
+		})
+	}
+}
+
+func TestSyncPublishesMaxLengthName(t *testing.T) {
+	root, src := t.TempDir(), t.TempDir()
+	file := "conf/" + strings.Repeat("x", 255)
+	writeTree(t, src, map[string]string{file: "release"})
+	if err := Sync(src, root, []string{file}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := content(t, filepath.Join(root, file)); got != "release" {
+		t.Fatalf("published file = %q", got)
+	}
 }

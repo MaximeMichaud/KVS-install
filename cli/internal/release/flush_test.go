@@ -37,17 +37,6 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// laidName is the file a temporary file of Sync is laid as: .NAME.kvsctl,
-// or .NAME.kvsctl-RANDOM when that name is taken, in the same directory.
-func laidName(tmp string) (string, bool) {
-	base := filepath.Base(tmp)
-	cut := strings.LastIndex(base, ".kvsctl")
-	if !strings.HasPrefix(base, ".") || cut < 1 {
-		return "", false
-	}
-	return filepath.Join(filepath.Dir(tmp), base[1:cut]), true
-}
-
 func TestDownloadFlushesBeforeTheRename(t *testing.T) {
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "b.tar.gz")
@@ -109,11 +98,18 @@ func TestSyncFlushesEachFileBeforeItsName(t *testing.T) {
 	var laid []string
 	dirs := map[string]bool{}
 	stubFlushes(t, func(f *os.File) error {
-		final, ok := laidName(f.Name())
-		if !ok {
-			t.Errorf("%s was flushed under its own name, not before its rename", f.Name())
+		full, err := filepath.EvalSymlinks(f.Name())
+		if err != nil {
+			t.Fatal(err)
 		}
-		rel, _ := filepath.Rel(root, final)
+		if len(laid) >= len(files) {
+			t.Fatalf("unexpected flush of %s", full)
+		}
+		rel := files[len(laid)]
+		final := filepath.Join(root, rel)
+		if filepath.Dir(full) != filepath.Dir(final) || full == final {
+			t.Errorf("flush for %s used %s, want a temporary in the same directory", final, full)
+		}
 		if got, _ := os.ReadFile(f.Name()); string(got) != shipped[rel] {
 			t.Errorf("%s was flushed before it was whole: %q", rel, got)
 		}

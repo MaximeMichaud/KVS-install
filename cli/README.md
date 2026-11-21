@@ -83,6 +83,24 @@ release (see [Commands that write](#commands-that-write)), and
 puts it. `--root DIR`, or `KVS_INSTALL_DIR=DIR` in the environment, name
 another one.
 
+Release bundles use relative POSIX paths and contain only directories and
+regular files under `docker/` or `conf/`, plus the top-level `kvs-export.sh`,
+`kvs-install.sh`, `README.md` and `LICENSE`. Backslashes, links and special
+files are refused. Local Docker data, environment files, Compose overrides,
+imports, certificates, generated configuration and downloaded GeoIP data
+stay with the installation, even if Git tracks them. Older records stop
+managing these paths on read. Any local entry at a new release path,
+including a dangling link, blocks the plan and synchronization. Move it
+aside to proceed. A path created during the copy also blocks publication.
+Recovery removes only journaled temporaries. For a target-only file with
+unrecognized contents and no recorded creation, it prints the path and
+keeps the file while restoring the previous version.
+Both bundle readers reject paths needed as both files and directories before
+extraction starts.
+Extracted files retain their read and execute bits, gain owner read/write,
+and lose special bits and group/other write access. Copying a snapshot or
+release also strips special bits and group/other write access.
+
 ## Taking over a stack
 
 A stack that `kvs-install.sh` installed is a git checkout. `kvsctl adopt`

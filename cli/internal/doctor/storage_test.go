@@ -144,12 +144,12 @@ func TestFilesAndRecordedImages(t *testing.T) {
 		t.Run(map[bool]string{false: "unchanged", true: "edited"}[changed], func(t *testing.T) {
 			r, _ := fixture(t)
 			r.opts.Only = []string{"files"}
-			writeFile(t, filepath.Join(r.inst.Root, "tracked.txt"), "original\n")
+			writeFile(t, filepath.Join(r.inst.Root, "conf/tracked.txt"), "original\n")
 			sum := sha256.Sum256([]byte("original\n"))
-			data, _ := json.Marshal(instance.State{Current: "1.0.0", Checksums: map[string]string{"tracked.txt": hex.EncodeToString(sum[:])}})
+			data, _ := json.Marshal(instance.State{Current: "1.0.0", Checksums: map[string]string{"conf/tracked.txt": hex.EncodeToString(sum[:])}})
 			writeFile(t, filepath.Join(r.inst.StateDir(), "state.json"), string(data))
 			if changed {
-				writeFile(t, filepath.Join(r.inst.Root, "tracked.txt"), "customized\n")
+				writeFile(t, filepath.Join(r.inst.Root, "conf/tracked.txt"), "customized\n")
 			}
 			want := OK
 			if changed {

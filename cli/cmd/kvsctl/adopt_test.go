@@ -441,3 +441,48 @@ func TestAdoptSaysWhereTheFilesAreWhenTheRecordFails(t *testing.T) {
 		t.Fatalf("the release files are not where the message says: %v", err)
 	}
 }
+
+func TestAdoptAndMigrateTrackedOverride(t *testing.T) {
+	root := checkoutRoot(t)
+	const local = "docker/compose.override.yaml"
+	path := filepath.Join(root, local)
+	if err := os.WriteFile(path, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, root, "add", local)
+	git(t, root, "commit", "-qm", "track override")
+	s := testSession(t, root)
+	if err := adopt(s, "1.0.0", false); err != nil {
+		t.Fatal(err)
+	}
+	if data := readFile(t, filepath.Join(s.inst.StateDir(), "state.json")); strings.Contains(data, local) {
+		t.Fatal("adopt recorded the override")
+	}
+	if _, err := os.Stat(filepath.Join(s.inst.ReleasesDir(), "1.0.0", local)); !os.IsNotExist(err) {
+		t.Fatalf("override in snapshot: %v", err)
+	}
+	state := loadState(t, root)
+	state.Files = append(state.Files, local)
+	state.PreviousFiles = []string{"docker/docker-compose.yml", local}
+	state.Checksums[local] = "old"
+	if err := s.inst.SaveState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.inst.SaveJournal(&instance.Journal{Files: state.PreviousFiles}); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.inst.LoadJournal()
+	if err != nil || !slices.Equal(j.Files, []string{"docker/docker-compose.yml"}) {
+		t.Fatalf("legacy journal: %+v, %v", j, err)
+	}
+	state = loadState(t, root)
+	if _, ok := state.Checksums[local]; ok || slices.Contains(state.Files, local) || slices.Contains(state.PreviousFiles, local) {
+		t.Fatalf("legacy override still managed: %+v", state)
+	}
+	if err := release.Sync(filepath.Join(s.inst.ReleasesDir(), "1.0.0"), root, state.PreviousFiles, state.Files); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != "services: {}\n" {
+		t.Fatalf("local override changed: %q", got)
+	}
+}

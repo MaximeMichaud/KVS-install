@@ -1391,3 +1391,22 @@ func TestManualRollbackStoppedBeforeComposeLeavesTheDatabase(t *testing.T) {
 		}
 	}
 }
+
+func TestRollbackPreservesLocalFileCreatedAfterPlan(t *testing.T) {
+	const path = "docker/policy.xml"
+	s := newStack(t, "", rel{version: "1.0.0", files: map[string]string{path: "release policy"}}, rel{version: "1.1.0"})
+	if err := s.upgrade(s.runner(quick)); err != nil {
+		t.Fatal(err)
+	}
+	s.rep.on = func(e Event) {
+		if e.Step == StepApply && e.Kind == KindStepStart {
+			if err := os.WriteFile(filepath.Join(s.root, path), []byte("local policy"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	err := s.rollback(s.runner(quick))
+	if err == nil || !strings.Contains(err.Error(), path) || s.journal() != nil || s.file(path) != "local policy" || s.state().Current != "1.1.0" {
+		t.Fatalf("late rollback conflict: %v, journal %+v", err, s.journal())
+	}
+}

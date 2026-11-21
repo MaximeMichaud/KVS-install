@@ -531,6 +531,15 @@ func TestPlanNamesWhatKeepsTheReleaseFilesOut(t *testing.T) {
 	if err := os.RemoveAll(filepath.Dir(notes)); err != nil {
 		t.Fatal(err)
 	}
+	local := filepath.Dir(notes)
+	if err := os.WriteFile(local, []byte("local file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, plan = s.plan(s.runner(func(o *Options) { o.AllowLocalChanges = true }))
+	blocked(t, plan, local+" is a local file the previous release did not own")
+	if err := os.Remove(local); err != nil {
+		t.Fatal(err)
+	}
 	if _, plan := s.plan(s.runner()); len(plan.Blockers) != 0 {
 		t.Errorf("nothing in the way: %q", plan.Blockers)
 	}

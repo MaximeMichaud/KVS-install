@@ -30,6 +30,51 @@ import (
 // and adopt records the same paths of a git checkout.
 var Paths = []string{"docker", "conf", "kvs-export.sh", "kvs-install.sh", "README.md", "LICENSE"}
 
+// OverrideFiles lists the local compose overrides in discovery order.
+var OverrideFiles = []string{"compose.override.yml", "compose.override.yaml", "docker-compose.override.yml", "docker-compose.override.yaml"}
+
+// Local files and directories excluded from a release under docker/.
+// Patterns with a slash are relative to docker/, the others match a component.
+var localDockerPaths = []string{
+	".env", ".kvs-scripts.lock", "kvs-archive", "data",
+	"nginx/dhparam.pem", "nginx/ssl", "nginx/conf.d/*.conf",
+	"multi-site/sites", "multi-site/caddy/sites/*.caddy", "mariadb/init/*kvs-import*",
+	"geoip/*.mmdb", "geoip/*.mmdb.gz", "geoip/*.tar.gz", "geoip/.GeoLite2-Country.download.*",
+}
+
+// IsFile reports whether name is a file managed by releases and adoption.
+func IsFile(name string) bool { return releasePath(name, false) }
+
+func releasePath(name string, directory bool) bool {
+	top, rest, nested := strings.Cut(name, "/")
+	if strings.Contains(name, "\\") || !slices.Contains(Paths, top) || path.Clean(name) != name {
+		return false
+	}
+	if top != "docker" && top != "conf" {
+		return !nested && !directory
+	}
+	if !nested {
+		return directory
+	}
+	if top == "docker" {
+		for part := rest; part != "."; part = path.Dir(part) {
+			if part == "import" || slices.Contains(OverrideFiles, part) {
+				return false
+			}
+			for _, pattern := range localDockerPaths {
+				value := part
+				if !strings.Contains(pattern, "/") {
+					value = path.Base(part)
+				}
+				if matched, _ := path.Match(pattern, value); matched {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 // maxDownload bounds a download whose size the manifest does not give: a
 // release bundle is a few megabytes and a kvsctl build a few tens. A
 // variable so a test can lower it.
@@ -322,6 +367,13 @@ func Extract(archive, dir string) ([]string, error) {
 		return nil, err
 	}
 	defer f.Close()
+	// Check the entire archive before creating or replacing any staged file.
+	if _, _, err := listBundle(f, nil, 0); err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return nil, fmt.Errorf("bundle is not gzip: %w", err)
@@ -363,7 +415,7 @@ func Extract(archive, dir string) ([]string, error) {
 				return nil, err
 			}
 			recordParents(dirs, target)
-			mode := os.FileMode(hdr.Mode).Perm() | 0o600
+			mode := os.FileMode(hdr.Mode)&0o755 | 0o600
 			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|unix.O_NOFOLLOW, mode)
 			if err != nil {
 				return nil, err
@@ -403,6 +455,9 @@ func Extract(archive, dir string) ([]string, error) {
 // the bundle; an entry that leaves the bundle, or that is neither a
 // directory nor a regular file, is refused.
 func entryName(hdr *tar.Header) (string, error) {
+	if strings.Contains(hdr.Name, "\\") {
+		return "", fmt.Errorf("bundle entry %q must use POSIX separators", hdr.Name)
+	}
 	name := filepath.Clean(hdr.Name)
 	if name == "." || strings.HasPrefix(name, "..") || filepath.IsAbs(name) {
 		return "", fmt.Errorf("bundle entry %q leaves the bundle", hdr.Name)
@@ -410,7 +465,11 @@ func entryName(hdr *tar.Header) (string, error) {
 	if hdr.Typeflag != tar.TypeDir && hdr.Typeflag != tar.TypeReg {
 		return "", fmt.Errorf("bundle entry %q is not a plain file", hdr.Name)
 	}
-	return filepath.ToSlash(name), nil
+	name = filepath.ToSlash(name)
+	if !releasePath(name, hdr.Typeflag == tar.TypeDir) {
+		return "", fmt.Errorf("bundle entry %q is outside the release paths", name)
+	}
+	return name, nil
 }
 
 // listBundle lists the files of the .tar.gz bundle r holds, sorted, under
@@ -423,7 +482,7 @@ func listBundle(r io.Reader, want []string, limit int64) ([]string, map[string][
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
-	var files []string
+	var files, paths []string
 	kept := map[string][]byte{}
 	entries := 0
 	var total int64
@@ -442,9 +501,11 @@ func listBundle(r io.Reader, want []string, limit int64) ([]string, map[string][
 		if err != nil {
 			return nil, nil, err
 		}
-		if hdr.Typeflag != tar.TypeReg {
+		if hdr.Typeflag == tar.TypeDir {
+			paths = append(paths, name+"/")
 			continue
 		}
+		paths = append(paths, name)
 		if total += hdr.Size; total > maxBytes {
 			return nil, nil, fmt.Errorf("bundle unpacks to more than %d MiB", maxBytes>>20)
 		}
@@ -462,8 +523,25 @@ func listBundle(r io.Reader, want []string, limit int64) ([]string, map[string][
 			kept[name] = data
 		}
 	}
+	// A directory header or any descendant needs name to be a directory,
+	// even if its header precedes the conflicting file.
+	sort.Strings(paths)
+	for _, name := range files {
+		prefix := name + "/"
+		i := sort.SearchStrings(paths, prefix)
+		if i < len(paths) && strings.HasPrefix(paths[i], prefix) {
+			return nil, nil, fmt.Errorf("bundle needs %q as both a file and a directory", name)
+		}
+	}
 	sort.Strings(files)
 	return files, kept, nil
+}
+
+// SyncJournal records a single in-flight temporary before copying any bytes
+// and each new release path after its successful no-replace publication.
+type SyncJournal struct {
+	Pending func(PendingCopy) error
+	Created func(file string) error
 }
 
 // Sync copies the files of src (a release directory) over root and removes
@@ -476,8 +554,16 @@ func listBundle(r io.Reader, want []string, limit int64) ([]string, map[string][
 // Each file reaches the disk before it replaces the one in place, and the
 // directories that changed are flushed at the end.
 func Sync(src, root string, files, previous []string) error {
+	return SyncWithJournal(src, root, files, previous, nil)
+}
+
+func SyncWithJournal(src, root string, files, previous []string, journal *SyncJournal) error {
 	if problems := Conflicts(root, files, previous); len(problems) > 0 {
 		return &ConflictError{Problems: problems}
+	}
+	old := map[string]bool{}
+	for _, f := range previous {
+		old[f] = true
 	}
 	keep := map[string]bool{}
 	needed := map[string]bool{}
@@ -495,7 +581,7 @@ func Sync(src, root string, files, previous []string) error {
 		if keep[f] {
 			continue
 		}
-		standing, err := remove(root, f, needed)
+		standing, err := remove(root, f, needed, keep)
 		if err != nil {
 			return err
 		}
@@ -504,7 +590,12 @@ func Sync(src, root string, files, previous []string) error {
 		}
 	}
 	for _, f := range files {
-		if err := lay(src, root, f); err != nil {
+		// Duplicate archive entries have already been extracted to their final bytes.
+		if !keep[f] {
+			continue
+		}
+		delete(keep, f)
+		if err := lay(src, root, f, old[f], journal); err != nil {
 			return err
 		}
 		// Replacing a file is a new entry in its directory, so the
@@ -531,7 +622,7 @@ func Snapshot(root, dest string, files []string) error {
 	}
 	dirs := map[string]bool{tmp: true}
 	for _, f := range files {
-		if err := lay(root, tmp, f); err != nil {
+		if err := lay(root, tmp, f, true, nil); err != nil {
 			os.RemoveAll(tmp)
 			return err
 		}
@@ -587,6 +678,50 @@ func Verify(root string, sums map[string]string) (changed []string, err error) {
 	}
 	sort.Strings(changed)
 	return changed, nil
+}
+
+// RecoveryFiles identifies the paths that the interrupted target can have
+// left behind. An absent target-only file needs no unlink, even if someone
+// creates one later. Its empty directories may need to give way to an
+// original file that recovery is about to restore.
+func RecoveryFiles(root, src string, original, target, created []string, notice func(string)) []string {
+	owned := slices.Clone(original)
+	known := map[string]bool{}
+	for _, file := range original {
+		known[file] = true
+	}
+	published := map[string]bool{}
+	for _, file := range created {
+		published[file] = true
+	}
+	for _, file := range target {
+		if known[file] || !IsFile(file) {
+			continue
+		}
+		if !published[file] {
+			got, err := sha256Beneath(root, file)
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOTDIR) {
+				for dir := path.Dir(file); dir != "."; dir = path.Dir(dir) {
+					if known[dir] {
+						pruneParents(root, path.Dir(file), map[string]bool{dir: true})
+						break
+					}
+				}
+				continue
+			}
+			if err != nil {
+				notice(fmt.Sprintf("warning: keeping %s because its contents could not be verified: %v", file, err))
+				continue
+			}
+			want, err := sha256Beneath(src, file)
+			if err != nil || got != want {
+				notice(fmt.Sprintf("warning: keeping %s because its contents do not match a verified delivery and its creation was not recorded", file))
+				continue
+			}
+		}
+		owned = append(owned, file)
+	}
+	return owned
 }
 
 // errOversized is a file larger than any release file can be.

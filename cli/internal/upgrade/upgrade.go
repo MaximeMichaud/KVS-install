@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -743,21 +742,6 @@ func (r *Runner) logNote() string {
 		return ""
 	}
 	return "; log: " + r.Opts.LogPath
-}
-
-func listFiles(dir string) ([]string, error) {
-	var files []string
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.Mode().IsRegular() {
-			rel, _ := filepath.Rel(dir, path)
-			files = append(files, filepath.ToSlash(rel))
-		}
-		return nil
-	})
-	return files, err
 }
 
 func relPath(root, path string) string {

@@ -186,7 +186,7 @@ func (r *Runner) change(ctx context.Context, state *instance.State, plan *Plan, 
 		r.failStep(step, cause)
 		return r.failed(ctx, state, j, cause)
 	}
-	if err := r.lay(dir, files, state, want); err != nil {
+	if err := r.lay(dir, files, state, want, j); err != nil {
 		var conflict *release.ConflictError
 		if errors.As(err, &conflict) {
 			return r.notLaid(plan, err)
@@ -327,11 +327,29 @@ func (r *Runner) stage(ctx context.Context, state *instance.State, plan *Plan) (
 	return dir, files, nil
 }
 
+// syncFiles journals copies both during apply and while undoing it. Only
+// forward publication establishes that the interrupted target created a file.
+func (r *Runner) syncFiles(dir string, files, previous []string, j *instance.Journal) error {
+	return release.SyncWithJournal(dir, r.Inst.Root, files, previous, &release.SyncJournal{
+		Pending: func(pending release.PendingCopy) error {
+			j.Pending = &pending
+			return r.Inst.SaveJournal(j)
+		},
+		Created: func(file string) error {
+			if j.Phase != instance.PhaseRollback {
+				j.Created = append(j.Created, file)
+			}
+			j.Pending = nil
+			return r.Inst.SaveJournal(j)
+		},
+	})
+}
+
 // lay puts the staged release over the installation: its files, the
 // compose file list, the settings its .env.example adds and the variant
 // settings.
-func (r *Runner) lay(dir string, files []string, state *instance.State, want map[string]string) error {
-	if err := release.Sync(dir, r.Inst.Root, files, state.Files); err != nil {
+func (r *Runner) lay(dir string, files []string, state *instance.State, want map[string]string, j *instance.Journal) error {
+	if err := r.syncFiles(dir, files, state.Files, j); err != nil {
 		return fmt.Errorf("lay the release files: %w", err)
 	}
 	if err := r.setComposeFiles(files); err != nil {
@@ -1215,15 +1233,10 @@ func (r *Runner) composeSeparator() string {
 	return ":"
 }
 
-// overrideFiles are the names of the operator's override compose loads next
-// to docker-compose.yml while COMPOSE_FILE is unset, in the order it looks
-// for them: it loads the first one it finds, and only that one.
-var overrideFiles = []string{"compose.override.yml", "compose.override.yaml", "docker-compose.override.yml", "docker-compose.override.yaml"}
-
 // DefaultOverride is the operator's override compose loads in dir while
 // COMPOSE_FILE is unset, "" when there is none.
 func DefaultOverride(dir string) string {
-	for _, name := range overrideFiles {
+	for _, name := range release.OverrideFiles {
 		if info, err := os.Stat(filepath.Join(dir, name)); err == nil && !info.IsDir() {
 			return name
 		}
@@ -1236,7 +1249,7 @@ func DefaultOverride(dir string) string {
 // beside the .env, since no release file holds the local changes.
 func OverridePaths(dir string) []string {
 	var paths []string
-	for _, name := range overrideFiles {
+	for _, name := range release.OverrideFiles {
 		path := filepath.Join(dir, name)
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 			paths = append(paths, path)
@@ -1249,7 +1262,7 @@ func OverridePaths(dir string) []string {
 // the operator, by any name compose gives one and by any path. A list that
 // names one is the operator's choice: kvsctl adds no other override to it.
 func IsOverride(entry string) bool {
-	return slices.Contains(overrideFiles, filepath.Base(entry))
+	return slices.Contains(release.OverrideFiles, filepath.Base(entry))
 }
 
 // setComposeFile puts COMPOSE_FILE back to value, removing the key when
@@ -1358,6 +1371,24 @@ func (r *Runner) dropCheckouts(state *instance.State) {
 			r.log("the files of a checkout no version uses any more could not be removed: " + err.Error())
 		}
 	}
+}
+
+func listFiles(dir string) ([]string, error) {
+	var files []string
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			rel, _ := filepath.Rel(dir, path)
+			name := filepath.ToSlash(rel)
+			if release.IsFile(name) {
+				files = append(files, name)
+			}
+		}
+		return nil
+	})
+	return files, err
 }
 
 // holds reports whether dir holds exactly files, relative to it: the files
