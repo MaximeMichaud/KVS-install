@@ -6725,51 +6725,116 @@ public_ipv4() {
     return 1
 }
 
+# Query only a configured, non-loopback nameserver. A local stub may answer
+# from the hosts file even when NSS is explicitly asked to use DNS.
+dns_nameservers() {
+    awk -v upstream=/run/systemd/resolve/resolv.conf '
+        function nameserver(    addr) {
+            if ($1 != "nameserver" || $2 !~ /^[0-9a-fA-F:.]+(%[[:alnum:]_.-]+)?$/) return
+            addr = tolower($2)
+            sub(/%.*/, "", addr)
+            if (addr == "127.0.0.53" || addr == "127.0.0.54") stub = 1
+            if (addr ~ /^127\./ || addr == "0.0.0.0" || addr ~ /^[0:]*:0*1?$/ ||
+                addr ~ /^(0*:)*ffff:(127\.|7f[[:xdigit:]][[:xdigit:]]:)/) return
+            if ((addr ~ /:/ || addr ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) && !seen[$2]++) {
+                print $2
+                direct = 1
+            }
+        }
+        { nameserver() }
+        END {
+            if (stub && !direct) {
+                while ((getline < upstream) > 0) nameserver()
+                close(upstream)
+            }
+        }
+    ' /etc/resolv.conf 2>/dev/null
+}
+
+dns_records() {
+    local name=$1 type=$2 resolver=$3 reply
+    if command -v dig >/dev/null; then
+        reply=$(LC_ALL=C dig +time=2 +tries=1 +noall +comments +answer +authority "@$resolver" "$name." "$type" 2>/dev/null) || return 1
+    elif command -v host >/dev/null; then
+        if ! reply=$(LC_ALL=C host -v -W 2 -t "$type" "$name." "$resolver" 2>/dev/null); then
+            [[ "$reply" == *'3(NXDOMAIN)'* ]]
+            return
+        fi
+    else
+        return 1
+    fi
+
+    [[ "$reply" == *'status: NXDOMAIN,'* ]] && return 0
+    [[ "$reply" == *'status: NOERROR,'* ]] || return 1
+    # Read only answer records. A referral can carry an address for its
+    # nameserver in the additional section. A recursive negative answer
+    # carries an SOA; an authoritative server may omit it for NODATA.
+    awk -v type="$type" '
+        /^;; flags:/ { authoritative = ($0 ~ /[ ;]aa[ ;]/) }
+        /^;; .*SECTION:/ { section = $2; next }
+        section == "ANSWER" && $3 == "IN" {
+            if ($4 == "CNAME") alias = 1
+            if ($4 == type && !seen[$5]++) { print $5; found = 1 }
+        }
+        section == "AUTHORITY" && $3 == "IN" {
+            if ($4 == "SOA") negative = 1
+            if ($4 == "NS") referral = 1
+        }
+        END { exit !(found || negative || (authoritative && !referral && !alias)) }
+    ' <<< "$reply"
+}
+
 # DNS Check Function: 0 when every record points here, 1 on a mismatch,
-# 2 when the public IP is unknown and nothing could be compared.
+# 2 when the public address or the DNS answer cannot be verified.
 check_dns() {
+    local name records resolver candidate status=0
+    local -a nameservers
+    mapfile -t nameservers < <(dns_nameservers)
+    local -a names=("$DOMAIN")
+    if include_www_for_domain; then names+=("www.$DOMAIN"); fi
+
     echo ""
     echo -e "${CYAN}Checking DNS configuration...${NC}"
     SERVER_IP=$(public_ipv4) || SERVER_IP=""
-    # getent, which needs no dnsutils, and its ahostsv4 database: "getent
-    # hosts" answers the AAAA record first when the name has one, an IPv6
-    # address that never equals the public IPv4 compared here, so a server
-    # whose A and AAAA records both point at it was reported as a MISMATCH.
-    DOMAIN_IP=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR == 1 { print $1 }')
-    WWW_IP=""
-    if include_www_for_domain; then
-        WWW_IP=$(getent ahostsv4 "www.$DOMAIN" 2>/dev/null | awk 'NR == 1 { print $1 }')
-    fi
-
-    dns_ok=true
     if [ -z "$SERVER_IP" ]; then
         echo -e "  ${YELLOW}Could not determine the public IP of this server (no lookup service answered), the records are not compared${NC}"
-        echo "  $DOMAIN -> ${DOMAIN_IP:-unresolved}"
-        if include_www_for_domain; then
-            echo "  www.$DOMAIN -> ${WWW_IP:-unresolved}"
-        fi
-        return 2
-    fi
-    echo "Server IP: $SERVER_IP"
-    if [ "$DOMAIN_IP" = "$SERVER_IP" ]; then
-        echo -e "  $DOMAIN: ${GREEN}OK${NC} -> $DOMAIN_IP"
+        status=2
     else
-        echo -e "  $DOMAIN: ${RED}MISMATCH${NC} -> ${DOMAIN_IP:-no A record} (expected: $SERVER_IP)"
-        dns_ok=false
+        echo "Server IP: $SERVER_IP"
     fi
-    if include_www_for_domain; then
-        if [ "$WWW_IP" = "$SERVER_IP" ]; then
-            echo -e "  www.$DOMAIN: ${GREEN}OK${NC} -> $WWW_IP"
-        else
-            echo -e "  www.$DOMAIN: ${RED}MISMATCH${NC} -> ${WWW_IP:-no A record} (expected: $SERVER_IP)"
-            dns_ok=false
+    for name in "${names[@]}"; do
+        resolver=""
+        for candidate in "${nameservers[@]}"; do
+            if records=$(dns_records "$name" A "$candidate"); then
+                resolver=$candidate
+                break
+            fi
+        done
+        if [ -z "$resolver" ]; then
+            echo -e "  ${YELLOW}WARNING: Cannot verify public DNS for $name (no conclusive answer from a non-loopback nameserver using dig or host).${NC}"
+            [ "$status" -ne 0 ] || status=2
+            continue
         fi
-    fi
-
-    if [ "$dns_ok" = false ]; then
-        return 1
-    fi
-    return 0
+        # A synthesized local address cannot establish a public mismatch.
+        if [[ "$records" =~ (^|$'\n')(127\.|169\.254\.|0\.0\.0\.0($|$'\n')) ]]; then
+            echo -e "  ${YELLOW}WARNING: Cannot verify public DNS for $name (local A answer: ${records//$'\n'/, }).${NC}"
+            [ "$status" -ne 0 ] || status=2
+            continue
+        fi
+        records=${records//$'\n'/, }
+        if [ -z "$records" ]; then
+            echo -e "  $name: ${RED}MISMATCH${NC} -> no A record"
+            status=1
+        elif [ -z "$SERVER_IP" ]; then
+            echo "  $name -> $records"
+        elif [ "$records" = "$SERVER_IP" ]; then
+            echo -e "  $name: ${GREEN}OK${NC} -> $records"
+        else
+            echo -e "  $name: ${RED}MISMATCH${NC} -> $records (expected: $SERVER_IP)"
+            status=1
+        fi
+    done
+    return "$status"
 }
 
 # DNS Check with retry loop. The check answers with its status, so it
@@ -6805,9 +6870,9 @@ while true; do
         echo ""
         echo -e "${RED}DNS not configured correctly!${NC}"
         echo "Please configure your DNS records:"
-        echo "  - A record for $DOMAIN -> $SERVER_IP"
+        echo "  - A record for $DOMAIN -> ${SERVER_IP:-your public IPv4 address}"
         if include_www_for_domain; then
-            echo "  - A record for www.$DOMAIN -> $SERVER_IP"
+            echo "  - A record for www.$DOMAIN -> ${SERVER_IP:-your public IPv4 address}"
         fi
         echo ""
         echo "Options:"

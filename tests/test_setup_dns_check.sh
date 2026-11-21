@@ -19,7 +19,7 @@ fail() {
 }
 
 # The functions, as the script defines them.
-awk '/^public_ipv4\(\) \{/,/^}/; /^check_dns\(\) \{/,/^}/; /^validate_dns_settings\(\) \{/,/^}/' \
+awk '/^dns_nameservers\(\) \{/,/^}/; /^dns_records\(\) \{/,/^}/; /^public_ipv4\(\) \{/,/^}/; /^check_dns\(\) \{/,/^}/; /^validate_dns_settings\(\) \{/,/^}/' \
     "$ROOT_DIR/docker/setup.sh" > "$WORK/dns.sh"
 grep -q 'public_ipv4()' "$WORK/dns.sh" || fail "public_ipv4 is not defined in docker/setup.sh"
 grep -q 'check_dns()' "$WORK/dns.sh" || fail "check_dns is not defined in docker/setup.sh"
@@ -42,19 +42,78 @@ esac
 STUB
 cat > "$WORK/bin/getent" <<'STUB'
 #!/bin/bash
+dns=false
+if [ "${1:-} ${2:-}" = "-s dns" ]; then dns=true; shift 2; fi
+case "$2" in
+    example.com) records=${STUB_DNS_IP:-} ;;
+    www.example.com) records=${STUB_WWW_IP-${STUB_DNS_IP:-}} ;;
+    *) exit 2 ;;
+esac
 case "$1" in
     hosts) printf '%s\t%s\n' "${STUB_DNS_IPV6:-2001:db8::1}" "$2" ;;
     ahostsv4)
-        [ -n "${STUB_DNS_IP:-}" ] || exit 2
-        printf '%s\tSTREAM %s\n%s\tDGRAM\n%s\tRAW\n' "$STUB_DNS_IP" "$2" "$STUB_DNS_IP" "$STUB_DNS_IP" ;;
+        if [ "$dns" = false ]; then records=${STUB_HOSTS_IP:-$records}; fi
+        for ip in $records; do
+            printf '%s\tSTREAM %s\n%s\tDGRAM\n%s\tRAW\n' "$ip" "$2" "$ip" "$ip"
+        done ;;
     *) exit 2 ;;
 esac
 STUB
-chmod +x "$WORK/bin/curl" "$WORK/bin/getent"
+# Both clients print sectioned DNS replies. Glue has the queried type too.
+cat > "$WORK/bin/dig" <<'STUB'
+#!/bin/bash
+if [ "${0##*/}" = host ]; then
+    [ "$#" = 7 ] && [ "$1 $2 $3 $4" = '-v -W 2 -t' ] || exit 2
+    type=$5 name=$6 server=$7
+else
+    [ "$#" = 9 ] && [ "$1 $2 $3 $4 $5 $6" = '+time=2 +tries=1 +noall +comments +answer +authority' ] || exit 2
+    server=${7#@} name=$8 type=$9
+fi
+printf '%s\n' "$server $name $type" >> "$DNS_CALLS"
+case "$server" in
+    192.0.2.54) response=${FIRST_DNS_RESPONSE:-error} ;;
+    192.0.2.53|2001:db8::53) response=${LAST_DNS_RESPONSE:-answer} ;;
+    *) exit 2 ;;
+esac
+case "$name $type" in
+    'example.com. A') records=${STUB_DNS_IP:-} ;;
+    'www.example.com. A') records=${STUB_WWW_IP-${STUB_DNS_IP:-}} ;;
+    *) exit 2 ;;
+esac
+if [ "${0##*/}" = host ] && [ "${DNS_RCODE:-}" = NXDOMAIN ]; then
+    echo "Host $name not found: 3(NXDOMAIN)"
+    exit 1
+fi
+printf ';; ->>HEADER<<- opcode: QUERY, status: %s, id: 1\n' "${DNS_RCODE:-NOERROR}"
+case "$response" in
+    error) exit 1 ;;
+    referral)
+        printf ';; flags: qr rd;\n;; AUTHORITY SECTION:\nexample.com. 60 IN NS ns.example.com.\n'
+        printf ';; ADDITIONAL SECTION:\nns.example.com. 60 IN A 192.0.2.88\n' ;;
+    empty) echo ';; flags: qr rd ra;' ;;
+    authoritative) echo ';; flags: qr aa rd;' ;;
+    answer)
+        printf ';; flags: qr rd ra;\n;; ANSWER SECTION:\n%s 60 IN CNAME alias.example.com.\n' "$name"
+        for ip in $records; do printf 'alias.example.com. 60 IN %s %s\n' "$type" "$ip"; done
+        if [ -z "$records" ]; then
+            printf ';; AUTHORITY SECTION:\nexample.com. 60 IN SOA ns.example.com. admin.example.com. 1 60 60 3600 60\n'
+        fi ;;
+esac
+STUB
+cp "$WORK/bin/dig" "$WORK/bin/host"
+export DNS_CALLS="$WORK/dns.calls"
+write_resolvers() {
+    printf 'nameserver %s\n' "$@" > "$WORK/resolv.conf"
+}
+write_resolvers 127.0.0.53 ::1 192.0.2.54 192.0.2.53
+sed -i "s|/etc/resolv.conf|$WORK/resolv.conf|g;s|/run/systemd/resolve/resolv.conf|$WORK/upstream|g" "$WORK/dns.sh"
+mkdir "$WORK/tools"
+for tool in bash awk sed head; do ln -s "$(command -v "$tool")" "$WORK/tools/$tool"; done
+chmod +x "$WORK/bin/"*
 
 run_check() {
     # shellcheck disable=SC2016
-    PATH="$WORK/bin:$PATH" STUB_OK="$1" STUB_IP="$2" STUB_DNS_IP="$3" bash -c '
+    PATH="$WORK/bin:$WORK/tools" STUB_OK="$1" STUB_IP="$2" STUB_DNS_IP="$3" bash -c '
         CYAN=; GREEN=; RED=; YELLOW=; NC=; DOMAIN=example.com
         include_www_for_domain() { return 0; }
         source "$1"
@@ -75,6 +134,76 @@ grep -q 'Server IP: 203.0.113.7' <<< "$out" || fail "the trace answer must yield
 out=$(run_check "api.ipify.org" 203.0.113.7 198.51.100.9)
 grep -q 'status=1' <<< "$out" || fail "records pointing elsewhere must still be a mismatch, got: $out"
 grep -q 'MISMATCH' <<< "$out" || fail "the mismatch must be reported"
+
+out=$(STUB_HOSTS_IP=192.0.2.88 run_check https 203.0.113.7 203.0.113.7)
+grep -Fxq 'status=0' <<< "$out" || fail "a hosts-file address hid matching DNS records: $out"
+
+# A local stub can synthesize a different A record. Only the configured
+# upstream is compared. Without a direct query the result is indeterminate.
+for client in dig host; do
+    if [ "$client" = host ]; then mv "$WORK/bin/dig" "$WORK/dig.saved"; fi
+    : > "$DNS_CALLS"
+    out=$(STUB_HOSTS_IP=127.0.1.1 run_check https 203.0.113.7 203.0.113.7)
+    grep -Fxq 'status=0' <<< "$out" || fail "$client did not use upstream DNS: $out"
+    grep -Eq '^@?192\.0\.2\.54 example\.com\. A$' "$DNS_CALLS" || fail "$client skipped resolver order"
+    grep -Eq '^@?192\.0\.2\.53 www\.example\.com\. A$' "$DNS_CALLS" || fail "$client missed www"
+    if grep -Eq '127\.|::1' "$DNS_CALLS"; then fail "$client contacted a loopback stub"; fi
+    for response in referral empty; do
+        out=$(FIRST_DNS_RESPONSE=$response run_check https 203.0.113.7 203.0.113.7)
+        grep -Fxq 'status=0' <<< "$out" || fail "$client did not retry a $response reply: $out"
+        out=$(FIRST_DNS_RESPONSE=$response LAST_DNS_RESPONSE=$response run_check https 203.0.113.7 '')
+        grep -Fxq 'status=2' <<< "$out" || fail "$client mistook an inconclusive $response for missing A: $out"
+    done
+    out=$(FIRST_DNS_RESPONSE=authoritative run_check https 203.0.113.7 203.0.113.7)
+    grep -Fq 'MISMATCH -> no A record' <<< "$out" || fail "$client ignored authoritative NODATA: $out"
+    out=$(run_check https 203.0.113.7 '')
+    grep -Fq 'MISMATCH -> no A record' <<< "$out" || fail "$client ignored recursive NODATA: $out"
+    write_resolvers 127.0.0.53
+    printf 'search example.test\n nameserver 2001:db8::53 # upstream\n' > "$WORK/upstream"
+    : > "$DNS_CALLS"
+    out=$(run_check https 203.0.113.7 203.0.113.7)
+    { grep -Fxq 'status=0' <<< "$out" && grep -Fxq '2001:db8::53 example.com. A' "$DNS_CALLS"; } ||
+        fail "$client missed the upstream behind the systemd stub: $out"
+    write_resolvers 127.0.0.53 ::1 192.0.2.54 192.0.2.53
+    : > "$DNS_CALLS"
+    out=$(LAST_DNS_RESPONSE=error run_check https 203.0.113.7 '')
+    { grep -Fxq 'status=2' <<< "$out" && ! grep -Fq '2001:db8::53' "$DNS_CALLS"; } ||
+        fail "$client used systemd upstreams despite configured direct servers: $out"
+    rm "$WORK/upstream"
+    out=$(DNS_RCODE=SERVFAIL run_check https 203.0.113.7 '')
+    grep -Fxq 'status=2' <<< "$out" || fail "$client treated SERVFAIL as missing A: $out"
+    out=$(DNS_RCODE=NXDOMAIN run_check https 203.0.113.7 '')
+    grep -Fq 'MISMATCH -> no A record' <<< "$out" || fail "$client ignored NXDOMAIN: $out"
+done
+mv "$WORK/bin/host" "$WORK/host.saved"
+out=$(run_check https 203.0.113.7 198.51.100.9)
+{ grep -Fq 'Cannot verify public DNS' <<< "$out" && grep -Fxq 'status=2' <<< "$out"; } || fail "missing DNS tools: $out"
+mv "$WORK/host.saved" "$WORK/bin/host"
+mv "$WORK/dig.saved" "$WORK/bin/dig"
+write_resolvers 127.0.0.53 0:0:0:0:0:0:0:1
+: > "$DNS_CALLS"
+out=$(run_check https 203.0.113.7 198.51.100.9)
+{ grep -Fxq 'status=2' <<< "$out" && [ ! -s "$DNS_CALLS" ]; } || fail "stub-only configuration: $out"
+write_resolvers 192.0.2.53
+for addr in 127.0.1.1 169.254.2.1 0.0.0.0; do
+    out=$(run_check https 203.0.113.7 "203.0.113.7 $addr")
+    { grep -Fq 'Cannot verify public DNS' <<< "$out" && grep -Fxq 'status=2' <<< "$out"; } || fail "local A $addr: $out"
+done
+out=$(STUB_WWW_IP=127.0.1.1 run_check https 203.0.113.7 198.51.100.9)
+grep -Fxq 'status=1' <<< "$out" || fail "local www answer hid a definite apex mismatch"
+
+for records in '203.0.113.7 192.0.2.8 192.0.2.8 192.0.2.9' '192.0.2.8 192.0.2.9 203.0.113.7'; do
+    for name in example.com www.example.com; do
+        if [ "$name" = example.com ]; then apex=$records; www=203.0.113.7; else apex=203.0.113.7; www=$records; fi
+        out=$(STUB_WWW_IP="$www" run_check https 203.0.113.7 "$apex")
+        grep -Fxq 'status=1' <<< "$out" || fail "mixed A records for $name passed: $out"
+        line=$(grep -F "  $name: MISMATCH" <<< "$out")
+        for ip in 192.0.2.8 192.0.2.9; do
+            [ "$(grep -Fo "$ip" <<< "$line" | wc -l)" -eq 1 ] ||
+                fail "the mismatch for $name must name $ip once: $out"
+        done
+    done
+done
 
 # A name with no A record at all: the mismatch names what is missing.
 out=$(run_check "api.ipify.org" 203.0.113.7 "")
@@ -118,16 +247,16 @@ cat > "$WORK/bin/sleep" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$SLEEP_LOG"
 STUB
-cat > "$WORK/bin/getent-fixed-later" <<'STUB'
+cat > "$WORK/bin/dig-fixed-later" <<'STUB'
 #!/bin/bash
 # The records point here from the CHECKS_UNTIL_FIXED-th check on.
-[ "$1" = ahostsv4 ] || exit 2
+[ "$*" = "+time=2 +tries=1 +noall +comments +answer +authority @192.0.2.53 example.com. A" ] || exit 2
 count=$(($(cat "$CHECK_COUNT" 2>/dev/null || echo 0) + 1))
 echo "$count" > "$CHECK_COUNT"
 if [ "$count" -ge "$CHECKS_UNTIL_FIXED" ]; then ip=203.0.113.7; else ip=198.51.100.9; fi
-printf '%s\tSTREAM %s\n' "$ip" "$2"
+printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n;; ANSWER SECTION:\nexample.com. 60 IN A %s\n' "$ip"
 STUB
-chmod +x "$WORK/bin/sleep" "$WORK/bin/getent-fixed-later"
+chmod +x "$WORK/bin/sleep" "$WORK/bin/dig-fixed-later"
 
 # run_loop_env <DNS_CHOICE> [VAR=value...]: the loop with the given
 # environment, after the check the setup makes at its start; counts the
@@ -139,7 +268,7 @@ run_loop_env() {
     : > "$WORK/curl.log"
     : > "$WORK/sleep.log"
     # shellcheck disable=SC2016
-    env PATH="$WORK/bin:$PATH" STUB_OK="api.ipify.org" STUB_IP=203.0.113.7 STUB_DNS_IP=198.51.100.9 \
+    env PATH="$WORK/bin:${loop_tools:-$PATH}" STUB_OK="api.ipify.org" STUB_IP=203.0.113.7 STUB_DNS_IP=198.51.100.9 \
         DNS_CHOICE="$choice" SLEEP_LOG="$WORK/sleep.log" CURL_LOG="$WORK/curl.log" "$@" timeout 20 bash -c '
         set -e
         CYAN=; GREEN=; RED=; YELLOW=; NC=; DOMAIN=example.com
@@ -156,6 +285,27 @@ run_loop_env() {
     ' _ "$WORK/dns.sh" "$WORK/loop.sh" < /dev/null 2>&1
     echo "exit=$?"
 }
+
+out=$(run_loop_env 3 STUB_DNS_IP=127.0.1.1)
+{ grep -q 'reached the next step' <<< "$out" && grep -q 'Cannot verify public DNS' <<< "$out"; } ||
+    fail "a local A answer stopped strict setup: $out"
+
+# A negative DNS answer does not depend on knowing the server address.
+# Use only the fixture clients, including when dig is absent.
+ln -s "$(command -v timeout)" "$WORK/tools/timeout"
+for client in dig host; do
+    if [ "$client" = host ]; then mv "$WORK/bin/dig" "$WORK/dig.saved"; fi
+    for rcode in NOERROR NXDOMAIN; do
+        out=$(loop_tools="$WORK/tools" run_loop_env 3 STUB_OK= STUB_DNS_IP= \
+            LAST_DNS_RESPONSE=authoritative DNS_RCODE="$rcode")
+        { grep -Fxq 'exit=1' <<< "$out" && grep -Fq 'MISMATCH -> no A record' <<< "$out" &&
+            ! grep -Fq 'DNS check skipped' <<< "$out"; } || fail "$client missing-unknown-ip ($rcode): $out"
+    done
+    out=$(loop_tools="$WORK/tools" run_loop_env 3 STUB_OK= LAST_DNS_RESPONSE=referral)
+    { grep -Fxq 'exit=0' <<< "$out" && grep -Fq 'DNS check skipped' <<< "$out"; } ||
+        fail "$client inconclusive-unknown-ip: $out"
+done
+mv "$WORK/dig.saved" "$WORK/bin/dig"
 
 out=$(run_loop_env yes)
 grep -qx 'exit=1' <<< "$out" || fail "an unknown DNS_CHOICE must stop the setup, got: $out"
@@ -177,10 +327,10 @@ grep -qx 'exit=1' <<< "$out" || fail "DNS_CHOICE=1 must be bounded by default, g
 [ "$(sort -u "$WORK/sleep.log")" = 30 ] && [ "$(wc -l < "$WORK/sleep.log")" -eq 10 ] ||
     fail "the default retries must wait 30 seconds each, got: $(tr '\n' ' ' < "$WORK/sleep.log")"
 
-cp "$WORK/bin/getent" "$WORK/getent.mismatch"
-cp "$WORK/bin/getent-fixed-later" "$WORK/bin/getent"
+cp "$WORK/bin/dig" "$WORK/dig.mismatch"
+cp "$WORK/bin/dig-fixed-later" "$WORK/bin/dig"
 out=$(run_loop_env 1 CHECK_COUNT="$WORK/check-count" CHECKS_UNTIL_FIXED=3)
-cp "$WORK/getent.mismatch" "$WORK/bin/getent"
+cp "$WORK/dig.mismatch" "$WORK/bin/dig"
 rm -f "$WORK/check-count"
 grep -q 'DNS configuration OK' <<< "$out" || fail "a retry that finds the records must go on, got: $out"
 grep -q 'reached the next step' <<< "$out" || fail "the setup must go on once the records point here, got: $out"
@@ -293,6 +443,7 @@ STUB
     chmod 755 "$case_dir/setup.sh" "$case_dir/bin/docker" "$case_dir/bin/curl" "$case_dir/bin/ss"
     cp "$ROOT_DIR/docker/bin/resolve-bases.sh" "$case_dir/bin/"
     cp "$ROOT_DIR/docker/images.lock" "$case_dir/"
+    cp "$WORK/bin/"{getent,dig,host} "$case_dir/bin/"
     : > "$case_dir/docker.log"
 }
 
