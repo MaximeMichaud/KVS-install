@@ -1202,9 +1202,32 @@ parse_publish_endpoint() {
 
     if [[ "$endpoint" =~ ^([0-9]+)$ ]]; then
         port="${BASH_REMATCH[1]}"
-    elif [[ "$endpoint" =~ ^\[([0-9A-Fa-f:.%]+)\]:([0-9]+)$ ]]; then
+    elif [[ "$endpoint" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
         host="${BASH_REMATCH[1]}"
         port="${BASH_REMATCH[2]}"
+        local literal=$host tail group='[0-9a-fA-F]{1,4}' ipv4='(0|[1-9][0-9]{0,2})'
+        local -a groups
+        if [[ "$literal" == *.* ]]; then
+            tail=${literal##*:}
+            [[ "$tail" =~ ^($ipv4\.){3}$ipv4$ ]] || return 1
+            IFS=. read -r -a octets <<< "$tail"
+            for octet in "${octets[@]}"; do
+                (( octet <= 255 )) || return 1
+            done
+            # A dotted tail occupies two IPv6 groups.
+            literal=${literal%"$tail"}0:0
+        fi
+        if [[ "$host" == *:* ]]; then
+            if [[ "$literal" == *::* ]]; then
+                [[ "$literal" =~ ^($group(:$group)*)?::($group(:$group)*)?$ ]] || return 1
+                IFS=' ' read -r -a groups <<< "${literal//:/ }"
+                (( ${#groups[@]} < 8 )) || return 1
+            else
+                [[ "$literal" =~ ^$group(:$group){7}$ ]] || return 1
+            fi
+        else
+            [[ "$host" == *.* ]] || return 1
+        fi
     elif [[ "$endpoint" =~ ^(([0-9]{1,3}\.){3}[0-9]{1,3}):([0-9]+)$ ]]; then
         host="${BASH_REMATCH[1]}"
         port="${BASH_REMATCH[3]}"

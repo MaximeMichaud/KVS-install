@@ -96,6 +96,37 @@ run_with_override() {
     [ "$status" -ne 124 ] || fail "$name: setup hung (timeout)"
 }
 
+# Exercise each parser as called by setup and reconfigure before they save ports.
+for parser in parse_publish_endpoint parse_publish_endpoint_port; do
+    case "$parser" in
+        parse_publish_endpoint) script=setup.sh ;;
+        *) script=reconfigure.sh ;;
+    esac
+    # shellcheck source=/dev/null
+    source <(sed -n "/^${parser}() {/,/^}/p" "$REPO_ROOT/docker/$script")
+    for host in 1234 192.0.2.256 192.0.02.1 1:2:3:4:5:6:7 1:2:3:4:5:6:7:8:: ::1:2:3:4:5:6:7:8 1:::2 1:2:3:4:5:6:7:8: :1:2:3:4:5:6:7:8 ::ffff:192.0.02.1 192.0.2.1:: : ... 2001:db8::1::2 2001:db8::12345 2001:db8::1%1 2001:db8::192.0.2.256; do
+        if PATH=/nonexistent "$parser" "[$host]:8443"; then
+            fail "$script accepted [$host]:8443"
+        fi
+    done
+    for host in 192.0.2.12 :: ::1 1:2:3:4:5:6:192.0.2.1 2001:DB8::F 2001:db8:: 2001:db8::1 2001:0db8:0:0:0:0:0:1 2001:db8::192.0.2.10; do
+        PATH=/nonexistent "$parser" "[$host]:18443" || fail "$script rejected [$host]:18443"
+        if [ "$script" = setup.sh ]; then
+            [ "$PUBLISH_HOST/$PUBLISH_PORT" = "$host/18443" ] || fail "wrong bind address or port"
+        else
+            [ "$PARSED_PUBLISH_PORT" = 18443 ] || fail "wrong published port"
+        fi
+    done
+done
+
+run_with_override invalid-ipv6 'HTTPS_PORT=[:]:8443' HTTP_PORT=8080
+[ "$status" -ne 0 ] || fail "setup accepted a malformed IPv6 override"
+grep -Fq 'HTTPS_PORT is not a valid port' "$output_log" ||
+    fail "setup did not reject the malformed IPv6 override"
+cmp "$env_file" "$REPO_ROOT/docker/.env.example" ||
+    fail "refusing a malformed IPv6 override changed .env"
+echo "ok - setup rejects malformed IPv6 overrides before it writes .env"
+
 # 1. An HTTP_PORT carrying a shell command is refused before it is written, so
 #    the override never reaches .env, the injected command never runs, and the
 #    run stops at the override check. The unchanged .env is the primary signal:
