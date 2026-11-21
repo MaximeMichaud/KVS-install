@@ -1006,6 +1006,8 @@ test_archive_extraction_skips_an_installed_site() {
   trap 'rm -rf "$temp_dir"' RETURN
   mkdir -p "$temp_dir/src/admin/include" "$temp_dir/root" "$temp_dir/www"
   printf "define('DB_PASS','pass');\n" >"$temp_dir/src/admin/include/setup_db.php"
+  mkdir "$temp_dir/src/_INSTALL"
+  echo rewrites >"$temp_dir/src/_INSTALL/nginx_config.txt"
   echo stock >"$temp_dir/src/index.php"
   (cd "$temp_dir/src" && zip -qr "$temp_dir/root/KVS_7.0.2_[example.com].zip" .)
 
@@ -1878,8 +1880,10 @@ test_install_rerun_keeps_setup_db_restricted() {
   [[ "$(declare -f install_KVS)" == *KVS_WWW_ROOT* ]] ||
     fail "install_KVS must take its web root from KVS_WWW_ROOT" || return 1
   DOMAIN=site.example.com URL=site.example.com PHP=8.3 KVS_WWW_ROOT="$temp_dir/www"
+  KVS_NGINX_DIR="$temp_dir/nginx" KVS_ARCHIVE_DIR="$temp_dir/upload"
   site="$temp_dir/www/$DOMAIN"
-  mkdir -p "$site/admin/include"
+  mkdir -p "$site/admin/include" "$KVS_NGINX_DIR/globals" "$KVS_ARCHIVE_DIR"
+  echo 'rewrite ^/old$ /new permanent;' > "$KVS_NGINX_DIR/globals/kvs.conf"
   printf "<?php\n\$config['project_url']=\"https://site.example.com\";\n" >"$site/admin/include/setup.php"
   printf "<?php\ndefine('DB_LOGIN','site.example.com');\ndefine('DB_PASS','RealPass123');\ndefine('DB_DEVICE','site.example.com');\n" \
     >"$site/admin/include/setup_db.php"

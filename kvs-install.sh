@@ -1339,6 +1339,17 @@ function aptinstall_phpmyadmin() {
     fi
 }
 
+# Use the same member check before full extraction and targeted reads.
+kvs_rewrite_member() {
+  local members member
+  members=$(unzip -Z1 "$1" '*_INSTALL/nginx_config.txt') || return 1
+  member=$(awk '$0 == "_INSTALL/nginx_config.txt" || $0 == "./_INSTALL/nginx_config.txt"' <<< "$members")
+  case "$member" in
+    _INSTALL/nginx_config.txt|./_INSTALL/nginx_config.txt) printf '%s\n' "$member" ;;
+    *) echo "Expected exactly one nginx rewrite member in $1" >&2; return 1 ;;
+  esac
+}
+
 # The archive is extracted once. A later run over an installed site must not
 # overwrite admin/data (page configuration, login fingerprints), the theme or
 # the language files with the stock copies: KVS updates itself from its panel.
@@ -1350,10 +1361,16 @@ extract_kvs_archive() {
     echo "Existing KVS installation found in $kvs_path, the archive in $archive_dir is left untouched"
     return 0
   fi
+  local archive
+  archive=$(find_kvs_archive "$archive_dir") && kvs_rewrite_member "$archive" >/dev/null || return 1
   mkdir -p "$kvs_path" || return $?
-  mv "$archive_dir"/KVS_* "$kvs_path" || return $?
-  unzip -o "$kvs_path"/KVS_* -d "$kvs_path" || return $?
-  rm -r "$kvs_path"/KVS_*
+  unzip -o "$archive" -d "$kvs_path" || return $?
+  if [[ -n ${3:-} ]]; then
+    # Return the exact upload to the caller for removal after publication.
+    printf -v "$3" '%s' "$archive"
+  else
+    rm -- "$archive"
+  fi
 }
 
 # The stock admin/include/setup_db.php carries the placeholders login, pass
@@ -1487,9 +1504,76 @@ provision_kvs_database() {
     return 0
 }
 
+# The initial extraction supplies the rewrites in _INSTALL. For a copied
+# site, read only that member of the uploaded archive.
+install_kvs_rewrites() (
+    local source="$1/_INSTALL/nginx_config.txt" archive_dir="$2"
+    local target="${KVS_NGINX_DIR:-/etc/nginx}/globals/kvs.conf" archive="" temp
+    local from_archive=false digest current_digest="" member
+    local pending="$target.sha256.pending" stamp=""
+    local -a uploads=("$archive_dir"/KVS_*.zip)
+
+    # Serialize publication and recovery in the shared nginx directory.
+    exec 9<"${target%/*}" && flock -x 9 || return 1
+    if [[ -f "$target" ]]; then
+        digest=$(sha256sum < "$target") || return 1
+        current_digest=${digest%% *}
+        if [[ ! -L "$target" && -f "$pending" && $(<"$pending") == "$current_digest" ]]; then
+            mv -fT -- "$pending" "$target.sha256" || return 1
+        fi
+        if [[ -L "$target" || ! -f "$target.sha256" || $(<"$target.sha256") != "$current_digest" ]]; then
+            rm -f -- "$pending" || return 1
+            echo "Keeping existing nginx rewrites in $target (local or untracked rules)"
+            return 0
+        fi
+    fi
+    if [[ -e "${uploads[0]:-}" || ! -f "$source" ]]; then
+        if [[ ! -e "${uploads[0]:-}" && -f "$target" && -s "$target" ]]; then
+            return 0
+        fi
+        archive=$(find_kvs_archive "$archive_dir") || return 1
+    fi
+
+    temp=$(mktemp "${target}.XXXXXX") || return 1
+    trap 'rm -f -- "$temp" ${stamp:+"$stamp"}' EXIT
+    if [[ -n "$archive" ]]; then
+        member=$(kvs_rewrite_member "$archive") || return 1
+        unzip -p "$archive" "$member" > "$temp" || return 1
+        from_archive=true
+    fi
+    # An extracted local override still wins. Only the ZIP can establish
+    # provenance when resuming without a published or pending digest.
+    if [[ -f "$source" ]] && { [[ "$from_archive" == false ]] || ! cmp -s -- "$source" "$temp"; }; then
+        cat "$source" > "$temp" || return 1
+        from_archive=false
+    fi
+    if [[ ! -s "$temp" ]]; then
+        echo "Cannot install empty KVS nginx rewrites" >&2
+        return 1
+    fi
+    digest=$(sha256sum < "$temp") || return 1
+    digest=${digest%% *}
+    if [[ "$digest" == "$current_digest" ]]; then
+        rm -f -- "$pending"
+        return $?
+    fi
+    chmod 644 "$temp" || return 1
+    if [[ "$from_archive" == true || ( -f "$pending" && $(<"$pending") == "$digest" ) ]]; then
+        # Record the intended bytes before publishing them. On interruption
+        # the old digest still identifies the old rules and the pending
+        # digest identifies the new rules, whichever rename completed.
+        stamp=$(mktemp "${target}.XXXXXX") || return 1
+        printf '%s\n' "$digest" > "$stamp" && mv -fT -- "$stamp" "$pending" || return 1
+        mv -fT -- "$temp" "$target" && mv -fT -- "$pending" "$target.sha256"
+    else
+        mv -fT -- "$temp" "$target" && rm -f -- "$target.sha256" "$pending"
+    fi
+)
+
 function install_KVS() {
     KVS_PATH="${KVS_WWW_ROOT:-/var/www}/$DOMAIN"
-    extract_kvs_archive "$KVS_PATH" || return $?
+    local archive_dir="${KVS_ARCHIVE_DIR:-/root}" fresh_archive=""
+    extract_kvs_archive "$KVS_PATH" "$archive_dir" fresh_archive || return $?
     chown -R www-data:www-data "$KVS_PATH"
     chmod -R 755 "$KVS_PATH"
     # The blanket chmod opened setup_db.php, which holds the password on a
@@ -1501,9 +1585,8 @@ function install_KVS() {
         sed -i '/xargs chmod 666/d' "$KVS_PATH"/_INSTALL/install_permissions.sh
         "$KVS_PATH"/_INSTALL/install_permissions.sh
     fi
-    if [ -f "$KVS_PATH"/_INSTALL/nginx_config.txt ]; then
-        cat "$KVS_PATH"/_INSTALL/nginx_config.txt > /etc/nginx/globals/kvs.conf
-    fi
+    install_kvs_rewrites "$KVS_PATH" "$archive_dir" || return $?
+    if [[ -n "$fresh_archive" ]]; then rm -- "$fresh_archive" || return 1; fi
     sed -i "s|/PATH|$KVS_PATH|
              s|/usr/local/bin/|/usr/bin/|
              s|/usr/bin/php[0-9.]*|/usr/bin/php$PHP|" "$KVS_PATH"/admin/include/setup.php
