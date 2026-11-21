@@ -358,7 +358,9 @@ has no place on a production server.
   exits 1 with what it reclaimed.
 - `kvsctl update-cli [--version V]`: replace this binary with the build the
   latest stable release ships, or the one of the release `--version` names,
-  a release candidate included. The download stops past the size the signed
+  a release candidate included. An explicitly requested older build is refused.
+  An implicit older target or an equal target exits 0 and keeps the binary.
+  The download stops past the size the signed
   manifest gives (128 MiB when it gives none) and must match its sha256, and
   its `version` has to run within 10 seconds and name that release before it
   takes the place of this binary, which is kept as `<path>.previous`. It

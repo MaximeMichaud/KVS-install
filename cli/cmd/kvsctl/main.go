@@ -682,7 +682,7 @@ func versionCmd() *cobra.Command {
 // there is no way to tell which of the two is newer.
 func cliState(releaseVersion string) (msg string, outdated bool) {
 	switch {
-	case Version == releaseVersion:
+	case strings.TrimPrefix(Version, "v") == strings.TrimPrefix(releaseVersion, "v"):
 		return fmt.Sprintf("kvsctl %s is the build of release %s", Version, releaseVersion), false
 	case !isRelease(Version):
 		return fmt.Sprintf("kvsctl %s is not a release build, release %s ships one", Version, releaseVersion), true
@@ -691,6 +691,14 @@ func cliState(releaseVersion string) (msg string, outdated bool) {
 	default:
 		return fmt.Sprintf("kvsctl %s is newer than the build of release %s", Version, releaseVersion), false
 	}
+}
+
+// checkCLIDowngrade refuses an explicitly requested build older than this binary.
+func checkCLIDowngrade(target string) error {
+	if target != "" && semver.Less(target, Version) {
+		return fmt.Errorf("refusing to downgrade kvsctl from %s to %s", Version, target)
+	}
+	return nil
 }
 
 func isRelease(v string) bool {

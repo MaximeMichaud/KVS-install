@@ -335,3 +335,40 @@ func TestPrintAnnouncedKeys(t *testing.T) {
 		t.Errorf("printed %q, want %q", out.String(), want)
 	}
 }
+
+func TestUpdateCLIRefusesExplicitDowngrade(t *testing.T) {
+	rel := testRelease("1.2.0", "2026-09-01", "")
+	rel.CLI = map[string]manifest.Asset{cliPlatform(): fakeBuild(t, "exit 1")}
+	useFlags(t, t.TempDir(), signedManifest(t, rel), false)
+	old := Version
+	t.Cleanup(func() { Version = old })
+	for _, tc := range []struct {
+		current, target string
+		refuse          bool
+	}{
+		{"1.3.0", "1.2.0", true},
+		{"1.3.0", "", false},
+		{"1.2.0", "1.2.0", false},
+		{"v1.2.0", "1.2.0", false},
+	} {
+		Version = tc.current
+		if tc.current == "v1.2.0" {
+			msg, outdated := cliState("1.2.0")
+			if outdated || !strings.Contains(msg, "is the build of release 1.2.0") {
+				t.Errorf("equal versions: %s", msg)
+			}
+		}
+		cmd := updateCLICmd()
+		if err := cmd.Flags().Set("version", tc.target); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.RunE(cmd, nil)
+		if tc.refuse {
+			if err == nil || !strings.Contains(err.Error(), "refusing to downgrade kvsctl from 1.3.0 to 1.2.0") {
+				t.Errorf("explicit downgrade: %v", err)
+			}
+		} else if err != nil {
+			t.Errorf("current %s, target %q: %v", tc.current, tc.target, err)
+		}
+	}
+}

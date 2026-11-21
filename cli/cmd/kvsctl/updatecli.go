@@ -76,6 +76,9 @@ func updateCLICmd() *cobra.Command {
 			}
 			msg, outdated := cliState(target.Version)
 			if !outdated {
+				if err := checkCLIDowngrade(version); err != nil {
+					return err
+				}
 				cliDetail(msg + ", nothing to do")
 				return nil
 			}
@@ -93,7 +96,7 @@ func updateCLICmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&version, "version", "", "the release whose kvsctl to install, a release candidate included (default the latest stable release)")
+	cmd.Flags().StringVar(&version, "version", "", "the release whose kvsctl to install, a release candidate included; downgrades are refused (default the latest stable release)")
 	return cmd
 }
 
