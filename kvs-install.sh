@@ -1866,7 +1866,7 @@ issue_site_certificate() {
         echo "ZeroSSL needs an email for the account: put yours in place of <your email>."
       fi
       echo "The --issue command exits with status 2 when the certificate is already issued and still valid: run the --install-cert command all the same."
-      echo "The KVS storage servers skip the TLS check until then; turn it back on in the KVS admin panel once the certificate is in place."
+      echo "Local KVS storage servers skip the TLS check until then. Turn it back on for those servers in the KVS admin panel once the certificate is in place."
     } >&2
 }
 
@@ -2233,9 +2233,7 @@ VALUES (
 ON DUPLICATE KEY UPDATE
     value = JSON_SET(
         value,
-        '$.server_type', 'nginx',
-        '$.memory_limit_default', 256,
-        '$.file_upload_max_size', 2048
+        '$.server_type', 'nginx'
     ),
     version_control = version_control + 1;
 EOSQL
@@ -2244,7 +2242,16 @@ EOSQL
     echo "ERROR: KVS server type reads '${server_type}' after the update, expected nginx" >&2
     return 1
   fi
-  echo "KVS server type set to nginx, upload limit 2048 MB, default memory limit 256 MB"
+  echo "KVS server type set to nginx"
+}
+
+# Share the optional decimal port (1 through 65535) across all storage origins.
+kvs_storage_port_pattern() {
+  printf '%s' '(:0*([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?'
+}
+
+kvs_local_storage_origin() {
+  printf '^https?://(www[.])?%s[.]?%s' "${DOMAIN//./[.]}" "$(kvs_storage_port_pattern)"
 }
 
 # The seeded storage servers point at https://www.<domain>/contents/... with
@@ -2257,10 +2264,12 @@ configure_kvs_servers() {
   local db="${1:-$DOMAIN}"
   local kvs_path="${KVS_PATH:-/var/www/$DOMAIN}"
   local project_url="https://$URL"
-  local storage_prefix="https?://(www[.])?${DOMAIN//./[.]}(:[0-9]+)?/contents/"
-  local canonical_prefix="${project_url//./[.]}/contents/"
-  local ssl_skip=1
-  local matching stale mismatch
+  local matching stale external label host_end local_origin local_host contents_pattern canonical_prefix
+  # Every line of the field is one endpoint: rewrite and check each of them.
+  local_origin=$(kvs_local_storage_origin)
+  local_host=${local_origin#^}
+  contents_pattern="(?m)^${local_host}/contents/"
+  canonical_prefix="${project_url//./[.]}/contents/"
   local prefix
 
   prefix=$(kvs_tables_prefix) || return 1
@@ -2268,22 +2277,47 @@ configure_kvs_servers() {
 UPDATE ${prefix}admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
 UPDATE ${prefix}admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
 UPDATE ${prefix}admin_servers
-    SET urls = REGEXP_REPLACE(urls, '(?m)^${storage_prefix}', '${project_url}/contents/')
-    WHERE urls REGEXP '(?m)^${storage_prefix}';
-UPDATE ${prefix}admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
+    SET urls = REGEXP_REPLACE(urls, '$contents_pattern', '${project_url}/contents/')
+    WHERE urls REGEXP '$contents_pattern';
 EOSQL
-  matching=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls REGEXP '(?m)^${canonical_prefix}'") || return $?
-  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls REGEXP '(?m)^(?!${canonical_prefix})${storage_prefix}'") || return $?
-  mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
-  if [ "$matching" -lt 1 ] || [ "$stale" -ne 0 ] 2>/dev/null; then
+  matching=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls REGEXP '(?m)^${local_host}([/?#]|$)'") || return $?
+  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls REGEXP '(?m)^(?!${canonical_prefix})${local_host}/contents/'") || return $?
+  if [[ ! "$matching" =~ ^[0-9]+$ || "$stale" != 0 ]]; then
     echo "ERROR: KVS storage server URLs do not match ${project_url}/contents/ (matching=${matching}, stale=${stale})" >&2
     return 1
   fi
-  if [ "$mismatch" -ne 0 ] 2>/dev/null; then
-    echo "ERROR: KVS storage servers kept their TLS check (streaming_skip_ssl_check=${ssl_skip} expected)" >&2
+  if [[ "$matching" == 0 ]]; then
+    # With no local rows, count HTTP(S) origins with a hostname or IPv6 literal.
+    label='[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
+    host_end="$(kvs_storage_port_pattern)([/?#]|$)"
+    external=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers
+        WHERE urls REGEXP '^https?://${label}([.]${label})*[.]?${host_end}'
+           OR (urls REGEXP '^https?://[[][a-fA-F0-9:.]+[]]${host_end}'
+               AND IS_IPV6(SUBSTRING_INDEX(SUBSTRING_INDEX(urls, ']', 1), '[', -1)))") || return $?
+    if [[ ! "$external" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: No matching local or external KVS storage URLs" >&2
+      return 1
+    fi
+    echo "WARNING: KVS storage uses external hosts. Their URLs and TLS settings are preserved." >&2
+  else
+    echo "KVS local storage configured for ${project_url}"
+  fi
+  set_kvs_local_storage_tls "$db" "$prefix" 1
+}
+
+set_kvs_local_storage_tls() {
+  local db="$1" prefix="$2" ssl_skip="$3" mismatch
+  local local_server
+  local_server="urls REGEXP '(?m)$(kvs_local_storage_origin)([/?#]|$)'"
+
+  mariadb "$db" <<EOSQL || return $?
+UPDATE ${prefix}admin_servers SET streaming_skip_ssl_check = ${ssl_skip} WHERE ${local_server};
+EOSQL
+  mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE ${local_server} AND COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
+  if [[ ! "$mismatch" =~ ^0$ ]]; then
+    echo "ERROR: Local KVS storage servers do not follow the TLS setting (streaming_skip_ssl_check=${ssl_skip})" >&2
     return 1
   fi
-  echo "KVS storage servers use ${project_url}/contents/..., TLS verification off until the certificate step"
 }
 
 # After the certificate step: the storage servers verify TLS only when the
@@ -2291,7 +2325,7 @@ EOSQL
 # asked for or fell back to.
 configure_kvs_servers_tls() {
   local db="${1:-$DOMAIN}"
-  local ssl_skip mismatch prefix
+  local ssl_skip prefix
 
   case "${CERTIFICATE_MODE:-}" in
     public) ssl_skip=0 ;;
@@ -2302,15 +2336,8 @@ configure_kvs_servers_tls() {
       ;;
   esac
   prefix=$(kvs_tables_prefix) || return 1
-  mariadb "$db" <<EOSQL || return $?
-UPDATE ${prefix}admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
-EOSQL
-  mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
-  if [ "$mismatch" -ne 0 ] 2>/dev/null; then
-    echo "ERROR: KVS storage servers do not follow the certificate mode (streaming_skip_ssl_check=${ssl_skip})" >&2
-    return 1
-  fi
-  echo "KVS storage servers: TLS verification $([ "$ssl_skip" -eq 1 ] && echo "left off for the self-signed certificate" || echo "enabled")"
+  set_kvs_local_storage_tls "$db" "$prefix" "$ssl_skip" || return $?
+  echo "Local KVS storage servers: TLS verification $([ "$ssl_skip" -eq 1 ] && echo "left off for the self-signed certificate" || echo "enabled")"
 }
 
 function install_ioncube() {
@@ -2432,7 +2459,7 @@ function setupdone() {
   echo "${cyan}Website: ${green}https://$URL"
   if [[ "$CERTIFICATE_MODE" == "selfsigned" && "$SSL_PROVIDER" != "selfsigned" ]]; then
     echo "${red}The ${SSL_PROVIDER} certificate could not be issued or installed: the site uses a self-signed one for now,${normal}"
-    echo "${red}and the KVS storage servers skip the TLS check until the real one is in place (see the warning of the acme.sh step in /root/kvs-install.log).${normal}"
+    echo "${red}and the local KVS storage servers skip the TLS check until the real one is in place (see the warning of the acme.sh step in /root/kvs-install.log).${normal}"
   fi
   echo "${cyan}phpMyAdmin: ${green}https://$URL/phpmyadmin/"
   echo "${cyan}Database: ${green}$DOMAIN"

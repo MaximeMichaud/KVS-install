@@ -958,8 +958,8 @@ test_kvs_system_settings_select_nginx() {
     fail "system settings step failed although the read-back says nginx" || return 1
   assert_file_contains "$temp_dir/sql" "'\$.server_type', 'nginx'" \
     "settings update must switch the KVS server type to nginx" || return 1
-  assert_file_contains "$temp_dir/sql" "'\$.file_upload_max_size', 2048" \
-    "settings update must align the KVS upload limit with the PHP and nginx limits" || return 1
+  assert_file_contains "$temp_dir/sql" "'file_upload_max_size', 2048" \
+    "a new settings row must start with the PHP and nginx upload limit" || return 1
   assert_file_contains "$temp_dir/mariadb-calls" "example.com" \
     "settings update must target the site database" || return 1
 
@@ -1125,7 +1125,7 @@ test_kvs_servers_follow_the_site_url() {
   # whatever certificate was asked for.
   configure_kvs_servers >/dev/null 2>&1 || fail "server configuration failed" || return 1
   assert_file_contains "$temp_dir/sql" "'https://example.com/contents/'" "server URLs must follow the site URL" || return 1
-  assert_file_contains "$temp_dir/sql" "'(?m)^https?://(www[.])?example[.]com(:[0-9]+)?/contents/'" "seeded www and plain http URLs must be matched" || return 1
+  assert_file_contains "$temp_dir/sql" "REGEXP_REPLACE(urls, '(?m)^https?://(www[.])?example[.]com[.]?(:0*" "seeded www and plain http URLs must be matched on every line" || return 1
   assert_file_contains "$temp_dir/sql" "REPLACE(path, '%PROJECT_PATH%', '/var/www/example.com')" "server paths must follow the site" || return 1
   assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = 1" "the TLS check must stay off before the certificate step" || return 1
 
