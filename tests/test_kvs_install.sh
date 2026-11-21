@@ -780,7 +780,7 @@ EOF
           }
           main
         ' _ "$script"
-    ) <<<5 >"$temp_dir/out-$mode" 2>&1 || status=$?
+    ) <<<5 2>&1 | cat >"$temp_dir/out-$mode" || status=$?
     assert_equal 1 "$(wc -l <"$temp_dir/downloads")" "the $mode run must download the script once" || return 1
     assert_equal 0 "$status" "the $mode run must end well once updated: $(tail -n 3 "$temp_dir/out-$mode")" || return 1
     assert_equal 1 "$(grep -acxF 'Update Done.' "$temp_dir/out-$mode")" "the $mode run must update once" || return 1
@@ -1042,18 +1042,31 @@ test_setup_db_file_is_restricted_to_the_php_user() {
   esac
 }
 
+make_test_certificate() {
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+    -subj "/CN=$DOMAIN" -keyout "$1/$DOMAIN.key" -out "$1/fullchain.cer" 2>/dev/null
+}
+
 test_acme_issue_reuses_a_valid_certificate() {
   local temp_dir
   local status
   temp_dir=$(mktemp -d)
   trap 'rm -rf "$temp_dir"' RETURN
-  # shellcheck disable=SC2016  # the script must expand ACME_EXIT at run time
-  printf '#!/bin/bash\nexit "${ACME_EXIT:-0}"\n' >"$temp_dir/acme.sh"
+  DOMAIN=site.example.test SSL_PROVIDER=letsencrypt
+  generate_selfsigned_cert() { return 1; }
+  make_test_certificate "$temp_dir" || return 1
+  cat >"$temp_dir/acme.sh" <<'SH'
+#!/bin/bash
+case $1 in
+  --issue) exit "${ACME_EXIT:-0}" ;;
+  --info) echo "DOMAIN_CONF=${0%/*}/domain.conf" ;;
+esac
+SH
   chmod +x "$temp_dir/acme.sh"
 
-  ACME_EXIT=0 acme_issue_or_reuse "$temp_dir/acme.sh" --issue >/dev/null || fail "a fresh issue must succeed" || return 1
-  ACME_EXIT=2 acme_issue_or_reuse "$temp_dir/acme.sh" --issue >/dev/null || fail "a still valid certificate must count as success" || return 1
-  ACME_EXIT=1 acme_issue_or_reuse "$temp_dir/acme.sh" --issue >/dev/null 2>&1
+  ACME_EXIT=0 issue_site_certificate "$temp_dir/acme.sh" --issue >/dev/null || fail "a fresh issue must succeed" || return 1
+  ACME_EXIT=2 issue_site_certificate "$temp_dir/acme.sh" --issue >/dev/null || fail "a still valid certificate must count as success" || return 1
+  ACME_EXIT=1 issue_site_certificate "$temp_dir/acme.sh" --issue >/dev/null 2>&1
   status=$?
   assert_equal "1" "$status" "a failed issue must stay a failure" || return 1
 }
@@ -2242,6 +2255,7 @@ test_certificate_fallback_is_reported_and_followed() {
   DOMAIN=example.com
   SSL_PROVIDER=letsencrypt
   EMAIL=admin@example.com
+  make_test_certificate "$temp_dir" || return 1
   # acme.sh keeps state as the real one does: a certificate issued once makes
   # the next --issue exit 2 (still valid, skipped); ZeroSSL refuses to issue
   # before an account has an email. Each "<what>-fails-once" file makes that
@@ -2252,6 +2266,7 @@ test_certificate_fallback_is_reported_and_followed() {
 printf '%s\n' "$*" >>"$s/acme-calls"
 once() { [[ -e "$s/$1-fails-once" ]] && rm -f "$s/$1-fails-once"; }
 case "$1" in
+  --info) echo "DOMAIN_CONF=$s/domain.conf" ;;
   --register-account) [[ "$3" == *@* ]] || exit 1; : >"$s/registered" ;;
   --issue)
     [[ -e "$s/needs-account" && ! -e "$s/registered" ]] && exit 1
@@ -2282,6 +2297,12 @@ STUB
     fail "a still valid certificate must succeed" || return 1
   assert_equal "public" "$CERTIFICATE_MODE" "a reused certificate is public" || return 1
   [[ -e "$temp_dir/installed" ]] || fail "a still valid certificate was not installed" || return 1
+  : >"$temp_dir/install-fails-once"
+  if issue_site_certificate "$temp_dir/acme.sh" --issue -d example.com >/dev/null 2>&1; then
+    fail "a failed reinstall of a still-valid certificate passed"
+    return 1
+  fi
+  [[ ! -e "$temp_dir/selfsigned" ]] || fail "replaced a still-valid certificate after an install error" || return 1
 
   # A refused issue, a failed install over an issued certificate, and ZeroSSL
   # without an email: each falls back, says so, and the commands it prints,
@@ -2308,7 +2329,7 @@ STUB
     grep -q "acme.sh's own cron may not do it before a renewal, if ever" <<<"$out" ||
       fail "the warning must say that acme.sh's cron may not install the certificate" || return 1
     if [[ "$case" == zerossl ]]; then
-      grep -Fq -- "--register-account -m <your email>" <<<"$out" ||
+      grep -Fq -- "--register-account -m <your email> --server zerossl" <<<"$out" ||
         fail "ZeroSSL without an email must start with the account: $out" || return 1
     else
       ! grep -q -- "--register-account" <<<"$out" ||

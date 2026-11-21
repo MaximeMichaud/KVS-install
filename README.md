@@ -299,8 +299,12 @@ INSTALL_TYPE=2 \
 database_ver=12.3 \
 IONCUBE=YES \
 AUTOPACKAGEUPDATE=YES \
+SSL_PROVIDER=zerossl \
+EMAIL=admin@example.com \
 ./kvs-install.sh
 ```
+
+The default is `SSL_PROVIDER=letsencrypt`. Set `EMAIL` to your ACME account email address. The installer passes it to acme.sh during setup and selects the requested CA when issuing the certificate. If acme.sh skips issuance and the saved renewal authority differs, the installer reports that authority and prints the command to switch. After issuance or a skip, it checks the cached key against the first certificate in the full chain before deploying the pair and recording the nginx reload command. ZeroSSL requires an account email. To use a self-signed certificate, set `SSL_PROVIDER=selfsigned` and omit `EMAIL`.
 
 With `IONCUBE=NO` the archive is treated as unencoded and `KVS_PHP_VERSION` picks the PHP release to install (7.4, 8.1, 8.2, 8.3 or 8.4); interactive runs ask instead. An IonCube encoded archive uses the recommended default unless `KVS_PHP_VERSION` explicitly overrides it, with a compatibility warning.
 

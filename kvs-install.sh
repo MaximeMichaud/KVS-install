@@ -1782,19 +1782,38 @@ certificate_domain_names() {
   printf '%s\n' "$names"
 }
 
-# acme.sh exits 2 when the certificate is still valid and needs no renewal.
-# That is a success for the installer: the existing certificate is installed
-# again as is instead of being replaced by a self-signed one.
-acme_issue_or_reuse() {
-  local status
-
-  "$@"
-  status=$?
-  if [ "$status" -eq 2 ]; then
-    echo "Certificate still valid, reusing it"
-    return 0
-  fi
-  return "$status"
+check_acme_certificate() {
+    local acme="$1" status="$2" ssl_dir="$3" info current expected="" conf key chain key_pub cert_pub
+    info=$("$acme" --info -d "$DOMAIN" --ecc) || return 1
+    conf=$(sed -n 's/^DOMAIN_CONF=//p' <<< "$info")
+    if [[ "$conf" != /* ]]; then
+        echo "Cannot locate the cached acme.sh certificate and key for $DOMAIN" >&2
+        return 1
+    fi
+    key="${conf%/*}/$DOMAIN.key"
+    chain="${conf%/*}/fullchain.cer"
+    if ! key_pub=$(openssl pkey -in "$key" -passin pass: -pubout) ||
+       ! cert_pub=$(openssl x509 -in "$chain" -pubkey -noout) || [[ "$key_pub" != "$cert_pub" ]]; then
+        printf 'Cannot verify a matching public key in %s and %s. Repair the cached pair before deployment.\n' "$key" "$chain" >&2
+        return 1
+    fi
+    if ((status == 2)); then
+        echo "Certificate still valid, reusing it"
+        case "${SSL_PROVIDER:-}" in
+            zerossl) expected="https://acme.$SSL_PROVIDER.com/v2/DV90" ;;
+            letsencrypt) expected="https://acme-v02.api.$SSL_PROVIDER.org/directory" ;;
+        esac
+        if [[ -n "$expected" ]]; then
+            current=$(sed -n 's/^Le_API=//p' <<< "$info")
+            if [[ "$current" != "$expected" ]]; then
+                printf 'The certificate is valid. Its renewal authority is %s. To switch to %s, run:\n' \
+                    "${current:-unknown}" "$SSL_PROVIDER" >&2
+                printf '  %q --renew -d %q --ecc --server %q --force &&\n' "$acme" "$DOMAIN" "$SSL_PROVIDER" >&2
+                printf '  %q --install-cert --ecc -d %q --key-file %q --fullchain-file %q --reloadcmd %q\n' \
+                    "$acme" "$DOMAIN" "$ssl_dir/key.pem" "$ssl_dir/cert.pem" "service nginx force-reload" >&2
+            fi
+        fi
+    fi
 }
 
 # The certificate the site serves once install_acme.sh has run: "public" when
@@ -1811,17 +1830,23 @@ CERTIFICATE_MODE=""
 # the warning gives the commands to run, one after the other.
 issue_site_certificate() {
     local acme="$1"
-    local ssl_dir="/etc/nginx/ssl/$DOMAIN"
+    local ssl_dir="/etc/nginx/ssl/$DOMAIN" status=0
     shift
 
-    if acme_issue_or_reuse "$acme" "$@" &&
-        "$acme" --install-cert --ecc -d "$DOMAIN" \
-          --key-file "$ssl_dir"/key.pem \
-          --fullchain-file "$ssl_dir"/cert.pem \
-          --reloadcmd "service nginx force-reload"; then
-        CERTIFICATE_MODE=public
-        echo "SSL certificate issued and installed"
-        return 0
+    "$acme" "$@" || status=$?
+    if ((status == 0 || status == 2)); then
+        check_acme_certificate "$acme" "$status" "$ssl_dir" || return 1
+        if "$acme" --install-cert --ecc -d "$DOMAIN" \
+            --key-file "$ssl_dir/key.pem" --fullchain-file "$ssl_dir/cert.pem" \
+            --reloadcmd "service nginx force-reload"; then
+            CERTIFICATE_MODE=public
+            echo "SSL certificate installed"
+            return 0
+        fi
+        if ((status == 2)); then
+            echo "Could not deploy the still-valid certificate for $DOMAIN" >&2
+            return 1
+        fi
     fi
 
     CERTIFICATE_MODE=selfsigned
@@ -1833,7 +1858,7 @@ issue_site_certificate() {
       echo "Check that the domain points at this server and that port 80 is reachable, then run these commands one after the other:"
       # ZeroSSL issues nothing to an account without an email.
       if [[ "$SSL_PROVIDER" == "zerossl" && -z "${EMAIL:-}" ]]; then
-        echo "  $acme --register-account -m <your email>"
+        echo "  $acme --register-account -m <your email> --server zerossl"
       fi
       echo "  $acme $*"
       echo "  $acme --install-cert --ecc -d $DOMAIN --key-file $ssl_dir/key.pem --fullchain-file $ssl_dir/cert.pem --reloadcmd 'service nginx force-reload'"
@@ -1888,18 +1913,19 @@ function install_acme.sh() {
     cd /root || exit
     [ -d /root/acme.sh ] || git clone https://github.com/acmesh-official/acme.sh.git
     cd ./acme.sh || exit
-    ./acme.sh --install -m "$EMAIL"
+    local -a server_args=()
+    case "$SSL_PROVIDER" in
+        letsencrypt|zerossl) server_args=(--server "$SSL_PROVIDER") ;;
+    esac
+    ./acme.sh --install -m "$EMAIL" "${server_args[@]}"
     mkdir -p /var/www/_letsencrypt && chown www-data /var/www/_letsencrypt
     service nginx restart
 
     # Build acme.sh command based on provider
     ACME_ARGS="--issue $(certificate_domain_names) -w /var/www/_letsencrypt --keylength ec-256"
-    if [[ "$SSL_PROVIDER" == "letsencrypt" ]]; then
-        ACME_ARGS="$ACME_ARGS --server letsencrypt"
-    fi
 
     # shellcheck disable=SC2086  # Intentional word splitting for multiple flags
-    issue_site_certificate /root/.acme.sh/acme.sh $ACME_ARGS || return $?
+    issue_site_certificate /root/.acme.sh/acme.sh $ACME_ARGS "${server_args[@]}" || return $?
 
     enable_site_vhost
 }
