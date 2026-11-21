@@ -1824,8 +1824,9 @@ test_gum_repository_leaves_with_its_key() {
   apt_install() { printf 'install %s\n' "$*" >>"$temp_dir/apt-calls"; }
 
   # No gpg on the host: nothing is written, the run goes on.
-  curl() { fail "curl must not run without gpg"; }
+  curl() { : >"$temp_dir/curl-called"; return 7; }
   run_install_gum >/dev/null || fail "install_gum must not fail the installer" || return 1
+  [[ ! -e "$temp_dir/curl-called" ]] || fail "curl must not run without gpg" || return 1
   [[ ! -e "$list" && ! -e "$keyring" ]] || fail "no list nor keyring must be written without gpg" || return 1
   [[ ! -e "$temp_dir/apt-calls" ]] || fail "apt must not run without gpg" || return 1
 
