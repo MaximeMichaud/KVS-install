@@ -534,7 +534,7 @@ test_setup_and_init_are_wired_for_imports() {
     grep -A4 -F 'import_stage_dump() {' "$setup" | grep -q '\[ "$IMPORT_MODE" = true \] || return 0' || fail "the staging must stay an import-only step"
     grep -B2 -F 'if [ -n "$IMPORT_VOLUME_TO_DELETE" ]; then' "$setup" | grep -Fq 'remove_env_value KVS_IMPORT_COMPLETED' || fail "a new import must clear the completion of an earlier one before touching the database"
 
-    grep -Fq "'^https?://(www[.])?\${HOST_PATTERN}(:[0-9]+)?/contents/'" "$configure" || fail "http storage URLs must be adopted too"
+    grep -Fq 'STORAGE_PREFIX="https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/contents/"' "$configure" || fail "http storage URLs must be adopted too"
     grep -Fq 'HOST_PATTERN="(${DOMAIN_PATTERN}|${IMPORT_SOURCE_DOMAIN//./[.]})"' "$configure" || fail "storage URLs on the source domain must follow the installation"
     grep -Fq 'IMPORT_SOURCE_DOMAIN=${IMPORT_SOURCE_DOMAIN:-}' "$REPO_ROOT/docker/docker-compose.yml" || fail "the init must receive the source domain"
     grep -Fq 'set_env_value IMPORT_SOURCE_DOMAIN "$IMPORT_DETECTED_DOMAIN"' "$setup" || fail "the source domain must reach .env for the init"

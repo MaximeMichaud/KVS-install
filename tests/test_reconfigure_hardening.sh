@@ -761,7 +761,7 @@ case "${1:-}" in
                 fi
                 exit "${MOCK_DB_RESTORE_STATUS:-0}"
             fi
-            if [[ "$sql" == *'SELECT COUNT(*) FROM '*' urls LIKE '* ]]; then
+            if [[ "$sql" == *'SELECT COUNT(*) FROM '*" urls REGEXP '(?m)^https://"* ]]; then
                 record_query_kind verify-matching-url "$query_bytes"
                 if [ "${MOCK_EMPTY_MATCHING_COUNT:-false}" != true ]; then
                     if [ -n "${MOCK_MATCHING_COUNT+x}" ]; then

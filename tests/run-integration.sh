@@ -28,6 +28,7 @@ suites=(
     integration_nginx_import.sh
     integration_nginx_log_rotation.sh
     integration_database_runtime.sh
+    integration_storage_url_lines.sh
     integration_import_collation.sh
     integration_export_schema_objects.sh
     integration_admin_default_check.sh

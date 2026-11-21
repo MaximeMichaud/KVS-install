@@ -163,6 +163,17 @@ for suite in "$ROOT_DIR"/tests/integration_*; do
         <<<"$docker" >/dev/null && continue
     fail "no workflow runs tests/$name: list it in tests/run-integration.sh"
 done
+# An integration run must not report success if its pinned database is absent.
+if storage_image_log=$(
+    # shellcheck disable=SC2329  # Exported to the suite.
+    docker() { [[ "$1 $2" = "image inspect" ]] || exit 99; return 1; }
+    export -f docker
+    CI=true bash "$ROOT_DIR/tests/integration_storage_url_lines.sh" 2>&1
+); then
+    fail "the storage URL suite skipped its missing image in CI"
+fi
+grep -Fq 'require the pinned MariaDB 11.4 image' <<< "$storage_image_log" ||
+    fail "the storage URL suite did not explain its missing image"
 echo "PASS: every integration suite runs in CI"
 holds "$go" "the kvsctl tests must run, with the race detector" \
     'any(.jobs.build.steps[]; .run == "go test -race ./...")'

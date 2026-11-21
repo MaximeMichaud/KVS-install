@@ -2000,9 +2000,11 @@ fi
 # Replace only this project's bounded storage prefix. The optional old port is
 # consumed, so repeated runs and 443/non-443 transitions remain idempotent.
 DOMAIN_PATTERN=${DOMAIN//./[.]}
+STORAGE_PREFIX="https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/"
+CANONICAL_PREFIX="${SERVER_URL//./[.]}/contents/"
 run_application_update_query \
-    "urls = REGEXP_REPLACE(urls, '^https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/', '${SERVER_URL}/contents/')" \
-    "urls REGEXP '^https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/'"
+    "urls = REGEXP_REPLACE(urls, '(?m)^${STORAGE_PREFIX}', '${SERVER_URL}/contents/')" \
+    "urls REGEXP '(?m)^${STORAGE_PREFIX}'"
 
 SETUP_PATH=/var/www/kvs/admin/include/setup.php
 if [ "$MODE" = multi ]; then
@@ -2067,9 +2069,9 @@ fi
 echo ""
 echo "Current settings:"
 if ! MATCHING_URL_COUNT=$(run_scalar_query \
-    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls LIKE '${SERVER_URL}/contents/%';") ||
+    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '(?m)^${CANONICAL_PREFIX}';") ||
     ! STALE_PROJECT_URL_COUNT=$(run_scalar_query \
-        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '^https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/' AND urls NOT LIKE '${SERVER_URL}/contents/%';") ||
+        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '(?m)^(?!${CANONICAL_PREFIX})${STORAGE_PREFIX}';") ||
     ! SSL_MISMATCH_COUNT=$(run_scalar_query \
         "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${EXPECTED_SSL_SKIP};"); then
     echo -e "${RED}ERROR: Could not verify the reconfigured database state${NC}"

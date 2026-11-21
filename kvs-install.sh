@@ -2257,7 +2257,8 @@ configure_kvs_servers() {
   local db="${1:-$DOMAIN}"
   local kvs_path="${KVS_PATH:-/var/www/$DOMAIN}"
   local project_url="https://$URL"
-  local domain_pattern="${DOMAIN//./[.]}"
+  local storage_prefix="https?://(www[.])?${DOMAIN//./[.]}(:[0-9]+)?/contents/"
+  local canonical_prefix="${project_url//./[.]}/contents/"
   local ssl_skip=1
   local matching stale mismatch
   local prefix
@@ -2267,12 +2268,12 @@ configure_kvs_servers() {
 UPDATE ${prefix}admin_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
 UPDATE ${prefix}admin_conversion_servers SET path = REPLACE(path, '%PROJECT_PATH%', '$kvs_path') WHERE path LIKE '%PROJECT_PATH%';
 UPDATE ${prefix}admin_servers
-    SET urls = REGEXP_REPLACE(urls, '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/', '${project_url}/contents/')
-    WHERE urls REGEXP '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/';
+    SET urls = REGEXP_REPLACE(urls, '(?m)^${storage_prefix}', '${project_url}/contents/')
+    WHERE urls REGEXP '(?m)^${storage_prefix}';
 UPDATE ${prefix}admin_servers SET streaming_skip_ssl_check = ${ssl_skip};
 EOSQL
-  matching=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls LIKE '${project_url}/contents/%'") || return $?
-  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls REGEXP '^https?://(www[.])?${domain_pattern}(:[0-9]+)?/contents/' AND urls NOT LIKE '${project_url}/contents/%'") || return $?
+  matching=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls REGEXP '(?m)^${canonical_prefix}'") || return $?
+  stale=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE urls REGEXP '(?m)^(?!${canonical_prefix})${storage_prefix}'") || return $?
   mismatch=$(mariadb -N "$db" -e "SELECT COUNT(*) FROM ${prefix}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${ssl_skip}") || return $?
   if [ "$matching" -lt 1 ] || [ "$stale" -ne 0 ] 2>/dev/null; then
     echo "ERROR: KVS storage server URLs do not match ${project_url}/contents/ (matching=${matching}, stale=${stale})" >&2

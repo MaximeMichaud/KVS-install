@@ -2179,7 +2179,7 @@ if [[ " $* " == *' kvs-php sh -c '* ]] &&
     [ "$submitted_password" = "${TEST_MARIADB_PASSWORD:?}" ] || exit 91
 
     case "$sql" in
-        *'urls LIKE '*) printf '%s\n' 1 ;;
+        *"urls REGEXP '(?m)^https://"*) printf '%s\n' 1 ;;
         *'urls REGEXP '*) printf '%s\n' 0 ;;
         *'COALESCE(streaming_skip_ssl_check'*) printf '%s\n' 0 ;;
         *'SELECT server_id, urls, streaming_skip_ssl_check'*)

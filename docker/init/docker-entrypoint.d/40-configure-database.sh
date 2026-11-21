@@ -40,20 +40,24 @@ if [ -n "${IMPORT_SOURCE_DOMAIN:-}" ] && [ "$IMPORT_SOURCE_DOMAIN" != "$DOMAIN" 
         log_warn "IMPORT_SOURCE_DOMAIN is not a domain name, ignored: $IMPORT_SOURCE_DOMAIN"
     fi
 fi
+# Each line of urls is an endpoint. Test the canonical prefix on the
+# same line as the candidate so it cannot hide a later stale endpoint.
+STORAGE_PREFIX="https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/contents/"
+CANONICAL_PREFIX="${PROJECT_URL//./[.]}/contents/"
 if ! db_exec "UPDATE ${TABLES_PREFIX}admin_servers
     SET urls = REGEXP_REPLACE(
         urls,
-        '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/contents/',
+        '(?m)^${STORAGE_PREFIX}',
         '${PROJECT_URL}/contents/'
     )
-    WHERE urls REGEXP '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/contents/';"; then
+    WHERE urls REGEXP '(?m)^${STORAGE_PREFIX}';"; then
     log_error "Could not synchronize persisted server URLs"
     exit 1
 fi
 if ! MATCHING_URL_COUNT=$(db_query \
-    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls LIKE '${PROJECT_URL}/contents/%';") ||
+    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '(?m)^${CANONICAL_PREFIX}';") ||
     ! STALE_URL_COUNT=$(db_query \
-    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/contents/' AND urls NOT LIKE '${PROJECT_URL}/contents/%';"); then
+    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '(?m)^(?!${CANONICAL_PREFIX})${STORAGE_PREFIX}';"); then
     log_error "Could not verify persisted server URLs"
     exit 1
 fi

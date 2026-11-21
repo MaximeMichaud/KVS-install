@@ -102,7 +102,7 @@ get_project_url() {
 
 # The regular expression literal of a query, as the script builds it.
 query_pattern() {
-    printf '%s' "$1" | grep -o "'\^https?://[^']*'" | head -n 1 | tr -d "'"
+    printf '%s' "$1" | grep -o "https?://[^']*" | head -n 1 | sed 's/^/^/'
 }
 
 db_exec() {
@@ -152,7 +152,7 @@ db_query() {
     current_url=$(<"$CONFIG_STATE/url")
     current_skip=$(<"$CONFIG_STATE/ssl-skip")
 
-    if [[ "$query" == *'urls LIKE '* ]]; then
+    if [[ "$query" == *"urls REGEXP '(?m)^https://"* ]]; then
         if [ "${TEST_URL_COUNTER_MODE:-valid}" = invalid ]; then
             printf 'invalid-counter\n'
         elif [[ "$current_url" == "${project_url}/contents/"* ]]; then

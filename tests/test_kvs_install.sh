@@ -1114,7 +1114,7 @@ test_kvs_servers_follow_the_site_url() {
   MOCK_MISMATCH=0
   mariadb() {
     case "$*" in
-      *"NOT LIKE"*) printf '%s\n' "$MOCK_STALE" ;;
+      *"(?!"*) printf '%s\n' "$MOCK_STALE" ;;
       *COALESCE*) printf '%s\n' "$MOCK_MISMATCH" ;;
       *"COUNT(*)"*) printf '2\n' ;;
       *) cat >>"$temp_dir/sql" ;;
@@ -1125,7 +1125,7 @@ test_kvs_servers_follow_the_site_url() {
   # whatever certificate was asked for.
   configure_kvs_servers >/dev/null 2>&1 || fail "server configuration failed" || return 1
   assert_file_contains "$temp_dir/sql" "'https://example.com/contents/'" "server URLs must follow the site URL" || return 1
-  assert_file_contains "$temp_dir/sql" "'^https?://(www[.])?example[.]com(:[0-9]+)?/contents/'" "seeded www and plain http URLs must be matched" || return 1
+  assert_file_contains "$temp_dir/sql" "'(?m)^https?://(www[.])?example[.]com(:[0-9]+)?/contents/'" "seeded www and plain http URLs must be matched" || return 1
   assert_file_contains "$temp_dir/sql" "REPLACE(path, '%PROJECT_PATH%', '/var/www/example.com')" "server paths must follow the site" || return 1
   assert_file_contains "$temp_dir/sql" "streaming_skip_ssl_check = 1" "the TLS check must stay off before the certificate step" || return 1
 
