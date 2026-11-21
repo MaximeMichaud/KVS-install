@@ -95,7 +95,7 @@ func (r *runner) settings() Result {
 		}
 	}
 	for _, key := range []string{"USE_WWW", "CLOUDFLARE_ENABLED", "ENABLE_MANTICORE", "DISABLE_KVS_SUPPORT_ACCESS"} {
-		if value := strings.ToLower(env[key]); value != "" && value != "true" && value != "false" {
+		if value := env[key]; value != "" && value != "true" && value != "false" {
 			problems = append(problems, key+" must be true or false")
 		}
 	}

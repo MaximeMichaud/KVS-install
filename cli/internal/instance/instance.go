@@ -544,7 +544,7 @@ func (i *Instance) SiteHost() string {
 	if domain == "" {
 		return ""
 	}
-	if strings.EqualFold(strings.TrimSpace(i.Env["USE_WWW"]), "true") {
+	if i.Env["USE_WWW"] == "true" {
 		return "www." + domain
 	}
 	return domain

@@ -84,6 +84,8 @@ func TestStackSettings(t *testing.T) {
 		{"selfsigned", "SSL_PROVIDER=selfsigned\n", OK}, {"zerossl", "SSL_PROVIDER=zerossl\n", OK}, {"unknown-tls", "SSL_PROVIDER=none\n", Fail},
 		{"ioncube-off", "IONCUBE=off\n", OK}, {"ioncube-on", "IONCUBE=TrUe\n", OK}, {"ioncube-typo", "IONCUBE=maybe\n", Fail},
 		{"cf-www", "CLOUDFLARE_ENABLED=true\nUSE_WWW=true\n", OK}, {"boolean-typo", "USE_WWW=yes\n", Fail},
+		{"www-case", "USE_WWW=True\n", Fail}, {"cloudflare-case", "CLOUDFLARE_ENABLED=TRUE\n", Fail},
+		{"manticore-case", "ENABLE_MANTICORE=False\n", Fail}, {"support-case", "DISABLE_KVS_SUPPORT_ACCESS=FALSE\n", Fail},
 		{"both-caches", "COMPOSE_PROFILES=dragonfly,memcached\n", Fail}, {"search-profile", "COMPOSE_PROFILES=dragonfly,manticore\n", OK},
 		{"php84", "PHP_VERSION=8.4\n", OK}, {"unsupported-php", "PHP_VERSION=7.4\n", Fail},
 		{"invalid-auto-update", "YT_DLP_AUTO_UPDATE=typo\n", Fail},

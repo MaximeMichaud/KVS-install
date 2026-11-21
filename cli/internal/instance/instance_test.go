@@ -117,7 +117,8 @@ func TestSiteHost(t *testing.T) {
 		{"", "example.com"},
 		{"false", "example.com"},
 		{"true", "www.example.com"},
-		{"TRUE", "www.example.com"},
+		{"TRUE", "example.com"},
+		{" true ", "example.com"},
 	}
 	for _, c := range cases {
 		inst := &Instance{Env: map[string]string{"DOMAIN": "example.com", "USE_WWW": c.useWWW}}
