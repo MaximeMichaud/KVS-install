@@ -568,7 +568,6 @@ In a 2023 test, a standard installation left 6.3GB free out of 10GB. Watch demo 
 - **Automated Updates**: Enables automatic updates for all installed packages and added repositories to keep the server secure and up-to-date.
 - **Domain Configuration**: Automatically configures the server domain based on the uploaded CMS license, ensuring correct system operation. DNS zone configuration is still required. The Docker installation takes the domain from the archive name (`KVS_X.X.X_[domain.tld].zip`) only while `docker/.env` saves none: a later run keeps the saved domain, which can be a subdomain the license accepts, and says so when the archive name differs; `DOMAIN=<domain>` switches it.
 - **MariaDB Latest LTS**: Installs the latest LTS version of MariaDB, offering more up-to-date solutions than standard repository versions with options to select preferred LTS versions.
-- **Resource Monitoring Tools**: Includes additional packages like ncdu, vnstat, and nload for resource monitoring.
 - **Optional IonCube Installation**: Provides the option to install or skip IonCube depending on licensing needs.
 - **YT-DLP Installation**: Installs yt-dlp, a fork of youtube-dl, and keeps it current. The standalone installation fetches the latest release and replaces it every night; the Docker images carry a checked release and install each newer one once it is checked (see [yt-dlp](#yt-dlp)).
 
