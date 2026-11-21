@@ -722,13 +722,13 @@ test_project_url_uses_validated_public_https_port() {
         USE_WWW=false
         # shellcheck disable=SC2034  # Read by get_project_url from the sourced file.
         PROJECT_HTTPS_PORT=18443
-        [ "$(get_project_url)" = "https://7.0.2.target.example:18443" ]
+        [ "$(get_project_url)" = "https://7.0.2.target.example:18443" ] || exit 1
         # shellcheck disable=SC2034  # Read by get_project_url from the sourced file.
         USE_WWW=true
-        [ "$(get_project_url)" = "https://www.7.0.2.target.example:18443" ]
+        [ "$(get_project_url)" = "https://www.7.0.2.target.example:18443" ] || exit 1
         # shellcheck disable=SC2034  # Read by get_project_url from the sourced file.
         PROJECT_HTTPS_PORT=443
-        [ "$(get_project_url)" = "https://www.7.0.2.target.example" ]
+        [ "$(get_project_url)" = "https://www.7.0.2.target.example" ] || exit 1
         # shellcheck disable=SC2034  # Read by get_project_url from the sourced file.
         for PROJECT_HTTPS_PORT in text 0 65536; do
             if get_project_url >/dev/null 2>&1; then
