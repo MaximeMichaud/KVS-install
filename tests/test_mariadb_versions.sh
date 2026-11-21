@@ -80,7 +80,7 @@ cp "$ROOT_DIR/docker/bin/resolve-bases.sh" "$TEST_DIR/docker/bin/"
     grep '^SETUP_SCRIPT_DIR=' "$ROOT_DIR/docker/setup.sh"
     grep '^readonly MARIADB_LTS_VERSIONS=' "$ROOT_DIR/docker/setup.sh"
     awk '
-        $0 == "ask_existing_volume() {" || $0 == "mariadb_next_series() {" || $0 == "prompt_read() {" ||
+        $0 == "replace_setup_database_volume() {" || $0 == "ask_existing_volume() {" || $0 == "mariadb_next_series() {" || $0 == "prompt_read() {" ||
             $0 == "mariadb_series_choice() {" || $0 == "set_env_value() {" || $0 == "remove_env_value() {" { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
@@ -127,7 +127,10 @@ check_volume() (
     fi
     # shellcheck disable=SC2329  # Called by ask_existing_volume.
     delete_database_volume() { echo "DELETED $1"; }
+    # shellcheck disable=SC2034  # Set by the volume chooser and read by the deferred deletion.
+    SETUP_VOLUME_TO_DELETE=""
     ask_existing_volume
+    replace_setup_database_volume || exit 1
     echo "KEEP_EXISTING_DB=$KEEP_EXISTING_DB"
 )
 

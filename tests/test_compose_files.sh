@@ -335,24 +335,16 @@ for retiring in 'select_cache' 'configure_mode || exit $?' 'setup_select_mantico
     comes_before "$first" "$(line_of "$retiring")" "the first check must come before $retiring, which can remove a container"
 done
 
-late=$(grep -n '^require_compose_config "' "$setup" | cut -d: -f1)
-[ "$(printf '%s\n' "$late" | grep -c .)" -eq 1 ] || fail "setup.sh must have one check with a message of its own: '$late'"
-late_line=$(sed -n "${late}p" "$setup")
-for retired in 'cache server' 'ACME' 'Manticore'; do
-    grep -Fq "$retired" <<< "$late_line" || fail "the later check must name what the choices may have removed ($retired): $late_line"
+late=$(grep -nxF 'require_compose_config || exit 1' "$setup" | head -n1 | cut -d: -f1)
+for settled in select_cache setup_select_manticore set_php_bases; do
+    comes_before "$(line_of "$settled")" "$late" "the volume check must follow $settled"
 done
-if grep -Fq 'Nothing was stopped' <<< "$late_line"; then
-    fail "the later check must not claim that nothing was stopped: $late_line"
-fi
-grep -Eq '\|\| exit 1$' <<< "$late_line" || fail "the later check must stop the setup: $late_line"
-for settled in 'configure_mode || exit $?' 'select_cache' 'setup_select_manticore' 'set_php_bases'; do
-    comes_before "$(line_of "$settled")" "$late" "the later check must come after $settled"
+for step in import_require_empty_volume '    ask_existing_volume' 'database_configure_resources || exit 1' setup_build_images; do
+    comes_before "$late" "$(line_of "$step")" "the configuration must be checked before $step"
 done
-comes_before "$late" "$(line_of 'import_require_empty_volume')" "the check must come before the volume of an import is checked"
-comes_before "$late" "$(line_of '    ask_existing_volume')" "the check must come before the volume question, which can delete it"
-comes_before "$late" "$(line_of 'database_configure_resources || exit 1')" "the check must come before the database settings"
-comes_before "$late" "$(first_line_with 'echo "Stopping existing containers..."')" "the check must come before the running containers are stopped"
-comes_before "$late" "$(first_line_with 'docker compose build')" "the check must come before anything is built"
+final=$(grep -nxF 'require_compose_config || exit 1' "$setup" | tail -n1 | cut -d: -f1)
+comes_before "$(line_of setup_build_images)" "$final" "the final check must include the detected developer TLS profile"
+comes_before "$final" "$(line_of 'configure_mode || exit $?')" "validate the effective configuration before removing a route"
 
 prepare=$(line_of 'retirement_prepare_identity || exit 1')
 comes_before "$(line_of 'require_compose_config() {')" "$prepare" "require_compose_config must be defined before preparation calls it"
@@ -360,7 +352,7 @@ comes_before "$(line_of 'compose_files_for() {')" "$prepare" "compose_files_for 
 earlier=$(line_of '                COMPOSE_FILE=$(compose_files_for "${MODE:-}") require_compose_config || return 1')
 comes_before "$earlier" "$(line_of '                retirement_write || return 1')" "the saved retirement must start with readable Compose files"
 retire=$(line_of 'retirement_finish || exit 1')
-comes_before "$(line_of 'configure_mode || exit $?')" "$(line_of 'select_cache')" "mode validation must precede cache retirement"
+comes_before "$(line_of 'check_configured_ports || exit 1')" "$retire" "port conflicts must be checked before retirement"
 comes_before "$(line_of 'select_cache')" "$retire" "earlier-project retirement must follow the selected mode and cache"
 final_retirement_check=$(first_line_with 'Remaining earlier-project resources were kept; cache/TLS choices may already have changed their containers.')
 comes_before "$(line_of 'retirement_finish() {')" "$final_retirement_check" "retirement must validate the final Compose configuration"

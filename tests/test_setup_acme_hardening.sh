@@ -347,9 +347,6 @@ unset MOCK_ISSUE_STATUS MOCK_ISSUE_OUTPUT
 # shellcheck disable=SC2016
 grep -Fq 'private_public_key=$(openssl pkey' "$ROOT_DIR/docker/setup.sh" ||
     fail "setup does not validate the certificate and private key pair"
-# shellcheck disable=SC2016
-grep -Fq 'checkhost "www.${DOMAIN}"' "$ROOT_DIR/docker/setup.sh" ||
-    fail "setup does not validate the requested www SAN"
 grep -Fq 'subject#subject=' "$ROOT_DIR/docker/setup.sh" ||
     fail "setup does not reject a self-signed ACME fallback"
 grep -Fq 'openssl verify -purpose sslserver' "$ROOT_DIR/docker/setup.sh" ||

@@ -1908,7 +1908,7 @@ test_multi_site_port_check_keeps_the_loopback_conflicts() {
     local output status
 
     mkdir -p "$case_dir"
-    for function_name in prompt_read public_port_conflicts_exist port_conflicts_to_resolve check_configured_ports; do
+    for function_name in prompt_read parse_publish_endpoint publish_address_key publish_endpoint_is_listening public_port_conflicts_exist port_conflicts_to_resolve check_configured_ports stop_for_configured_ports; do
         awk -v name="$function_name" '
             $0 == name "() {" { capture = 1 }
             capture { print }
@@ -1934,17 +1934,32 @@ test_multi_site_port_check_keeps_the_loopback_conflicts() {
             LISTENING_FILE="$case_dir/listening" DOWN_LOG="$case_dir/down.log" bash -c '
             RED= GREEN= YELLOW= NC= COMPOSE_PROJECT_NAME=kvs-a-test STOP_EXISTING=$STOP
             PUBLIC_HTTP_ENDPOINT=80 PUBLIC_HTTPS_ENDPOINT=443 ENABLE_MANTICORE=false
-            publish_endpoint_is_listening() { [[ " $(cat "$LISTENING_FILE") " == *" $1/$2 "* ]]; }
+            ss() {
+                local endpoint addr port proto=tcp
+                [ "$1 $2" = "-H -ltn" ] || proto=udp
+                for endpoint in $(cat "$LISTENING_FILE"); do
+                    [ "${endpoint##*/}" = "$proto" ] || continue
+                    addr=${endpoint%/*}
+                    port=${addr##*:}
+                    [ "$3" = "sport = :$port" ] || continue
+                    [[ "$addr" == *:* ]] || addr="0.0.0.0:$port"
+                    echo "LISTEN 0 128 $addr 0.0.0.0:*"
+                done
+            }
             caddy_publishes_required_multi_site_ports() { [ "$CADDY" = yes ]; }
             docker() {
                 case "$*" in
                     ps*--format*Names*) [ "$OWN" = yes ] && echo kvs-a-test-mariadb ;;
+                    "port kvs-a-test-mariadb")
+                        echo "80/tcp -> ${OWN_HTTP:-0.0.0.0}:80"
+                        echo "443/tcp -> 0.0.0.0:443"
+                        [ "${FOREIGN_PORT:-no}" = yes ] || echo "3306/tcp -> 127.0.0.1:3306" ;;
                     "compose down") echo down >> "$DOWN_LOG"; echo "$AFTER_DOWN" > "$LISTENING_FILE"; OWN=no ;;
                 esac
                 return 0
             }
             source "$1"
-            check_configured_ports
+            check_configured_ports && stop_for_configured_ports
         ' _ "$functions_file" < /dev/null 2>&1
     }
 
@@ -1974,9 +1989,18 @@ test_multi_site_port_check_keeps_the_loopback_conflicts() {
     output=$(run_check single no "127.0.0.1:3306/tcp" no) || status=$?
     [ "$status" -ne 0 ] || fail "single mode must refuse a native MariaDB on the loopback: $output"
 
-    # The owner of a port is not checked while this project runs: its
-    # containers are stopped, and a port another process still holds then
-    # stops the setup, named, with the project left stopped.
+    # A foreign listener must be named before stopping the project's containers.
+    status=0
+    output=$(FOREIGN_PORT=yes run_check single no "80/tcp 127.0.0.1:3306/tcp" yes) || status=$?
+    [ "$status" != 0 ] && [ ! -s "$case_dir/down.log" ] || fail "a foreign listener stopped the project: $output"
+    grep -Fq '127.0.0.1:3306/tcp' <<< "$output" || fail "foreign listener missing from preflight: $output"
+
+    status=0
+    output=$(OWN_HTTP=127.0.0.1 run_check single no "127.0.0.1:80/tcp 127.0.0.2:80/tcp" yes) || status=$?
+    [ "$status" != 0 ] && [ ! -s "$case_dir/down.log" ] || fail "one published address hid a different listener: $output"
+    grep -Fq '  - 80/tcp' <<< "$output" || fail "wildcard publication conflict was not reported"
+
+    # A port may be taken again between validation and the actual stop.
     for mode in single multi; do
         status=0
         if [ "$mode" = single ]; then

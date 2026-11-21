@@ -302,7 +302,12 @@ mv() {
 }
 ''')
     body = body.replace('/var/www/', str(d / 'site') + '/')
-    point = '\nprepare_multi_site_proxy() {\n'
+    begin=body.index('\nprepare_multi_site_proxy() {\n')
+    end=body.index('\nMODE=$PREVIOUS_MODE\n',begin)
+    body=body[:begin]+"\nENABLE_MANTICORE=true # Keep the search container in this fixture.\n"+body[end:]
+    body=body.replace('if [ "$MODE" = multi ]; then prepare_multi_site_proxy || exit 1; fi',
+                      ': # Proxy provisioning is outside this retirement fixture.')
+    point = '\nstop_for_configured_ports || exit 1\n'
     assert body.count(point) == 1
     body = body.replace(point, '''
 /usr/bin/docker compose config --format json > current-model.json

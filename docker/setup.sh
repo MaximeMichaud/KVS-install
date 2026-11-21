@@ -932,28 +932,35 @@ remove_env_value() {
 }
 
 set_env_value() {
-    local key="$1"
-    local value="$2"
-    local env_owner
-    local temporary
-    local temporary_owner
-    local line
-    local last_line=""
-    local env_prefix=""
-
-    [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
-    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    local key="${1-}" value env_owner temporary temporary_owner line last_line env_prefix
+    (( $# >= 2 && $# % 2 == 0 )) || return 1
     if ! env_owner=$(stat -c '%u:%g' .env) ||
         ! temporary=$(mktemp ./.env.tmp.XXXXXX); then
         return 1
     fi
-    if ! cat .env > "$temporary" ||
-        ! remove_env_value "$key" "$temporary" env_prefix ||
-        ! printf '%s%s=%s\n' "$env_prefix" "$key" "$value" >> "$temporary" ||
-        ! chmod 600 "$temporary"; then
+    if ! cat .env > "$temporary" || ! chmod 600 "$temporary"; then
         rm -f -- "$temporary"
         return 1
     fi
+    # Publish related settings together. Preserve export prefixes and verify
+    # each appended assignment before the only rename visible to .env readers.
+    while (( $# )); do
+        key=$1 value=$2 env_prefix="" last_line=""
+        shift 2
+        if ! [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ && "$value" != *$'\n'* && "$value" != *$'\r'* ]] ||
+            ! remove_env_value "$key" "$temporary" env_prefix ||
+            ! printf '%s%s=%s\n' "$env_prefix" "$key" "$value" >> "$temporary"; then
+            rm -f -- "$temporary"
+            return 1
+        fi
+        while IFS= read -r line || [ -n "$line" ]; do
+            last_line=$line
+        done < "$temporary"
+        if [ "$last_line" != "${env_prefix}${key}=${value}" ]; then
+            rm -f -- "$temporary"
+            return 1
+        fi
+    done
     if ! temporary_owner=$(stat -c '%u:%g' "$temporary"); then
         rm -f -- "$temporary"
         return 1
@@ -963,12 +970,8 @@ set_env_value() {
         rm -f -- "$temporary"
         return 1
     fi
-    while IFS= read -r line || [ -n "$line" ]; do
-        last_line=$line
-    done < "$temporary"
     : "${env_sync_help=$(LC_ALL=C sync --help 2>/dev/null || :)}"
-    if [ "$last_line" != "${env_prefix}${key}=${value}" ] ||
-        { [[ $env_sync_help == *--file-system* ]] && ! sync -- "$temporary"; } ||
+    if { [[ $env_sync_help == *--file-system* ]] && ! sync -- "$temporary"; } ||
         ! mv -f -- "$temporary" .env; then
         rm -f -- "$temporary"
         return 1
@@ -1190,9 +1193,7 @@ retirement_subset() {
     done
 }
 
-retirement_finish() {
-    local id
-    local -a ids networks
+retirement_validate_ready() {
     [ -n "${KVS_IMPORT_PENDING_RETIREMENT:-}" ] || return 0
     # No extra source: validate the value loaded by the existing setup reads.
     retirement_load || return 1
@@ -1203,6 +1204,13 @@ retirement_finish() {
         echo 'ERROR: retirement resources were replaced. The new resources and pending record were kept.' >&2
         return 1
     fi
+}
+
+retirement_finish() {
+    local id
+    local -a ids networks
+    [ -n "${KVS_IMPORT_PENDING_RETIREMENT:-}" ] || return 0
+    retirement_validate_ready || return 1
     COMPOSE_FILE=$(compose_files_for "$MODE") require_compose_config 'Remaining earlier-project resources were kept; cache/TLS choices may already have changed their containers.' || return 1
     if [ -n "$RETIRE_CURRENT_IDS$RETIRE_CURRENT_NETWORKS" ]; then
         echo -e "${YELLOW}Removing the containers of ${RETIRE_PROJECT} (${RETIRE_OLD_DOMAIN}); its volumes stay: docker volume ls --filter name=${RETIRE_PROJECT}_${NC}"
@@ -1300,7 +1308,40 @@ function validate_port_override() {
     esac
 }
 
+# A numeric key for a validated publish address. Expand IPv6 compression and
+# represent IPv4-mapped addresses the same way as their IPv4 spelling.
+publish_address_key() {
+    local host=$1 left right tail group zeros hex key=""
+    local -a octets groups
+    if [ -z "$host" ]; then echo any; return; fi
+    if [[ "$host" == *.* ]]; then
+        tail=${host##*:}
+        IFS=. read -r -a octets <<< "$tail"
+        printf -v tail '%02x%02x:%02x%02x' "$((10#${octets[0]}))" "$((10#${octets[1]}))" \
+            "$((10#${octets[2]}))" "$((10#${octets[3]}))"
+        if [[ "$host" == *:* ]]; then host=${host%:*}:$tail; else host=::ffff:$tail; fi
+    fi
+    if [[ "$host" == *::* ]]; then
+        left=${host%%::*} right=${host#*::}
+        IFS=' ' read -r -a groups <<< "${left//:/ } ${right//:/ }"
+        printf -v zeros '%*s' "$((8 - ${#groups[@]}))" ''
+        host=${left:+$left:}${zeros// /0:}$right
+    fi
+    IFS=: read -r -a groups <<< "$host"
+    for group in "${groups[@]}"; do
+        printf -v hex '%04x' "$((16#$group))"
+        key+=$hex
+    done
+    case "$key" in
+        00000000000000000000ffff00000000) echo '4:any' ;;
+        00000000000000000000ffff*) echo "4:${key:24}" ;;
+        00000000000000000000000000000000) echo '6:any' ;;
+        *) echo "6:$key" ;;
+    esac
+}
+
 resolve_public_port_configuration() {
+    local http_host https_key http_key
     if [ "$MODE" = "multi" ]; then
         PUBLIC_HTTP_ENDPOINT=80
         PUBLIC_HTTPS_ENDPOINT=443
@@ -1314,12 +1355,24 @@ resolve_public_port_configuration() {
         return 1
     fi
     PUBLIC_HTTP_PORT=$PUBLISH_PORT
+    http_host=$PUBLISH_HOST
 
     if ! parse_publish_endpoint "$PUBLIC_HTTPS_ENDPOINT"; then
         echo -e "${RED}ERROR: Invalid HTTPS_PORT endpoint: ${PUBLIC_HTTPS_ENDPOINT}${NC}"
         return 1
     fi
     PUBLIC_HTTPS_PORT=$PUBLISH_PORT
+    if [ "$PUBLIC_HTTP_PORT" = "$PUBLIC_HTTPS_PORT" ]; then
+        http_key=$(publish_address_key "$http_host") || return 1
+        https_key=$(publish_address_key "$PUBLISH_HOST") || return 1
+        # A bare port publishes on both families. An explicit wildcard
+        # conflicts with any address of its own family.
+        if [[ $http_key = "$https_key" || $http_key = any || $https_key = any ||
+              $http_key = "${https_key%:*}:any" || $https_key = "${http_key%:*}:any" ]]; then
+            echo "ERROR: HTTP_PORT=$PUBLIC_HTTP_ENDPOINT and HTTPS_PORT=$PUBLIC_HTTPS_ENDPOINT overlap on a host TCP socket." >&2
+            return 1
+        fi
+    fi
 }
 
 setup_resume_docker_query() {
@@ -1590,6 +1643,105 @@ import_resume_nginx_rewrites() {
         echo "  Nginx rewrites:  the rules of the interrupted pass put back into $target"
     fi
     export KVS_NGINX_REWRITES_SHA256="$sum"
+}
+
+nginx_has_public_certificate() {
+    local expected_provider="${1:-public}"
+
+    local -a probe=(exec -T -e KVS_CERT_PROVIDER="$expected_provider" nginx sh)
+    if [ "${2:-}" = volume ]; then
+        probe=(run --rm --no-deps -T --entrypoint sh -e KVS_CERT_PROVIDER="$expected_provider" nginx)
+    fi
+
+    docker compose "${probe[@]}" -c '
+        # Reserve 42 for a certificate that was successfully examined.
+        export LC_ALL=C
+        probe_error() { echo "ERROR: Nginx certificate probe: $*" >&2; exit 1; }
+        cert="/etc/nginx/ssl/${DOMAIN}/cert.pem"
+        key="/etc/nginx/ssl/${DOMAIN}/key.pem"
+        ca_bundle=/etc/ssl/certs/ca-certificates.crt
+        # An empty mount is expected on first install. A dangling link is still an entry.
+        if [ "$KVS_CERT_PROVIDER" = public ] && [ ! -e "$cert" ] && [ ! -L "$cert" ] &&
+            [ ! -e "$key" ] && [ ! -L "$key" ]; then
+            require_directory() {
+                [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ] || probe_error "inaccessible $1"
+            }
+            require_directory /etc/nginx/ssl
+            site_dir=${cert%/*}
+            if [ -e "$site_dir" ] || [ -L "$site_dir" ]; then require_directory "$site_dir"; fi
+            exit 43
+        fi
+        for file in "$cert" "$key" "$ca_bundle"; do
+            [ -r "$file" ] && [ -s "$file" ] || probe_error "missing, empty or unreadable $file"
+        done
+        san=$(openssl x509 -in "$cert" -noout -ext subjectAltName) || probe_error "openssl x509 subjectAltName"
+        names=$(sed "1d; s/^[[:space:]]*//; s/[[:space:]]*$//" <<EOF
+$san
+EOF
+        ) || probe_error "sed subjectAltName"
+        www=${USE_WWW:-false}
+        case "$DOMAIN" in *.*.*) ;; *.*) www=true ;; esac
+        if [ "$www" = true ]; then
+            case "$names" in
+                "DNS:$DOMAIN, DNS:www.$DOMAIN"|"DNS:www.$DOMAIN, DNS:$DOMAIN") ;;
+                *) exit 42 ;;
+            esac
+        else
+            [ "$names" = "DNS:$DOMAIN" ] || exit 42
+        fi
+        start=$(openssl x509 -in "$cert" -noout -startdate) || probe_error "openssl x509 startdate"
+        end=$(openssl x509 -in "$cert" -noout -enddate) || probe_error "openssl x509 enddate"
+        start=$(date -u -d "${start#notBefore=}" +%s) || probe_error "date notBefore"
+        end=$(date -u -d "${end#notAfter=}" +%s) || probe_error "date notAfter"
+        now=$(date -u +%s) || probe_error "date current time"
+        [ "$start" -le "$now" ] && [ "$now" -lt "$end" ] || {
+            [ "$?" = 1 ] || probe_error "invalid date output"
+            exit 42
+        }
+        subject=$(openssl x509 -in "$cert" -noout -subject -nameopt RFC2253) || probe_error "openssl x509 subject"
+        issuer=$(openssl x509 -in "$cert" -noout -issuer -nameopt RFC2253) || probe_error "openssl x509 issuer"
+        [ "${subject#subject=}" != "${issuer#issuer=}" ] || exit 42
+        verify_status=0
+        verification=$(openssl verify -purpose sslserver -CAfile "$ca_bundle" -untrusted "$cert" "$cert" 2>&1) || verify_status=$?
+        if [ "$verify_status" != 0 ]; then
+            # verify returns 2 for a chain rejection. Require a certificate
+            # diagnostic as well: an invocation or trust-store error is fatal.
+            if [ "$verify_status" = 2 ]; then
+                rejected=false
+                while IFS=" " read -r label number at depth reason; do
+                    [ "$label" = error ] && [ "$at" = at ] || continue
+                    case "$depth:$reason" in [0-9]*:"depth lookup: "*) ;; *) continue ;; esac
+                    case "$number" in
+                        2|7|9|10|18|19|20|21|22|23|25|26|27|28|32|34|47|66|67|68|79) rejected=true ;;
+                        *) probe_error "openssl verify: $verification" ;;
+                    esac
+                done <<EOF
+$verification
+EOF
+                [ "$rejected" = false ] || exit 42
+            fi
+            probe_error "openssl verify ($verify_status): $verification"
+        fi
+        case "$KVS_CERT_PROVIDER" in
+            public) ;;
+            letsencrypt)
+                case "$issuer" in
+                    *"O=Let"*"s Encrypt"*) ;;
+                    *) exit 42 ;;
+                esac
+                ;;
+            zerossl)
+                case "$issuer" in
+                    *"O=ZeroSSL"*|*"CN=ZeroSSL"*) ;;
+                    *) exit 42 ;;
+                esac
+                ;;
+            *) probe_error "unknown provider $KVS_CERT_PROVIDER" ;;
+        esac
+        cert_public_key=$(openssl x509 -in "$cert" -pubkey -noout) || probe_error "openssl x509 public key"
+        private_public_key=$(openssl pkey -in "$key" -pubout -passin pass:) || probe_error "openssl pkey"
+        [ "$cert_public_key" = "$private_public_key" ] || exit 42
+    ' >/dev/null
 }
 
 setup_resume_import() {
@@ -4217,7 +4369,7 @@ if [[ -v EMAIL ]]; then
 fi
 declare -A KVS_PORT_OVERRIDES=()
 for KVS_PORT_VARIABLE in \
-    HTTP_PORT HTTPS_PORT MARIADB_HOST_PORT CACHE_HOST_PORT \
+    HTTP_PORT HTTPS_PORT PROJECT_HTTPS_PORT MARIADB_HOST_PORT CACHE_HOST_PORT \
     MANTICORE_MYSQL_HOST_PORT MANTICORE_HTTP_HOST_PORT; do
     if [[ -v "$KVS_PORT_VARIABLE" ]]; then
         KVS_PORT_OVERRIDES["$KVS_PORT_VARIABLE"]="${!KVS_PORT_VARIABLE}"
@@ -4238,7 +4390,7 @@ chmod 600 .env
 
 # Load environment
 unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED KVS_IMPORT_PENDING_RETIREMENT MANTICORE_REBUILD_PENDING
-unset SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT
+unset SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT HTTPS_PORT PROJECT_HTTPS_PORT PROJECT_HTTPS_PORT_PINNED
 source .env
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
@@ -4276,7 +4428,7 @@ add_compose_profile() {
         ",,") profiles="$profile" ;;
         *) profiles="${profiles},${profile}" ;;
     esac
-    set_env_value COMPOSE_PROFILES "$profiles"
+    set_env_value COMPOSE_PROFILES "$profiles" || return 1
     COMPOSE_PROFILES="$profiles"
     export COMPOSE_PROFILES
 }
@@ -4299,7 +4451,7 @@ remove_compose_profile() {
             filtered="$item"
         fi
     done
-    set_env_value COMPOSE_PROFILES "$filtered"
+    set_env_value COMPOSE_PROFILES "$filtered" || return 1
     COMPOSE_PROFILES="$filtered"
     export COMPOSE_PROFILES
 }
@@ -4316,7 +4468,7 @@ publish_endpoint_is_listening() {
     local endpoint="$1"
     local protocol="${2:-tcp}"
     local local_address
-    local listener_address
+    local listener_address listeners publish_key listener_key
     local -a ss_args=(-H -ltn)
 
     parse_publish_endpoint "$endpoint" || return 2
@@ -4324,23 +4476,35 @@ publish_endpoint_is_listening() {
         ss_args=(-H -lun)
     fi
 
+    if ! listeners=$(ss "${ss_args[@]}" "sport = :$PUBLISH_PORT"); then
+        echo "ERROR: Could not inspect $endpoint/$protocol with ss." >&2
+        return 2
+    fi
+    publish_key=$(publish_address_key "$PUBLISH_HOST") || return 2
     while read -r _ _ _ local_address _; do
         [ -n "$local_address" ] || continue
         listener_address=${local_address%:*}
         listener_address=${listener_address#[}
         listener_address=${listener_address%]}
 
-        if [ -z "$PUBLISH_HOST" ] || [ "$PUBLISH_HOST" = "0.0.0.0" ] || \
-            [ "$PUBLISH_HOST" = "::" ]; then
-            return 0
-        fi
+        # During preflight, ignore only this exact socket if Docker publishes it
+        # for a container the approved stop or pending retirement will release.
         case "$listener_address" in
-            '*'|'0.0.0.0'|'::') return 0 ;;
+            '*') [[ "${3:-}" == *$'\n'"0.0.0.0:$PUBLISH_PORT/$protocol"$'\n'* ||
+                    "${3:-}" == *$'\n'"[::]:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
+            *:*) [[ "${3:-}" == *$'\n'"[$listener_address]:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
+            *) [[ "${3:-}" == *$'\n'"$listener_address:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
         esac
-        if [ "$listener_address" = "$PUBLISH_HOST" ]; then
+        if [[ $publish_key = any || $publish_key = *:any || $listener_address = '*' ]]; then
             return 0
         fi
-    done < <(ss "${ss_args[@]}" "sport = :$PUBLISH_PORT" 2>/dev/null)
+        # ss may include an interface suffix on a numeric address.
+        listener_address=${listener_address%%\%*}
+        listener_key=$(publish_address_key "${listener_address%]}") || return 2
+        if [[ $listener_key = "$publish_key" || $listener_key = *:any ]]; then
+            return 0
+        fi
+    done <<< "$listeners"
 
     return 1
 }
@@ -4379,18 +4543,11 @@ caddy_publishes_required_multi_site_ports() {
 # "docker compose up" fail with "Bind for 127.0.0.1:3306 failed: port is
 # already allocated" once the images were built and the site imported.
 public_port_conflicts_exist() {
-    local service name variable port
+    local service name variable port description socket
+    local -a endpoints=("$PUBLIC_HTTP_ENDPOINT/tcp" "$PUBLIC_HTTPS_ENDPOINT/tcp")
     PUBLIC_PORT_CONFLICTS=()
 
-    if publish_endpoint_is_listening "$PUBLIC_HTTP_ENDPOINT" tcp; then
-        PUBLIC_PORT_CONFLICTS+=("${PUBLIC_HTTP_ENDPOINT}/tcp")
-    fi
-    if publish_endpoint_is_listening "$PUBLIC_HTTPS_ENDPOINT" tcp; then
-        PUBLIC_PORT_CONFLICTS+=("${PUBLIC_HTTPS_ENDPOINT}/tcp")
-    fi
-    if [ "$MODE" = "multi" ] && publish_endpoint_is_listening 443 udp; then
-        PUBLIC_PORT_CONFLICTS+=("443/udp")
-    fi
+    if [ "$MODE" = multi ]; then endpoints+=("443/udp"); fi
     for service in \
         "MariaDB:MARIADB_HOST_PORT:3306" \
         "the cache:CACHE_HOST_PORT:11211" \
@@ -4404,8 +4561,14 @@ public_port_conflicts_exist() {
             MANTICORE_*) [ "${ENABLE_MANTICORE:-false}" = true ] || continue ;;
         esac
         port=${!variable:-$port}
-        if publish_endpoint_is_listening "127.0.0.1:${port}" tcp; then
-            PUBLIC_PORT_CONFLICTS+=("127.0.0.1:${port}/tcp (${name}; ${variable}=<port> publishes it elsewhere)")
+        endpoints+=("127.0.0.1:${port}/tcp (${name}; ${variable}=<port> publishes it elsewhere)")
+    done
+    for description in "${endpoints[@]}"; do
+        socket=${description%% *}
+        if publish_endpoint_is_listening "${socket%/*}" "${socket##*/}" "${1:-}"; then
+            PUBLIC_PORT_CONFLICTS+=("$description")
+        elif [ "$?" -ne 1 ]; then
+            return 2
         fi
     done
 
@@ -4416,6 +4579,10 @@ public_port_conflicts_exist() {
 # setup behavior consistent with Docker Compose environment precedence. Every
 # override is checked before any is written, so a refused run leaves .env as
 # it was. An empty one stands for the default, as Compose reads ${HTTP_PORT:-80}.
+case ${PROJECT_HTTPS_PORT_PINNED:-} in
+    ''|true|false) ;;
+    *) echo "ERROR: PROJECT_HTTPS_PORT_PINNED must be empty, true or false." >&2; exit 1 ;;
+esac
 for KVS_PORT_VARIABLE in "${!KVS_PORT_OVERRIDES[@]}"; do
     [ -n "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}" ] || continue
     if ! validate_port_override "$KVS_PORT_VARIABLE" "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}"; then
@@ -4425,11 +4592,35 @@ for KVS_PORT_VARIABLE in "${!KVS_PORT_OVERRIDES[@]}"; do
         exit 1
     fi
 done
+# Old environments have no pin marker. A saved URL port equal to the old
+# binding followed it; a different value belonged to a proxy.
+if [[ -v KVS_PORT_OVERRIDES[PROJECT_HTTPS_PORT] ]]; then
+    if [ -n "${KVS_PORT_OVERRIDES[PROJECT_HTTPS_PORT]}" ]; then
+        KVS_PORT_OVERRIDES[PROJECT_HTTPS_PORT_PINNED]=true
+    else
+        KVS_PORT_OVERRIDES[PROJECT_HTTPS_PORT_PINNED]=false
+    fi
+elif [[ -v KVS_PORT_OVERRIDES[HTTPS_PORT] && ${PROJECT_HTTPS_PORT_PINNED:-} != true ]]; then
+    if [ "${PROJECT_HTTPS_PORT_PINNED:-}" = false ] || {
+        validate_port_override PROJECT_HTTPS_PORT "${PROJECT_HTTPS_PORT:-}" &&
+        parse_publish_endpoint "${HTTPS_PORT:-443}" && (( 10#$PROJECT_HTTPS_PORT == PUBLISH_PORT ))
+    }; then
+        parse_publish_endpoint "${KVS_PORT_OVERRIDES[HTTPS_PORT]:-443}" || exit 1
+        KVS_PORT_OVERRIDES[PROJECT_HTTPS_PORT]=$PUBLISH_PORT
+        KVS_PORT_OVERRIDES[PROJECT_HTTPS_PORT_PINNED]=false
+    elif validate_port_override PROJECT_HTTPS_PORT "${PROJECT_HTTPS_PORT:-}"; then
+        KVS_PORT_OVERRIDES[PROJECT_HTTPS_PORT_PINNED]=true
+    fi
+fi
+port_settings=()
 for KVS_PORT_VARIABLE in "${!KVS_PORT_OVERRIDES[@]}"; do
     printf -v "$KVS_PORT_VARIABLE" '%s' "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}"
     export "${KVS_PORT_VARIABLE?}"
-    set_env_value "$KVS_PORT_VARIABLE" "${KVS_PORT_OVERRIDES[$KVS_PORT_VARIABLE]}"
+    port_settings+=("$KVS_PORT_VARIABLE" "${!KVS_PORT_VARIABLE}")
 done
+if (( ${#port_settings[@]} )); then
+    set_env_value "${port_settings[@]}" || exit 1
+fi
 
 if [ -n "$KVS_DOMAIN_OVERRIDE" ]; then
     DOMAIN="$KVS_DOMAIN_OVERRIDE"
@@ -5323,17 +5514,13 @@ select_cache() {
             remove_compose_profile dragonfly
             add_compose_profile memcached
             echo -e "${GREEN}Selected Memcached${NC}"
-            # Remove orphan dragonfly container if exists (port conflict)
-            docker stop "${SITE_PREFIX}-dragonfly" 2>/dev/null || true
-            docker rm "${SITE_PREFIX}-dragonfly" 2>/dev/null || true
+            unused_cache=dragonfly
             ;;
         *)
             remove_compose_profile memcached
             add_compose_profile dragonfly
             echo -e "${GREEN}Selected Dragonfly${NC}"
-            # Remove orphan memcached container if exists (port conflict)
-            docker stop "${SITE_PREFIX}-memcached" 2>/dev/null || true
-            docker rm "${SITE_PREFIX}-memcached" 2>/dev/null || true
+            unused_cache=memcached
             ;;
     esac
 
@@ -5351,8 +5538,7 @@ select_cache() {
     fi
 }
 
-# The cache, TLS and search choices below remove the containers they
-# retire, so Compose reads the files first, with the PHP bases set above:
+# Check the installed configuration first, with the PHP bases set above:
 # those configure_mode records for the mode of the last run, not the
 # COMPOSE_FILE that run left in .env, which may still name an override
 # deleted by hand since. The check before the volume question reads them
@@ -5395,22 +5581,47 @@ set_compose_file() {
     fi
 }
 
-select_mode() {
-    echo ""
-    echo -e "${CYAN}Installation Mode${NC}"
-    # Skip prompt if already set (headless mode)
-    if [[ -z "$MODE_CHOICE" ]]; then
-        if [ "${HEADLESS:-}" = "y" ]; then
-            MODE_CHOICE=1
-        else
-            echo "  1) Single site (default) - direct nginx, best performance"
-            echo "  2) Multi site - Caddy proxy (see multi-site/site-manager.sh)"
-            echo -n "Select mode [1-2] (default: 1): "
-            read -r MODE_CHOICE
-        fi
+select_project_https_port() {
+    resolve_public_port_configuration || return 1
+    if [ "$MODE" = "single" ] && [ "$SSL_PROVIDER" != "selfsigned" ] &&
+        [ "$PUBLIC_HTTP_PORT" -ne 80 ]; then
+        echo -e "${RED}ERROR: Direct ACME HTTP-01 validation requires host TCP port 80${NC}"
+        echo "Use HTTP_PORT with numeric port 80, or select self-signed/Caddy mode."
+        return 1
     fi
+    if [ "$MODE" = single ] && [ "$SSL_PROVIDER" = selfsigned ]; then
+        if [ "${PROJECT_HTTPS_PORT_PINNED:-}" = false ]; then
+            PROJECT_HTTPS_PORT=$PUBLIC_HTTPS_PORT
+        fi
+        if [ -z "${PROJECT_HTTPS_PORT:-}" ] && [ "${HEADLESS:-}" != y ]; then
+            echo -n "External HTTPS port used in site URLs (default: $PUBLIC_HTTPS_PORT): "
+            prompt_read PROJECT_HTTPS_PORT || return 1
+            if [ -n "$PROJECT_HTTPS_PORT" ]; then PROJECT_HTTPS_PORT_PINNED=true; fi
+        fi
+        if [ -z "${PROJECT_HTTPS_PORT:-}" ]; then PROJECT_HTTPS_PORT_PINNED=false; fi
+        PROJECT_HTTPS_PORT=${PROJECT_HTTPS_PORT:-$PUBLIC_HTTPS_PORT}
+        if ! validate_port_override PROJECT_HTTPS_PORT "$PROJECT_HTTPS_PORT"; then
+            echo "ERROR: PROJECT_HTTPS_PORT must be a number from 1 to 65535." >&2
+            return 1
+        fi
+        PROJECT_HTTPS_PORT=$((10#$PROJECT_HTTPS_PORT))
+        if [ -z "${PROJECT_HTTPS_PORT_PINNED:-}" ]; then
+            if [ "$PROJECT_HTTPS_PORT" = "$PUBLIC_HTTPS_PORT" ]; then
+                PROJECT_HTTPS_PORT_PINNED=false
+            else
+                PROJECT_HTTPS_PORT_PINNED=true
+            fi
+        fi
+    else
+        PROJECT_HTTPS_PORT=$PUBLIC_HTTPS_PORT
+        PROJECT_HTTPS_PORT_PINNED=false
+    fi
+    set_env_value PROJECT_HTTPS_PORT "$PROJECT_HTTPS_PORT" PROJECT_HTTPS_PORT_PINNED "$PROJECT_HTTPS_PORT_PINNED" SSL_PROVIDER "$SSL_PROVIDER" || return 1
+    export PROJECT_HTTPS_PORT
+}
 
-    case $MODE_CHOICE in
+select_mode() {
+    case ${MODE_CHOICE:-1} in
         2)
             if [ "${CLOUDFLARE_ENABLED:-false}" = true ]; then
                 echo "ERROR: CLOUDFLARE_ENABLED=true supports single-site mode only; Caddy multi-site is not supported" >&2
@@ -5420,7 +5631,7 @@ select_mode() {
 
             echo -e "${YELLOW}Multi-site mode uses Caddy reverse proxy${NC}"
             MODE="multi"
-            set_env_value MODE "$MODE"
+            set_env_value MODE "$MODE" || return 1
             set_compose_file multi || return 1
             export MODE
             echo -e "${GREEN}Multi-site mode configured for the primary site${NC}"
@@ -5443,7 +5654,7 @@ select_mode() {
             fi
 
             MODE="single"
-            set_env_value MODE "$MODE"
+            set_env_value MODE "$MODE" || return 1
             set_compose_file single || return 1
             export MODE
             echo -e "${GREEN}Single site mode (direct nginx)${NC}"
@@ -5505,7 +5716,8 @@ configure_direct_tls_profile() {
     case "${MODE}:${SSL_PROVIDER}" in
         single:letsencrypt|single:zerossl) add_compose_profile direct-tls ;;
         *)
-            remove_compose_profile direct-tls
+            remove_compose_profile direct-tls || return 1
+            [ "${1:-}" != settings ] || return 0
             if ! acme_container_names=$(docker ps -a --format '{{.Names}}' 2>/dev/null); then
                 echo -e "${RED}ERROR: Could not inspect ACME containers${NC}"
                 return 1
@@ -5533,6 +5745,11 @@ configure_direct_tls_profile() {
 }
 
 configure_mode() {
+    if [[ ${MODE_CHOICE:-$MODE} = 2 || ${MODE_CHOICE:-$MODE} = multi ]] && [ "$SSL_PROVIDER" = "zerossl" ]; then
+        echo -e "${RED}ERROR: Multi-site mode does not support selecting ZeroSSL explicitly${NC}"
+        echo "Use Let's Encrypt, or self-signed certificates for local testing."
+        return 1
+    fi
     if [ -n "${MODE_CHOICE:-}" ] || [ "$MODE" = "single" ]; then
         select_mode || return $?
     elif [ "$MODE" = "multi" ]; then
@@ -5541,12 +5758,6 @@ configure_mode() {
         export MODE
     else
         echo -e "${RED}ERROR: Invalid installation mode in .env: $MODE${NC}"
-        return 1
-    fi
-
-    if [ "$MODE" = "multi" ] && [ "$SSL_PROVIDER" = "zerossl" ]; then
-        echo -e "${RED}ERROR: Multi-site mode does not support selecting ZeroSSL explicitly${NC}"
-        echo "Use Let's Encrypt, or self-signed certificates for local testing."
         return 1
     fi
 
@@ -5560,9 +5771,41 @@ configure_mode() {
     fi
 }
 
-configure_mode || exit $?
+# Read the requested mode before applying it: switching away from Caddy can
+# remove a route, and the TLS and volume choices below can stop the stack.
+if [ -n "${MODE_CHOICE:-}" ] || [ "$MODE" = single ]; then
+    echo ""
+    echo -e "${CYAN}Installation Mode${NC}"
+    # Skip prompt if already set (headless mode)
+    if [[ -z "$MODE_CHOICE" ]]; then
+        if [ "${HEADLESS:-}" = "y" ]; then
+            MODE_CHOICE=1
+        else
+            echo "  1) Single site (default) - direct nginx, best performance"
+            echo "  2) Multi site - Caddy proxy (see multi-site/site-manager.sh)"
+            echo -n "Select mode [1-2] (default: 1): "
+            prompt_read MODE_CHOICE || exit 1
+        fi
+    fi
+fi
+PREVIOUS_MODE=$MODE
+case ${MODE_CHOICE:-$MODE} in
+    1|single) MODE=single ;;
+    2|multi) MODE=multi ;;
+    *) echo "ERROR: Invalid installation mode: ${MODE_CHOICE:-$MODE}" >&2; exit 1 ;;
+esac
+COMPOSE_FILE=$(compose_files_for "$MODE")
+export MODE COMPOSE_FILE
+check_cloudflare_configuration || exit 1
+if [ "$MODE" = multi ]; then
+    require_multi_compose_version || exit 1
+    PROGRESS_TOTAL=13
+fi
+if [ "${DEV_SSL_INTELLIGENT:-false}" != true ]; then
+    select_project_https_port || exit 1
+    configure_direct_tls_profile settings || exit 1
+fi
 select_cache
-retirement_finish || exit 1
 
 prepare_multi_site_proxy() {
     local tls_mode="public"
@@ -5572,7 +5815,7 @@ prepare_multi_site_proxy() {
     fi
 
     ./multi-site/site-manager.sh primary-config \
-        "$DOMAIN" "$SITE_PREFIX" "$tls_mode" "$USE_WWW"
+        "$DOMAIN" "$SITE_PREFIX" "$tls_mode" "$USE_WWW" || return 1
     ./multi-site/site-manager.sh proxy-network
 }
 
@@ -5759,8 +6002,6 @@ select_manticore() {
         ENABLE_MANTICORE=false
         export ENABLE_MANTICORE
         remove_compose_profile manticore
-        docker stop "${SITE_PREFIX}-manticore" >/dev/null 2>&1 || true
-        docker rm "${SITE_PREFIX}-manticore" >/dev/null 2>&1 || true
         echo -e "${YELLOW}Manticore Search disabled${NC}"
     fi
 }
@@ -5787,12 +6028,6 @@ setup_select_manticore
 delete_database_volume() {
     local volume_name="$1"
 
-    # The volume goes right after: a clean shutdown of MariaDB is worth
-    # nothing here, so it gets Docker's usual 10 s, not its grace period.
-    if ! docker compose down --timeout 10; then
-        echo -e "${RED}ERROR: Could not stop this Compose project${NC}"
-        return 1
-    fi
     if docker volume inspect "$volume_name" >/dev/null 2>&1; then
         if ! docker volume rm "$volume_name" >/dev/null; then
             echo -e "${RED}ERROR: Could not delete database volume ${volume_name}${NC}"
@@ -5970,9 +6205,8 @@ ask_existing_volume() {
             case $VOLUME_CHOICE in
                 1)
                     echo ""
-                    echo -e "${YELLOW}Deleting existing database...${NC}"
-                    delete_database_volume "$VOLUME_NAME" || exit 1
-                    echo -e "${GREEN}✓ Database deleted. Will create fresh MariaDB ${SELECTED_MAJOR_MINOR} installation.${NC}"
+                    SETUP_VOLUME_TO_DELETE=$VOLUME_NAME
+                    echo "The existing database will be deleted before MariaDB starts."
                     KEEP_EXISTING_DB=false
                     ;;
                 2)
@@ -6061,13 +6295,8 @@ ask_existing_volume() {
             case $VOLUME_CHOICE in
                 1)
                     echo ""
-                    echo -e "${YELLOW}Deleting existing database...${NC}"
-                    delete_database_volume "$VOLUME_NAME" || exit 1
-                    if ! set_env_value MARIADB_VERSION "$MARIADB_VERSION"; then
-                        echo -e "${RED}ERROR: the database was deleted, but MARIADB_VERSION=${MARIADB_VERSION} could not be written back to .env.${NC}" >&2
-                        exit 1
-                    fi
-                    echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
+                    SETUP_VOLUME_TO_DELETE=$VOLUME_NAME
+                    echo "The existing database will be deleted before MariaDB starts."
                     KEEP_EXISTING_DB=false
                     ;;
                 2)
@@ -6129,9 +6358,8 @@ ask_existing_volume() {
             case $VOLUME_CHOICE in
                 1)
                     echo ""
-                    echo -e "${YELLOW}Deleting existing database...${NC}"
-                    delete_database_volume "$VOLUME_NAME" || exit 1
-                    echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
+                    SETUP_VOLUME_TO_DELETE=$VOLUME_NAME
+                    echo "The existing database will be deleted before MariaDB starts."
                     KEEP_EXISTING_DB=false
                     ;;
                 2)
@@ -6171,9 +6399,8 @@ ask_existing_volume() {
             case $VOLUME_CHOICE in
                 1)
                     echo ""
-                    echo -e "${YELLOW}Deleting existing database...${NC}"
-                    delete_database_volume "$VOLUME_NAME" || exit 1
-                    echo -e "${GREEN}✓ Database deleted. Will create fresh installation.${NC}"
+                    SETUP_VOLUME_TO_DELETE=$VOLUME_NAME
+                    echo "The existing database will be deleted before MariaDB starts."
                     KEEP_EXISTING_DB=false
                     ;;
                 2)
@@ -6200,11 +6427,19 @@ ask_existing_volume() {
     fi
 }
 
-# Before the volume question and the stop of the running containers: from
-# here COMPOSE_FILE, COMPOSE_PROFILES and the .env are settled, so the check
-# reads what every Compose command below reads. The choices made since the
-# first check may have removed a container they retire.
-require_compose_config "The site was not stopped. The choices made above may already have removed the containers they retire: the other cache server, the ACME client when direct TLS is off, Manticore when it is disabled." || exit 1
+replace_setup_database_volume() {
+    [ -n "$SETUP_VOLUME_TO_DELETE" ] || return 0
+    delete_database_volume "$SETUP_VOLUME_TO_DELETE" || return 1
+    if [ "${VERSION_MISMATCH:-false}" = true ] && ! set_env_value MARIADB_VERSION "$MARIADB_VERSION"; then
+        echo "ERROR: the database was deleted, but MARIADB_VERSION=${MARIADB_VERSION} could not be written back to .env." >&2
+        return 1
+    fi
+    echo "Deleted the old database volume. MariaDB will initialize a fresh database."
+}
+
+# Check the target Compose configuration before asking about existing data.
+require_compose_config || exit 1
+SETUP_VOLUME_TO_DELETE=""
 import_require_empty_volume
 if [ "$IMPORT_MODE" = true ]; then
     KEEP_EXISTING_DB=false
@@ -6212,11 +6447,7 @@ else
     ask_existing_volume
 fi
 
-# A database this run imports or starts fresh does not match the indexes
-# the manticore-data volume kept either: the need goes to .env the same
-# way, before an import replaces the database volume. A fresh start has
-# deleted it already, and a run stopped in between finds no database the
-# next time, which is a fresh start again.
+# Record the rebuild before replacing a database that the indexes describe.
 setup_note_manticore_rebuild() {
     [ "${ENABLE_MANTICORE:-false}" = true ] && [ "${KEEP_EXISTING_DB:-false}" != true ] || return 0
     set_env_value MANTICORE_REBUILD_PENDING true || exit 1
@@ -6235,8 +6466,18 @@ if [ "$KVS_ADMIN_PASSWORD_PROVIDED" != true ] &&
 fi
 export KVS_ADMIN_PASSWORD
 
+# The saved mode and database series still describe the live site until its
+# route and volume are retired. Reload other choices, including pending search
+# rebuilds and PHP build bases, without reverting those three staged settings.
+reload_setup_environment() {
+    # shellcheck disable=SC2034  # Shield the selected values from assignments in .env.
+    local MODE=$MODE COMPOSE_FILE=$COMPOSE_FILE MARIADB_VERSION=$MARIADB_VERSION
+    # shellcheck source=/dev/null
+    source .env
+}
+reload_setup_environment
+
 # Generate passwords if still defaults
-source .env
 if [ "$MARIADB_ROOT_PASSWORD" = "CHANGE_ME_ROOT_PASSWORD" ]; then  # pragma: allowlist secret
     MARIADB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
     set_env_value MARIADB_ROOT_PASSWORD "$MARIADB_ROOT_PASSWORD"
@@ -6248,9 +6489,6 @@ if [ "$MARIADB_PASSWORD" = "CHANGE_ME_KVS_PASSWORD" ]; then  # pragma: allowlist
     set_env_value MARIADB_PASSWORD "$MARIADB_PASSWORD"
     echo -e "${GREEN}Generated MariaDB KVS password${NC}"
 fi
-
-# Reload .env
-source .env
 
 # The KVS support access opt-out kvs-init applies; it acts on true only, and
 # false (the default) leaves KVS untouched. An explicit request wins and is
@@ -6280,35 +6518,12 @@ resolve_support_access_setting() {
 }
 resolve_support_access_setting || exit 1
 
-resolve_public_port_configuration || exit $?
-set_env_value PROJECT_HTTPS_PORT "$PUBLIC_HTTPS_PORT"
-PROJECT_HTTPS_PORT="$PUBLIC_HTTPS_PORT"
-export PROJECT_HTTPS_PORT
-if [ "$MODE" = "single" ] && [ "$SSL_PROVIDER" != "selfsigned" ] &&
-    [ "$PUBLIC_HTTP_PORT" -ne 80 ]; then
-    echo -e "${RED}ERROR: Direct ACME HTTP-01 validation requires host TCP port 80${NC}"
-    echo "Use HTTP_PORT with numeric port 80, or select self-signed/Caddy mode."
-    exit 1
-fi
 
 # Validate and persist both sizes before replacing any database volume.
 database_configure_resources || exit 1
 if [ "$IMPORT_MODE" = true ]; then
     IMPORT_DATABASE_JOBS=$(database_import_jobs "$IMPORT_DATABASE_JOBS_REQUEST") || exit 1
     echo "  Native database import connections: $IMPORT_DATABASE_JOBS (file transfers use IMPORT_TRANSFER_JOBS separately)."
-fi
-
-# Open firewall ports if ufw is active
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-    echo -e "${CYAN}Opening configured public firewall ports...${NC}"
-    ufw allow "${PUBLIC_HTTP_PORT}/tcp" >/dev/null 2>&1
-    if [ "$PUBLIC_HTTPS_PORT" != "$PUBLIC_HTTP_PORT" ]; then
-        ufw allow "${PUBLIC_HTTPS_PORT}/tcp" >/dev/null 2>&1
-    fi
-    if [ "$MODE" = "multi" ]; then
-        ufw allow 443/udp >/dev/null 2>&1
-    fi
-    echo -e "${GREEN}Firewall ports opened${NC}"
 fi
 
 # The conflicts this run has to resolve. In multi mode Caddy publishes
@@ -6320,7 +6535,7 @@ port_conflicts_to_resolve() {
     local conflict
     local -a kept=()
 
-    public_port_conflicts_exist || return 1
+    public_port_conflicts_exist "${1:-}" || return $?
     [ "${CADDY_PUBLISHES_PUBLIC_PORTS:-false}" = true ] || return 0
     for conflict in "${PUBLIC_PORT_CONFLICTS[@]}"; do
         case "$conflict" in
@@ -6332,64 +6547,99 @@ port_conflicts_to_resolve() {
     [ "${#PUBLIC_PORT_CONFLICTS[@]}" -gt 0 ]
 }
 
-# Every port the stack publishes must be free. When this project has running
-# containers, they are stopped (STOP_EXISTING) without checking which process
-# holds the port, and the ports are checked again: one still in use then
-# stops the setup with the project left stopped. Returns 1 when a port stays
-# in use. The caller runs it as "check_configured_ports || exit 1", where set
-# -e does not apply, so the question goes through prompt_read: at the end of
-# input the setup stops before anything is stopped.
+# Collect consent while every container and route is still in place. A native
+# service can occupy one port while this project legitimately occupies others.
 check_configured_ports() {
+    local container mappings expected=$'\n' retired="" protocol endpoint
+    STOP_PROJECT_FOR_PORTS=false
     CADDY_PUBLISHES_PUBLIC_PORTS=false
     if [ "$MODE" = "multi" ] && caddy_publishes_required_multi_site_ports; then
         CADDY_PUBLISHES_PUBLIC_PORTS=true
         echo -e "${GREEN}Caddy already publishes the required multi-site ports${NC}"
     fi
-    port_conflicts_to_resolve || return 0
+    port_conflicts_to_resolve || {
+        case $? in 1) return 0 ;; *) return 1 ;; esac
+    }
 
     # Only manage containers from this Compose project. Name-prefix filters
     # can accidentally stop the central proxy or another KVS site.
     KVS_CONTAINERS=$(docker ps \
         --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-        --format '{{.Names}}' 2>/dev/null || true)
-    if [ -z "$KVS_CONTAINERS" ]; then
+        --format '{{.Names}}') || return 1
+    if [ -n "${KVS_IMPORT_PENDING_RETIREMENT:-}" ]; then
+        retired=$(docker ps --filter "label=com.docker.compose.project=$RETIRE_PROJECT" --format '{{.Names}}') || return 1
+    fi
+    while IFS= read -r container; do
+        [ -n "$container" ] || continue
+        mappings=$(docker port "$container") || return 1
+        while read -r protocol _ endpoint; do
+            [ -n "$endpoint" ] || continue
+            expected+="$endpoint/${protocol##*/}"$'\n'
+        done <<< "$mappings"
+    done <<< "$KVS_CONTAINERS"$'\n'"$retired"
+    if port_conflicts_to_resolve "$expected"; then
         echo -e "${RED}ERROR: Configured ports are in use by another process:${NC}"
         printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
         return 1
+    elif [ "$?" -ne 1 ]; then
+        return 1
     fi
+    [ -n "$KVS_CONTAINERS" ] || return 0
     echo -e "${YELLOW}Existing KVS containers detected${NC}"
     docker ps \
         --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
         --format "table {{.Names}}\t{{.Status}}" 2>/dev/null
     echo ""
     # Skip prompt if already set (headless mode)
-    if [[ -z "$STOP_EXISTING" ]]; then
+    if [[ -z "$STOP_EXISTING" && -z "${SETUP_VOLUME_TO_DELETE:-}" ]]; then
         echo -n "Stop existing KVS containers? [Y/n]: "
-        prompt_read STOP_EXISTING
+        prompt_read STOP_EXISTING || return 1
     fi
     if [ "$STOP_EXISTING" = "n" ] || [ "$STOP_EXISTING" = "N" ]; then
         echo -e "${RED}ERROR: Cannot continue while the configured ports remain in use${NC}"
         return 1
     fi
-    echo "Stopping existing containers..."
-    docker compose down 2>/dev/null || true
-    docker ps -q \
-        --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" 2>/dev/null | \
-        xargs -r docker stop 2>/dev/null || true
-    echo -e "${GREEN}Existing containers stopped${NC}"
+    STOP_PROJECT_FOR_PORTS=true
+}
+
+stop_for_configured_ports() {
+    local stopped=false
+    local -a timeout_args=()
+    if [ -n "${SETUP_VOLUME_TO_DELETE:-}${IMPORT_VOLUME_TO_DELETE:-}" ]; then
+        # A volume replacement always needs a shutdown, even if the old
+        # stack published different ports. Its discarded DB gets 10 seconds.
+        timeout_args=(--timeout 10)
+    fi
+    if [ "${#timeout_args[@]}" -gt 0 ] || [ "${STOP_PROJECT_FOR_PORTS:-false}" = true ]; then
+        echo "Stopping existing containers..."
+        if ! docker compose down "${timeout_args[@]}"; then
+            echo -e "${RED}ERROR: Could not stop this Compose project${NC}" >&2
+            return 1
+        fi
+        stopped=true
+    fi
+    if [ "${STOP_PROJECT_FOR_PORTS:-false}" = true ]; then
+        docker ps -q \
+            --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" 2>/dev/null | \
+            xargs -r docker stop 2>/dev/null || true
+        echo -e "${GREEN}Existing containers stopped${NC}"
+    fi
 
     if port_conflicts_to_resolve; then
-        echo -e "${RED}ERROR: Configured ports are still in use after stopping this project:${NC}"
+        if [ "$stopped" = true ]; then
+            echo -e "${RED}ERROR: Configured ports are still in use after stopping this project:${NC}"
+        else
+            echo -e "${RED}ERROR: Configured ports are in use:${NC}"
+        fi
         printf '  - %s\n' "${PUBLIC_PORT_CONFLICTS[@]}"
-        echo "The containers of ${COMPOSE_PROJECT_NAME} stay stopped: free the ports listed, then run the setup again."
+        if [ "$stopped" = true ]; then
+            echo "The containers of ${COMPOSE_PROJECT_NAME} stay stopped: free the ports listed, then run the setup again."
+        fi
+        return 1
+    elif [ "$?" -ne 1 ]; then
         return 1
     fi
 }
-
-# Check if configured ports are available
-echo ""
-echo -e "${CYAN}Checking configured public ports...${NC}"
-check_configured_ports || exit 1
 
 # The public IPv4 address of this server, from the first lookup service
 # that answers with one. Empty when none does (no internet, every service
@@ -6530,10 +6780,6 @@ while true; do
     fi
 done
 
-if [ "$MODE" = "multi" ]; then
-    prepare_multi_site_proxy
-fi
-
 IMPORT_DATABASE_FORMAT=$IMPORT_DATABASE_FORMAT_REQUEST
 import_fetch_source
 import_ensure_nginx_rewrites
@@ -6641,6 +6887,37 @@ setup_build_images() {
     fi
 }
 setup_build_images
+
+if [ "${DEV_SSL_INTELLIGENT:-false}" = true ]; then
+    echo ""
+    echo "🔍 Dev mode: Checking for existing SSL certificate..."
+
+    # The certificate volume is shared with the single-site model. Its probe
+    # can run before a new multi-site installation creates the Caddy network.
+    if COMPOSE_FILE=$(compose_files_for single) nginx_has_public_certificate public volume; then
+        SSL_PROVIDER="letsencrypt"
+        echo -e "  ${GREEN}✓${NC} Found a valid non-self-signed certificate - reusing it"
+    else
+        case $? in
+            42) echo -e "  ${YELLOW}✓${NC} No valid public certificate - using self-signed TLS" ;;
+            43) echo "  No certificate pair yet - using self-signed TLS" ;;
+            *) echo "ERROR: Could not inspect the Nginx certificate volume." >&2; exit 1 ;;
+        esac
+        SSL_PROVIDER="selfsigned"
+    fi
+    export SSL_PROVIDER
+    if [ "$SSL_PROVIDER" != selfsigned ]; then
+        case ${EMAIL:-} in ''|admin@example.com) EMAIL=${KVS_EMAIL:-} ;; esac
+        if ! validate_email "$EMAIL" || [ "$EMAIL" = admin@example.com ]; then
+            echo "ERROR: A valid EMAIL is required for public certificates." >&2
+            exit 1
+        fi
+        set_env_value EMAIL "$EMAIL" || exit 1
+    fi
+    select_project_https_port || exit 1
+    configure_direct_tls_profile settings || exit 1
+fi
+require_compose_config || exit 1
 
 # Create bind mount directory
 mkdir -p /var/www/"$DOMAIN"
@@ -6762,14 +7039,44 @@ import_verify_database() {
     fi
 }
 
-progress_bar "Starting MariaDB"
 import_stage_dump
 import_record_transfers || exit 1
+
+# Resolve conflicts and collect consent while the old route, containers and
+# volumes are intact. Recheck live sockets once their owners have stopped.
+retirement_validate_ready || exit 1
+check_configured_ports || exit 1
+MODE=$PREVIOUS_MODE
+configure_mode || exit $?
+if [ "$MODE" = multi ]; then prepare_multi_site_proxy || exit 1; fi
+docker stop "${SITE_PREFIX}-$unused_cache" >/dev/null 2>&1 || true
+docker rm "${SITE_PREFIX}-$unused_cache" >/dev/null 2>&1 || true
+if [ "$ENABLE_MANTICORE" != true ]; then
+    docker stop "${SITE_PREFIX}-manticore" >/dev/null 2>&1 || true
+    docker rm "${SITE_PREFIX}-manticore" >/dev/null 2>&1 || true
+fi
+retirement_finish || exit 1
+stop_for_configured_ports || exit 1
+# Open firewall ports if ufw is active
+if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    echo -e "${CYAN}Opening configured public firewall ports...${NC}"
+    ufw allow "${PUBLIC_HTTP_PORT}/tcp" >/dev/null 2>&1
+    if [ "$PUBLIC_HTTPS_PORT" != "$PUBLIC_HTTP_PORT" ]; then
+        ufw allow "${PUBLIC_HTTPS_PORT}/tcp" >/dev/null 2>&1
+    fi
+    if [ "$MODE" = "multi" ]; then
+        ufw allow 443/udp >/dev/null 2>&1
+    fi
+    echo -e "${GREEN}Firewall ports opened${NC}"
+fi
+
+progress_bar "Starting MariaDB"
+replace_setup_database_volume || exit 1
 import_replace_database_volume
 # kvs-init clears KVS's cron locks and its cron registration
 # (40-configure-database.sh), and MariaDB restarts under whatever is
 # running: a cron.php in progress must see neither. Keeping the database
-# stops nothing, and check_configured_ports stops this project only when it
+# stops nothing, and setup stops this project for a port conflict only when it
 # sees one of its published ports listening: with Docker's userland proxy
 # off, for instance, it sees none.
 # setup_start_cron starts cron again at the end; a run that fails before
@@ -7081,80 +7388,6 @@ fi
 # SSL Certificate based on SSL_PROVIDER
 SSL_PROVIDER="${SSL_PROVIDER:-letsencrypt}"
 
-# Dev mode: intelligent SSL detection (reuse existing cert if available)
-nginx_has_public_certificate() {
-    local expected_provider="${1:-public}"
-
-    docker compose exec -T -e KVS_CERT_PROVIDER="$expected_provider" nginx sh -c '
-        cert="/etc/nginx/ssl/${DOMAIN}/cert.pem"
-        key="/etc/nginx/ssl/${DOMAIN}/key.pem"
-        [ -s "$cert" ] && [ -s "$key" ] || exit 1
-        san_entries=$(
-            openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null |
-                sed "1d; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d" |
-                tr "," "\n" |
-                sed "s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d"
-        ) || exit 1
-        [ -n "$san_entries" ] || exit 1
-        if printf "%s\n" "$san_entries" | grep -Ev "^DNS:" >/dev/null; then
-            exit 1
-        fi
-        actual_dns_names=$(
-            printf "%s\n" "$san_entries" |
-                sed -n "s/^DNS://p" | LC_ALL=C sort
-        ) || exit 1
-        expected_dns_names=$(
-            printf "%s\n" "$DOMAIN"
-            dot_count=$(printf %s "$DOMAIN" | tr -cd . | wc -c)
-            if [ "${USE_WWW:-false}" = true ] || [ "$dot_count" -eq 1 ]; then
-                printf "%s\n" "www.${DOMAIN}"
-            fi
-        )
-        expected_dns_names=$(
-            printf "%s\n" "$expected_dns_names" | LC_ALL=C sort
-        ) || exit 1
-        [ "$actual_dns_names" = "$expected_dns_names" ] || exit 1
-        not_before=$(openssl x509 -in "$cert" -noout -startdate) || exit 1
-        not_before=${not_before#notBefore=}
-        not_before_epoch=$(LC_ALL=C date -u -d "$not_before" +%s) || exit 1
-        now_epoch=$(date -u +%s) || exit 1
-        [ "$not_before_epoch" -le "$now_epoch" ] || exit 1
-        openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1 || exit 1
-        openssl x509 -in "$cert" -noout -checkhost "$DOMAIN" >/dev/null 2>&1 || exit 1
-        dot_count=$(printf %s "$DOMAIN" | tr -cd . | wc -c)
-        if [ "${USE_WWW:-false}" = true ] || [ "$dot_count" -eq 1 ]; then
-            openssl x509 -in "$cert" -noout -checkhost "www.${DOMAIN}" \
-                >/dev/null 2>&1 || exit 1
-        fi
-        subject=$(openssl x509 -in "$cert" -noout -subject -nameopt RFC2253) || exit 1
-        issuer=$(openssl x509 -in "$cert" -noout -issuer -nameopt RFC2253) || exit 1
-        [ "${subject#subject=}" != "${issuer#issuer=}" ] || exit 1
-        ca_bundle=/etc/ssl/certs/ca-certificates.crt
-        [ -s "$ca_bundle" ] || exit 1
-        openssl verify -purpose sslserver -CAfile "$ca_bundle" \
-            -untrusted "$cert" "$cert" >/dev/null 2>&1 || exit 1
-        case "$KVS_CERT_PROVIDER" in
-            public) ;;
-            letsencrypt)
-                case "$issuer" in
-                    *"O=Let"*"s Encrypt"*) ;;
-                    *) exit 1 ;;
-                esac
-                ;;
-            zerossl)
-                case "$issuer" in
-                    *"O=ZeroSSL"*|*"CN=ZeroSSL"*) ;;
-                    *) exit 1 ;;
-                esac
-                ;;
-            *) exit 1 ;;
-        esac
-        cert_public_key=$(openssl x509 -in "$cert" -pubkey -noout) || exit 1
-        private_public_key=$(openssl pkey -in "$key" -pubout -passin pass:) || exit 1
-        [ "$cert_public_key" = "$private_public_key" ]
-    ' >/dev/null 2>&1
-}
-
 get_configured_acme_api() {
     docker compose exec -T acme sh -c '
         domain=$1
@@ -7330,22 +7563,6 @@ configure_direct_acme_certificate() {
     echo -e "${GREEN}SSL certificate installed and validated${NC}"
 }
 
-if [ "$RESUME_IMPORT" != true ] && [ "${DEV_SSL_INTELLIGENT:-false}" = "true" ]; then
-    echo ""
-    echo "🔍 Dev mode: Checking for existing SSL certificate..."
-
-    if nginx_has_public_certificate; then
-        SSL_PROVIDER="letsencrypt"
-        echo -e "  ${GREEN}✓${NC} Found a valid non-self-signed certificate - reusing it"
-    else
-        SSL_PROVIDER="selfsigned"
-        echo -e "  ${YELLOW}✓${NC} No valid public certificate - using self-signed TLS"
-    fi
-    set_env_value SSL_PROVIDER "$SSL_PROVIDER"
-    export SSL_PROVIDER
-    configure_direct_tls_profile
-    echo ""
-fi
 
 # A refused issuance (DNS still on the old server during a migration, a CA
 # outage, a rate limit) leaves Nginx on the certificate it already had,
@@ -7476,8 +7693,9 @@ else
 fi
 echo ""
 PUBLIC_HTTPS_PORT_SUFFIX=""
-if [ "$PUBLIC_HTTPS_PORT" != "443" ]; then
-    PUBLIC_HTTPS_PORT_SUFFIX=":${PUBLIC_HTTPS_PORT}"
+url_port=${PROJECT_HTTPS_PORT:-$PUBLIC_HTTPS_PORT}
+if [ "$url_port" != "443" ]; then
+    PUBLIC_HTTPS_PORT_SUFFIX=":${url_port}"
 fi
 if [ "$USE_WWW" = "true" ]; then
     PUBLIC_PROJECT_URL="https://www.${DOMAIN}${PUBLIC_HTTPS_PORT_SUFFIX}"

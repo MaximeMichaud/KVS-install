@@ -176,8 +176,8 @@ for source in archive replaced-archive remote directory; do
             eval "$(sed -n '/^    IMPORT_DB_DUMP=$(import_field "\$settled" 1)/,/^    IMPORT_RAW_DUMP=\$IMPORT_DB_DUMP$/p' "$root/docker/setup.sh")" ;;
         remote) IMPORT_RAW_DUMP=$raw; IMPORT_RAW_DUMP_ID=$(import_transfer_identity "$raw") ;;
     esac
-    # Run the production steps between staging and starting MariaDB.
-    eval "$(sed -n '/^import_stage_dump$/,/^import_replace_database_volume$/{ /^import_stage_dump$/d; /^import_replace_database_volume$/d; p; }' "$root/docker/setup.sh")"
+    # Run the production step that follows staging: recording the transfers.
+    eval "$(sed -n '/^import_stage_dump$/,/^import_record_transfers || exit 1$/{ /^import_stage_dump$/d; p; }' "$root/docker/setup.sh")"
     IMPORT_MODE=false
     unset IMPORT_DB_DUMP
     if [ "$source" = archive ]; then

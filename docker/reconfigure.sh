@@ -218,7 +218,7 @@ if [ ! -f ".env" ]; then
 fi
 
 # Load environment
-unset CLOUDFLARE_ENABLED COMPOSE_PROFILES
+unset CLOUDFLARE_ENABLED COMPOSE_PROFILES PROJECT_HTTPS_PORT PROJECT_HTTPS_PORT_PINNED
 # shellcheck source=/dev/null
 source .env
 DOMAIN="${DOMAIN:-}"
@@ -413,15 +413,37 @@ parse_publish_endpoint_port() {
 }
 
 resolve_project_https_port() {
-    local endpoint="${HTTPS_PORT:-443}"
+    local endpoint="${HTTPS_PORT:-443}" bound
 
+    case ${PROJECT_HTTPS_PORT_PINNED:-} in
+        ''|true|false) ;;
+        *) echo "ERROR: PROJECT_HTTPS_PORT_PINNED must be empty, true or false." >&2; return 1 ;;
+    esac
     if [ "${MODE:-single}" = "multi" ]; then
         PROJECT_HTTPS_PORT=443
+        PROJECT_HTTPS_PORT_PINNED=false
         return 0
     fi
     if ! parse_publish_endpoint_port "$endpoint"; then
         echo -e "${RED}ERROR: Invalid HTTPS_PORT endpoint: ${endpoint}${NC}"
         return 1
+    fi
+    bound=$PARSED_PUBLISH_PORT
+    if [ "${SSL_PROVIDER:-}" = selfsigned ] && [ "${PROJECT_HTTPS_PORT_PINNED:-}" != false ] &&
+        [ -n "${PROJECT_HTTPS_PORT:-}" ]; then
+        if ! [[ "$PROJECT_HTTPS_PORT" =~ ^[0-9]{1,5}$ ]] || ! parse_publish_endpoint_port "$PROJECT_HTTPS_PORT"; then
+            echo "ERROR: PROJECT_HTTPS_PORT must be a number from 1 to 65535." >&2
+            return 1
+        fi
+        if [ -z "${PROJECT_HTTPS_PORT_PINNED:-}" ]; then
+            if [ "$PARSED_PUBLISH_PORT" = "$bound" ]; then
+                PROJECT_HTTPS_PORT_PINNED=false
+            else
+                PROJECT_HTTPS_PORT_PINNED=true
+            fi
+        fi
+    else
+        PROJECT_HTTPS_PORT_PINNED=false
     fi
     PROJECT_HTTPS_PORT="$PARSED_PUBLISH_PORT"
 }
@@ -1925,8 +1947,7 @@ fi
 if [ "$MODE" = single ] && [ "$SSL_PROVIDER" = selfsigned ]; then
     # Prove the actual PHP/cURL trust store in both application containers
     # before removing the old database workaround. Use port 443, which NGINX
-    # always serves inside the network: PROJECT_HTTPS_PORT is the host
-    # mapping, which NGINX serves too unless it is one of its HTTP ports.
+    # always serves inside the network, even behind a port-translating proxy.
     for tls_container in "$PHP_CONTAINER" "${CONTAINER_PREFIX}-cron"; do
         if ! docker exec -e KVS_TLS_HOST="$DOMAIN" "$tls_container" php -r '
             $url = "https://" . getenv("KVS_TLS_HOST") . "/";
@@ -1952,7 +1973,8 @@ if [ "$MODE" = single ] && [ "$SSL_PROVIDER" = selfsigned ]; then
     run_query "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = 0;"
     echo -e "${GREEN}Self-signed TLS trusted by PHP and cron; SSL verification enabled${NC}"
 fi
-set_env_value PROJECT_HTTPS_PORT "$PROJECT_HTTPS_PORT"
+set_env_value PROJECT_HTTPS_PORT_PINNED "$PROJECT_HTTPS_PORT_PINNED" || exit 1
+set_env_value PROJECT_HTTPS_PORT "$PROJECT_HTTPS_PORT" || exit 1
 export PROJECT_HTTPS_PORT
 
 # 2. Update server URLs based on USE_WWW

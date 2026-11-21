@@ -424,3 +424,44 @@ func TestUnsetEnv(t *testing.T) {
 		t.Errorf("a key that is not there is not an error: %v", err)
 	}
 }
+
+func TestMergeEnvPreservesLegacyPublicHTTPSPort(t *testing.T) {
+	dir, err := filepath.Abs("../../../docker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []string{"", "10443"} {
+		inst := newInstance(t, "DOMAIN=site.test\nMARIADB_PASSWORD=fixture\nMARIADB_ROOT_PASSWORD=fixture\nMODE=single\nSSL_PROVIDER=selfsigned\nHTTPS_PORT=8443\nPROJECT_HTTPS_PORT="+port+"\n")
+		if _, err := inst.MergeEnv(filepath.Join(dir, ".env.example")); err != nil {
+			t.Fatal(err)
+		}
+		if inst.Env["PROJECT_HTTPS_PORT_PINNED"] != "" || inst.Env["PROJECT_HTTPS_PORT"] != port {
+			t.Fatalf("merge changed the legacy port %q or its pin", port)
+		}
+		if os.Getenv("KVSCTL_COMPOSE_PARITY") != "1" {
+			continue
+		}
+		cmd := exec.Command("docker", "compose", "-p", "site", "--env-file", inst.EnvPath,
+			"-f", filepath.Join(dir, "docker-compose.yml"), "--profile", "setup", "config", "--format", "json")
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "DOCKER_HOST=unix:///nonexistent.sock", "COMPOSE_PROFILES=dragonfly"}
+		data, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config struct {
+			Services map[string]struct{ Environment map[string]string }
+		}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatal(err)
+		}
+		want := port
+		if want == "" {
+			want = "443"
+		}
+		for _, service := range []string{"nginx", "kvs-init"} {
+			if got := config.Services[service].Environment["PROJECT_HTTPS_PORT"]; got != want {
+				t.Errorf("%s URL port after merge = %q, want %q", service, got, want)
+			}
+		}
+	}
+}

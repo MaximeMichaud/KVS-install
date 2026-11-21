@@ -370,7 +370,7 @@ branch=$(grep -n '^    import_files_only$' "$SETUP" | cut -d: -f1)
 sed -n "$((branch - 1))p;$((branch + 1))p" "$SETUP" | tr '\n' ' ' | grep -Fq 'if [ "$IMPORT_FILES_ONLY" = yes ]; then     exit 0' ||
     fail 'the pass of the files alone must exit right after it'
 for later in '^retirement_load initial \|\| exit 1$' '^retirement_prepare_identity \|\| exit 1$' '^select_import_source$' '^import_require_empty_volume$' \
-    'docker compose down 2>/dev/null' '^import_fetch_source$' '^import_stage_dump$'; do
+    '^stop_for_configured_ports \|\| exit 1$' '^import_fetch_source$' '^import_stage_dump$'; do
     line=$(grep -En -- "$later" "$SETUP" | head -n 1 | cut -d: -f1)
     [ -n "$line" ] && [ "$line" -gt "$branch" ] || fail "the pass of the files alone must end before '$later'"
 done

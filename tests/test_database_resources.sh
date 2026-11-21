@@ -223,17 +223,100 @@ for grace in '' 15m; do
 done
 echo 'PASS: MariaDB gets a 10 minute stop grace period in both Compose files, and .env can change it'
 
-# The volume deletion stops the project right before the volume goes: a
-# clean shutdown is worth nothing there, so MariaDB gets the usual 10 s.
-source <(sed -n '/^delete_database_volume() {/,/^}/p' "$root/docker/setup.sh")
-(
-    # shellcheck disable=SC2329  # Called by delete_database_volume.
-    docker() { printf '%s\n' "$*" >> docker-calls.log; [ "$1 $2" != 'volume inspect' ]; }
-    delete_database_volume kvs-resources_mariadb-data > /dev/null
-) || fail 'the volume deletion failed'
-grep -Fxq 'compose down --timeout 10' docker-calls.log ||
-    fail "the volume deletion must stop the project within 10 s: $(cat docker-calls.log)"
-echo 'PASS: the volume deletion does not wait for the stop grace period'
+# Exercise the setup and import call sites in script order. The requested
+# socket can become occupied during shutdown, even if preflight saw it free.
+sed -n '/^parse_publish_endpoint() {/,/^}/p; /^publish_endpoint_is_listening() {/,/^}/p;
+    /^publish_address_key() {/,/^}/p; /^public_port_conflicts_exist() {/,/^}/p; /^port_conflicts_to_resolve() {/,/^}/p;
+    /^check_configured_ports() {/,/^}/p; /^stop_for_configured_ports() {/,/^}/p;
+    /^delete_database_volume() {/,/^}/p; /^replace_setup_database_volume() {/,/^}/p;
+    /^import_replace_database_volume() {/,/^}/p' "$root/docker/setup.sh" > volume-functions
+sed -n '/^check_configured_ports || exit 1$/p; /^stop_for_configured_ports || exit 1$/p;
+    /^replace_setup_database_volume || exit 1$/p; /^import_replace_database_volume$/p' "$root/docker/setup.sh" > volume-steps
+cat > volume-case <<'SH'
+set -eu
+source ./volume-functions
+RED= GREEN= YELLOW= NC= MODE=single COMPOSE_PROJECT_NAME=kvs-test STOP_EXISTING=y
+PUBLIC_HTTPS_ENDPOINT=127.0.0.1:$port PUBLIC_HTTP_ENDPOINT=127.0.0.1:$free_port
+if [ "$scenario" = ipv6 ]; then PUBLIC_HTTPS_ENDPOINT="[0:0:0:0:0:0:0:1]:$port"; fi
+MARIADB_HOST_PORT=$free_port CACHE_HOST_PORT=$free_port
+ss() {
+    if [ "$3" = "sport = :${PUBLIC_HTTPS_ENDPOINT##*:}" ]; then
+        case $scenario in
+            preflight) return 1 ;;
+            owner-check) [ ! -e mappings-read ] || return 1 ;;
+            ss-fails) [ ! -s events ] || return 1 ;;
+            ss-missing)
+                if [ -s events ]; then PATH=/nonexistent command ss "$@"; return $?; fi ;;
+        esac
+    fi
+    command ss "$@"
+}
+SETUP_VOLUME_TO_DELETE= IMPORT_VOLUME_TO_DELETE=
+if [ "$IMPORT_MODE" = true ]; then IMPORT_VOLUME_TO_DELETE=fixture; else SETUP_VOLUME_TO_DELETE=fixture; fi
+remove_env_value() { [ "$1" = KVS_IMPORT_COMPLETED ]; }
+docker() {
+    case "$*" in
+        'ps --filter label=com.docker.compose.project=kvs-test --format {{.Names}}') echo kvs-old ;;
+        'ps --filter label=com.docker.compose.project=kvs-test --format table '*|'ps -q --filter label=com.docker.compose.project=kvs-test') ;;
+        'port kvs-old') touch mappings-read; echo "443/tcp -> 127.0.0.1:$port" ;;
+        'compose down --timeout 10')
+            echo down >> events
+            case $scenario in
+                fail) return 1 ;;
+                late|ipv6|owned)
+                    python3 -c 'import socket, sys
+s = socket.socket(fileno=int(sys.argv[1]))
+if sys.argv[2] in ("late", "ipv6"):
+    s.listen()
+else:
+    s.shutdown(socket.SHUT_RDWR)' "$socket_fd" "$scenario" ;;
+            esac ;;
+        'volume inspect fixture') [ -f volume ] ;;
+        'volume rm fixture') echo rm >> events; rm volume ;;
+        *) echo "Unexpected Docker call: $*" >&2; return 64 ;;
+    esac
+}
+source ./volume-steps
+SH
+python3 - <<'PY'
+import os
+import socket
+import subprocess
+from pathlib import Path
+
+for importing in ("true", "false"):
+    for scenario in ("free", "late", "ipv6", "ss-fails", "ss-missing", "preflight", "owner-check", "owned", "fail"):
+        with socket.socket(socket.AF_INET6 if scenario == "ipv6" else socket.AF_INET) as sock, socket.socket() as free:
+            sock.bind(("::1" if scenario == "ipv6" else "127.0.0.1", 0))
+            free.bind(("127.0.0.1", 0))
+            if scenario in ("owned", "owner-check"):
+                sock.listen()
+            Path("mappings-read").unlink(missing_ok=True)
+            Path("volume").touch()
+            Path("events").write_text("")
+            env = dict(os.environ, IMPORT_MODE=importing, scenario=scenario,
+                       port=str(sock.getsockname()[1]), free_port=str(free.getsockname()[1]),
+                       socket_fd=str(sock.fileno()))
+            result = subprocess.run(["bash", "volume-case"], env=env, pass_fds=(sock.fileno(),),
+                                    capture_output=True, text=True, timeout=10)
+            events = Path("events").read_text().splitlines()
+            output = result.stdout + result.stderr
+            early = scenario in ("preflight", "owner-check")
+            kept = early or scenario in ("late", "ipv6", "ss-fails", "ss-missing", "fail")
+            evidence = (importing, scenario, result.returncode, events, output)
+            assert result.returncode == int(kept), evidence
+            assert events == ([] if early else ["down"] if kept else ["down", "rm"]), evidence
+            assert Path("volume").exists() == kept, evidence
+            if scenario == "late":
+                assert f"127.0.0.1:{sock.getsockname()[1]}/tcp" in output, evidence
+            if scenario == "ipv6":
+                assert f"[0:0:0:0:0:0:0:1]:{sock.getsockname()[1]}/tcp" in output, evidence
+            if early or scenario.startswith("ss-"):
+                assert "inspect" in output and str(sock.getsockname()[1]) in output, evidence
+            if scenario == "fail":
+                assert "Could not stop this Compose project" in output, evidence
+PY
+echo 'PASS: setup and import stop once, check the requested sockets and then remove the selected volume'
 
 # Compose rejects a stop grace period without its unit for the whole
 # project, so every docker compose command would fail: setup.sh and

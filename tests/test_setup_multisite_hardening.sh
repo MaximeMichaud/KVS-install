@@ -659,6 +659,7 @@ extract_function parse_publish_endpoint "$port_function_source"
 extract_function publish_endpoint_is_listening "$port_function_source"
 extract_function container_publishes_host_port "$port_function_source"
 extract_function caddy_publishes_required_multi_site_ports "$port_function_source"
+extract_function publish_address_key "$port_function_source"
 extract_function resolve_public_port_configuration "$port_function_source"
 # shellcheck source=/dev/null
 source "$port_function_source"

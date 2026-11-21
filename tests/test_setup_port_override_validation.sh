@@ -164,13 +164,20 @@ echo "ok 2 - a non-numeric loopback port override is refused and .env is intact"
 
 # 3. A valid override still passes validation, is written to .env and the run
 #    continues, so the check does not reject legitimate values.
-run_with_override http-8080 HTTP_PORT=8080
+# Direct ACME requires port 80. Self-signed TLS permits a custom binding.
+run_with_override http-8080 HTTP_PORT=8080 SSL_CHOICE=3
 grep -Fq "Cache Server" "$output_log" ||
     fail "HTTP_PORT=8080: a valid override did not pass validation (never reached the cache selection): $(tail -n 3 "$output_log")"
 got=$(env_value "$env_file" HTTP_PORT)
 [ "$got" = "8080" ] ||
     fail "HTTP_PORT=8080: .env HTTP_PORT is '${got}', expected 8080"
 echo "ok 3 - a valid HTTP_PORT override passes validation and is written to .env"
+
+run_with_override acme-loopback HTTP_PORT=127.0.0.1:80 SSL_CHOICE=1
+{ grep -Fq 'Cache Server' "$output_log" &&
+    [ "$(env_value "$env_file" HTTP_PORT)" = 127.0.0.1:80 ] &&
+    [ "$(env_value "$env_file" SSL_PROVIDER)" = letsencrypt ]; } ||
+    fail "direct ACME refused or replaced the explicit HTTP binding on port 80"
 
 # 4. Every override is checked before any is written: valid ones given next to
 #    an invalid one are not saved either, so a refused run leaves .env as it
