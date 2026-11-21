@@ -4,7 +4,7 @@
 #
 #   release-notes-range.sh <tag>
 #
-# Prints "value=<previous stable tag>..<tag>" for $GITHUB_OUTPUT, or
+# Prints "value=refs/tags/<previous stable tag>..refs/tags/<tag>" for $GITHUB_OUTPUT, or
 # "value=" when no stable release came before <tag>, in which case the notes
 # cover the whole history.
 #
@@ -29,7 +29,8 @@ die() {
 [ $# -eq 1 ] || die "usage: release-notes-range.sh <tag>"
 
 tag=$1
-git rev-parse --verify --quiet "${tag}^{commit}" >/dev/null ||
+ref=refs/tags/$tag
+git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null ||
     die "$tag is not a tag of this repository"
 [[ "$tag" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-.*)?$ ]] ||
     die "$tag is not a release version"
@@ -50,7 +51,7 @@ older() {
 }
 
 previous=$(
-    git tag --merged "$tag" --list '[0-9]*' | while IFS= read -r candidate; do
+    git tag --merged "$ref" --list '[0-9]*' | while IFS= read -r candidate; do
         [[ "$candidate" =~ ^([0-9]{2})\.([0-9]+)\.([0-9]+)$ ]] || continue
         if older "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"; then
             printf '%s\n' "$candidate"
@@ -61,5 +62,5 @@ previous=$(
 if [ -z "$previous" ]; then
     echo "value="
 else
-    echo "value=${previous}..${tag}"
+    echo "value=refs/tags/${previous}..${ref}"
 fi

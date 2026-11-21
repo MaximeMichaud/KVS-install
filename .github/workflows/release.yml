@@ -9,14 +9,16 @@ on:
 permissions:
   contents: read
 
-# One run at a time. The publish job extends the manifest of the latest
+# One tag run at a time. The publish job extends the manifest of the latest
 # release, so two runs publishing together would build on the same previous
 # manifest and the second would drop the release of the first. A run started
 # while another one is in progress waits for it. GitHub keeps one waiting
 # run per group: a third run cancels the one that was waiting, which then
-# has to be started again.
+# has to be started again. Tag runs keep the group name release, so a tag
+# queued by an older revision of this workflow still waits with them;
+# branch dispatches use release-branch.
 concurrency:
-  group: release
+  group: ${{ github.ref_type == 'tag' && 'release' || 'release-branch' }}
   cancel-in-progress: false
 
 jobs:
@@ -31,6 +33,13 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       namespace: ${{ steps.namespace.outputs.value }}
     steps:
+      - name: require a tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::A release requires a tag. Select an existing release tag."
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -143,12 +152,14 @@ jobs:
   # Nothing is built, pushed or published before both pass.
   go:
     name: kvsctl tests
+    if: github.ref_type == 'tag'
     uses: ./.github/workflows/go.yml
     permissions:
       contents: read
 
   suites:
     name: shell suites
+    if: github.ref_type == 'tag'
     uses: ./.github/workflows/tests.yml
     permissions:
       contents: read
@@ -456,12 +467,12 @@ jobs:
           # The commit the tag points at, peeled from an annotated tag. It is
           # read on a line of its own so a failure stops the step instead of
           # passing an empty --commit.
-          commit=$(git rev-parse --verify "${TAG}^{commit}")
+          commit=$(git rev-parse --verify "refs/tags/${TAG}^{commit}")
 
           # Every image of the override is pinned to the digest the build
           # reported or the lock holds, never to a tag alone.
           go run ./cmd/kvsctl-release bundle \
-            --repo .. --ref "$TAG" --version "$VERSION" \
+            --repo .. --ref "refs/tags/$TAG" --version "$VERSION" \
             --images "$images" --digests "$digests" --out "$bundle"
 
           arguments=(
@@ -581,6 +592,7 @@ jobs:
       - name: the GitHub release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
+          target_commitish: ${{ github.sha }}
           tag_name: ${{ needs.prepare.outputs.tag }}
           body_path: RELEASE_NOTES.md
           draft: ${{ needs.prepare.outputs.prerelease }}

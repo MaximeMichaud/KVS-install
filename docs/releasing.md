@@ -87,12 +87,11 @@ description. A stable release is marked as the latest one, which is the
 release every `kvsctl` reads by default:
 `https://github.com/MaximeMichaud/KVS-install/releases/latest/download/manifest.json`.
 
-One run goes at a time. A manifest extends the one of the latest release, so
-two runs publishing together would start from the same manifest and the
-second would drop the release of the first. A run started while another one
-is in progress waits for it. GitHub keeps a single waiting run: a third run
-cancels the one that was waiting, which then has to be started again (Re-run
-all jobs on its page).
+Tag runs publish one at a time because each manifest extends the latest
+release. If two runs used the same previous manifest, the second would
+drop the first release. While one tag run is active, one more can wait.
+A third tag run replaces the waiting run. To restart the cancelled run,
+select Re-run all jobs on its page.
 
 ## One-time setup
 
@@ -249,8 +248,13 @@ release](#a-bad-release) anyway.
 
    ```sh
    git tag -a 26.11.0 -m 26.11.0
-   git push origin 26.11.0
+   git push origin refs/tags/26.11.0
    ```
+
+   A release run requires a tag. To start one manually on an existing tag,
+   use `gh workflow run release.yml --ref <tag>`, replacing `<tag>` with the
+   version. Selecting a branch fails in **prepare** before the test suites
+   start and leaves queued tag runs in place.
 
    The run uses the workflow, the scripts and the files of the tagged
    commit. The bundle holds that commit's `docker/` and `conf/` directories,
@@ -395,7 +399,7 @@ candidate is good, tag the release on its commit:
 
 ```sh
 git tag -a 26.11.0 -m 26.11.0 "26.11.0-rc2^{commit}"
-git push origin 26.11.0
+git push origin refs/tags/26.11.0
 ```
 
 The release then reads the `.github/release.env` of the candidate, so write
@@ -545,7 +549,7 @@ so a failed run is fixed and run again.
   yet. When the fix is a new commit, delete the tag and tag again:
 
   ```sh
-  git push --delete origin 26.11.0
+  git push --delete origin refs/tags/26.11.0
   git tag -d 26.11.0
   ```
 

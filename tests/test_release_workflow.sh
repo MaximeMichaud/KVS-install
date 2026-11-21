@@ -86,10 +86,27 @@ unconditional_steps() {
         --arg job "$job"
 }
 
+unconditional_job "$release" release.yml prepare
+holds "$release" "prepare must start with the release ref check" \
+    '.jobs.prepare | (has("needs") | not) and .steps[0].name == "require a tag"'
+guard=$(jq -er '.jobs.prepare.steps[0].run' <<<"$release")
+if message=$(GITHUB_REF_TYPE=branch bash -e -c "$guard" 2>&1); then
+    fail "prepare accepted a branch"
+fi
+[[ "$message" == *"A release requires a tag"* ]] || fail "prepare did not explain why a branch was refused"
+GITHUB_REF_TYPE=tag bash -e -c "$guard" || fail "prepare refused a tag"
+holds "$release" "a release must target the workflow commit" \
+    'any(.jobs.publish.steps[]; (.uses // "" | startswith("softprops/action-gh-release@"))
+        and .with.target_commitish == "${{ github.sha }}")'
 # The tests gate everything that leaves the runner.
 holds "$release" "the release must run the kvsctl tests" '.jobs.go.uses == "./.github/workflows/go.yml"'
 holds "$release" "the release must run the shell suites" '.jobs.suites.uses == "./.github/workflows/tests.yml"'
-for job in go suites keys images cli publish; do
+for job in go suites; do
+    holds "$release" "$job must run independently on tags and propagate failures" \
+        '.jobs[$job] | .if == $tag and (has("needs") or has("continue-on-error") | not)' \
+        --arg job "$job" --arg tag "github.ref_type == 'tag'"
+done
+for job in keys images cli publish; do
     unconditional_job "$release" release.yml "$job"
 done
 for job in prepare keys images cli; do
@@ -229,7 +246,8 @@ echo "PASS: the signing keys and the previous manifest are checked before any im
 
 has "$RELEASE" './.github/scripts/release-env.sh "$VERSION"' "the prepare job must check release.env"
 has "$RELEASE" '--images "$images" --digests "$digests" --out "$bundle"' "the bundle must pin every image by digest"
-has "$RELEASE" 'commit=$(git rev-parse --verify "${TAG}^{commit}")' "the commit must be read on a line of its own"
+has "$RELEASE" 'commit=$(git rev-parse --verify "refs/tags/${TAG}^{commit}")' "the commit must be read on a line of its own"
+has "$RELEASE" '--repo .. --ref "refs/tags/$TAG" --version "$VERSION"' "the bundle must come from the release tag"
 has "$RELEASE" '--commit "$commit"' "the manifest must record the commit"
 has "$RELEASE" '--notes "$NOTES"' "the manifest must carry NOTES"
 for knob in MIN_FROM DATABASE ONE_WAY KVS_MIN KVSCTL_MIN COMPOSE_MIN ANNOUNCE_KEY HIGHLIGHT_1 HIGHLIGHT_2 HIGHLIGHT_3; do
@@ -245,8 +263,8 @@ has "$RELEASE" 'printf '"'"'%s'"'"' "$KVSCTL_RELEASE_KEY_NEXT" > "${RUNNER_TEMP}
 has "$RELEASE" 'keys=$(../.github/scripts/release-public-keys.sh)' "the new manifest must be checked against the embedded keys"
 has "$RELEASE" 'go run ./cmd/kvsctl-release verify --all' "every signature must match a key kvsctl ships with"
 has "$RELEASE" 'rm -f "${RUNNER_TEMP}/release.key" "${RUNNER_TEMP}/release-next.key"' "both keys must be removed"
-has "$RELEASE" 'group: release' "release runs must not overlap"
-has "$RELEASE" 'cancel-in-progress: false' "a release run must never be cancelled by the next one"
+holds "$release" "all tags must share a queue separate from branches and let active runs finish" \
+    '.concurrency.group == "${{ github.ref_type == '"'"'tag'"'"' && '"'"'release'"'"' || '"'"'release-branch'"'"' }}" and .concurrency["cancel-in-progress"] == false'
 has "$RELEASE" '--ignore-tags . --strip header' "the notes must be one section"
 has "$RELEASE" './.github/scripts/release-notes-range.sh "$TAG"' "the notes must start at the previous stable release"
 grep -Eq '^ +version: v[0-9]+\.[0-9]+\.[0-9]+$' "$RELEASE" || fail "the git-cliff version must be pinned"

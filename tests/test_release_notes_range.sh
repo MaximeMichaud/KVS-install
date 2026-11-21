@@ -29,6 +29,9 @@ range_of() {
 
 expect() {
     local tag=$1 want=$2 got
+    if [ -n "$want" ]; then
+        want="refs/tags/${want%%..*}..refs/tags/${want##*..}"
+    fi
     got=$(range_of "$tag" 2>&1) || fail "the range of $tag could not be read: $got"
     [ "$got" = "value=$want" ] || fail "the range of $tag is '$got', expected 'value=$want'"
 }
@@ -67,6 +70,7 @@ refused() {
         fail "the range of $tag: the message does not say '$want': $(cat "$TEST_DIR/out.log")"
 }
 
+repo branch 26.99.0
 refused 26.99.0 "is not a tag of this repository"
 repo tag -a -m other build-42
 refused build-42 "is not a release version"
@@ -95,3 +99,7 @@ release 27.11.10
 release 27.11.11
 expect 27.11.11 "27.11.10..27.11.11"
 echo "PASS: the previous stable release is the highest version, not the last one as text"
+
+repo branch 27.11.11 HEAD^
+expect 27.11.11 "27.11.10..27.11.11"
+echo "PASS: a branch with the release name does not affect the notes"
