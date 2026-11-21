@@ -23,7 +23,7 @@ extract_function() {
         capture && /^}$/ { exit }
     ' "$ROOT_DIR/docker/setup.sh"
 }
-for name in report_step_failure log_command run_step remove_env_value set_env_value detect_ioncube; do
+for name in setup_kvs_archive report_step_failure log_command run_step remove_env_value set_env_value detect_ioncube; do
     extract_function "$name" >> "$WORK/functions.sh"
     grep -q "^${name}() {" "$WORK/functions.sh" || fail "$name is not defined in docker/setup.sh"
 done

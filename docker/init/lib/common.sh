@@ -38,9 +38,9 @@ log_step() {
 # Find KVS archive (used in multiple scripts)
 # Returns path to archive or empty string if not found
 find_kvs_archive() {
-    # The directory itself, as setup.sh reads it: an older archive kept in
-    # a subdirectory must not be the one this init extracts.
-    find "$KVS_ARCHIVE_DIR" -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1
+    # shellcheck source=/dev/null
+    source "${BASH_SOURCE[0]%/*}/kvs-archive.sh" || return 1
+    select_kvs_archive "$KVS_ARCHIVE_DIR" "${DOMAIN:-}"
 }
 
 # Check if KVS is already installed

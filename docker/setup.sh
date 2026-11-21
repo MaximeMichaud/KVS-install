@@ -724,18 +724,33 @@ configure_disk_space_limit() {
     echo -e "${CYAN}└──────────────────────────────────────────────────────────────────┘${NC}"
 }
 
-# One KVS archive at most in kvs-archive/. Every step that reads the
-# archive takes the first one find lists, an order nothing fixes: with two
-# archives (an older download kept beside the new one) one step could
-# read one version and the extraction install the other.
-require_single_kvs_archive() {
-    local -a archives
-
-    mapfile -t archives < <(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null | sort)
-    [ "${#archives[@]}" -le 1 ] && return 0
-    echo -e "${RED}ERROR: kvs-archive/ holds ${#archives[@]} KVS archives; keep the one to install and remove the others:${NC}" >&2
+# The installed tree shares its selection rule with kvs-init and add. A
+# standalone copy of setup.sh without the library keeps its single-archive
+# behavior until the rest of the installation tree is available.
+setup_kvs_archive() {
+    local lib="${SETUP_SCRIPT_DIR:-.}/init/lib/kvs-archive.sh" path
+    if [ -f "$lib" ]; then
+        # shellcheck source=/dev/null
+        source "$lib" || return 1
+        select_kvs_archive kvs-archive "${DOMAIN:-}"
+        return
+    fi
+    local -a archives=()
+    for path in kvs-archive/KVS_*.zip; do
+        [ -f "$path" ] && [ ! -L "$path" ] || continue
+        archives+=("$path")
+    done
+    case ${#archives[@]} in
+        0) return 0 ;;
+        1) printf '%s\n' "${archives[0]}"; return ;;
+    esac
+    echo "kvs-archive/ holds ${#archives[@]} KVS archives; keep one or restore $lib to select by domain:" >&2
     printf '  %s\n' "${archives[@]}" >&2
     return 1
+}
+
+require_single_kvs_archive() {
+    setup_kvs_archive >/dev/null
 }
 
 validate_domain() {
@@ -1899,7 +1914,7 @@ kvs_tables_prefix() {
     elif [ -f "/var/www/$DOMAIN/admin/include/setup.php" ]; then
         prefix=$(setup_php_config_value tables_prefix < "/var/www/$DOMAIN/admin/include/setup.php")
     else
-        archive=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null | head -n 1)
+        archive=$(setup_kvs_archive) || return 1
         if [ -n "$archive" ] && command -v unzip >/dev/null 2>&1; then
             prefix=$(unzip -p "$archive" admin/include/setup.php 2>/dev/null | setup_php_config_value tables_prefix)
         fi
@@ -1967,7 +1982,7 @@ kvs_documented_php_version() {
                 kvs_version=$(printf '%s' "${IMPORT_SITE_VERSION:-}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
                 ;;
             archive)
-                kvs_file=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
+                kvs_file=$(setup_kvs_archive) || return 1
                 if [ -n "$kvs_file" ]; then
                     kvs_version=$(basename "$kvs_file" | grep -oP 'KVS_\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
                 fi
@@ -2890,7 +2905,7 @@ import_inspect_remote() {
 import_check_kvs_archive_version() {
     local archive archive_version
 
-    archive=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null | head -n 1)
+    archive=$(setup_kvs_archive) || return 1
     if [ -z "$archive" ]; then
         echo "  KVS archive:     none in kvs-archive/, none needed (the site brings its version, its encoding and its nginx rewrites)"
         return 0
@@ -4642,7 +4657,7 @@ detect_ioncube() {
 
     # Find KVS archive
     local KVS_FILE
-    KVS_FILE=$(find kvs-archive -maxdepth 1 -name 'KVS_*.zip' 2>/dev/null | head -n1)
+    KVS_FILE=$(setup_kvs_archive) || return 1
     if [ -z "$KVS_FILE" ]; then
         echo -e "${YELLOW}KVS archive not found. Keeping IONCUBE=${IONCUBE:-YES}${NC}"
         return

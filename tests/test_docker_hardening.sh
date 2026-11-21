@@ -1345,16 +1345,10 @@ test_failed_build_step_shows_its_output_not_the_dockerfile_echo() {
 # kept in a subdirectory could be the one extracted. Both read the top level.
 test_init_archive_lookup_reads_the_top_level_only() {
     local case_dir="$TMP_ROOT/init-archive-lookup"
-    local functions_file="$case_dir/find.sh"
+    local functions_file="$REPO_ROOT/docker/init/lib/common.sh"
     local output
 
     mkdir -p "$case_dir/kvs-archive/old"
-    awk '
-        $0 == "find_kvs_archive() {" { capture = 1 }
-        capture { print }
-        capture && /^}$/ { exit }
-    ' "$REPO_ROOT/docker/init/lib/common.sh" > "$functions_file"
-    grep -q '^find_kvs_archive() {' "$functions_file" || fail "find_kvs_archive not found in common.sh"
     : > "$case_dir/kvs-archive/old/KVS_7.0.1_[mysite.test].zip"
 
     output=$(

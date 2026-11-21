@@ -662,33 +662,15 @@ remove_primary_site() {
 # Add Site
 # =============================================================================
 
-# Sets site_archive in the caller (add_site): the KVS archive a new site is
-# made from, when kvs-archive/ holds exactly one, and fails when it holds
-# none. The archives are what the site's init can install, the regular files
-# named KVS_*.zip directly in that directory, which its find_kvs_archive
-# lists with find -type f: a symlink or a directory of that name is not one.
-# find -H follows kvs-archive/ itself when it is a symlink, as the bind mount
-# of the init container does. The init installs the first archive find
-# lists, an order nothing fixes, so with several add reads none of them and
-# leaves site_archive empty, with a warning that names them.
+# Use the same archive as the site's init, including in a shared directory.
 select_site_archive() {
-    local domain="$1"
-    local -a archives
-
-    site_archive=""
-    mapfile -t archives < <(find -H "$KVS_ARCHIVE_DIR" -maxdepth 1 -name 'KVS_*.zip' -type f 2>/dev/null)
-    if [ "${#archives[@]}" -eq 0 ]; then
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/../init/lib/kvs-archive.sh" || return 1
+    site_archive=$(select_kvs_archive "$KVS_ARCHIVE_DIR" "$1") || return 1
+    if [ -z "$site_archive" ]; then
         log_error "No KVS archive found in ${KVS_ARCHIVE_DIR}/"
         return 1
     fi
-    if [ "${#archives[@]}" -eq 1 ]; then
-        site_archive=${archives[0]}
-        return 0
-    fi
-    log_warn "${KVS_ARCHIVE_DIR}/ holds ${#archives[@]} KVS archives; the new site's init installs the first one it lists, which add cannot tell:"
-    printf '  %s\n' "${archives[@]##*/}"
-    log_warn "add reads none of them: where the archive would decide, the new site gets PHP 8.1 unless KVS_PHP_VERSION is set, IONCUBE=YES unless IONCUBE is set, and the table prefix ktvs_"
-    log_warn "Keep only the new site's archive in ${KVS_ARCHIVE_DIR}/ until the site's first start. Give add its values on the add command line only, for example: KVS_PHP_VERSION=8.3 IONCUBE=NO ./site-manager.sh add ${domain}"
 }
 
 # Sets php_version and ioncube in the caller (add_site) for a new site made
@@ -843,6 +825,7 @@ add_site() {
     local site_archive
     local webroot="${WEBROOT_BASE}/${domain}"
     select_site_archive "$domain" || return 1
+    site_archive=$(realpath -e -- "$site_archive") || return 1
     select_site_php "$site_archive" "$webroot" || return 1
 
     # The build bases of the PHP series, pinned by digest in
@@ -871,6 +854,11 @@ add_site() {
     chown 1000:1000 "${webroot}"
     log_success "Created webroot: ${webroot}"
 
+    # A file bind also limits an older init image to the selected licence.
+    # Keep the resolved path in a symlink so shell and Compose quoting cannot
+    # reinterpret a special character in the host archive path.
+    ln -s -- "$site_archive" "$site_dir/archive.zip"
+
     # Generate .env file. The table prefix is the one of the archive's
     # setup.php (ktvs_ for every archive KVS ships); the init reads it from
     # the site itself, .env carries it for the scripts outside the container.
@@ -885,6 +873,7 @@ SITE_PREFIX=${site_prefix}
 COMPOSE_PROJECT_NAME=${site_prefix}
 USE_WWW=false
 TABLES_PREFIX=${tables_prefix}
+KVS_SITE_ARCHIVE=./archive.zip
 
 # Database
 # Tag and digest from the lock. A different MARIADB_VERSION still selects that image.
@@ -959,6 +948,57 @@ stopped_cron_notice() {
     log_warn "cron of ${STOPPED_CRON_SITE} is stopped: docker compose start cron in ${SITES_DIR}/${STOPPED_CRON_SITE}, or re-run ./site-manager.sh start ${STOPPED_CRON_SITE}"
 }
 
+# Inspect the effective bind, including local overrides and Compose interpolation.
+# The cached init may still pick the first archive visible in a directory.
+check_site_archive_mount() {
+    local domain="$1" mount source path selected count=0
+    if ! mount=$(set -o pipefail
+        docker compose --profile setup config --format json kvs-init |
+            jq -er '[.services["kvs-init"].volumes[]? | select(.type == "bind" and
+                (.target == "/kvs-archive" or (.target | startswith("/kvs-archive/"))))]
+                | if length == 0 then "none" elif length != 1 then error("multiple archive binds")
+                  else .[0] | (if .target == "/kvs-archive" then "dir" else "file" end) + "\n" + .source end'
+    ); then
+        log_error "Could not inspect the kvs-init archive mount. Check the Compose configuration and that jq is installed."
+        return 1
+    fi
+    source=${mount#*$'\n'}
+    case "$mount" in
+        none) return 0 ;;
+        file$'\n'*)
+            if [ ! -f "$source" ]; then
+                log_error "Repair the archive mount source $source so it points to the site's regular archive, then retry."
+                return 1
+            fi
+            return 0 ;;
+    esac
+    if [ ! -d "$source" ]; then
+        log_error "Restore the mounted archive directory $source before starting $domain."
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/../init/lib/kvs-archive.sh" || return 1
+    selected=$(select_kvs_archive "$source" "$domain") || return 1
+    for path in "$source"/KVS_*.zip; do
+        [ ! -f "$path" ] || count=$((count + 1))
+    done
+    if [ "$count" -gt 1 ]; then
+        log_error "The directory bind exposes several licences to kvs-init. For $domain use $selected."
+        printf '  ln -sT -- %q %q\n' "$selected" "$PWD/archive.zip"
+        printf '  In %s replace only the kvs-init archive volume with:\n' "$PWD/docker-compose.yml"
+        cat <<'MOUNT'
+      - type: bind
+        source: ./archive.zip
+        target: /kvs-archive/KVS_site.zip
+        read_only: true
+        bind:
+          create_host_path: false
+MOUNT
+        printf '  Then run: %q start %q\n' "$SCRIPT_DIR/site-manager.sh" "$domain"
+        return 1
+    fi
+}
+
 start_site() {
     local domain="$1"
     local admin_password="${KVS_ADMIN_PASSWORD:-}"
@@ -980,6 +1020,7 @@ start_site() {
 
     log_info "Starting site: ${domain}"
     cd "$site_dir"
+    check_site_archive_mount "$domain" || return 1
 
     # kvs-init clears KVS's cron locks and its cron registration
     # (40-configure-database.sh): a cron.php still running on a started

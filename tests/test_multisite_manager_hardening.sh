@@ -33,6 +33,8 @@ create_fixture() {
     # add reads the PHP series and the IonCube encoding of the archive.
     mkdir -p "${fixture}/lib"
     cp "${ROOT_DIR}/docker/lib/kvs-php.sh" "${fixture}/lib/"
+    mkdir -p "${fixture}/init/lib"
+    cp "${ROOT_DIR}/docker/init/lib/kvs-archive.sh" "${fixture}/init/lib/"
     : > "${fixture}/kvs-archive/KVS_test.zip"
 }
 
@@ -164,6 +166,10 @@ docker() {
                 esac
                 mock_index=$((mock_index + 1))
             done
+            if [[ " $* " == *' config --format json kvs-init '* ]]; then
+                "$REAL_DOCKER" "$@"
+                return
+            fi
             # MOCK_COMPOSE_IONCUBE_LOG: for each Compose call, the IONCUBE
             # the real Compose gives PHP-FPM and cron with those options, in
             # this directory, from this environment.
@@ -787,7 +793,7 @@ if grep -Fxq 'compose up -d mariadb' "$cron_stop_failure_log" ||
     fail "the start went on to MariaDB and kvs-init after cron could not be stopped"
 fi
 
-mkdir -p "${TEST_DIR}/valid/docker/multi-site/sites/oneshot-failure.example"
+KVS_WEBROOT_BASE="$valid_webroot" bash "$valid_script" add oneshot-failure.example >/dev/null
 oneshot_failure_log="${TEST_DIR}/valid/oneshot-failure.log"
 set +e
 MOCK_PHPMYADMIN_INIT_STATUS=42 \
@@ -806,7 +812,7 @@ if grep -Fq 'run --rm --no-deps kvs-init' "$oneshot_failure_log" ||
     fail "site startup continued after a failed phpMyAdmin one-shot"
 fi
 
-mkdir -p "${TEST_DIR}/valid/docker/multi-site/sites/kvs-init-failure.example"
+KVS_WEBROOT_BASE="$valid_webroot" bash "$valid_script" add kvs-init-failure.example >/dev/null
 kvs_init_failure_log="${TEST_DIR}/valid/kvs-init-failure.log"
 set +e
 MOCK_KVS_INIT_STATUS=43 \
@@ -847,7 +853,7 @@ set -e
 [ ! -e "${TEST_DIR}/valid/docker/multi-site/sites/${oversized_prefix_domain}" ] ||
     fail "an unsupported long domain created a site"
 
-mkdir -p "${TEST_DIR}/valid/docker/multi-site/sites/reload.example"
+KVS_WEBROOT_BASE="$valid_webroot" bash "$valid_script" add reload.example >/dev/null
 reload_log="${TEST_DIR}/valid/reload.log"
 set +e
 MOCK_CADDY_RELOAD_STATUS=23 \
@@ -1840,45 +1846,62 @@ rm -f "${TEST_DIR}/w3_no_lib/docker/lib/kvs-php.sh"
 w3_run
 w3_refused 'kvs-php.sh: it tells which PHP a KVS release needs' "no docker/lib/kvs-php.sh"
 
-# Two archives: the site's init installs the first one find lists, an order
-# the file system decides, so add reads neither and keeps PHP 8.1, IONCUBE=YES
-# and ktvs_, naming them, whichever was copied first. add used to read the
-# sorted first one, here a plain 7.0.3 with the prefix abc_.
-w3_two=('KVS_7.0.3_[a.example].zip' 'KVS_7.0.4_[b.example].zip')
-w3_kinds=(plain encoded)
-w3_prefixes=(abc_ ktvs_)
-# w3_two_archives <name> <index>...: a fixture with both archives, copied in
-# that order.
-w3_two_archives() {
-    local index
-    w3_fixture "$1"
-    shift
-    for index in "$@"; do
-        w3_zip "${w3_dir}/${w3_two[$index]}" \
-            "admin/include/functions_base.php:${w3_kinds[$index]}" \
-            "admin/include/setup.php:prefix=${w3_prefixes[$index]}"
+# Different licensed archives share the directory. The added site's PHP,
+# encoding and prefix, setup's readers and the init must agree on its file.
+w3_fixture x4
+other="${w3_dir}/KVS_6.2.0_[other.example].zip"
+chosen="${w3_dir}/KVS_7.0.3_[W3.EXAMPLE].zip"
+w3_zip "$other" admin/include/functions_base.php:encoded admin/include/setup.php:prefix=old_
+w3_zip "$chosen" admin/include/functions_base.php:plain admin/include/setup.php:prefix=abc_
+w3_run
+w3_expect 8.3 NO "the matching licensed archive"
+grep -Fxq 'TABLES_PREFIX=abc_' "$w3_env" || fail "add used another site's prefix"
+# shellcheck disable=SC2034,SC2329  # The extracted setup functions use the fixture values and callbacks.
+x4_archive_readers() (
+    cd "$(dirname "$w3_dir")"
+    local DOMAIN IMPORT_MODE=false IMPORT_SITE_IONCUBE='' IONCUBE
+    local SETUP_SCRIPT_DIR="$ROOT_DIR/docker" IMPORT_SITE_VERSION
+    local RED GREEN YELLOW CYAN='' NC KVS_ARCHIVE_DIR
+    for name in setup_kvs_archive require_single_kvs_archive kvs_documented_php_version detect_ioncube \
+        setup_php_config_value kvs_tables_prefix import_check_kvs_archive_version; do
+        eval "$(sed -n "/^${name}() {/,/^}/p" "$ROOT_DIR/docker/setup.sh")"
     done
-}
-for w3_order in plain-first encoded-first; do
-    if [ "$w3_order" = plain-first ]; then
-        w3_two_archives "w3_two_${w3_order}" 0 1
-    else
-        w3_two_archives "w3_two_${w3_order}" 1 0
-    fi
-    w3_run
-    w3_expect 8.1 YES "two archives, ${w3_order}"
-    grep -Fxq 'TABLES_PREFIX=ktvs_' "$w3_env" ||
-        fail "W3: two archives, ${w3_order}: the table prefix was read from one of them: $(grep '^TABLES_PREFIX=' "$w3_env")"
-    for w3_archive in "${w3_two[@]}"; do
-        grep -Fq "  ${w3_archive}" "$w3_out" ||
-            fail "W3: two archives, ${w3_order}: ${w3_archive} was not named: $(cat "$w3_out")"
+    # Check both domains: whichever file the filesystem lists first, using
+    # that file unconditionally must fail for the other site.
+    # shellcheck source=/dev/null
+    source "$ROOT_DIR/docker/init/lib/common.sh"
+    KVS_ARCHIVE_DIR=$w3_dir
+    set_env_value() { printf '%s=%s\n' "$1" "$2" > .env; }
+    import_archive_version() { [ "$1" = "kvs-archive/${expected_file##*/}" ] && echo "$version"; }
+    for DOMAIN in w3.example other.example; do
+        case $DOMAIN in
+            w3.example) expected_file=$chosen; version=7.0.3; php=8.3; encoding=NO; prefix=abc_ ;;
+            *) expected_file=$other; version=6.2.0; php=7.4; encoding=YES; prefix=old_ ;;
+        esac
+        require_single_kvs_archive || fail "setup refused the shared archive directory"
+        [ "$(kvs_tables_prefix)" = "$prefix" ] || fail "setup used another site's prefix"
+        [ "$(kvs_documented_php_version "$w3_dir/absent")" = "$version"$'\t'"$php"$'\t'archive ] ||
+            fail "setup selected PHP from another archive"
+        detect_ioncube "$w3_dir/absent" >/dev/null
+        [ "$IONCUBE" = "$encoding" ] || fail "setup used another archive's encoding"
+        IMPORT_SITE_VERSION=$version
+        import_check_kvs_archive_version || fail "setup checked another archive's import version"
+        [ "$(find_kvs_archive)" = "$expected_file" ] || fail "the init missed its licensed archive"
     done
-    grep -Fq "Keep only the new site's archive" "$w3_out" ||
-        fail "W3: two archives, ${w3_order}: no advice was given: $(cat "$w3_out")"
-done
-w3_two_archives w3_two_set 0 1
+    DOMAIN=absent.example
+    if find_kvs_archive > picked; then fail "the init accepted no domain match"; fi
+    [ ! -s picked ] || fail "the init returned an unrelated file"
+    DOMAIN=w3.example
+    cp "$chosen" "$w3_dir/KVS_7.0.4_[w3.example].zip"
+    if find_kvs_archive > picked; then fail "the init accepted two matching versions"; fi
+    if require_single_kvs_archive; then fail "setup accepted two matching versions"; fi
+)
+x4_archive_readers
+w3_fixture x4_no_match
+w3_zip "${w3_dir}/KVS_7.0.3_[notw3.example].zip" admin/include/functions_base.php:plain
+w3_zip "${w3_dir}/KVS_7.0.4_[other.example].zip" admin/include/functions_base.php:encoded
 w3_run KVS_PHP_VERSION=8.3 IONCUBE=NO
-w3_expect 8.3 NO "two archives with KVS_PHP_VERSION and IONCUBE set"
+w3_refused "exactly one archive" "no matching domain even with PHP overrides"
 
 # One archive gives its own table prefix.
 w3_fixture w3_prefix
@@ -1894,11 +1917,11 @@ grep -Fxq 'TABLES_PREFIX=abc_' "$w3_env" ||
 # one archive made add see two and read none; a symlink alone was read
 # although the init finds no archive. kvs-archive/ itself may be a symlink,
 # which the init's bind mount follows.
-eval "$(sed -n '/^find_kvs_archive() {/,/^}/p' "${ROOT_DIR}/docker/init/lib/common.sh")"
-declare -F find_kvs_archive >/dev/null || fail "W3: find_kvs_archive not found in the init"
 # w3_init_pick: the archive the init of the current fixture would install,
 # its kvs-archive/ mounted as the resolved directory.
 w3_init_pick() {
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/docker/init/lib/common.sh"
     local KVS_ARCHIVE_DIR
     # shellcheck disable=SC2034  # read by find_kvs_archive
     KVS_ARCHIVE_DIR=$(cd "$w3_dir" && pwd -P)
@@ -1909,7 +1932,10 @@ w3_zip "${w3_dir}/KVS_7.0.3_[w3.example].zip" admin/include/functions_base.php:e
 ln -s /nonexistent/KVS_old.zip "${w3_dir}/KVS_old.zip"
 mkdir "${w3_dir}/KVS_backup.zip"
 w3_run
-w3_expect 8.3 YES "one archive next to a dangling symlink and a directory"
+w3_refused "KVS_old.zip is a symbolic link" "a dangling archive link beside a regular archive"
+rm "$w3_dir/KVS_old.zip"
+w3_run
+w3_expect 8.3 YES "one archive next to a directory"
 [ "$(basename "$(w3_init_pick)")" = 'KVS_7.0.3_[w3.example].zip' ] ||
     fail "W3: the init would not install the archive add read: $(w3_init_pick)"
 ! grep -Fq 'KVS archives;' "$w3_out" || fail "W3: a symlink or a directory was counted as an archive: $(cat "$w3_out")"
@@ -1917,9 +1943,9 @@ w3_fixture w3_symlink_only
 mkdir -p "${TEST_DIR}/w3_symlink_only/store"
 w3_zip "${TEST_DIR}/w3_symlink_only/store/KVS_7.0.3_[w3.example].zip" admin/include/functions_base.php:encoded
 ln -s "${TEST_DIR}/w3_symlink_only/store/KVS_7.0.3_[w3.example].zip" "${w3_dir}/"
-[ -z "$(w3_init_pick)" ] || fail "W3: the init lists a symlinked archive"
+if (w3_init_pick) > "$w3_out" 2>&1; then fail "W3: the init accepted a symlinked archive"; fi
 w3_run
-w3_refused "No KVS archive found in" "only a symlinked archive"
+w3_refused "KVS_7.0.3_[w3.example].zip is a symbolic link" "only a symlinked archive"
 w3_fixture w3_linked_dir
 mkdir -p "${TEST_DIR}/w3_linked_dir/store"
 w3_zip "${TEST_DIR}/w3_linked_dir/store/KVS_7.0.2_[w3.example].zip" admin/include/functions_base.php:plain
@@ -1961,14 +1987,11 @@ w3_run IONCUBE=NO
 w3_expect 8.1 YES "IONCUBE=NO with an encoded kept webroot"
 grep -Fq "IONCUBE=NO is not used: the files of ${TEST_DIR}/w3_kept_unused/webroots/w3.example give IONCUBE=YES" "$w3_out" ||
     fail "W3: the IONCUBE the kept files contradict was dropped silently: $(cat "$w3_out")"
-# With several archives, which add does not read, the kept files still
-# decide.
+# A kept site still decides when the directory contains another license.
 w3_kept w3_kept_two "$w3_encoded" 7.0.3
-w3_zip "${w3_dir}/KVS_7.0.4_[w3.example].zip" admin/include/functions_base.php:plain
+w3_zip "${w3_dir}/KVS_7.0.4_[other.example].zip" admin/include/functions_base.php:plain
 w3_run
 w3_expect 8.3 YES "an encoded kept KVS 7.0.3 with two plain archives"
-grep -Fq "Keep only the new site's archive" "$w3_out" ||
-    fail "W3: the two archives next to a kept webroot were not reported: $(cat "$w3_out")"
 # A version.php without a version leaves the series to the archive.
 w3_kept w3_kept_noversion "$w3_plain" unknown
 w3_run
@@ -2030,6 +2053,7 @@ done
     source "${ROOT_DIR}/docker/lib/kvs-php.sh"
     # shellcheck source=docker/lib/import.sh
     source "${ROOT_DIR}/docker/lib/import.sh"
+    eval "$(sed -n '/^setup_kvs_archive() {/,/^}/p' "${ROOT_DIR}/docker/setup.sh")"
     eval "$(sed -n '/^kvs_documented_php_version() {/,/^}/p' "${ROOT_DIR}/docker/setup.sh")"
     eval "$(sed -n '/^detect_ioncube() {/,/^}/p' "${ROOT_DIR}/docker/setup.sh")"
     declare -F kvs_documented_php_version >/dev/null ||

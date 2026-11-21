@@ -41,6 +41,7 @@ extract_function() {
 source "$ROOT_DIR/docker/lib/import.sh"
 functions_file="$TEST_DIR/functions.sh"
 {
+    extract_function setup_kvs_archive
     extract_function remove_env_value
     extract_function set_env_value
     extract_function import_check_kvs_archive_version

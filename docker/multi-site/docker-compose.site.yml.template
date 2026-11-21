@@ -299,7 +299,13 @@ services:
     volumes:
       - /var/www/${DOMAIN}:/var/www/kvs
       - manticore-api:/var/www/manticore-api
-      - ../../../kvs-archive:/kvs-archive:ro
+      # Sites created before the file bind keep their original directory mount.
+      - type: bind
+        source: ${KVS_SITE_ARCHIVE:-../../../kvs-archive}
+        target: /kvs-archive${KVS_SITE_ARCHIVE:+/KVS_site.zip}
+        read_only: true
+        bind:
+          create_host_path: false
       - nginx-includes:/nginx-includes
     environment:
       - DOMAIN=${DOMAIN}

@@ -432,8 +432,7 @@ archive_is_valid() {
 # must hold still across the check, so one still being written is never used.
 # A file whose size has not changed for KVS_ARCHIVE_SETTLE_SECONDS (60 by
 # default) and that unzip still refuses is not an upload in progress but a
-# broken file, and ends the wait. Two archives are refused, as the Docker setup
-# refuses them in kvs-archive/: whichever sorts first would be the one used.
+# broken file, and ends the wait. This upload step expects one file to copy.
 # Messages go to standard error, keeping the path alone on standard output for
 # capture; the caller's CTRL + C ends the wait.
 wait_for_complete_kvs_archive() {
@@ -498,6 +497,7 @@ copy_complete_archive() {
     rm -f "$partial"
     return 1
   fi
+  printf '%s\n' "$dest/$base"
 }
 
 # unzip checks an uploaded archive before the installer uses it. A minimal
@@ -2917,7 +2917,7 @@ function dockerInstall() {
   local INSTALL_DIR
   local BACKUP_DIR
   local clone_status
-  local staged_archive
+  local staged_archive="" archive_domain saved_domain
   local kvsctl_aside
   local kvsctl_move
 
@@ -3038,8 +3038,20 @@ function dockerInstall() {
   # First check if archive already exists in kvs-archive. It is preferred over
   # /root, so a broken one (cut short by an older installer, or uploaded there
   # by hand) would fail every run in the init container: check it here.
+  saved_domain=$(saved_site_domain ./.env)
   if ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
-    staged_archive=$(find_kvs_archive kvs-archive) || return 1
+    if [[ -f ./init/lib/kvs-archive.sh ]]; then
+      # shellcheck source=/dev/null
+      source ./init/lib/kvs-archive.sh || return 1
+      staged_archive=$(select_kvs_archive kvs-archive "${DOMAIN:-$saved_domain}") || return 1
+    else
+      # An older checkout has no shared selector.
+      staged_archive=$(find_kvs_archive kvs-archive) || return 1
+    fi
+    if [[ -z "$staged_archive" ]]; then
+      echo "No regular KVS archive found in $INSTALL_DIR/docker/kvs-archive/" >&2
+      return 1
+    fi
     if ! archive_is_valid "$staged_archive"; then
       echo "${red}$INSTALL_DIR/docker/$staged_archive is not a complete zip archive (unzip cannot read it).${normal}" >&2
       echo "${red}Remove it and run the installer again; an archive in /root is then staged in its place.${normal}" >&2
@@ -3049,7 +3061,7 @@ function dockerInstall() {
   # Then check /root
   elif ls /root/KVS_*.zip 1>/dev/null 2>&1; then
     echo "Found KVS archive in /root, copying to kvs-archive/..."
-    copy_complete_archive /root kvs-archive || {
+    staged_archive=$(copy_complete_archive /root kvs-archive) || {
       echo "${red}The KVS archive in /root is incomplete or could not be copied${normal}" >&2
       return 1
     }
@@ -3061,7 +3073,7 @@ function dockerInstall() {
   else
     echo "${red}No KVS archive found${normal}"
     echo "Please upload your KVS_X.X.X_[domain.tld].zip file to /root"
-    copy_complete_archive /root kvs-archive || {
+    staged_archive=$(copy_complete_archive /root kvs-archive) || {
       echo "${red}The KVS archive in /root is incomplete or could not be copied${normal}" >&2
       return 1
     }
@@ -3069,9 +3081,7 @@ function dockerInstall() {
   fi
 
   # Extract the domain from the archive file name (KVS_X.X.X_[domain].zip).
-  local kvs_file archive_domain saved_domain
-  kvs_file=$(find kvs-archive -maxdepth 1 -name "KVS_*.zip" -type f 2>/dev/null | head -1)
-  archive_domain=$(archive_domain_from_name "${kvs_file##*/}")
+  archive_domain=$(archive_domain_from_name "${staged_archive##*/}")
 
   # Setup .env file
   if [ ! -f .env ]; then
@@ -3095,7 +3105,6 @@ function dockerInstall() {
   # different archive name is a warning that says how to switch. A name that
   # is renamed, bracket-less or invalid is a warning, not a failure, so it
   # never aborts an install whose domain is otherwise known.
-  saved_domain=$(saved_site_domain ./.env)
   if [[ -n "${DOMAIN:-}" ]]; then
     if validate_kvs_domain "${DOMAIN,,}"; then
       if [[ -n "$archive_domain" && "${DOMAIN,,}" != "$archive_domain" ]]; then

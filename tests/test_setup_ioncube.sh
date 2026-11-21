@@ -22,6 +22,7 @@ extract_function() {
 }
 
 {
+    extract_function setup_kvs_archive setup.sh
     extract_function remove_env_value setup.sh
     extract_function set_env_value setup.sh
     extract_function detect_ioncube setup.sh

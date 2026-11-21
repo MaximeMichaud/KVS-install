@@ -75,6 +75,7 @@ rm -f "$KVS_PATH/admin/include/setup.php"
 [ "$(get_tables_prefix 2>/dev/null)" = ktvs_ ] || fail "a missing setup.php must fall back to ktvs_"
 
 # --- the Docker setup: import, site in place, archive, fallback --------------
+eval "$(extract_function "$ROOT_DIR/docker/setup.sh" setup_kvs_archive)"
 eval "$(extract_function "$ROOT_DIR/docker/setup.sh" setup_php_config_value)"
 eval "$(extract_function "$ROOT_DIR/docker/setup.sh" kvs_tables_prefix)"
 [ "$(setup_php_config_value tables_prefix 2>/dev/null < "$TEST_DIR/init-site/admin/include/setup.php" || true)" = "" ] ||

@@ -28,6 +28,7 @@ extract_function() {
 functions_file="$TEST_DIR/functions.sh"
 {
     grep -m1 '^readonly SUPPORTED_PHP_VERSIONS=' "$ROOT_DIR/docker/setup.sh"
+    extract_function setup_kvs_archive
     extract_function php_version_is_supported
     extract_function version_at_least
     extract_function saved_php_version
@@ -442,7 +443,7 @@ if command -v unzip > /dev/null 2>&1 && command -v python3 > /dev/null 2>&1; the
     {
         echo "source \"$ROOT_DIR/docker/lib/import.sh\""
         grep -m1 '^readonly SUPPORTED_PHP_VERSIONS=' "$ROOT_DIR/docker/setup.sh"
-        for name in php_version_is_supported version_at_least saved_php_version kvs_documented_php_version \
+        for name in setup_kvs_archive php_version_is_supported version_at_least saved_php_version kvs_documented_php_version \
             refuse_unbuildable_kvs_php select_php_version; do
             extract_function "$name"
         done | sed "s|/var/www/|$TEST_DIR/www/|g"
