@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -40,6 +41,7 @@ func (r *Runner) Plan(ctx context.Context, state *instance.State) (*Plan, error)
 		return nil, err
 	}
 	plan := &Plan{Current: state.Current, Previous: state.Previous, CurrentLabel: state.Label(state.Current), PreviousLabel: state.Label(state.Previous), Manifest: m}
+	plan.KVSVersion = r.Inst.KVSVersion()
 	stable := m.LatestStable()
 	switch {
 	case r.Opts.Version != "":
@@ -117,9 +119,11 @@ func (r *Runner) Plan(ctx context.Context, state *instance.State) (*Plan, error)
 	}
 	r.planCompose(ctx, plan)
 	if kvsMin := plan.Target.Requires.KVSMin; kvsMin != "" {
-		kvs := r.Inst.KVSVersion()
-		if v, ok := SiteKVS(kvs); ok && semver.Less(v.String(), kvsMin) {
-			plan.Blockers = append(plan.Blockers, fmt.Sprintf("%s supports KVS %s and newer, this site runs KVS %s: update KVS from its admin panel first", plan.Target.Version, kvsMin, kvs))
+		plan.KVSComparisonAttempted = true
+		v, ok := kvsForMinimum(plan.KVSVersion)
+		plan.KVSCompared = ok
+		if ok && semver.Less(v.String(), kvsMin) {
+			plan.Blockers = append(plan.Blockers, fmt.Sprintf("%s supports KVS %s and newer, this site runs KVS %s: update KVS from its admin panel first", plan.Target.Version, kvsMin, plan.KVSVersion))
 		}
 	}
 	planEngine(plan, info, infoErr)
@@ -132,14 +136,33 @@ func (r *Runner) Plan(ctx context.Context, state *instance.State) (*Plan, error)
 	return plan, nil
 }
 
+// setup.sh reads the leading three decimal components of a site version.
+// Capture the significant digits of each, including a single zero for zero.
+var kvsPrefix = regexp.MustCompile(`^0*([0-9]+)\.0*([0-9]+)\.0*([0-9]+)`)
+
+func kvsForMinimum(kvs string) (semver.Version, bool) {
+	if v, ok := SiteKVS(kvs); ok {
+		return v, true
+	}
+	parts := kvsPrefix.FindStringSubmatch(kvs)
+	if parts == nil {
+		return semver.Version{}, false
+	}
+	core := strings.Join(parts[1:], ".")
+	if suffix := kvs[len(parts[0]):]; suffix != "" {
+		if v, ok := SiteKVS(core + suffix); ok {
+			return v, true
+		}
+	}
+	return SiteKVS(core)
+}
+
 // SiteKVS reads the KVS version of a site, as its version.php writes it,
 // to compare with the KVS minimum of a release. KVS numbers its own
 // versions: a pre-release label in upper case or a number with a leading
 // zero, which semver.Parse refuses in a version of the stack (7.1.0-RC1,
 // 7.1.0-rc01), is read as the lower case label and the plain number
-// (7.1.0-rc1). ok is false for a version that does not parse even so,
-// which is not held against the site, as a Compose version that does not
-// parse is not (planCompose): the plan shows it, not compared.
+// (7.1.0-rc1). ok is false when the full version does not parse.
 func SiteKVS(kvs string) (v semver.Version, ok bool) {
 	core, pre, hasPre := strings.Cut(kvs, "-")
 	if hasPre {

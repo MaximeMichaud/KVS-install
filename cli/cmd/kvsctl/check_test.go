@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -161,21 +160,18 @@ func TestPrintPlanSaysWhenTheKVSVersionIsNotCompared(t *testing.T) {
 	root := newRoot(t)
 	state := &instance.State{Current: "1.0.0", Files: []string{"docker/docker-compose.yml"}}
 	inst := saveState(t, root, state)
-	inst.WebRoot = t.TempDir()
-	version := filepath.Join(inst.WebRoot, "admin", "include", "version.php")
-	if err := os.MkdirAll(filepath.Dir(version), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	plan := readyPlan()
 	plan.Target.Requires.KVSMin = "7.0.0"
 	for kvs, want := range map[string]string{
+		"7.0.3":     "KVS          release supports 7.0.0 and newer, site runs 7.0.3 (comparison not run)\n",
+		"6.9.9a":    "KVS          release supports 7.0.0 and newer, site runs 6.9.9a\n",
 		"7.1.0-RC1": "KVS          release supports 7.0.0 and newer, site runs 7.1.0-RC1\n",
 		"7.1":       "KVS          release supports 7.0.0 and newer, site runs 7.1, which kvsctl cannot compare, so it is not checked\n",
 		"":          "KVS          release supports 7.0.0 and newer, site runs an unknown version\n",
 	} {
-		if err := os.WriteFile(version, []byte("<?php\n$config['project_version'] = '"+kvs+"';\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		plan.KVSVersion = kvs
+		plan.KVSComparisonAttempted = kvs != "7.0.3"
+		plan.KVSCompared = kvs == "7.1.0-RC1" || kvs == "6.9.9a"
 		var out bytes.Buffer
 		printPlan(&out, plan, inst, state, "", "")
 		if text := out.String(); !strings.Contains(text, want) {

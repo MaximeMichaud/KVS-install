@@ -86,11 +86,23 @@ func printPlan(w io.Writer, plan *upgrade.Plan, inst *instance.Instance, state *
 	}
 	line("Site", "%s (%s)", inst.Domain(), inst.Root)
 	installed := state.Label(plan.Current)
-	if kvs := inst.KVSVersion(); kvs != "" {
+	if kvs := plan.KVSVersion; kvs != "" {
 		installed += fmt.Sprintf("  KVS %s, PHP %s, IonCube %s", kvs, inst.PHPVersion(), yesNo(inst.IonCube()))
 	}
 	line("Installed", "%s", installed)
 	line("Manifest", "%s", manifestSummary(plan.Manifest))
+	if kvsMin := plan.Target.Requires.KVSMin; kvsMin != "" {
+		site := plan.KVSVersion
+		if site == "" {
+			site = "an unknown version"
+		}
+		if !plan.KVSComparisonAttempted {
+			site += " (comparison not run)"
+		} else if !plan.KVSCompared && plan.KVSVersion != "" {
+			site += ", which kvsctl cannot compare, so it is not checked"
+		}
+		line("KVS", "release supports %s and newer, site runs %s", kvsMin, site)
+	}
 	switch {
 	case plan.UpToDate:
 		line("Target", "%s, already installed with the images it pins", plan.Target.Version)
@@ -148,15 +160,6 @@ func printPlan(w io.Writer, plan *upgrade.Plan, inst *instance.Instance, state *
 		} else {
 			line("PHP", "release ships %s, site runs %s", php, inst.PHPVersion())
 		}
-	}
-	if kvsMin := plan.Target.Requires.KVSMin; kvsMin != "" {
-		site := inst.KVSVersion()
-		if site == "" {
-			site = "an unknown version"
-		} else if _, ok := upgrade.SiteKVS(site); !ok {
-			site += ", which kvsctl cannot compare, so it is not checked"
-		}
-		line("KVS", "release supports %s and newer, site runs %s", kvsMin, site)
 	}
 	if min := plan.Target.Requires.ComposeMin; min != "" {
 		have := plan.ComposeVersion

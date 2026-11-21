@@ -302,6 +302,11 @@ type Plan struct {
 	// previous images: a rollback recreates the MariaDB data directory
 	// and replays the backup.
 	OneWay bool
+	// The site version is read before the plan can stop early. Attempted
+	// distinguishes an early stop from a version the check could not parse.
+	KVSVersion             string
+	KVSComparisonAttempted bool
+	KVSCompared            bool
 	// ComposeVersion is the compose plugin found, read when the release
 	// names a minimum.
 	ComposeVersion string

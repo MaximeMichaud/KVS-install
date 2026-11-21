@@ -1404,14 +1404,21 @@ func TestPlanKVSMinimum(t *testing.T) {
 	}
 	// KVS writes its own versions, in forms a version of the stack may
 	// not take: a pre-release label in upper case or with a leading zero
-	// is compared as its lower case label and plain number, and one that
-	// does not parse even so is shown and not held against the site.
+	// is compared as its lower case label and plain number. Other suffixes
+	// use the leading three numbers when present.
 	for kvs, below := range map[string]bool{
 		"7.1.0-RC1": false, "7.1.0-rc01": false, "7.0.1-Beta": false,
 		"6.4.0-RC1": true, "7.0.0-RC1": true, "7.0.0-rc01": true,
+		"07.0.0-RC1": true, "7.00.000-rc01": true,
+		"6.9.9.1": true, "6.9.9a": true, "06.09.009a": true,
+		"7.0.3.1": false, "7.0.3a": false, "7.0": false, "site6.9.9": false,
 		"6.4": false, "7.1": false, "7.1.0 beta": false,
 	} {
 		plan := planWith("<?php\n$config['project_version'] = '" + kvs + "';\n")
+		wantCompared := kvs != "6.4" && kvs != "7.1" && kvs != "7.0" && kvs != "site6.9.9"
+		if !plan.KVSComparisonAttempted || plan.KVSCompared != wantCompared || plan.KVSVersion != kvs {
+			t.Errorf("KVS %q: recorded %q, compared %t, want %t", kvs, plan.KVSVersion, plan.KVSCompared, wantCompared)
+		}
 		if !below {
 			if len(plan.Blockers) != 0 {
 				t.Errorf("KVS %s: %v", kvs, plan.Blockers)
@@ -1419,6 +1426,13 @@ func TestPlanKVSMinimum(t *testing.T) {
 			continue
 		}
 		blocked(t, plan, "1.1.0 supports KVS 7.0.0 and newer, this site runs KVS "+kvs+": update KVS from its admin panel first")
+	}
+	s.release("1.1.0").CacheRouting = "future"
+	s.writeManifest()
+	early := planWith("<?php $config['project_version']='7.0.3';")
+	blocked(t, early, "unsupported cache routing")
+	if early.KVSVersion != "7.0.3" || early.KVSComparisonAttempted || early.KVSCompared {
+		t.Errorf("unexpected KVS comparison after the plan stopped: %+v", early)
 	}
 }
 
