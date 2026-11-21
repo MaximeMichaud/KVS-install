@@ -65,7 +65,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # shellcheck source=/dev/null
 source <(sed -n '/^env_sync_failed() {/,/^}/p; /^remove_env_value() {/,/^}/p; /^set_env_value() {/,/^}/p' "$root/docker/setup.sh")
 # shellcheck source=/dev/null
-source <(sed -n '/^kvs_publish_export() {/,/^}/p; /^kvs_dirname() {/,/^}/p' "$root/kvs-export.sh")
+source <(sed -n '/^kvs_publish_export() {/,/^}/p; /^kvs_copy_export_permissions() {/,/^}/p; /^kvs_dirname() {/,/^}/p' "$root/kvs-export.sh")
 # shellcheck disable=SC2329  # Called by the export function on failure.
 kvs_error() { echo "$*" >&2; }
 exercise() (

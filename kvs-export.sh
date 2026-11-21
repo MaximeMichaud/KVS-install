@@ -2974,6 +2974,32 @@ kvs_archive_excludes() {
     fi
 }
 
+# Copy permissions without reading old archive data into the new export.
+kvs_copy_export_permissions() {
+    local output="$1" staged="$2" old_acl staged_acl attributes staged_attributes
+
+    if cp --attributes-only --version > /dev/null 2>&1; then
+        cp --attributes-only --preserve=mode,ownership -- "$output" "$staged"
+        return $?
+    fi
+    # Old coreutils has no --attributes-only. Restore ownership first:
+    # chown can clear the special mode bits. Keep a real access ACL when
+    # the ACL tools are installed, including its numeric users and groups.
+    [ -r "$output" ] && attributes=$(stat -c '%u:%g %a' -- "$output") || return 1
+    chown -- "${attributes% *}" "$staged" || return 1
+    command -v getfacl >/dev/null || { kvs_error "getfacl is required to check access ACLs"; return 1; }
+    old_acl=$(getfacl -csn -- "$output") && staged_acl=$(getfacl -csn -- "$staged") || return 1
+    # An empty --skip-base listing has only mode bits. A default ACL on
+    # the staging directory can give the new file additional named entries.
+    if [ -n "$old_acl$staged_acl" ]; then
+        command -v setfacl >/dev/null || { kvs_error "setfacl is required to preserve the access ACL"; return 1; }
+        getfacl -cpn -- "$output" | setfacl --set-file=- -- "$staged" || return 1
+    fi
+    chmod -- "${attributes##* }" "$staged" || return 1
+    staged_attributes=$(stat -c '%u:%g %a' -- "$staged") && [ "$staged_attributes" = "$attributes" ] || return 1
+    staged_acl=$(getfacl -csn -- "$staged") && [ "$staged_acl" = "$old_acl" ]
+}
+
 # Publish only a complete export. A private sibling stage keeps a previous
 # export intact through dump, compression and tar failures, on the same disk.
 kvs_publish_export() {
@@ -2987,10 +3013,10 @@ kvs_publish_export() {
     fi
     if [ -f "$output" ] && [ -O "$output" ]; then
         # A previous output of ours keeps its mode, which includes the access
-        # ACL; chmod --reference alone loses it. Copy attributes only, leaving
+        # ACL; mode bits alone cannot restore it. Copy attributes only, leaving
         # the completed export data intact.
-        if ! cp --attributes-only --preserve=mode,ownership -- "$output" "$staged"; then
-            kvs_error "could not preserve the permissions of $output"
+        if ! kvs_copy_export_permissions "$output" "$staged"; then
+            kvs_error "could not preserve the permissions of $output; choose another path with -o or explicitly remove the old file before retrying"
             return 1
         fi
         # Swapped for someone else's file after the check: its owner would

@@ -409,7 +409,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill pgrep sleep awk sort stat id chmod chown cp mv sync sha256sum getconf mkfifo tee head cut; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill pgrep sleep awk sort stat id chmod chown ls cp mv sync sha256sum getconf mkfifo tee head cut; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -3307,6 +3307,141 @@ test_exports_refuse_non_regular_destinations() {
     pass 'named exports refuse directories, symlinks and FIFOs without replacing them'
 }
 
+test_reexport_with_old_cp() {
+    local work="$TMP_ROOT/old-cp" site="$TMP_ROOT/old-cp-site" group expected before
+    mkdir -p "$work/bin" "$work/acl-bin"
+    make_site "$site"
+    cat > "$work/bin/cp" <<'EOF'
+#!/bin/bash
+case " $* " in
+    *' --attributes-only '*)
+        if [ "${CP_HAS_ATTRIBUTES:-no}" = yes ] && [[ " $* " == *' --version '* ]]; then exit 0; fi
+        exit 1 ;;
+esac
+exec "$REAL_CP" "$@"
+EOF
+    chmod +x "$work/bin/cp"
+    export REAL_CP
+    REAL_CP=$(command -v cp)
+    if command -v getfacl >/dev/null; then
+        ln -s "$(command -v getfacl)" "$work/acl-bin/getfacl"
+    else
+        # Base-only fixture on hosts without the optional ACL tools.
+        printf '#!/bin/sh\nexit 0\n' > "$work/acl-bin/getfacl"
+        chmod +x "$work/acl-bin/getfacl"
+    fi
+    local busybox tool
+    busybox=$(command -v busybox || true)
+    [ -x "$busybox" ] || busybox=/usr/lib/initcpio/busybox
+    for tool in stat chown chmod; do
+        if [ -x "$busybox" ]; then
+            ln -s "$busybox" "$work/bin/$tool"
+        else
+            cat > "$work/bin/$tool" <<EOF
+#!/bin/sh
+case "\$*" in *--reference*) exit 2 ;; esac
+exec "$(command -v "$tool")" "\$@"
+EOF
+            chmod +x "$work/bin/$tool"
+        fi
+    done
+    printf 'previous export\n' > "$work/export"
+    for group in $(id -G); do
+        [ "$group" = "$(id -g)" ] || { chgrp "$group" "$work/export"; break; }
+    done
+    chmod 6640 "$work/export"
+    expected=$(stat -c '%u:%g:%a' "$work/export")
+    run_export "$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" --yes --no-size --gzip --dump-only \
+        --output "$work/export" "$site" || fail "old cp could not replace a dump: $(cat "$work/stderr")"
+    [ "$(stat -c '%u:%g:%a' "$work/export")" = "$expected" ] || fail "old cp lost ownership or mode"
+    gzip -dc "$work/export" | grep -Fq -- '-- Dump completed' || fail "old cp did not publish the new data"
+
+    # A chmod that succeeds without applying the mode must not publish.
+    mkdir "$work/no-change"
+    printf '#!/bin/sh\nexit 0\n' > "$work/no-change/chmod"
+    chmod +x "$work/no-change/chmod"
+    before=$(stat -c '%i %u:%g %a' "$work/export")
+    if run_export "$work/no-change:$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+        --yes --no-size --gzip --dump-only --output "$work/export" "$site"; then
+        fail "a successful chmod without a mode change allowed publication"
+    fi
+    [ "$(stat -c '%i %u:%g %a' "$work/export")" = "$before" ] || fail "failed mode verification replaced the dump"
+
+    printf 'keep this export\n' > "$work/export"
+    if CP_HAS_ATTRIBUTES=yes run_export "$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+        --yes --no-size --gzip --dump-only --output "$work/export" "$site"; then
+        fail "a permission-copy failure on a capable cp must stop publication"
+    fi
+    [ "$(cat "$work/export")" = 'keep this export' ] || fail "permission-copy failure replaced the dump"
+
+    if command -v getfacl >/dev/null && command -v setfacl >/dev/null; then
+        setfacl -m u:65534:r--,g::--- "$work/export"
+        before=$(getfacl -cpn -- "$work/export")
+        if run_export "$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" --yes --no-size --gzip \
+            --dump-only --output "$work/export" "$site"; then
+            fail "old cp without ACL tools must not discard an extended ACL"
+        fi
+        [ "$(cat "$work/export")" = 'keep this export' ] || fail "unavailable ACL tools replaced the dump"
+        # An ls without ACL support prints the mode without the '+' marker.
+        cat > "$work/bin/ls" <<'EOF'
+#!/bin/sh
+case "$1" in
+    --version) echo 'ls (GNU coreutils) 8.4'; exit 0 ;;
+    -ld) printf '%s\n' '-rw-r----- 1 owner group 16 export'; exit 0 ;;
+esac
+exit 1
+EOF
+        chmod +x "$work/bin/ls"
+        if run_export "$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" --yes --no-size --gzip \
+            --dump-only --output "$work/export" "$site"; then
+            fail "ls without ACL support allowed replacement"
+        fi
+        grep -q 'getfacl' "$work/stderr" || fail "the refusal must identify the missing ACL reader"
+        grep -q 'another path with -o or explicitly remove the old file' "$work/stderr" ||
+            fail "the refusal must identify the missing ACL reader and recovery options"
+        [ "$(getfacl -cpn -- "$work/export")" = "$before" ] &&
+            [ "$(cat "$work/export")" = 'keep this export' ] || fail "unverified ACL or data changed"
+        if run_export "$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+            --yes --no-size --gzip --dump-only --output "$work/export" "$site"; then
+            fail "getfacl alone cannot copy an extended ACL"
+        fi
+        setfacl -b -- "$work/export"
+        printf '#!/bin/sh\necho "Operation not supported" >&2\nexit 1\n' > "$work/acl-bin/setfacl"
+        chmod +x "$work/acl-bin/setfacl"
+        run_export "$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+            --yes --no-size --gzip --dump-only --output "$work/export" "$site" ||
+            fail "a verified base ACL must not need a working setfacl"
+        rm "$work/acl-bin/setfacl"
+        setfacl -m u:65534:r--,g::--- "$work/export"
+        rm -f "$work/bin/ls"
+        ln -s "$(command -v setfacl)" "$work/acl-bin/setfacl"
+        run_export "$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+            --yes --no-size --gzip --dump-only --output "$work/export" "$site" || fail "old cp with ACL tools failed"
+        [ "$(getfacl -cpn -- "$work/export")" = "$before" ] || fail "replacement changed the extended ACL"
+        gzip -dc "$work/export" | grep -Fq -- '-- Dump completed' || fail "replacement kept the old data"
+
+        setfacl -b -- "$work/export"
+        setfacl -dm u:65534:r-- "$work"
+        printf 'previous export\n' > "$work/export"
+        if run_export "$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" --yes --no-size --gzip \
+            --dump-only --output "$work/export" "$site"; then
+            fail "old cp without ACL tools must not publish an ACL inherited by the stage"
+        fi
+        [ "$(cat "$work/export")" = 'previous export' ] || fail "failure to remove an inherited ACL replaced the dump"
+        rm "$work/acl-bin/setfacl"
+        if run_export "$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+            --yes --no-size --gzip --dump-only --output "$work/export" "$site"; then
+            fail "a base source ACL alone cannot clear an inherited ACL"
+        fi
+        ln -s "$(command -v setfacl)" "$work/acl-bin/setfacl"
+        run_export "$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
+            --yes --no-size --gzip --dump-only --output "$work/export" "$site" || fail "inherited ACL could not be cleared"
+        [ -z "$(getfacl -csn -- "$work/export")" ] || fail "an inherited ACL survived publication"
+    fi
+    unset REAL_CP
+    pass "re-export with old cp preserves permissions and publishes complete data"
+}
+
 test_export_replacements_preserve_access_acls() {
     local site="$TMP_ROOT/output-acl-site" work="$TMP_ROOT/output-acl"
     local kind
@@ -3662,6 +3797,7 @@ test_the_archive_never_takes_in_its_own_staging_directory
 test_failed_exports_preserve_the_previous_output
 test_interrupted_exports_stop_their_database_processes
 test_exports_refuse_non_regular_destinations
+test_reexport_with_old_cp
 test_export_replacements_preserve_access_acls
 test_a_fresh_export_is_created_private
 test_an_output_another_user_owns_is_not_inherited
