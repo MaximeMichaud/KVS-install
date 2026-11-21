@@ -1429,10 +1429,10 @@ phpmyadmin_config_excludes() {
 function aptinstall_phpmyadmin() (
     local install_dir="${1:-$PHPMYADMIN_INSTALL_DIR}"
     local download_page="${2:-$PHPMYADMIN_DOWNLOAD_PAGE}"
-    local work_dir page archive_url secret config_tmp=""
+    local work_dir page archive_url
     echo "phpMyAdmin Installation"
     work_dir=$(mktemp -d) || return 1
-    trap 'rm -rf -- "$work_dir"; if [[ -n "$config_tmp" ]]; then rm -f -- "$config_tmp"; fi' EXIT
+    trap 'rm -rf -- "$work_dir"' EXIT
     page=$(curl -fsSL "$download_page") || return 1
     archive_url=$(grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' <<< "$page" | head -n 1)
     if [[ -z "$archive_url" ]] || ! curl -fsSL "$archive_url" -o "$work_dir/phpmyadmin.tar.gz"; then
@@ -1459,12 +1459,7 @@ function aptinstall_phpmyadmin() (
             echo "phpMyAdmin installation failed: check the configuration at $config" >&2
             return 1
         fi
-        secret=$(openssl rand -base64 22) && [[ -n "$secret" ]] || return 1
-        config_tmp=$(mktemp "$install_dir/.config.XXXXXX") || return 1
-        sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$secret'|" \
-            "$install_dir/config.sample.inc.php" > "$config_tmp" || return 1
-        grep -Fq "cfg['blowfish_secret'] = '$secret'" "$config_tmp" || return 1
-        chmod 644 "$config_tmp" && mv -fT -- "$config_tmp" "$config" || return 1
+        write_phpmyadmin_config "$install_dir" || return 1
     fi
     if [[ "$webserver" =~ (nginx) ]]; then
         apt_get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} || return $?
@@ -1522,9 +1517,11 @@ configure_kvs_database_file() {
   local password="$3"
 
   grep -q "define('DB_LOGIN','login')" "$file" || return 0
-  sed -i "s|'DB_LOGIN','login'|'DB_LOGIN','$domain'|
-          s|'DB_PASS','pass'|'DB_PASS','$password'|
-          s|'DB_DEVICE','base'|'DB_DEVICE','$domain'|" "$file"
+  sed -i -f - "$file" <<EOS
+s|'DB_LOGIN','login'|'DB_LOGIN','$domain'|
+s|'DB_PASS','pass'|'DB_PASS','$password'|
+s|'DB_DEVICE','base'|'DB_DEVICE','$domain'|
+EOS
 }
 
 # setup_db.php holds DB_PASS in clear. The blanket chmod of the tree, and an
@@ -1581,13 +1578,13 @@ provision_kvs_database() {
 
     if ! mariadb -e "SELECT User FROM mysql.user WHERE User='$domain' AND Host='localhost'" | grep -q "$domain"; then
         echo "Creating user $domain..."
-        if ! mariadb -e "CREATE USER \`$domain\`@localhost IDENTIFIED BY '${password}';"; then
+        if ! mariadb <<<"CREATE USER \`$domain\`@localhost IDENTIFIED BY '${password}';"; then
             echo "${red}Could not create the database user${normal}" >&2
             return 1
         fi
     else
         echo "User $domain already exists, updating password..."
-        if ! mariadb -e "ALTER USER \`$domain\`@localhost IDENTIFIED BY '${password}';"; then
+        if ! mariadb <<<"ALTER USER \`$domain\`@localhost IDENTIFIED BY '${password}';"; then
             echo "${red}Could not update the database user${normal}" >&2
             return 1
         fi
@@ -1617,7 +1614,7 @@ provision_kvs_database() {
             return 1
         fi
         echo "Importing initial database structure..."
-        if ! mariadb -u "$domain" -p"$password" "$domain" <"$kvs_path"/_INSTALL/install_db.sql; then
+        if ! MYSQL_PWD="$password" mariadb -u "$domain" "$domain" <"$kvs_path"/_INSTALL/install_db.sql; then
             echo "${red}The database import failed; _INSTALL/ is kept so the install can be retried${normal}" >&2
             return 1
         fi
@@ -3281,6 +3278,22 @@ function update() {
   exec bash "$script" "${INSTALLER_ARGS[@]}"
 }
 
+# Publish the cookie key only after its owner and permissions are set.
+write_phpmyadmin_config() {
+  local dir="$1" secret tmp
+  secret=$(openssl rand -base64 22) || return $?
+  [[ -n "$secret" ]] || return 1
+  tmp=$(mktemp "$dir/.config.inc.php.XXXXXX") || return $?
+  if sed -f - "$dir/config.sample.inc.php" >"$tmp" <<<"s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$secret'|" &&
+      grep -Fq -f - "$tmp" <<<"cfg['blowfish_secret'] = '$secret'" &&
+      chown root:www-data "$tmp" && chmod 640 "$tmp" &&
+      mv -fT "$tmp" "$dir/config.inc.php"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 function updatephpMyAdmin() {
     local install_dir="${1:-$PHPMYADMIN_INSTALL_DIR}"
     local download_page="${2:-$PHPMYADMIN_DOWNLOAD_PAGE}"
@@ -3291,7 +3304,6 @@ function updatephpMyAdmin() {
     local archive
     local download_page_content
     local phpmyadmin_url
-    local random_blowfish_secret
     local install_metadata
     local install_mode
     local install_uid
@@ -3375,14 +3387,7 @@ function updatephpMyAdmin() {
       rm -rf "$work_dir"
       return "$status"
     }
-    random_blowfish_secret=$(openssl rand -base64 22)
-    status=$?
-    if ((status != 0)); then
-      rm -rf "$work_dir"
-      return "$status"
-    fi
-    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$random_blowfish_secret'|" \
-      "$new_dir/config.sample.inc.php" >"$new_dir/config.inc.php"
+    write_phpmyadmin_config "$new_dir"
     status=$?
     if ((status != 0)); then
       rm -rf "$work_dir"

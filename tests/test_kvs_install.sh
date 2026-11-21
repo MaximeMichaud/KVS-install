@@ -1008,11 +1008,16 @@ test_database_file_configuration_is_anchored() {
   printf "define('DB_HOST','localhost');\ndefine('DB_LOGIN','login');\ndefine('DB_PASS','pass');\ndefine('DB_DEVICE','base');\n" >"$file"
 
   assert_equal "" "$(read_kvs_database_password "$file")" "stock placeholders must not read as a password" || return 1
+  sed() { printf '%s\n' "$@" >>"$temp_dir/sed-args"; command sed "$@"; }
   configure_kvs_database_file "$file" example.com 'p4ss/w0rd=' || fail "configuration failed" || return 1
   assert_file_contains "$file" "define('DB_LOGIN','example.com');" "login must be set" || return 1
   assert_file_contains "$file" "define('DB_PASS','p4ss/w0rd=');" "password must be set" || return 1
   assert_file_contains "$file" "define('DB_DEVICE','example.com');" "database must be set" || return 1
   assert_equal "p4ss/w0rd=" "$(read_kvs_database_password "$file")" "configured password must be read back" || return 1
+
+  if grep -Fq 'p4ss/w0rd=' "$temp_dir/sed-args"; then
+    fail "the database password reached sed arguments"; return 1
+  fi
 
   # A configured file is left alone, even with a new password on the re-run.
   configure_kvs_database_file "$file" example.com 'another' || fail "re-run configuration failed" || return 1
@@ -1519,7 +1524,8 @@ EOF
     cp "$TEST_PMA_ARCHIVE" "$output"
   }
   export TEST_PMA_CHOWN_LOG="$temp_dir/chown.log"
-  chown() { printf '%s\n' "$*" >> "$TEST_PMA_CHOWN_LOG"; }
+  sed() { printf '%s\n' "$@" >>"$temp_dir/sed-args"; command sed "$@"; }
+  chown() { printf '%s\n' "$*" >>"$TEST_PMA_CHOWN_LOG"; printf '%s %s\n' "$1" "$(stat -c %i "$2")" >>"$temp_dir/owners"; }
   openssl() { printf 'fixed-test-secret\n'; }
 
   updatephpMyAdmin "$install_dir" "https://downloads.test/" >/dev/null 2>&1
@@ -1529,6 +1535,12 @@ EOF
   [[ ! -e "$install_dir/old-sentinel" ]] || fail "successful phpMyAdmin update retained old content" || return 1
   assert_file_contains "$install_dir/index.php" "new-version" "successful phpMyAdmin update did not install new content" || return 1
   assert_file_contains "$install_dir/config.inc.php" "fixed-test-secret" "successful phpMyAdmin update did not generate its config" || return 1
+  assert_equal 640 "$(stat -c %a "$install_dir/config.inc.php")" "the cookie key must be readable only by root and the PHP group" || return 1
+  grep -Fxq "root:www-data $(stat -c %i "$install_dir/config.inc.php")" "$temp_dir/owners" ||
+    fail "config.inc.php must have the PHP reader group and a root owner" || return 1
+  if grep -Fq 'fixed-test-secret' "$temp_dir/sed-args"; then
+    fail "the cookie key reached sed arguments"; return 1
+  fi
   actual_mode=$(stat -c '%a' "$install_dir")
   actual_uid=$(stat -c '%u' "$install_dir")
   actual_gid=$(stat -c '%g' "$install_dir")
@@ -1584,12 +1596,17 @@ EOF
     done
     return 64
   }
-  chown() { :; }
+  sed() { printf '%s\n' "$@" >>"$temp_dir/sed-args"; command sed "$@"; }
+  chown() { printf '%s %s\n' "$1" "$(stat -c %i "$2")" >>"$temp_dir/owners"; }
   openssl() { printf 'fixed-test-secret\n'; }
   webserver=""
 
   chmod 555 "$start_dir"
-  (cd "$start_dir" && aptinstall_phpmyadmin "$install_dir" "https://downloads.test/") >/dev/null 2>&1
+  (
+    cd "$start_dir" || exit 1
+    grep() { [[ "$*" != *fixed-test-secret* ]] && command grep "$@"; }
+    aptinstall_phpmyadmin "$install_dir" "https://downloads.test/"
+  ) >/dev/null 2>&1
   status=$?
   chmod 755 "$start_dir"
 
@@ -1598,6 +1615,30 @@ EOF
   output=$(cat "$TEST_PMA_OUTPUT_LOG" 2>/dev/null)
   [[ $output == /* ]] || fail "the phpMyAdmin archive must be downloaded to an absolute path, got '$output'" || return 1
   [[ ! -e $output ]] || fail "the downloaded phpMyAdmin archive was left behind" || return 1
+  assert_equal 640 "$(stat -c %a "$install_dir/config.inc.php")" "the cookie key must be readable only by root and the PHP group" || return 1
+  grep -Fxq "root:www-data $(stat -c %i "$install_dir/config.inc.php")" "$temp_dir/owners" ||
+    fail "config.inc.php must have the PHP reader group and a root owner" || return 1
+  if grep -Fq 'fixed-test-secret' "$temp_dir/sed-args"; then
+    fail "the cookie key reached sed arguments"; return 1
+  fi
+
+  # Rendering or securing a replacement must leave the private key unpublished.
+  local broken="$temp_dir/invalid-config" stage
+  mkdir -p "$broken"
+  cp "$fixture_dir/config.sample.inc.php" "$broken/"
+  for stage in ownership empty missing; do
+    if (
+      case "$stage" in
+        ownership) chown() { return 1; } ;;
+        empty) openssl() { :; } ;;
+        missing) sed() { echo '<?php'; } ;;
+      esac
+      write_phpmyadmin_config "$broken"
+    ); then fail "config published after $stage failure"; return 1; fi
+    [[ ! -e "$broken/config.inc.php" ]] || fail "unusable config was published" || return 1
+    compgen -G "$broken/.config.inc.php.*" >/dev/null && { fail "temporary key was left behind"; return 1; }
+  done
+
   assert_file_contains "$install_dir/index.php" "new-version" "phpMyAdmin was not installed" || return 1
   assert_file_contains "$install_dir/config.inc.php" "fixed-test-secret" "phpMyAdmin config was not generated" || return 1
 
@@ -1731,7 +1772,7 @@ EOF
   touch "$install_dir/config.inc.php"
   aptinstall_phpmyadmin "$install_dir" "https://downloads.test/" || return 1
   assert_file_contains "$install_dir/config.inc.php" "fixed-test-secret" "an empty config was not repaired" || return 1
-  [[ $(stat -c %a "$install_dir/config.inc.php") == 644 ]] || fail "config unreadable by PHP" || return 1
+  assert_equal 640 "$(stat -c %a "$install_dir/config.inc.php")" "the repaired config must be readable only by root and the PHP group" || return 1
   rm "$install_dir/config.inc.php"
   ln -s "$temp_dir/missing" "$install_dir/config.inc.php"
   aptinstall_phpmyadmin "$install_dir" "https://downloads.test/" >/dev/null 2>&1 &&
@@ -1884,13 +1925,26 @@ test_failed_db_import_keeps_install_files_and_retries() {
 
   state="$temp_dir/state"
   mkdir -p "$state"
-  # A programmable mariadb: the import connects as the site user (-u ...), every
-  # other call carries -e. State files decide what the database looks like:
+  # A programmable mariadb: the import connects as the site user (-u ...), account DDL
+  # comes on standard input. State files decide what the database looks like:
   # table_count, count_fail, marker (the INITIAL_VERSION row of kt2_options),
   # import_fail and import_cut (the import stops before the marker).
   mariadb() {
-    local args="$*"
+    local args="$*" sql
+    [[ "$args" != *fixedpass* ]] || return 98
+    if [[ $# == 0 ]]; then
+      IFS= read -r sql || return 1
+      if [[ -e "$state/user_exists" ]]; then
+        [[ "$sql" == "ALTER USER \`$domain\`@localhost IDENTIFIED BY 'fixedpass';" ]] || return 1
+        touch "$state/user_altered"
+      else
+        [[ "$sql" == "CREATE USER \`$domain\`@localhost IDENTIFIED BY 'fixedpass';" ]] || return 1
+        touch "$state/user_exists"
+      fi
+      return $?
+    fi
     if [[ "$args" == "-u "* ]]; then
+      [[ ${MYSQL_PWD:-} == fixedpass && "$args" == "-u $domain $domain" ]] || return 1
       : >"$state/import_attempted"
       [ -f "$state/import_fail" ] && return 1
       if [ -f "$state/import_cut" ]; then
@@ -1937,6 +1991,8 @@ test_failed_db_import_keeps_install_files_and_retries() {
     fail "_INSTALL/ must be kept after a failed import" || return 1
   [[ -f "$state/import_attempted" ]] || fail "the import must have been attempted" || return 1
 
+  [[ -e "$state/user_exists" ]] || fail "the fresh install did not create the user" || return 1
+
   # Run 2: the database now exists but is still empty; the import succeeds.
   rm -f "$state/import_fail" "$state/import_attempted"
   status=0
@@ -1946,6 +2002,8 @@ test_failed_db_import_keeps_install_files_and_retries() {
     fail "an existing but empty database must be imported on re-run" || return 1
   [[ ! -d "$path/_INSTALL" ]] ||
     fail "_INSTALL/ must be removed after a successful import" || return 1
+
+  [[ -e "$state/user_altered" ]] || fail "the re-run did not update the user" || return 1
 
   # Run 3: an installed site re-run: complete database, _INSTALL/ already gone.
   rm -f "$state/import_attempted"
