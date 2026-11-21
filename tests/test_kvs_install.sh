@@ -1537,12 +1537,12 @@ test_phpmyadmin_install_downloads_outside_the_current_directory() {
   local install_dir
   local fixture_dir
   local fixture_archive
-  local output
+  local output page_status=0
   local status
   temp_dir=$(mktemp -d)
   trap 'chmod -R u+w "$temp_dir"; rm -rf "$temp_dir"' RETURN
   start_dir="$temp_dir/start"
-  install_dir="$temp_dir/phpmyadmin"
+  install_dir="$temp_dir/phpmyadmin"$'\n'
   fixture_dir="$temp_dir/fixture/phpMyAdmin-test"
   fixture_archive="$temp_dir/phpmyadmin-fixture.tar.gz"
   mkdir -p "$start_dir" "$fixture_dir"
@@ -1560,7 +1560,7 @@ EOF
 
     if [[ $* == *"downloads.test"* ]]; then
       printf '<a href="https://files.phpmyadmin.net/phpMyAdmin/test/phpMyAdmin-test-all-languages.tar.gz">download</a>\n'
-      return 0
+      return "$page_status"
     fi
     for argument in "$@"; do
       if [[ $previous == "-o" ]]; then
@@ -1588,6 +1588,154 @@ EOF
   [[ ! -e $output ]] || fail "the downloaded phpMyAdmin archive was left behind" || return 1
   assert_file_contains "$install_dir/index.php" "new-version" "phpMyAdmin was not installed" || return 1
   assert_file_contains "$install_dir/config.inc.php" "fixed-test-secret" "phpMyAdmin config was not generated" || return 1
+
+  # Reinstall the application files and keep the operator's config, even
+  # when the install directory and the config are links.
+  local linked_dir="$temp_dir/link to phpmyadmin" config="$temp_dir/local config" stage
+  ln -s "$install_dir" "$linked_dir"
+  mv "$install_dir/config.inc.php" "$config"
+  echo 'custom setting' >> "$config"
+  chmod 640 "$config"
+  ln -s "$config" "$install_dir/config.inc.php"
+  cp "$config" "$temp_dir/expected"
+  echo 'next version' > "$fixture_dir/index.php"
+  echo 'packaged config' > "$fixture_dir/config.inc.php"
+  tar czf "$fixture_archive" -C "$temp_dir/fixture" phpMyAdmin-test
+  webserver=nginx PHP=8.3
+  apt_get() { [[ $* == update ]]; }
+  apt_install() { printf '%s\n' "$@" > "$temp_dir/packages"; }
+  service() { [[ $* == 'nginx restart' ]] && touch "$temp_dir/restarted"; }
+  aptinstall_phpmyadmin "$linked_dir" "https://downloads.test/" || return 1
+  cmp "$temp_dir/expected" "$config" && [[ -L "$install_dir/config.inc.php" ]] &&
+    [[ $(stat -c %a "$config") == 640 ]] || fail "reinstall replaced the local config" || return 1
+  assert_file_contains "$install_dir/index.php" "next version" "application files were not refreshed" || return 1
+  grep -qxF php8.3-fpm "$temp_dir/packages" && [[ -f "$temp_dir/restarted" ]] ||
+    fail "native PHP packages or nginx restart missing" || return 1
+  # A linked config can also be a file shipped by the archive. Protect its
+  # exact path while refreshing its siblings, including a nested literal glob.
+  local target sibling link_value
+  mkdir "$install_dir/child"
+  ln -s "$install_dir/child" "$temp_dir/indirect"
+  for target in config.sample.inc.php 'settings/local[*]?.php'; do
+    sibling=${target%.*}.other.php
+    mkdir -p "$(dirname "$install_dir/$target")" "$(dirname "$fixture_dir/$target")"
+    cp "$temp_dir/expected" "$install_dir/$target"
+    chmod 640 "$install_dir/$target"
+    link_value="./$target"
+    if [[ "$target" == settings/* ]]; then
+      link_value="$temp_dir/indirect/../$target"
+    fi
+    ln -sfn "$link_value" "$install_dir/config.inc.php"
+    echo 'new sibling' > "$fixture_dir/$sibling"
+    [[ -f "$fixture_dir/$target" ]] || echo 'packaged settings' > "$fixture_dir/$target"
+    tar czf "$fixture_archive" -C "$temp_dir/fixture" phpMyAdmin-test
+    aptinstall_phpmyadmin "$linked_dir" "https://downloads.test/" || return 1
+    cmp "$temp_dir/expected" "$install_dir/config.inc.php" &&
+      [[ $(readlink "$install_dir/config.inc.php") == "$link_value" && $(stat -c %a "$install_dir/$target") == 640 ]] ||
+      fail "archive replaced linked settings at $target" || return 1
+    assert_file_contains "$install_dir/$sibling" "new sibling" "archive skipped a sibling of $target" || return 1
+  done
+  # Follow every link, including a directory link and a return from outside
+  # the tree. The last byte of each local name is significant.
+  local hop=$'settings/hop[*]?\n' leaf=$'local config\n'
+  mkdir -p "$fixture_dir/settings" "$install_dir/actual" "$fixture_dir/actual"
+  ln -s actual "$install_dir/alias"
+  ln -s "$install_dir/alias/$leaf" "$temp_dir/outside hop"
+  ln -s "$temp_dir/outside hop" "$install_dir/$hop"
+  ln -sfn "$hop" "$install_dir/config.inc.php"
+  cp "$temp_dir/expected" "$install_dir/actual/$leaf"
+  chmod 640 "$install_dir/actual/$leaf"
+  echo packaged > "$fixture_dir/$hop"
+  echo packaged > "$fixture_dir/alias"
+  echo packaged > "$fixture_dir/actual/$leaf"
+  echo neighbour > "$fixture_dir/actual/local config"
+  tar czf "$fixture_archive" -C "$temp_dir/fixture" phpMyAdmin-test
+  aptinstall_phpmyadmin "$linked_dir" "https://downloads.test/" || return 1
+  [[ -L "$install_dir/$hop" && -L "$install_dir/alias" && $(stat -c %a "$install_dir/actual/$leaf") == 640 ]] &&
+    cmp "$temp_dir/expected" "$install_dir/config.inc.php" || fail "local configuration chain changed" || return 1
+  assert_file_contains "$install_dir/actual/local config" neighbour "skipped a distinct archive member" || return 1
+
+  # A linked directory can hide packaged neighbours even when the tar
+  # contains no explicit directory entries. Refuse before extracting index.
+  rm "$fixture_dir/alias"
+  mkdir -p "$fixture_dir/alias/deep" "$install_dir/actual/deep"
+  echo old > "$install_dir/actual/deep/application.php"
+  echo new > "$fixture_dir/alias/deep/application.php"
+  echo untouched > "$install_dir/index.php"
+  tar czf "$fixture_archive" -C "$temp_dir/fixture" phpMyAdmin-test/index.php phpMyAdmin-test/alias/deep/application.php
+  if aptinstall_phpmyadmin "$linked_dir" "https://downloads.test/" > "$temp_dir/error" 2>&1; then
+    fail "silently skipped a shipped file under the configuration directory link"
+    return 1
+  fi
+  grep -Fq "$install_dir/alias" "$temp_dir/error" && grep -Fq 'real directory' "$temp_dir/error" ||
+    fail "missing directory link or recovery instructions" || return 1
+  [[ $(<"$install_dir/index.php") == untouched && -L "$install_dir/alias" &&
+     $(<"$install_dir/actual/deep/application.php") == old && $(stat -c %a "$install_dir/actual/$leaf") == 640 ]] &&
+    cmp "$temp_dir/expected" "$install_dir/config.inc.php" || fail "conflict reported after extraction" || return 1
+  rm -r "$fixture_dir/alias"
+  tar czf "$fixture_archive" -C "$temp_dir/fixture" phpMyAdmin-test
+
+  # A broken config link must not silently become a stock configuration.
+  rm "$install_dir/config.sample.inc.php"
+  ln -sfn config.sample.inc.php "$install_dir/config.inc.php"
+  if aptinstall_phpmyadmin "$linked_dir" "https://downloads.test/"; then
+    fail "archive filled a broken config link"
+    return 1
+  fi
+  touch "$install_dir/config.sample.inc.php"
+  echo "before invalid reinstall" > "$install_dir/index.php"
+  if aptinstall_phpmyadmin "$linked_dir" "https://downloads.test/"; then
+    fail "archive filled an empty config link"
+    return 1
+  fi
+  assert_file_contains "$install_dir/index.php" "before invalid reinstall" "invalid link checked after extraction" || return 1
+  rm "$fixture_dir/config.inc.php"
+  tar czf "$fixture_archive" -C "$temp_dir/fixture" phpMyAdmin-test
+  for stage in chown chmod openssl empty_secret sed invalid_sample publish; do
+    rm -f "$temp_dir/restarted"
+    (
+      case $stage in
+        chown) chown() { return 17; } ;;
+        chmod) chmod() { [[ $1 != 700 ]] && command chmod "$@"; } ;;
+        openssl) openssl() { echo partial; return 17; } ;;
+        empty_secret) openssl() { :; } ;;
+        sed) sed() { command sed "$@"; return 17; } ;;
+        invalid_sample) sed() { echo '<?php'; } ;;
+        publish) mv() { return 17; } ;;
+      esac
+      aptinstall_phpmyadmin "$temp_dir/failure-$stage" "https://downloads.test/"
+    ) > /dev/null 2>&1 && { fail "a failed $stage passed the installation"; return 1; }
+    [[ ! -e "$temp_dir/failure-$stage/config.inc.php" && ! -e "$temp_dir/restarted" ]] ||
+      fail "a failed $stage published a config or restarted nginx" || return 1
+    if compgen -G "$temp_dir/failure-$stage/.config.*" >/dev/null; then
+      fail "a failed $stage left the staged configuration behind"
+      return 1
+    fi
+  done
+
+  # A previous unchecked render could have left an empty file. Repair a
+  # regular file and report a broken link without replacing it.
+  rm "$install_dir/config.inc.php"
+  touch "$install_dir/config.inc.php"
+  aptinstall_phpmyadmin "$install_dir" "https://downloads.test/" || return 1
+  assert_file_contains "$install_dir/config.inc.php" "fixed-test-secret" "an empty config was not repaired" || return 1
+  [[ $(stat -c %a "$install_dir/config.inc.php") == 644 ]] || fail "config unreadable by PHP" || return 1
+  rm "$install_dir/config.inc.php"
+  ln -s "$temp_dir/missing" "$install_dir/config.inc.php"
+  aptinstall_phpmyadmin "$install_dir" "https://downloads.test/" >/dev/null 2>&1 &&
+    { fail "broken config link was accepted"; return 1; }
+  [[ -L "$install_dir/config.inc.php" && ! -e "$temp_dir/missing" ]] ||
+    fail "replaced a broken config link" || return 1
+
+  # Even a response that contains a release link is unusable when curl
+  # reports an HTTP or transfer error for the page.
+  page_status=18
+  aptinstall_phpmyadmin "$temp_dir/broken-page" "https://downloads.test/" >/dev/null 2>&1 &&
+    { fail "a failed page transfer was accepted"; return 1; }
+  [[ ! -e "$temp_dir/broken-page/config.inc.php" ]] || fail "a broken page published a config" || return 1
+  curl() { :; }
+  aptinstall_phpmyadmin "$temp_dir/empty-page" "https://downloads.test/" >/dev/null 2>&1 &&
+    { fail "an empty download page was accepted"; return 1; }
 
   # A failed download fails the step instead of leaving phpMyAdmin missing.
   curl() {
@@ -2218,7 +2366,9 @@ STUB
     curl() { printf '192.0.2.1\n'; }
     for case in letsencrypt:selfsigned:yes zerossl:selfsigned:yes selfsigned:selfsigned:no letsencrypt:public:no; do
       IFS=: read -r SSL_PROVIDER CERTIFICATE_MODE expected <<<"$case"
-      out=$(URL=example.com AUTOPACKAGEUPDATE=NO setupdone 2>&1)
+      out=$(URL=www.example.com DOMAIN=example.com AUTOPACKAGEUPDATE=NO setupdone 2>&1)
+      grep -qxF 'phpMyAdmin: https://www.example.com/phpmyadmin/' <<< "$out" ||
+        { fail "the summary must use the HTTPS site vhost and directory URL"; exit 1; }
       if [[ "$expected" == yes ]]; then
         grep -q "The $SSL_PROVIDER certificate could not be issued or installed" <<<"$out" &&
           grep -q "skip the TLS check until the real one is in place" <<<"$out" ||

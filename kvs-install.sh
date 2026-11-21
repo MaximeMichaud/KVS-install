@@ -1363,41 +1363,100 @@ INI
   echo "PHP settings written to $file; local values go in a later file such as $conf_dir/99-local.ini"
 }
 
-function aptinstall_phpmyadmin() {
-  local install_dir="${1:-$PHPMYADMIN_INSTALL_DIR}"
-  local download_page="${2:-$PHPMYADMIN_DOWNLOAD_PAGE}"
-  local work_dir
-  local status
-  echo "phpMyAdmin Installation"
-    # The archive goes to a private work directory, never to the current
-    # directory: that is wherever the installer was started from, which root
-    # may not be able to write to (an NFS home with root_squash, a read-only
-    # mount), and a failed download there left phpMyAdmin silently missing.
-    work_dir=$(mktemp -d) || return $?
-    PHPMYADMIN_URL=$(curl -s "$download_page" | grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' | head -n 1)
-    if [[ -z "$PHPMYADMIN_URL" ]] || ! curl -fsSL "${PHPMYADMIN_URL}" -o "$work_dir/phpmyadmin.tar.gz"; then
-      echo "phpMyAdmin installation failed: cannot download the archive" >&2
-      rm -rf "$work_dir"
-      return 1
-    fi
-    mkdir -p "$install_dir" &&
-      tar xzf "$work_dir/phpmyadmin.tar.gz" --strip-components=1 -C "$install_dir"
-    status=$?
-    rm -rf "$work_dir"
-    if ((status != 0)); then
-      echo "phpMyAdmin installation failed: cannot unpack the archive into $install_dir" >&2
-      return "$status"
-    fi
-    mkdir -p "$install_dir/tmp" || exit
-    chown www-data:www-data "$install_dir/tmp"
-    chmod 700 "$install_dir/tmp"
-    randomBlowfishSecret=$(openssl rand -base64 22)
-    sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$randomBlowfishSecret'|" "$install_dir/config.sample.inc.php" >"$install_dir/config.inc.php"
-    if [[ "$webserver" =~ (nginx) ]]; then
-      apt_get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} || return $?
-      service nginx restart
-    fi
+# Walk the config path as the kernel does. Resolving only the final file
+# would allow tar to replace an intermediate file or directory symlink.
+phpmyadmin_config_excludes() {
+    local -n patterns=$2
+    local work_dir=$3
+    local root directory remaining=config.inc.php part path relative link hops=0
+    IFS= read -r -d '' root < <(realpath -ze -- "$1") || return 1
+    root=${root%/}
+    directory=$root
+    while [[ -n "$remaining" ]]; do
+        part=${remaining%%/*}
+        if [[ "$remaining" == */* ]]; then remaining=${remaining#*/}; else remaining=""; fi
+        case "$part" in
+            ''|.) continue ;;
+            ..) directory=${directory%/*}; continue ;;
+        esac
+        path="$directory/$part"
+        if [[ "$path" == "$root"/* && ( -L "$path" || -z "$remaining" ) ]]; then
+            relative=${path#"$root"/}
+            # Escape literal names in the anchored tar exclusion pattern.
+            relative=${relative//\\/\\\\}
+            relative=${relative//\*/\\*}
+            relative=${relative//\?/\\?}
+            relative=${relative//\[/\\[}
+            if [[ -L "$path" && -d "$path" ]]; then
+                # Let tar match the same literal path it will exclude during
+                # extraction. A directory entry alone hides no shipped files.
+                if [[ ! -f "$work_dir/members" ]]; then
+                    tar tzf "$work_dir/phpmyadmin.tar.gz" > "$work_dir/members" || return 1
+                fi
+                tar tzf "$work_dir/phpmyadmin.tar.gz" --anchored --no-wildcards-match-slash \
+                    --exclude="*/$relative/?*" > "$work_dir/other-members" || return 1
+                if ! cmp -s "$work_dir/members" "$work_dir/other-members"; then
+                    printf 'Archive entries would be skipped under the configuration directory link %s. Replace it with a real directory preserving your settings, then retry.\n' "$path" >&2
+                    return 1
+                fi
+            fi
+            patterns+=("--exclude=*/$relative")
+        fi
+        if [[ -L "$path" ]]; then
+            ((++hops <= 40)) && IFS= read -r -d '' link < <(readlink -z -- "$path") || return 1
+            [[ "$link" != /* ]] || directory=""
+            remaining="$link${remaining:+/$remaining}"
+        else
+            directory=$path
+        fi
+    done
 }
+
+function aptinstall_phpmyadmin() (
+    local install_dir="${1:-$PHPMYADMIN_INSTALL_DIR}"
+    local download_page="${2:-$PHPMYADMIN_DOWNLOAD_PAGE}"
+    local work_dir page archive_url secret config_tmp=""
+    echo "phpMyAdmin Installation"
+    work_dir=$(mktemp -d) || return 1
+    trap 'rm -rf -- "$work_dir"; if [[ -n "$config_tmp" ]]; then rm -f -- "$config_tmp"; fi' EXIT
+    page=$(curl -fsSL "$download_page") || return 1
+    archive_url=$(grep -oP 'https://files.phpmyadmin.net/phpMyAdmin/[^"]+-all-languages.tar.gz' <<< "$page" | head -n 1)
+    if [[ -z "$archive_url" ]] || ! curl -fsSL "$archive_url" -o "$work_dir/phpmyadmin.tar.gz"; then
+        echo "phpMyAdmin installation failed: cannot download the archive" >&2
+        return 1
+    fi
+    mkdir -p "$install_dir" || return 1
+    local config="$install_dir/config.inc.php"
+    local -a excludes=('--exclude=*/config.inc.php')
+    if [[ -L "$config" ]]; then
+        if [[ ! -f "$config" || ! -s "$config" ]]; then
+            echo "phpMyAdmin installation failed: check the configuration at $config" >&2
+            return 1
+        fi
+        phpmyadmin_config_excludes "$install_dir" excludes "$work_dir" || return 1
+    fi
+    tar xzf "$work_dir/phpmyadmin.tar.gz" --strip-components=1 --anchored --no-wildcards-match-slash \
+        "${excludes[@]}" -C "$install_dir" || return $?
+    mkdir -p "$install_dir/tmp" && chown www-data:www-data "$install_dir/tmp" &&
+        chmod 700 "$install_dir/tmp" || return 1
+
+    if [[ ! -f "$config" || ! -s "$config" ]]; then
+        if [[ -L "$config" || ( -e "$config" && ! -f "$config" ) ]]; then
+            echo "phpMyAdmin installation failed: check the configuration at $config" >&2
+            return 1
+        fi
+        secret=$(openssl rand -base64 22) && [[ -n "$secret" ]] || return 1
+        config_tmp=$(mktemp "$install_dir/.config.XXXXXX") || return 1
+        sed -e "s|cfg\['blowfish_secret'\] = ''|cfg['blowfish_secret'] = '$secret'|" \
+            "$install_dir/config.sample.inc.php" > "$config_tmp" || return 1
+        grep -Fq "cfg['blowfish_secret'] = '$secret'" "$config_tmp" || return 1
+        chmod 644 "$config_tmp" && mv -fT -- "$config_tmp" "$config" || return 1
+    fi
+    if [[ "$webserver" =~ (nginx) ]]; then
+        apt_get update && apt_install php"$PHP"{,-bcmath,-mbstring,-common,-xml,-curl,-gd,-zip,-mysql,-fpm} || return $?
+        service nginx restart
+    fi
+)
 
 # Use the same member check before full extraction and targeted reads.
 kvs_rewrite_member() {
@@ -2328,7 +2387,7 @@ function setupdone() {
     echo "${red}The ${SSL_PROVIDER} certificate could not be issued or installed: the site uses a self-signed one for now,${normal}"
     echo "${red}and the KVS storage servers skip the TLS check until the real one is in place (see the warning of the acme.sh step in /root/kvs-install.log).${normal}"
   fi
-  echo "${cyan}phpMyAdmin: ${green}http://$IPV4/phpmyadmin"
+  echo "${cyan}phpMyAdmin: ${green}https://$URL/phpmyadmin/"
   echo "${cyan}Database: ${green}$DOMAIN"
   echo "${cyan}User: ${green}$DOMAIN"
   echo "${cyan}Password: ${green}$databasepassword"
