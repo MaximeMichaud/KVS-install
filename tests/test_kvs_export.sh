@@ -340,7 +340,7 @@ EOF
     # STUB_DU_SLEEP makes every call slow, for the time budget test.
     cat > "$STUB_BIN/du" <<'EOF'
 #!/bin/bash
-# One write per line: several of these run at once on the same log.
+case "$*" in *--files0-from=/dev/null*) exit 0 ;; esac
 printf 'du argv:%s\n' "$(printf ' [%s]' "$@")" >> "${STUB_LOG:-/dev/null}"
 if [ -n "${STUB_DU_SLEEP:-}" ]; then
     # Die on TERM at once, as the real du does, without leaving a sleep
@@ -349,7 +349,15 @@ if [ -n "${STUB_DU_SLEEP:-}" ]; then
     trap 'kill $! 2> /dev/null; exit 143' TERM
     wait $!
 fi
-printf '%s\t%s\n' "${STUB_DU_KB:-1024}" "${*: -1}"
+case ${*: -1} in
+    --files0-from=*)
+        list=${!#}
+        while IFS= read -r -d '' path; do
+            printf 'du entry: %s\n' "$path" >> "${STUB_LOG:-/dev/null}"
+            printf '%s\t%s\0' "${STUB_DU_KB:-1024}" "$path"
+        done < "${list#*=}" ;;
+    *) printf '%s\t%s\n' "${STUB_DU_KB:-1024}" "${*: -1}" ;;
+esac
 printf 'du done: %s\n' "${*: -1}" >> "${STUB_LOG:-/dev/null}"
 EOF
     # findmnt answers nfs for the path named in STUB_NFS_PATH, ext4 otherwise.
@@ -532,17 +540,17 @@ test_detect_reports_the_installation_as_key_value_lines() {
     [ -n "$(detect_value "$out" hostname)" ] || fail "the hostname must be reported"
     # Four entries three levels down (the three config files and the video),
     # 1 MB each from the stub.
-    assert_key "$out" site_size_mb 4
+    assert_key "$out" site_total_mb 4
+    assert_key "$out" site_size_mb 0
     assert_key "$out" site_size_status exact
     assert_key "$out" site_size_entries 4
     assert_key "$out" site_size_entries_total 4
     [[ "$(detect_value "$out" site_fs_used_mb)" =~ ^[0-9]+$ ]] || fail "the usage of the filesystem holding the site must be reported"
     [[ "$(detect_value "$out" site_size_seconds)" =~ ^[0-9]+$ ]] || fail "the measurement time must be reported"
-    grep -q '^du argv: \[-sLk\] \[--\] ' "$STUB_LOG" || fail "each entry must be measured through its symbolic links (du -sLk -- entry)"
-    [ "$(grep -c '^du argv:' "$STUB_LOG")" -eq 4 ] || fail "one du per entry three levels down, got $(grep -c '^du argv:' "$STUB_LOG")"
-    grep -q "^du argv: .*/admin/include/setup_db.php\]" "$STUB_LOG" || fail "the entries are the files three levels down"
+    grep -q '^du argv: \[-sLk\] \[-0\] \[--files0-from=' "$STUB_LOG" || fail "du must follow links and share its inode table"
+    grep -q "^du entry: .*/admin/include/setup_db.php$" "$STUB_LOG" || fail "the list must include files three levels down"
     grep -q "Measuring the site size" "$err" || fail "the size measurement must be announced on stderr"
-    grep -q "^Site size: 4 MB (4 entries, " "$err" || fail "the measured size must be reported with the time it took: $(cat "$err")"
+    grep -q "^Site size: 0 MB (4 entries, " "$err" || fail "the measured size must be reported with the time it took: $(cat "$err")"
     grep -q "The filesystem holding the site uses" "$err" || fail "the filesystem usage must be shown before the walk: $(cat "$err")"
     pass "detect reports the installation as key=value lines"
 }
@@ -622,6 +630,218 @@ EOF
     pass "detect reports the encoding and the web server configuration"
 }
 
+test_flat_directories_are_measured_in_batches() {
+    local site="$TMP_ROOT/flat site" out="$TMP_ROOT/flat.out" err="$TMP_ROOT/flat.err"
+    local bin="$TMP_ROOT/real-du" calls i jobs
+    make_site "$site"
+    mkdir -p "$site/tmp/inner" "$bin"
+    for ((i = 0; i < 260; i++)); do
+        : > "$site/tmp/file $i"
+        : > "$site/tmp/inner/file $i"
+    done
+    (
+        source /dev/stdin < <(sed '/^trap kvs_cleanup EXIT/,$d' "$EXPORT_SCRIPT")
+        [ "$(KVS_EXPORT_SIZE_JOBS=08 kvs_measure_jobs)" = 8 ]
+    ) || fail "a zero-padded job count must be decimal"
+    for jobs in 1 08; do
+        KVS_EXPORT_SIZE_JOBS=$jobs run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
+            fail "flat site detection failed: $(cat "$err")"
+        assert_key "$out" site_size_entries 524
+        assert_key "$out" site_total_mb 524
+        calls=$(grep -c '^du argv:' "$STUB_LOG")
+        [ "$calls" = 1 ] || fail "measuring 524 entries took $calls du walks"
+    done
+    # Aliases span shallow names and deep directory operands. Only the
+    # directory entries multiply, including when du cannot read a list.
+    mkdir -p "$site/backup/dir/a" "$site/backup/dir/b"
+    head -c 4194304 /dev/zero > "$site/backup/original"
+    ln "$site/backup/original" "$site/backup/dir/a/hard"
+    ln "$site/backup/original" "$site/backup/dir/b/hard"
+    ln -s original "$site/backup/soft"
+    cat > "$bin/du" <<'EOF'
+#!/bin/sh
+case "$*" in *--files0-from=*) [ "$OLD_DU" = no ] || exit 1 ;; esac
+exec "$REAL_DU" "$@"
+EOF
+    chmod +x "$bin/du"
+    for jobs in yes no; do
+        OLD_DU=$jobs REAL_DU="$MIN_BIN/du" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$site" ||
+            fail "detect with real du failed"
+        assert_key "$out" site_size_status exact
+        assert_key "$out" site_size_entries 528
+        assert_key "$out" site_size_entries_total 528
+        assert_key "$out" site_size_mb 4
+        if [ "$jobs" = no ]; then
+            [ "$(entry_value "$out" backup)" = "4|extra|copied" ] || fail "backup must count the shared inode once"
+        fi
+    done
+    pass "flat sites use one du walk and count names independently of blocks"
+}
+
+test_the_size_matches_the_selected_transport() (
+    local site="$TMP_ROOT/transport-site" bin="$TMP_ROOT/transport-tools" out="$TMP_ROOT/transport.out"
+    local err="$TMP_ROOT/transport.err" dest="$TMP_ROOT/transport-dest" tool fixture_free_mb=64 bytes blocks dirs i
+    mkdir -p "$bin" "$dest"
+    make_site "$site"
+    mkdir -p "$site/tmp" "$site/contents/videos/nested/skip"
+    head -c 4194304 /dev/zero > "$site/tmp/excluded"
+    ln "$site/tmp/excluded" "$site/contents/videos/kept"
+    ln "$site/tmp/excluded" "$site/contents/videos/nested/also-kept"
+    head -c 4194304 /dev/zero > "$site/contents/videos/nested/skip/private"
+    head -c 4194304 /dev/zero > "$TMP_ROOT/link-target"
+    ln -s "$TMP_ROOT/link-target" "$site/first"
+    ln -s "$TMP_ROOT/link-target" "$site/contents/videos/nested/second"
+    ln -s first "$site/relative"
+
+    mkdir -p "$site/contents/.rsync-partial" "$site/contents/dirs/"{1..260} "$site/contents/tiny"
+    head -c 4194304 /dev/zero > "$site/contents/.rsync-partial/interrupted"
+    for ((i = 0; i < 4096; i++)); do printf x > "$site/contents/tiny/$i"; done
+
+    # Use the same selected names for the report and the actual receiver.
+    # All comparisons are independent of which name is visited first.
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/docker/lib/import.sh"
+    eval "$(sed -n '/^import_remote_free_space_check() {/,/^}/p' "$REPO_ROOT/docker/setup.sh")"
+    # shellcheck disable=SC2034  # Read by the extracted preflight.
+    RED="" NC=""
+    # shellcheck disable=SC2329  # Called by the extracted import preflight.
+    df() { printf 'Filesystem Blocks Used Available Use%% Mounted\nfixture %d 0 %d 0%% /\n' "$fixture_free_mb" "$fixture_free_mb"; }
+    for tool in tar rsync; do
+        if [ "$tool" = rsync ]; then
+            local real_rsync
+            real_rsync=$(command -v rsync) || continue
+            # The old source can send files but cannot set receiver ownership.
+            cat > "$bin/rsync" <<'EOF'
+#!/bin/sh
+for arg do
+    case "$arg" in --chown=*) exit 1 ;; esac
+done
+exec "$REAL_RSYNC" "$@"
+EOF
+            chmod +x "$bin/rsync"
+            export REAL_RSYNC="$real_rsync"
+            # rsync's remote shell gets the host followed by the sender command.
+            cat > "$TMP_ROOT/local-rsh" <<'EOF'
+#!/bin/sh
+shift
+PATH="$SOURCE_BIN:$PATH" exec "$@"
+EOF
+            chmod +x "$TMP_ROOT/local-rsh"
+            # shellcheck disable=SC2329  # Called by import_remote_files.
+            import_ssh_rsh() { echo local-rsh; }
+            SOURCE_BIN="$bin" PATH="$TMP_ROOT:$PATH" IMPORT_SSH_TARGET=source.example IMPORT_TRANSFER_RETRIES=0 \
+                import_remote_files "$site" "$dest" yes '/tmp/*' '/contents/videos/nested/skip' >/dev/null
+            [ ! -e "$dest/contents/.rsync-partial" ] || fail "rsync copied its partial directory"
+        else
+            tar --version 2>/dev/null | grep -q 'GNU tar' || continue
+            # Exercise the importer's tar command, including its wildcard flags.
+            # shellcheck disable=SC2329  # Called by import_remote_files.
+            import_ssh() { sh -s; }
+            # shellcheck disable=SC2034  # Read by the sourced import library.
+            IMPORT_REMOTE_PREFIX=(env)
+            IMPORT_SSH_TARGET=source.example import_remote_files "$site" "$dest" no '/tmp/*' '/contents/videos/nested/skip' >/dev/null
+        fi
+        run_export "$bin:$MIN_BIN" "$out" "$err" --exclude contents/videos/nested/skip detect "$site" || fail "$tool detection"
+        read -r bytes blocks <<< "$(find "$dest" -type f -exec stat -c '%d:%i %s' {} + |
+            awk '!seen[$1]++ { n += $2; b += int(($2 + 4095) / 4096) } END { printf "%.0f %.0f", n, b }')"
+        dirs=$(find "$dest" -type d -printf . | wc -c)
+        assert_key "$out" site_size_status exact
+        assert_key "$out" site_size_mb "$((bytes / 1048576))"
+        assert_key "$out" site_required_mb "$(((blocks + dirs + 255) / 256))"
+        fixture_free_mb=$((bytes / 1048576))
+        fixture_free_mb=$((fixture_free_mb + fixture_free_mb / 10))
+        import_remote_free_space_check "$out" "$dest" >/dev/null && fail "$tool rounded the preflight down"
+        fixture_free_mb=6
+        import_remote_free_space_check "$out" "$dest" >/dev/null && fail "$tool accepted too little space"
+        fixture_free_mb=64
+        import_remote_free_space_check "$out" "$dest" >/dev/null || fail "$tool rejected sufficient space"
+        rm -rf "$dest"
+        mkdir "$dest"
+    done
+
+    rm -rf "$site/contents/tiny" "$site/contents/dirs" "$site/contents/.rsync-partial"
+
+    # The old du supplies only a source total. A complete filtered listing
+    # still permits an exact decision for an excluded-only file.
+    cat > "$bin/du" <<'EOF'
+#!/bin/sh
+case "$*" in *--files0-from=*) exit 1 ;; esac
+exec "$REAL_DU" "$@"
+EOF
+    chmod +x "$bin/du"
+    REAL_DU="$MIN_BIN/du" run_export "$bin:$MIN_BIN" "$out" "$err" --exclude contents --exclude first --exclude relative detect "$site"
+    assert_key "$out" site_size_status exact
+    assert_key "$out" site_size_mb 0
+    fixture_free_mb=2
+    import_remote_free_space_check "$out" "$dest" >/dev/null || fail "excluded bytes blocked the old-du import"
+    # A host with no filtered listing facility retains the successful
+    # root bound. Its allocation may be shared or excluded at transfer.
+    printf '#!/bin/sh\nexit 1\n' > "$bin/tar"
+    chmod +x "$bin/tar"
+    rm -f "$bin/rsync"
+    REAL_DU="$MIN_BIN/du" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$site"
+    assert_key "$out" site_size_status upper_bound
+    [ "$(detect_value "$out" site_size_mb)" -ge 28 ] || fail "an unavailable listing lost the root bound"
+    rm -f "$bin/tar"
+    rm -f "$bin/du"
+
+    # Force just the root pass. A followed single-link file is charged for
+    # every name; excluded data may inflate the upper bound.
+    cat > "$bin/find" <<'EOF'
+#!/bin/sh
+case " $* " in *' -mindepth 3 -maxdepth 3 '*) exit 1 ;; esac
+exec "$REAL_FIND" "$@"
+EOF
+    chmod +x "$bin/find"
+    REAL_FIND="$MIN_BIN/find" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$site" || fail "root fallback"
+    assert_key "$out" site_size_status upper_bound
+    [ "$(detect_value "$out" site_size_mb)" -ge 28 ] || fail "the unfiltered bound lost aliases"
+    fixture_free_mb=6
+    import_remote_free_space_check "$out" "$dest" >/dev/null && fail "preflight ignored the upper bound"
+    fixture_free_mb=64
+    import_remote_free_space_check "$out" "$dest" >/dev/null || fail "preflight rejected a fitting bound"
+
+    # Force the old du path, including its mixed -b/-k truncation. Sparse
+    # bytes and allocated blocks must each be able to set the larger bound.
+    local busybox
+    busybox=$(command -v busybox || true)
+    [ -x "$busybox" ] || busybox=/usr/lib/initcpio/busybox
+    if [ -x "$busybox" ]; then
+        ln -s "$busybox" "$bin/du"
+    else
+        cat > "$bin/du" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -sLlbk) "$REAL_DU" -sLlb "$2" | awk '{print int($1 / 1024) "\t" $2}' ;;
+    *) exec "$REAL_DU" "$@" ;;
+esac
+EOF
+        chmod +x "$bin/du"
+    fi
+    local small="$TMP_ROOT/bound-site"
+    make_site "$small"
+    truncate -s 1048577 "$small/sparse"
+    REAL_DU="$MIN_BIN/du" REAL_FIND="$MIN_BIN/find" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$small"
+    assert_key "$out" site_size_status upper_bound
+    assert_key "$out" site_required_mb 2
+    fixture_free_mb=1
+    import_remote_free_space_check "$out" "$dest" >/dev/null && fail "preflight rounded the apparent bound down"
+    rm "$small/sparse"
+    for ((i = 0; i < 4096; i++)); do printf x > "$small/contents/$i"; done
+    local allocated
+    allocated=$("$MIN_BIN/du" -sLlk "$small")
+    allocated=${allocated%%$'\t'*}
+    REAL_DU="$MIN_BIN/du" REAL_FIND="$MIN_BIN/find" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$small"
+    assert_key "$out" site_required_mb "$(((allocated + 1023) / 1024))"
+    rm -f "$bin/find"
+    REAL_DU="$MIN_BIN/du" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$small"
+    assert_key "$out" site_size_status exact
+    assert_key "$out" site_size_mb 0
+    assert_key "$out" site_required_mb 17
+    fixture_free_mb=2
+    if import_remote_free_space_check "$out" "$dest" >/dev/null; then fail "4096 tiny files fit in 2 MiB"; fi
+)
+
 test_the_size_walk_stops_at_its_time_budget() {
     local site="$TMP_ROOT/budget-site"
     local out="$TMP_ROOT/budget.out"
@@ -671,10 +891,10 @@ test_a_full_temporary_directory_does_not_shrink_the_site_size() {
         ulimit -f 8
         STUB_LOG=/dev/null run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site"
     ) || fail "detect must go on when the temporary directory is full: $(cat "$err")"
-    assert_key "$out" site_size_status exact
+    assert_key "$out" site_size_status upper_bound
     total=$(detect_value "$out" site_size_entries_total)
-    [ "$total" = 1 ] || [ "$total" = 304 ] ||
-        fail "an exact size must cover the whole site, not $total of its 304 entries: $(grep '^Site size' "$err")"
+    [ "$total" = 1 ] ||
+        fail "the unfiltered root pass must report one result, got $total: $(grep '^Site size' "$err")"
     grep -q "could not be written" "$err" || fail "the one-pass measurement must be explained: $(cat "$err")"
     pass "a full temporary directory does not shrink the site size"
 }
@@ -706,7 +926,7 @@ test_detect_reports_the_entries_and_what_stays_behind() {
     # du stub answers 1 MB per measured entry whatever it holds, the query
     # log among them.
     assert_key "$out" site_total_mb 14
-    assert_key "$out" site_size_mb 8
+    assert_key "$out" site_size_mb 0
     [ "$(entry_value "$out" contents/videos)" = "1|kvs|copied" ] || fail "contents/videos: $(entry_value "$out" contents/videos)"
     [ "$(entry_value "$out" contents/videos_sources)" = "1|network:nfs4|excluded" ] || fail "a network mount stays behind: $(entry_value "$out" contents/videos_sources)"
     [ "$(entry_value "$out" tmp)" = "1|transient|excluded" ] || fail "tmp: $(entry_value "$out" tmp)"
@@ -794,7 +1014,7 @@ test_excluded_and_included_paths_change_what_travels() {
         --include admin/logs/debug_sql_post.txt detect "$site" ||
         fail "detect with choices must succeed: $(cat "$err")"
     assert_key "$out" site_total_mb 14
-    assert_key "$out" site_size_mb 9
+    assert_key "$out" site_size_mb 2
     [ "$(entry_value "$out" contents/videos_sources)" = "1|kvs|excluded" ] || fail "an excluded bucket: $(entry_value "$out" contents/videos_sources)"
     [ "$(entry_value "$out" backup)" = "1|extra|excluded" ] || fail "an excluded extra: $(entry_value "$out" backup)"
     [ "$(entry_value "$out" .well-known)" = "1|hidden|copied" ] || fail "an included hidden entry: $(entry_value "$out" .well-known)"
@@ -810,7 +1030,7 @@ test_excluded_and_included_paths_change_what_travels() {
     # its child counts once.
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --exclude contents/videos/1.mp4 --exclude contents --exclude contents/videos detect "$site" ||
         fail "nested exclusions must succeed: $(cat "$err")"
-    assert_key "$out" site_size_mb 7
+    assert_key "$out" site_size_mb 0
     [ "$(entry_value "$out" contents/videos/1.mp4)" = "1|named|excluded" ] || fail "a named path: $(entry_value "$out" contents/videos/1.mp4)"
     has_pattern "$out" '/contents' || fail "the parent leaves as one pattern: $(grep '^exclude_' "$out")"
     has_pattern "$out" '/contents/videos' && fail "a child of an excluded parent needs no pattern"
@@ -3338,6 +3558,9 @@ make_tar_stub
 
 test_detect_reports_the_installation_as_key_value_lines
 test_detect_reports_the_encoding_and_the_web_server_configuration
+test_flat_directories_are_measured_in_batches
+test_the_size_matches_the_selected_transport
+pass "transfer size matches the selected names and transport"
 test_the_size_walk_stops_at_its_time_budget
 test_the_size_walk_can_be_skipped
 test_a_full_temporary_directory_does_not_shrink_the_site_size

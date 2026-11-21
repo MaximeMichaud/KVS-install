@@ -2556,7 +2556,7 @@ test_remote_site_size_bounds_warn_instead_of_blocking() {
         printf 'site_size_status=incomplete\nsite_size_mb=1\nsite_size_entries=3\nsite_size_entries_total=9\nsite_size_seconds=300\ndb_size_mb=1\nsite_fs_used_mb=%s\n' "$((avail * 3))" > "$report"
         out=$(import_remote_free_space_check "$report" "$TMP_ROOT") || exit 5
         [[ "$out" == *"not known exactly"* ]] || exit 6
-        [ "$(import_remote_size_text "$report")" = "at least 1 MB to transfer (3 of 9 entries measured in 300 s), at most $((avail * 3)) MB (the filesystem usage)" ] || exit 7
+        [ "$(import_remote_size_text "$report")" = "1 MB measured on source (3 of 9 entries measured in 300 s), filesystem usage $((avail * 3)) MB" ] || exit 7
         # Skipped, with an upper bound that fits: nothing to say.
         printf 'site_size_status=skipped\nsite_size_mb=0\ndb_size_mb=1\nsite_fs_used_mb=1\n' > "$report"
         out=$(import_remote_free_space_check "$report" "$TMP_ROOT") || exit 8

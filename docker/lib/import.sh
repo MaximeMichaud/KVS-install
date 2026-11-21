@@ -2505,7 +2505,10 @@ import_check_estimated_transfer_space() {
     if [ -n "$saved_bytes" ]; then
         total=$saved_bytes
     elif [ -n "$report" ]; then
-        size=$(import_kv "$report" site_size_mb)
+        # The allocation the copy needs; an older exporter reports it as
+        # site_size_mb.
+        size=$(import_kv "$report" site_required_mb)
+        [[ "$size" =~ ^[0-9]+$ ]] || size=$(import_kv "$report" site_size_mb)
         status=$(import_kv "$report" site_size_status)
         if [[ "$size" =~ ^[0-9]+$ && ( "$status" = exact || -z "$status" ) ]]; then
             total=$((10#$size * 1048576))
@@ -2556,7 +2559,7 @@ import_rsync_totals() {
     # Ctrl-C reaches: timeout otherwise moves itself, rsync and ssh into a
     # group of their own, and the setup waited for the whole scan of the
     # old server, minutes on a large site, before it stopped.
-    LC_ALL=C timeout --foreground "$budget" rsync --dry-run --stats "${listing[@]}" "$@" 2>"${IMPORT_RSYNC_COUNT_ERROR:-/dev/null}" |
+    LC_ALL=C timeout --foreground "$budget" rsync --dry-run --stats ${listing[@]+"${listing[@]}"} "$@" 2>"${IMPORT_RSYNC_COUNT_ERROR:-/dev/null}" |
         import_rsync_plan "${IMPORT_RSYNC_PLAN:-}" "${IMPORT_TRANSFER_CHUNK:-20000}" |
         import_rsync_stats_totals
     statuses=("${PIPESTATUS[@]}")
@@ -3208,7 +3211,7 @@ import_rsync_progress() {
     # mawk otherwise waits for a full input buffer. Its interactive mode
     # requires newline records, so normalize rsync carriage returns first.
     if awk -W version 2>&1 | grep -q '^mawk '; then awk_options=(-W interactive); fi
-    import_progress_lines | awk "${awk_options[@]}" -v total_bytes="$total_bytes" -v total_files="$total_files" \
+    import_progress_lines | awk ${awk_options[@]+"${awk_options[@]}"} -v total_bytes="$total_bytes" -v total_files="$total_files" \
         -v terminal="$terminal" -v state="$state" -v entries="$entries" -v counted="$counted" -v disks="$disks" \
         -v stats="$stats" -v columns="$columns" -v pace="$pace" '
         function now() { return systime() }
@@ -3569,7 +3572,6 @@ import_remote_files() (
     local -a rsync_args=()
     local -a transfer_status=()
     local -a patterns=("${@:4}")
-    local -a rsync_excludes=()
     local -a tar_excludes=()
     local -a du_excludes=()
 
@@ -3586,7 +3588,7 @@ import_remote_files() (
     [[ "$pause" =~ ^[0-9]{1,3}$ ]] || pause=15
     import_remote_path_check "$dir" || return 1
     mkdir -p "$destination" || return 1
-    for pattern in "${patterns[@]}"; do
+    for pattern in ${patterns[@]+"${patterns[@]}"}; do
         case "$pattern" in
             /*) ;;
             *)
@@ -3594,21 +3596,15 @@ import_remote_files() (
                 return 1
                 ;;
         esac
-        # A name matches as it is written (".c[1]" is no wildcard): only the
-        # "/*" that leaves what a directory holds behind is one. rsync
-        # matches a pattern without * ? [ as plain text, a backslash
-        # included, and reads a backslash as an escape in any other.
+        # rsync takes these exclusions from kvs_rsync_options. du and tar
+        # match a name as it is written (".c[1]" is no wildcard): only the
+        # "/*" that leaves what a directory holds behind is one.
         excluded=${pattern%/\*}
         if [ "$excluded" != "$pattern" ]; then
             du_excludes+=("--exclude=.$(import_glob_escape "$excluded")/*")
-            rsync_excludes+=("--exclude=$(import_glob_escape "$excluded")/*")
             tar_excludes+=(--wildcards "$(import_shquote "--exclude=.$(import_glob_escape "$excluded")/*")")
         else
             du_excludes+=("--exclude=.$(import_glob_escape "$excluded")")
-            case "$excluded" in
-                *[\*\?\[]*) rsync_excludes+=("--exclude=$(import_glob_escape "$excluded")") ;;
-                *) rsync_excludes+=("--exclude=$excluded") ;;
-            esac
             tar_excludes+=(--no-wildcards "$(import_shquote "--exclude=.$excluded")")
         fi
     done
@@ -3664,8 +3660,11 @@ import_remote_files() (
         # of the rsync, so the copying rsyncs run under umask 0, as -a
         # gave it that mode whole; the 077 of this transfer would make it
         # private.
-        rsync_args=(-a -H -s --no-perms --chown=1000:1000 --no-devices --no-specials --copy-unsafe-links --partial-dir=.rsync-partial --delete --no-human-readable
-            "${rsync_excludes[@]}" "${rsync_path[@]}" -e "$(import_ssh_rsh)" "$rsync_host:$dir/" "$destination/")
+        # shellcheck source=/dev/null
+        source "${BASH_SOURCE[0]%/*}/../../kvs-export.sh" --rsync-options-library || return 1
+        kvs_rsync_options ${patterns[@]+"${patterns[@]}"}
+        rsync_args+=(-s --no-perms --chown=1000:1000 --delete --no-human-readable)
+        rsync_args+=(${rsync_path[@]+"${rsync_path[@]}"} -e "$(import_ssh_rsh)" "$rsync_host:$dir/" "$destination/")
         if [ "$jobs" -gt 1 ] && command -v setsid >/dev/null 2>&1; then
             plan=$work
         elif [ "$jobs" -gt 1 ]; then

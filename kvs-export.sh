@@ -28,6 +28,44 @@
 # KVS-install Copyright (c) 2020-2025 Maxime Michaud
 # Licensed under GNU General Public License v3.0
 #################################################################
+# A path as a find -path, tar or rsync wildcard pattern matching it alone.
+kvs_glob_escape() {
+    local rest="$1" char out=""
+
+    while [ -n "$rest" ]; do
+        char=${rest:0:1}
+        rest=${rest:1}
+        case $char in
+            '*' | '?' | '[' | ']' | "\\") out="$out\\$char" ;;
+            *) out="$out$char" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+# Share the options that select which files and links rsync copies.
+# A wildcard-free rsync pattern treats backslashes literally.
+kvs_rsync_options() {
+    local pattern path
+    rsync_args=(-a -H --no-devices --no-specials --partial-dir=.rsync-partial --copy-unsafe-links)
+    for pattern in "$@"; do
+        path=${pattern%/\*}
+        if [ "$path" != "$pattern" ]; then
+            rsync_args+=("--exclude=$(kvs_glob_escape "$path")/*")
+        elif [[ $path == *[\*\?\[]* ]]; then
+            rsync_args+=("--exclude=$(kvs_glob_escape "$path")")
+        else
+            rsync_args+=("--exclude=$path")
+        fi
+    done
+}
+
+# The importer sources just the functions above. The exporter still runs
+# from a single file when piped to bash on the source server.
+if [ "${1:-}" = --rsync-options-library ] && [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
+
 set -u
 set -o pipefail
 # Old servers run bash 4.2 (CentOS 7) or 4.3 (Ubuntu 16.04, Debian 8), where
@@ -95,6 +133,7 @@ DB_DIRECTORY_PASSWORD=""
 DB_DIRECTORY_AUTH="site"
 DB_DIRECTORY_ROOT_REASON=""
 SITE_SIZE_MB="0"
+SITE_REQUIRED_MB=""
 SITE_SIZE_STATUS="skipped"
 SITE_SIZE_SECONDS="0"
 SITE_SIZE_ENTRIES="0"
@@ -162,7 +201,7 @@ TEMP_ERR_FILE=""
 # What the last kvs_probe_query printed, and its error.
 PROBE_OUT=""
 PROBE_ERR=""
-UNITS_FILE=""
+MEASURE_DIR=""
 LINKS_FILE=""
 # The size walk in progress: its lines arrive on descriptor 3.
 MEASURE_PID=""
@@ -229,8 +268,8 @@ Environment
   KVS_SITE_DIR              Site directory, same as the argument
   KVS_EXPORT_SEARCH_ROOTS   Colon separated roots to search for the site
   KVS_EXPORT_SIZE_TIMEOUT   Same as --size-timeout
-  KVS_EXPORT_SIZE_JOBS      How many du measure the site at once (default:
-                            the CPU count, at most 4)
+  KVS_EXPORT_SIZE_JOBS      Maximum concurrent listing jobs (up to two).
+                            One du counts blocks across the whole list.
   TMPDIR                    Where stdout archives stage their dump. Named
                             outputs are staged beside the destination.
                             Native export uses secure_file_priv
@@ -280,8 +319,8 @@ kvs_cleanup() {
     # Waiting for one pipeline member can wait for the other members too.
     # Stop all descendants first, then reap our direct children together.
     wait 2> /dev/null || true
-    if [ -n "$UNITS_FILE" ]; then
-        rm -f -- "$UNITS_FILE"
+    if [ -n "$MEASURE_DIR" ]; then
+        rm -rf -- "$MEASURE_DIR"
     fi
     if [ -n "$LINKS_FILE" ]; then
         rm -f -- "$LINKS_FILE"
@@ -1070,13 +1109,12 @@ kvs_site_filesystem_used() {
     fi
 }
 
-# How many du walk the site at once: the CPU count, at most 4 so a live
-# server keeps serving; KVS_EXPORT_SIZE_JOBS overrides (an SSD takes more).
+# The shallow and deep listings can run together when the job limit allows.
 kvs_measure_jobs() {
     local jobs="${KVS_EXPORT_SIZE_JOBS:-}"
 
     if kvs_is_number "$jobs" && [ "$jobs" -ge 1 ]; then
-        printf '%s' "$jobs"
+        printf '%s' "$((10#$jobs))"
         return 0
     fi
     jobs=$(nproc 2> /dev/null < /dev/null) || jobs=""
@@ -1085,47 +1123,116 @@ kvs_measure_jobs() {
     fi
     kvs_is_number "$jobs" || jobs=1
     [ "$jobs" -ge 1 ] || jobs=1
-    [ "$jobs" -le 4 ] || jobs=4
+    [ "$jobs" -le 2 ] || jobs=2
     printf '%s' "$jobs"
 }
 
-# The entries the walk measures one by one: everything three levels down
+# The entries the walk measures: everything three levels down
 # (the id buckets of contents/, admin/*/*, static/*/*) and the files above
 # that level. Together they hold the whole site but the directory inodes
-# above them, a few kilobytes. Three levels down is thousands of entries
-# at most, which find lists in a moment even under contents/.
+# above them, a few kilobytes.
 kvs_list_measure_units() {
-    local file="$1"
-    local depth="$2"
-    local -a statuses
-
-    # find also fails on a directory it cannot read, which only leaves that
-    # directory out; cat fails when the list could not be written whole.
-    {
-        find -L "$SITE_DIR" -mindepth 1 -maxdepth "$((depth - 1))" ! -type d -print0 2> /dev/null
-        find -L "$SITE_DIR" -mindepth "$depth" -maxdepth "$depth" -print0 2> /dev/null
-    } < /dev/null | cat > "$file" 2> /dev/null
-    statuses=(${PIPESTATUS[@]+"${PIPESTATUS[@]}"})
-    return "${statuses[1]}"
+    local dir="$1" jobs="$2" shallow_pid="" status=0
+    if (( jobs > 1 )); then
+        find -L "$SITE_DIR" -mindepth 1 -maxdepth 2 ! -type d -print0 > "$dir/units" &
+        shallow_pid=$!
+    else
+        find -L "$SITE_DIR" -mindepth 1 -maxdepth 2 ! -type d -print0 > "$dir/units" || return 1
+    fi
+    find -L "$SITE_DIR" -mindepth 3 -maxdepth 3 -print0 > "$dir/deep" || status=1
+    [ -z "$shallow_pid" ] || wait "$shallow_pid" || status=1
+    [ "$status" = 0 ] && cat "$dir/deep" >> "$dir/units"
 }
 
-# Start the du processes over the listed entries, their lines arriving on
-# descriptor 3. False when xargs cannot take a NUL separated list.
-kvs_start_measure() {
-    local file="$1"
-    local jobs="$2"
-
-    # The probes run du on an empty list: the options are checked, nothing
-    # is measured.
-    if xargs -r -0 -n 1 -P "$jobs" du < /dev/null > /dev/null 2>&1; then
-        exec 3< <(exec xargs -0 -n 1 -P "$jobs" du -sLk -- < "$file" 2> /dev/null)
-    elif xargs -r -0 -n 1 du < /dev/null > /dev/null 2>&1; then
-        exec 3< <(exec xargs -0 -n 1 du -sLk -- < "$file" 2> /dev/null)
+# du describes the source entries. Measure the payload independently: removing
+# an excluded bucket after counting each inode once loses its included aliases.
+kvs_transfer_bytes() {
+    local dir="$1" transport="$2" pattern path hard=no followed=no
+    shift 2
+    local -a filters=()
+    # The inventory and capability probes disappear before the transfer.
+    case $dir in "$SITE_DIR"/*) set -- "$@" "/${dir#"$SITE_DIR"/}" ;; esac
+    if [ "$transport" = rsync ]; then
+        local -a rsync_args=()
+        kvs_rsync_options "$@"
+        # A fresh destination emits one file record per payload, including
+        # followed links. Hard-link records start with h and cost no data.
+        LC_ALL=C rsync --dry-run --out-format='%i %l' ${rsync_args[@]+"${rsync_args[@]}"} -- "$SITE_DIR/" "$dir/empty/" |
+            awk '$1 ~ /^cd/ { blocks++ }
+                 $1 ~ /^(<|>)f/ { bytes += $2; blocks += int(($2 + 4095) / 4096) }
+                 END { printf "%.0f %.0f\n", bytes, blocks * 4096 }'
     else
+        for pattern in "$@"; do
+            path=$(kvs_glob_escape "$SITE_DIR${pattern%/\*}")
+            # A contents-only exclusion keeps the directory itself.
+            [ "$pattern" = "${pattern%/\*}" ] || path="$path/*"
+            filters+=( -path "$path" -prune -o )
+        done
+        # GNU and BusyBox tar differ on repeated names for a followed
+        # symlink. Inspect the records made by this tar, including builds
+        # without hard-link support, using empty files in the private stage.
+        mkdir "$dir/probe" "$dir/unpack" &&
+            : > "$dir/probe/a" && ln "$dir/probe/a" "$dir/probe/b" &&
+            : > "$dir/probe/target" && ln -s target "$dir/probe/c" &&
+            ln -s target "$dir/probe/d" || return 1
+        tar -C "$dir/probe" -chf - a b c d | tar -C "$dir/unpack" -xf - || return 1
+        [ ! "$dir/unpack/a" -ef "$dir/unpack/b" ] || hard=yes
+        [ ! "$dir/unpack/c" -ef "$dir/unpack/d" ] || followed=yes
+        find -L "$SITE_DIR" ${filters[@]+"${filters[@]}"} -type d -exec stat -L -c d -- {} + -o \
+            -type f -exec stat -L -c '%d %i %h %s' -- {} + |
+            LC_ALL=C awk -v hard="$hard" -v followed="$followed" '
+                $1 == "d" { blocks++; next }
+                ($3 > 1 ? hard : followed) == "yes" && seen[$1 ":" $2]++ { next }
+                { bytes += $4; blocks += int(($4 + 4095) / 4096) }
+                END { printf "%.0f %.0f\n", bytes, blocks * 4096 }
+            '
+    fi
+}
+
+# Count each followed name in both walks. BusyBox truncates apparent
+# bytes when -b and -k are combined, and sparse files need their length.
+kvs_root_size_kb() {
+    local allocated apparent status=0
+    allocated=$(du -sLlk "$1" 2>/dev/null) || status=$?
+    allocated=${allocated%%$'\t'*}
+    if [[ ! $allocated =~ ^[0-9]+$ ]]; then
+        [ "$status" != 0 ] || status=1
+        return "$status"
+    fi
+    if [ "$status" = 0 ]; then
+        apparent=$(du -sLlb "$1" 2>/dev/null) || status=$?
+        apparent=${apparent%%$'\t'*}
+        if [[ $apparent =~ ^[0-9]+$ ]]; then
+            apparent=$(((apparent + 1023) / 1024))
+            if (( apparent > allocated )); then allocated=$apparent; fi
+        elif [ "$status" = 0 ]; then
+            status=1
+        fi
+    fi
+    printf '%s\t%s\n' "$allocated" "$1"
+    return "$status"
+}
+
+kvs_measure_units() {
+    local dir="$1" total="$2" transport="$3" size bytes
+    shift 3
+    if [ "$total" -gt 0 ] && du -sLk -0 --files0-from=/dev/null >/dev/null 2>&1; then
+        printf 'per-entry\0'
+        du -sLk -0 --files0-from="$dir/units" || return 1
+    else
+        # Apparent size includes sparse extents; -l charges every name. The
+        # unfiltered root can bound the payload but cannot prove its size.
+        size=$(kvs_root_size_kb "$SITE_DIR") || return 1
+        printf '%s\t%s\0' "${size%%$'\t'*}" "$SITE_DIR"
+    fi
+    if [ "$total" -gt 0 ] && bytes=$(kvs_transfer_bytes "$dir" "$transport" "$@"); then
+        printf 'payload %s\0' "$bytes"
+    elif [ -z "${size:-}" ]; then
+        # Per-entry du may count a followed name once for several entries. Only the
+        # successful root pass above supplies a usable unfiltered bound.
         return 1
     fi
-    MEASURE_PID=$!
-    return 0
+    printf 'complete\0'
 }
 
 # Stop the walk. xargs is held first so it starts no further du while the
@@ -1167,15 +1274,10 @@ kvs_add_measure_line() {
     return 0
 }
 
-# The site size, the way the archive and the transfer will read it (links
-# followed). One du over a large site stats millions of inodes with no
-# sign of life for as long as that takes, so the tree is split into the
-# entries three levels down, a few du measure them at once and a line
-# every ten seconds tells how far the walk is. A time budget cuts it
-# short: the report then carries what was counted as a lower bound and
-# the filesystem usage as the upper one, and the caller decides.
+# Report source inventory progress while du visits the directory buckets.
+# Measure the filtered payload separately. If the walk is interrupted the
+# received subtotal describes the source entries reached so far.
 kvs_measure_site() {
-    local depth=3
     local jobs
     local total=0
     local line
@@ -1184,6 +1286,7 @@ kvs_measure_site() {
     local last
     local elapsed=0
     local timed_out="no"
+    local complete=no payload="" allocation="" transport=tar
 
     SITE_SIZE_MB="0"
     SITE_SIZE_STATUS="skipped"
@@ -1200,47 +1303,48 @@ kvs_measure_site() {
         return 0
     fi
     jobs=$(kvs_measure_jobs)
-    UNITS_FILE=$(mktemp 2> /dev/null) || UNITS_FILE=""
-    if [ -n "$UNITS_FILE" ] && ! kvs_list_measure_units "$UNITS_FILE" "$depth"; then
+    MEASURE_DIR=$(mktemp -d 2> /dev/null) || MEASURE_DIR=""
+    if [ -n "$MEASURE_DIR" ] && ! kvs_list_measure_units "$MEASURE_DIR" "$jobs" 2>/dev/null; then
         # A list cut short would leave part of the site out of an exact
         # size: the site is measured in one pass instead.
         kvs_warn "the list of the entries to measure could not be written in ${TMPDIR:-/tmp} (full?); measuring the site in one pass"
-        rm -f -- "$UNITS_FILE"
-        UNITS_FILE=""
+        rm -rf -- "$MEASURE_DIR"
+        MEASURE_DIR=""
     fi
-    if [ -n "$UNITS_FILE" ]; then
+    if [ -n "$MEASURE_DIR" ]; then
         while IFS= read -r -d '' _; do
             total=$((total + 1))
-        done < "$UNITS_FILE"
+        done < "$MEASURE_DIR/units"
     fi
     if [ -n "$SITE_FS_USED_MB" ]; then
-        kvs_say "The filesystem holding the site uses $(kvs_human_mb "$SITE_FS_USED_MB"); the site is at most that."
+        kvs_say "The filesystem holding the site uses $(kvs_human_mb "$SITE_FS_USED_MB")."
     fi
     if [ "$OPT_SIZE_TIMEOUT" -gt 0 ]; then
-        kvs_say "Measuring the site size for at most $(kvs_elapsed "$OPT_SIZE_TIMEOUT") ($total entries, $jobs at a time)..."
+        kvs_say "Measuring the site size for at most $(kvs_elapsed "$OPT_SIZE_TIMEOUT") ($total entries)..."
     else
-        kvs_say "Measuring the site size, this can take a while on a large installation ($total entries, $jobs at a time; --size-timeout bounds it, --no-size skips it)..."
+        kvs_say "Measuring the site size, this can take a while on a large installation ($total entries; --size-timeout bounds it, --no-size skips it)..."
     fi
-    if [ "$total" -gt 0 ] && kvs_start_measure "$UNITS_FILE" "$jobs"; then
-        MEASURE_PER_ENTRY="yes"
-    else
-        # Nothing listed or no usable xargs: one du over the site, with
-        # the timer only.
-        total=1
-        exec 3< <(exec du -sLk -- "$SITE_DIR" 2> /dev/null)
-        MEASURE_PID=$!
-    fi
+    if [ "$OPT_COMMAND" = detect ] && [ "$HAS_RSYNC" = yes ]; then transport=rsync; fi
+    exec 3< <(kvs_measure_units "$MEASURE_DIR" "$total" "$transport" ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"} 2>/dev/null)
+    MEASURE_PID=$!
+    [ "$total" -gt 0 ] || total=1
     start=$SECONDS
     last=$start
     while :; do
         line=""
-        if IFS= read -r -t 1 line <&3; then
-            kvs_add_measure_line "$line"
+        if IFS= read -r -t 1 -d '' line <&3; then
+            if [ "$line" = complete ]; then
+                complete=yes
+            elif [[ $line == "payload "* ]]; then
+                read -r payload allocation <<< "${line#payload }"
+            elif [ "$line" = per-entry ]; then
+                MEASURE_PER_ENTRY=yes
+            else
+                kvs_add_measure_line "$line"
+            fi
         else
             status=$?
             if [ "$status" -le 128 ]; then
-                # End of the stream; a last line without newline counts.
-                [ -z "$line" ] || kvs_add_measure_line "$line"
                 break
             fi
         fi
@@ -1256,15 +1360,19 @@ kvs_measure_site() {
     done
     exec 3<&-
     MEASURE_PID=""
-    rm -f -- "$UNITS_FILE"
-    UNITS_FILE=""
+    rm -rf -- "$MEASURE_DIR"
+    MEASURE_DIR=""
     SITE_SIZE_SECONDS=$((SECONDS - start))
-    SITE_SIZE_MB=$((MEASURE_KB / 1024))
+    SITE_TOTAL_MB=$((MEASURE_KB / 1024))
+    SITE_SIZE_MB=$SITE_TOTAL_MB
+    if [ "$complete" = yes ] && [ "$timed_out" = no ] && [ "$MEASURE_COUNT" -gt 0 ]; then
+        MEASURE_COUNT=$total
+    fi
     SITE_SIZE_ENTRIES=$MEASURE_COUNT
     SITE_SIZE_ENTRIES_TOTAL=$total
     if [ "$timed_out" = "yes" ]; then
         SITE_SIZE_STATUS="incomplete"
-        kvs_warn "site size measurement cut short after $(kvs_elapsed "$SITE_SIZE_SECONDS"): at least $(kvs_human_mb "$SITE_SIZE_MB") in $MEASURE_COUNT of $total entries, at most $(kvs_human_mb "$SITE_FS_USED_MB") (the filesystem usage); --size-timeout 0 measures it all"
+        kvs_warn "site size measurement cut short after $(kvs_elapsed "$SITE_SIZE_SECONDS"): $(kvs_human_mb "$SITE_SIZE_MB") measured on source in $MEASURE_COUNT of $total entries; --size-timeout 0 measures it all"
         return 0
     fi
     if [ "$MEASURE_COUNT" -eq 0 ]; then
@@ -1272,10 +1380,19 @@ kvs_measure_site() {
         kvs_warn "could not measure the size of $SITE_DIR"
         return 0
     fi
-    SITE_SIZE_STATUS="exact"
-    if [ "$MEASURE_COUNT" -lt "$total" ]; then
-        kvs_warn "$((total - MEASURE_COUNT)) of $total entries could not be measured (removed meanwhile, or unreadable)"
+    if [ "$complete" != yes ]; then
+        SITE_SIZE_STATUS=incomplete
+        kvs_warn "site size measurement incomplete"
+        return 0
+    elif ! kvs_is_number "$payload" || ! kvs_is_number "$allocation"; then
+        SITE_SIZE_STATUS=upper_bound
+        SITE_SIZE_MB=$(((MEASURE_KB + 1023) / 1024))
+        kvs_say "Site size: at most $(kvs_human_mb "$SITE_SIZE_MB") (unfiltered root)"
+        return 0
     fi
+    SITE_SIZE_STATUS=exact
+    SITE_REQUIRED_MB=$(((allocation + 1048575) / 1048576))
+    SITE_SIZE_MB=$((payload / 1048576))
     kvs_say "Site size: $(kvs_human_mb "$SITE_SIZE_MB") ($total entries, $(kvs_elapsed "$SITE_SIZE_SECONDS"))"
 }
 
@@ -1491,15 +1608,12 @@ kvs_drop_missing_path_options() {
     OPT_INCLUDES=(${kept[@]+"${kept[@]}"})
 }
 
-# Fill the entry arrays and the exclusion patterns from the walk buckets
-# and the options. What stays behind leaves the site size, once.
+# Decide what travels before measuring the payload.
 kvs_collect_entries() {
     local rel
     local kind
     local state
-    local mb
     local i
-    local excluded_mb=0
 
     kvs_drop_missing_path_options
     ENTRY_PATHS=()
@@ -1520,17 +1634,8 @@ kvs_collect_entries() {
         if [ "$kind" != "transient" ] && kvs_path_listed "$rel" ${OPT_INCLUDES[@]+"${OPT_INCLUDES[@]}"}; then
             state="copied"
         fi
-        mb=""
-        if [ "$MEASURE_PER_ENTRY" = "yes" ]; then
-            mb=$((${MEASURE_ENTRY_KB[$rel]:-0} / 1024))
-        fi
-        if [ "$kind" = "debuglog" ] && [ -z "${MEASURE_ENTRY_KB[$rel]+set}" ]; then
-            # Beyond the walk (skipped or cut short): one file, sized on
-            # its own.
-            mb=$(kvs_file_mb "$SITE_DIR/$rel")
-        fi
         ENTRY_PATHS+=("$rel")
-        ENTRY_MB+=("$mb")
+        ENTRY_MB+=("")
         ENTRY_KIND+=("$kind")
         ENTRY_STATE+=("$state")
     done < <(kvs_list_entry_candidates)
@@ -1541,12 +1646,8 @@ kvs_collect_entries() {
         if kvs_entry_index "$rel" > /dev/null; then
             continue
         fi
-        mb=""
-        if [ "$MEASURE_PER_ENTRY" = "yes" ] && [ -n "${MEASURE_ENTRY_KB[$rel]:-}" ]; then
-            mb=$((MEASURE_ENTRY_KB[$rel] / 1024))
-        fi
         ENTRY_PATHS+=("$rel")
-        ENTRY_MB+=("$mb")
+        ENTRY_MB+=("")
         ENTRY_KIND+=("named")
         ENTRY_STATE+=("excluded")
     done
@@ -1558,21 +1659,23 @@ kvs_collect_entries() {
             else
                 EXCLUDE_PATTERNS+=("/${ENTRY_PATHS[$i]}")
             fi
-            # A file's size leaves the total only when the walk counted it
-            # (an exact walk); a bounded walk may not have reached it.
-            if kvs_is_number "${ENTRY_MB[$i]}" &&
-                { [ "${ENTRY_KIND[$i]}" != "debuglog" ] || [ "$SITE_SIZE_STATUS" = "exact" ]; }; then
-                excluded_mb=$((excluded_mb + ENTRY_MB[i]))
-            fi
         fi
         i=$((i + 1))
     done
-    SITE_TOTAL_MB=$SITE_SIZE_MB
-    if [ "$SITE_SIZE_MB" -gt "$excluded_mb" ]; then
-        SITE_SIZE_MB=$((SITE_SIZE_MB - excluded_mb))
-    else
-        SITE_SIZE_MB=0
-    fi
+}
+
+kvs_fill_entry_sizes() {
+    local i rel
+    for i in "${!ENTRY_PATHS[@]}"; do
+        rel=${ENTRY_PATHS[i]}
+        if [ "$MEASURE_PER_ENTRY" = yes ] && [ -n "${MEASURE_ENTRY_KB[$rel]+set}" ]; then
+            ENTRY_MB[i]=$((MEASURE_ENTRY_KB[$rel] / 1024))
+        elif [ "${ENTRY_KIND[i]}" = debuglog ]; then
+            ENTRY_MB[i]=$(kvs_file_mb "$SITE_DIR/$rel")
+        elif [ "$MEASURE_PER_ENTRY" = yes ] && [ "${ENTRY_KIND[i]}" != named ]; then
+            ENTRY_MB[i]=0
+        fi
+    done
 }
 
 # The storage servers of the site, from its database: title, path, whether
@@ -1692,13 +1795,14 @@ kvs_site_size_text() {
     case $SITE_SIZE_STATUS in
         exact)
             if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
-                printf '%s to transfer of %s' "$(kvs_human_mb "$SITE_SIZE_MB")" "$(kvs_human_mb "$SITE_TOTAL_MB")"
+                printf '%s to transfer (%s measured on source)' "$(kvs_human_mb "$SITE_SIZE_MB")" "$(kvs_human_mb "$SITE_TOTAL_MB")"
             else
                 kvs_human_mb "$SITE_SIZE_MB"
             fi
             ;;
+        upper_bound) printf 'at most %s to transfer (unfiltered root)' "$(kvs_human_mb "$SITE_SIZE_MB")" ;;
         incomplete)
-            printf 'at least %s to transfer, at most %s, measurement cut short' "$(kvs_human_mb "$SITE_SIZE_MB")" "$(kvs_human_mb "$SITE_FS_USED_MB")"
+            printf '%s measured on source, filesystem usage %s, measurement incomplete' "$(kvs_human_mb "$SITE_SIZE_MB")" "$(kvs_human_mb "$SITE_FS_USED_MB")"
             ;;
         *)
             printf 'not measured, at most %s' "$(kvs_human_mb "$SITE_FS_USED_MB")"
@@ -2487,6 +2591,7 @@ kvs_print_detect() {
     printf 'db_system_versioned=%s\n' "$DB_SYSTEM_VERSIONED"
     printf 'db_utf8mb4=%s\n' "$DB_UTF8MB4"
     printf 'site_size_mb=%s\n' "$SITE_SIZE_MB"
+    printf 'site_required_mb=%s\n' "${SITE_REQUIRED_MB:-$SITE_SIZE_MB}"
     printf 'site_size_status=%s\n' "$SITE_SIZE_STATUS"
     printf 'site_size_seconds=%s\n' "$SITE_SIZE_SECONDS"
     printf 'site_size_entries=%s\n' "$SITE_SIZE_ENTRIES"
@@ -2776,8 +2881,9 @@ kvs_collect() {
     if [ "$measure_site" = "yes" ]; then
         kvs_probe_encoding
         kvs_probe_web_server_config
-        kvs_measure_site
         kvs_collect_entries
+        kvs_measure_site
+        kvs_fill_entry_sizes
     fi
     return 0
 }
@@ -2999,21 +3105,6 @@ kvs_refuse_dangling_links() {
     done
     [ "$count" -le 10 ] || kvs_say "  and $((count - 10)) more"
     return 1
-}
-
-# A path as a find -path, tar or rsync wildcard pattern matching it alone.
-kvs_glob_escape() {
-    local rest="$1" char out=""
-
-    while [ -n "$rest" ]; do
-        char=${rest:0:1}
-        rest=${rest:1}
-        case $char in
-            '*' | '?' | '[' | ']' | "\\") out="$out\\$char" ;;
-            *) out="$out$char" ;;
-        esac
-    done
-    printf '%s' "$out"
 }
 
 # kvs_has_glob_char <text>: it holds a character a wildcard pattern reads
@@ -3565,10 +3656,10 @@ kvs_command_archive() {
         else
             # The dump is staged next to the archive and copied into it, so
             # both exist at once; its compressed size is below DB_SIZE_MB.
-            needed=$((SITE_SIZE_MB + 2 * DB_SIZE_MB))
+            needed=$((${SITE_REQUIRED_MB:-$SITE_SIZE_MB} + 2 * DB_SIZE_MB))
             case $SITE_SIZE_STATUS in
-                exact) ;;
-                incomplete) kvs_warn "the site size is a lower bound, the free space check can pass on a disk that is too small" ;;
+                exact|upper_bound) ;;
+                incomplete) kvs_warn "site measurement incomplete; the free space check uses the source subtotal" ;;
                 *) kvs_warn "the site size is unknown, the free space is only checked for the dump" ;;
             esac
         fi
