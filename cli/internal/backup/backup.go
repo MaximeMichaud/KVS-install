@@ -955,7 +955,7 @@ func RestoreDatabase(ctx context.Context, path, mariadbContainer string, progres
 		defer close(watched)
 		in.watch(cancel, stop, func() sight { return serverSight(probeCtx, mariadbContainer, lock) })
 	}()
-	stdin := io.MultiReader(strings.NewReader(fmt.Sprintf(replayPreamble, lock)), in)
+	stdin := io.MultiReader(strings.NewReader(fmt.Sprintf(replayPreamble, lock)), &replayPrologue{body: body, counted: in})
 	err = execFn(ctx, mariadbContainer, stdin, io.Discard, "sh", "-c", restoreScript)
 	close(stop)
 	endProbes()
@@ -998,6 +998,14 @@ type replayReader struct {
 
 func (r *replayReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
+	r.record(n)
+	if errors.Is(err, io.EOF) {
+		r.eof.Store(true)
+	}
+	return n, err
+}
+
+func (r *replayReader) record(n int) {
 	if n > 0 {
 		r.moved(time.Since(r.start))
 		replayed := r.replayed.Add(int64(n))
@@ -1006,10 +1014,6 @@ func (r *replayReader) Read(p []byte) (int, error) {
 			r.progress(replayed, r.total)
 		}
 	}
-	if errors.Is(err, io.EOF) {
-		r.eof.Store(true)
-	}
-	return n, err
 }
 
 // moved records that the replay moved at, after start, unless it is known

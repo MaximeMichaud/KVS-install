@@ -215,7 +215,7 @@ func TestTheCommandsOfAReplay(t *testing.T) {
 	if m == nil {
 		t.Fatalf("the replay does not start with its lock:\n%s", input.String())
 	}
-	if want := fmt.Sprintf(wantPreamble, m[1]) + sql; input.String() != want {
+	if want := fmt.Sprintf(wantPreamble, m[1]) + compactMode + sql; input.String() != want {
 		t.Fatalf("the replay sent\n%s\nwant\n%s", input.String(), want)
 	}
 

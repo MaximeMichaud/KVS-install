@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -119,6 +120,22 @@ func readPreamble(stdin io.Reader) (string, error) {
 		return "", fmt.Errorf("the preamble of the replay is\n%s\nwant\n%s", got, want)
 	}
 	return string(m[1]), nil
+}
+
+// Watchdog and byte-count tests start with a dump without a mode prologue.
+func readCompactPreamble(stdin io.Reader) (string, error) {
+	lock, err := readPreamble(stdin)
+	if err != nil {
+		return "", err
+	}
+	setting := make([]byte, len(compactMode))
+	if _, err := io.ReadFull(stdin, setting); err != nil {
+		return "", err
+	}
+	if string(setting) != compactMode {
+		return "", fmt.Errorf("unexpected compact dump session mode: %q", setting)
+	}
+	return lock, nil
 }
 
 // guarded is the context of a replay the watchdog must stop: should it never
@@ -579,7 +596,7 @@ func TestRestoreDatabaseReportsProgress(t *testing.T) {
 	}
 	var replayed bytes.Buffer
 	s.replay = func(ctx context.Context, stdin io.Reader) error {
-		if _, err := readPreamble(stdin); err != nil {
+		if _, err := readCompactPreamble(stdin); err != nil {
 			return err
 		}
 		_, err := io.Copy(&replayed, stdin)
@@ -644,7 +661,7 @@ func TestRestoreDatabaseStopsWhenTheDatabaseStalls(t *testing.T) {
 	var ended []string
 	stubServer(t, &server{
 		replay: func(ctx context.Context, stdin io.Reader) error {
-			lock, err := readPreamble(stdin)
+			lock, err := readCompactPreamble(stdin)
 			if err != nil {
 				return err
 			}
@@ -704,7 +721,7 @@ func TestRestoreDatabaseStopsAStatementThatWaits(t *testing.T) {
 		var ended []string
 		stubServer(t, &server{
 			replay: func(ctx context.Context, stdin io.Reader) error {
-				lock, err := readPreamble(stdin)
+				lock, err := readCompactPreamble(stdin)
 				if err != nil {
 					return err
 				}
@@ -783,7 +800,7 @@ func TestRestoreDatabaseCountsAWaitFromItsStart(t *testing.T) {
 	var replayed bytes.Buffer
 	stubServer(t, &server{
 		replay: func(ctx context.Context, stdin io.Reader) error {
-			if _, err := readPreamble(stdin); err != nil {
+			if _, err := readCompactPreamble(stdin); err != nil {
 				return err
 			}
 			if _, err := io.CopyN(&replayed, stdin, 100); err != nil {
@@ -868,7 +885,7 @@ func TestRestoreDatabaseEndsTheConnectionItStops(t *testing.T) {
 		var ended []string
 		stubServer(t, &server{
 			replay: func(ctx context.Context, stdin io.Reader) error {
-				lock, err := readPreamble(stdin)
+				lock, err := readCompactPreamble(stdin)
 				if err != nil {
 					return err
 				}
@@ -917,7 +934,7 @@ func TestRestoreDatabaseWaitsWhileTheServerRunsAStatement(t *testing.T) {
 	var replayed bytes.Buffer
 	stubServer(t, &server{
 		replay: func(ctx context.Context, stdin io.Reader) error {
-			if _, err := readPreamble(stdin); err != nil {
+			if _, err := readCompactPreamble(stdin); err != nil {
 				return err
 			}
 			if _, err := io.CopyN(&replayed, stdin, 100); err != nil {
@@ -974,7 +991,7 @@ func TestRestoreDatabaseStallsWhenTheServerShowsNoWork(t *testing.T) {
 		var asked atomic.Int32
 		stubServer(t, &server{
 			replay: func(ctx context.Context, stdin io.Reader) error {
-				if _, err := readPreamble(stdin); err != nil {
+				if _, err := readCompactPreamble(stdin); err != nil {
 					return err
 				}
 				<-ctx.Done()
@@ -1007,7 +1024,7 @@ func TestRestoreDatabaseAsksTheServerAgain(t *testing.T) {
 	var replayed bytes.Buffer
 	stubServer(t, &server{
 		replay: func(ctx context.Context, stdin io.Reader) error {
-			if _, err := readPreamble(stdin); err != nil {
+			if _, err := readCompactPreamble(stdin); err != nil {
 				return err
 			}
 			select {
@@ -1048,7 +1065,7 @@ func TestRestoreDatabaseCountsAStatementThatJustEnded(t *testing.T) {
 	var replayed bytes.Buffer
 	stubServer(t, &server{
 		replay: func(ctx context.Context, stdin io.Reader) error {
-			if _, err := readPreamble(stdin); err != nil {
+			if _, err := readCompactPreamble(stdin); err != nil {
 				return err
 			}
 			if _, err := io.CopyN(&replayed, stdin, 100); err != nil {
@@ -1114,7 +1131,7 @@ func TestRestoreDatabaseHasNoTimeLimit(t *testing.T) {
 	path := createSQL(t, t.TempDir(), sql)
 	setVar(t, &stallTimeout, 300*time.Millisecond)
 	stubServer(t, &server{replay: func(ctx context.Context, stdin io.Reader) error {
-		if _, err := readPreamble(stdin); err != nil {
+		if _, err := readCompactPreamble(stdin); err != nil {
 			return err
 		}
 		one := make([]byte, 1)
@@ -1159,10 +1176,113 @@ func TestRestoreDatabaseWaitsForTheLastStatements(t *testing.T) {
 	}
 }
 
+func TestRestoreDumpSQLMode(t *testing.T) {
+	const start = "/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='"
+	const end = "' */;"
+	const mode = start + "NO_AUTO_VALUE_ON_ZERO" + end
+	const table = "CREATE TABLE ktvs_options (variable VARCHAR(64) PRIMARY KEY, value TEXT);\n"
+	const routine = "/*!50003 SET sql_mode = 'STRICT_TRANS_TABLES' */;\n" +
+		"DELIMITER ;;\nCREATE FUNCTION f() RETURNS TEXT DETERMINISTIC RETURN \"head\n" + mode + "\ntail\";;\nDELIMITER ;\n"
+	const fallback = "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'ALLOW_INVALID_DATES');\n"
+	long := "-- " + strings.Repeat("x", 8209) + "\r\n"
+	for _, c := range []struct{ name, prefix, input, want string }{
+		{"block_boundary", "/*" + strings.Repeat("x", 4095) + "*/ ", mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
+		{"standard", long, mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
+		{"compatible", "/*M!999999\\- enable the sandbox mode */\n/*!40101 SET NAMES utf8mb4 */;\n",
+			start + "NO_AUTO_VALUE_ON_ZERO,NO_TABLE_OPTIONS" + end, start + "NO_AUTO_VALUE_ON_ZERO,NO_TABLE_OPTIONS,ALLOW_INVALID_DATES" + end},
+		{"mysql_header", "/*!50503 SET NAMES utf8mb4 */;\nSET @saved_log_bin = @@SESSION.sql_log_bin;\n", mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
+		{"sandbox", "/*!999999\\- enable the sandbox mode */\n", mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
+		{"user_set", "SET @export_started=NOW(); SET @note='; SET SQL_MODE=1';\n", mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
+		{"long_set", "", "SET SQL_MODE='ANSI'" + strings.Repeat(" ", 8300) + ";", "SET SQL_MODE='ANSI,ALLOW_INVALID_DATES'" + strings.Repeat(" ", 8300) + ";"},
+		{"versioned_user_set", "/*!50003 SET @export_started=NOW() */;\n", mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
+		{"two_sets", "", "SET SQL_MODE=''; SET @v=NOW(), @@session.sql_mode='ANSI';", "SET SQL_MODE='ALLOW_INVALID_DATES'; SET @v=NOW(), @@session.sql_mode='ANSI,ALLOW_INVALID_DATES';"},
+		{"saved_ansi", "SET @list='ANSI_QUOTES'; ", "SET sql_mode=@list; SET \"sql_mode\"='';", "SET sql_mode=@list; SET \"sql_mode\"='ALLOW_INVALID_DATES';"},
+		{"expression", "", "SET sql_mode=CONCAT(@@sql_mode, ',ANSI');", "SET sql_mode=CONCAT(@@sql_mode, ',ANSI');"},
+		{"strict", "SET NAMES utf8mb4;\n", start + "STRICT_TRANS_TABLES,NO_AUTO_VALUE_ON_ZERO" + end + " \t",
+			start + "STRICT_TRANS_TABLES,NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end + " \t"},
+		{"plain", "", "SET SESSION sql_mode = 'STRICT_TRANS_TABLES';", "SET SESSION sql_mode = 'STRICT_TRANS_TABLES,ALLOW_INVALID_DATES';"},
+		{"prepared_compact", "", fallback + table, fallback + table},
+		{"empty", "", start + end, start + "ALLOW_INVALID_DATES" + end},
+		{"already_enabled", "", start + "allow_invalid_dates,ANSI" + end, start + "allow_invalid_dates,ANSI" + end},
+		{"compact", "", table, fallback + table},
+		{"comment_body", "/*" + strings.Repeat("c", 8191) + "\n" + mode + "\n", table, fallback + table},
+		{"routine_first", "", routine, fallback + routine},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body := "\r\n" + table + "INSERT INTO ktvs_options VALUES ('mode',\"begin\n" + mode + "\nend\");\n" + routine
+			input := c.prefix + c.input + body
+			want := c.prefix + c.want + body
+			dir := t.TempDir()
+			path := createSQL(t, dir, input)
+			log, err := os.CreateTemp(dir, "restore-log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := os.Stderr
+			os.Stderr = log
+			defer func() { os.Stderr = old; log.Close() }()
+			stubServer(t, &server{replay: func(_ context.Context, stdin io.Reader) error {
+				if _, err := readPreamble(stdin); err != nil {
+					return err
+				}
+				got, err := io.ReadAll(stdin)
+				if string(got) != want {
+					t.Error("restore changed the wrong SQL bytes")
+				}
+				return err
+			}})
+			if err := RestoreDatabase(context.Background(), path, "kvs-mariadb", nil); err != nil {
+				t.Fatal(err)
+			}
+			// Exercise the setup pipeline with exactly the same bytes and oracle.
+			got, setupLog := prepareSetupDumpWithLog(t, input)
+			restoreLog, err := os.ReadFile(log.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, warnings := range []string{string(restoreLog), setupLog} {
+				if strings.Contains(warnings, "Invalid dates may be stored as zero.") != (c.name == "expression" || c.name == "saved_ansi") {
+					t.Errorf("unexpected header warning: %q", warnings)
+				}
+			}
+			_, prepared, ok := strings.Cut(got, "/*M!110300 SET SESSION character_set_collations='' */;\n")
+			if !ok || !strings.HasPrefix(prepared, want+"\n-- kvs-install import\n") {
+				t.Error("setup changed the wrong SQL bytes")
+			}
+		})
+	}
+}
+
+func prepareSetupDump(t *testing.T, input string) string {
+	t.Helper()
+	sql, _ := prepareSetupDumpWithLog(t, input)
+	return sql
+}
+
+func prepareSetupDumpWithLog(t *testing.T, input string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "in.sql")
+	out := filepath.Join(dir, "out.sql")
+	if err := os.WriteFile(dump, []byte(input), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-c", `source ../../../docker/lib/import.sh && import_prepare_dump "$1" ktvs_ 7.0.2 /site /site "$2" token`, "_", dump, out)
+	log, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("setup: %v: %s", err, log)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(got), string(log)
+}
+
 func TestRestoreDatabaseNoticesAnIncompleteReplay(t *testing.T) {
 	path := createSQL(t, t.TempDir(), strings.Repeat("INSERT INTO t VALUES (1);\n", 1000))
 	stubServer(t, &server{replay: func(ctx context.Context, stdin io.Reader) error {
-		if _, err := readPreamble(stdin); err != nil {
+		if _, err := readCompactPreamble(stdin); err != nil {
 			return err
 		}
 		_, err := io.ReadFull(stdin, make([]byte, 100))
@@ -1194,7 +1314,7 @@ func TestReadsTheEarlierLayout(t *testing.T) {
 	path := writeTar(t, dir, "backup-0.1.0-20260924-033804.tar", [][2]string{{metaName, string(meta)}, {".env", "DOMAIN=example.test\n"}, {dumpName, dump.String()}})
 	var replayed bytes.Buffer
 	stubServer(t, &server{replay: func(ctx context.Context, stdin io.Reader) error {
-		if _, err := readPreamble(stdin); err != nil {
+		if _, err := readCompactPreamble(stdin); err != nil {
 			return err
 		}
 		_, err := io.Copy(&replayed, stdin)

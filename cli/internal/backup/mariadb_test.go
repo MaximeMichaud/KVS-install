@@ -391,6 +391,8 @@ SELECT 'video', video_id, title FROM ktvs_videos ORDER BY video_id;
 SELECT 'comment', comment_id, video_id, body FROM ktvs_comments ORDER BY comment_id;
 SELECT 'history', id, title, row_start, row_end FROM ktvs_versions FOR SYSTEM_TIME ALL ORDER BY id, row_start;
 SELECT 'current', id, title FROM ktvs_versions ORDER BY id;
+SELECT 'dates', id, day_value, time_value FROM ktvs_dates;
+SELECT 'routine bytes', HEX(ktvs_mode_text());
 SELECT 'next id', NEXTVAL(ktvs_ids);
 SHOW GRANTS FOR 'site'@'%';
 `)
@@ -412,9 +414,16 @@ CREATE VIEW ktvs_titles AS SELECT video_id, title FROM ktvs_videos;
 CREATE TRIGGER ktvs_videos_title BEFORE INSERT ON ktvs_videos FOR EACH ROW SET NEW.title = TRIM(NEW.title);
 CREATE PROCEDURE ktvs_count() SELECT COUNT(*) FROM ktvs_videos;
 CREATE FUNCTION ktvs_double(n INT) RETURNS INT DETERMINISTIC RETURN n * 2;
+CREATE TABLE ktvs_options (variable VARCHAR(64) PRIMARY KEY, value TEXT);
+CREATE FUNCTION ktvs_mode_text() RETURNS TEXT DETERMINISTIC RETURN "start
+/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+end";
 CREATE EVENT ktvs_cleanup ON SCHEDULE EVERY 1 DAY DO DELETE FROM ktvs_comments WHERE comment_id < 0;
 INSERT INTO ktvs_videos VALUES (1, ' first 😀 '), (2, 'second ✓');
 INSERT INTO ktvs_comments VALUES (1, 1, 'nice'), (2, 2, 'great');
+CREATE TABLE ktvs_dates (id INT AUTO_INCREMENT PRIMARY KEY, day_value DATE, time_value DATETIME);
+SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES';
+INSERT INTO ktvs_dates VALUES (0, '2021-02-31', '2021-02-30 08:00:00');
 CREATE TABLE ktvs_versions (id INT PRIMARY KEY, title VARCHAR(100)) ENGINE=InnoDB WITH SYSTEM VERSIONING;
 SET timestamp = 1700000000;
 INSERT INTO ktvs_versions VALUES (1, 'old title'), (2, 'deleted title');
@@ -450,7 +459,20 @@ DELETE FROM ktvs_versions WHERE id = 2;
 			t.Errorf("the dump holds %q: it is not the dump of the site alone", strings.TrimSpace(unwanted))
 		}
 	}
+	// Replay the same real dump through setup as well. HEX compares every
+	// byte of the value, including embedded newlines in the routine.
+	const query = "SELECT HEX(ktvs_mode_text());"
+	wantText := inSite(t, query)
+	asRoot(t, "CREATE DATABASE setup_replay;")
+	t.Cleanup(func() { asRoot(t, "DROP DATABASE setup_replay;") })
+	if got := asRoot(t, "USE setup_replay;\n"+prepareSetupDump(t, sql)+"\n"+query); got != wantText {
+		t.Fatalf("setup changed the routine result: %q, want %q", got, wantText)
+	}
+
 	before := siteSnapshot(t)
+	if !strings.Contains(before, "dates\t0\t2021-02-31\t2021-02-30 08:00:00") {
+		t.Fatalf("the source lost its zero ID or invalid dates:\n%s", before)
+	}
 	if !strings.Contains(before, "first 😀") {
 		t.Fatalf("the trigger did not run or the text was mangled:\n%s", before)
 	}

@@ -955,6 +955,66 @@ test_view_bodies_lose_the_old_database_name() {
     pass "view bodies lose the old database name"
 }
 
+# shellcheck disable=SC2034,SC2329  # Variables and stubs for the sourced questionnaire.
+test_sql_import_checks_perl_before_confirmation() {
+    local kind log="$TMP_ROOT/missing-perl.log"
+    for kind in archive directory remote; do
+        if (
+            # shellcheck source=/dev/null
+            source <(sed -n '/^select_import_source() {$/,/^}$/p' "$REPO_ROOT/docker/setup.sh")
+            HEADLESS=y IMPORT_MODE=true IMPORT_SOURCE=$kind CYAN='' NC=''
+            import_check_completed() { :; }
+            import_inspect_archive() { IMPORT_ARCHIVE_DUMP=export.sql.gz; }
+            import_inspect_directory() { IMPORT_DB_DUMP=export.sql; }
+            import_inspect_remote() { IMPORT_REMOTE_DATABASE_FORMAT=sql; }
+            import_check_kvs_archive_version() { echo continued; exit 0; }
+            PATH="$TMP_ROOT/empty-path" select_import_source
+        ) > "$log" 2>&1; then
+            fail "$kind SQL import continued without Perl"
+        fi
+        grep -Fq 'Install the perl package' "$log" || fail "$kind SQL preflight must name the package"
+    done
+    # A remote native export can become SQL once the target series is selected.
+    local fallback="$TMP_ROOT/format-check.sh"
+    sed -n '/^choose_mariadb_version$/,/^fi$/p' "$REPO_ROOT/docker/setup.sh" > "$fallback"
+    if (
+        choose_mariadb_version() { MARIADB_VERSION=11.4; }
+        # shellcheck source=/dev/null
+        source <(sed -n '/^import_native_target_supported() {$/,/^}$/p' "$REPO_ROOT/docker/setup.sh")
+        IMPORT_SOURCE=remote IMPORT_REMOTE_DATABASE_FORMAT=directory IMPORT_DATABASE_FORMAT=auto
+        # shellcheck source=/dev/null
+        PATH="$TMP_ROOT/empty-path" source "$fallback"
+    ) > "$log" 2>&1; then
+        fail 'the SQL fallback on an older MariaDB target needs Perl'
+    fi
+    grep -Fq 'Install the perl package' "$log" || fail 'SQL fallback must name the missing package'
+    if PATH="$TMP_ROOT/empty-path" import_prepare_dump unused ktvs_ 7.0.2 /site /site "$TMP_ROOT/out" token 2>"$log"; then
+        fail 'standalone SQL preparation continued without Perl'
+    fi
+    grep -Fq 'Install the perl package' "$log" || fail 'check for Perl before standalone dump inspection'
+    pass 'SQL imports check the host Perl package before preparation or transfer'
+}
+
+test_dump_mode_preserves_invalid_dates_and_zero_ids() {
+    local dump="$TMP_ROOT/mode.sql" prepared="$TMP_ROOT/prepared-mode.sql"
+    local save="/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;"
+    local restore='/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;'
+    local row="INSERT INTO \`ktvs_options\` VALUES ('mode',\"$save\");"
+
+    printf '%s\r\n' "$save" > "$dump"
+    make_dump "$dump.body" yes
+    cat "$dump.body" >> "$dump"
+    printf '%s\r\n' "$row" "$restore" >> "$dump"
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /site /site "$prepared" token >/dev/null
+    grep -Fxq "${save/NO_AUTO_VALUE_ON_ZERO/NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES}"$'\r' "$prepared" ||
+        fail 'the dump session must keep explicit zero IDs and invalid dates'
+    grep -Fxq "$row"$'\r' "$prepared" || fail 'SQL mode text in a row must survive'
+    grep -Fxq "$restore"$'\r' "$prepared" || fail 'the dump must restore the original SQL mode'
+    pass 'the dump mode preserves invalid dates and zero IDs'
+}
+
+test_sql_import_checks_perl_before_confirmation
+test_dump_mode_preserves_invalid_dates_and_zero_ids
 test_php_config_values_are_read_as_kvs_writes_them
 test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip

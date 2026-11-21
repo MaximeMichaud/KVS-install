@@ -10,6 +10,8 @@
 # stdout, so setup.sh and the standalone installer can share them and the
 # tests can run them alone.
 
+IMPORT_SQL_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+
 # Print the value of $config['<key>'] from a KVS PHP config file read on
 # stdin, as written by KVS: $config['project_path']="/var/www/kvs";
 import_php_config_value() {
@@ -388,6 +390,12 @@ import_view_database_qualifier() {
     '
 }
 
+import_require_perl() {
+    command -v perl >/dev/null 2>&1 && return 0
+    echo 'ERROR: SQL import requires Perl on the setup host. Install the perl package and run setup again.' >&2
+    return 1
+}
+
 # import_prepare_dump <dump> <table prefix> <KVS version> <old project path> <new project path> <output> <token>
 # Write the dump the MariaDB init directory will replay: CREATE DATABASE,
 # ALTER DATABASE and USE statements dropped (the init runs inside the
@@ -412,6 +420,7 @@ import_prepare_dump() {
     local token="$7"
     local inspection tables initial statements databases
 
+    import_require_perl || return 1
     inspection=${8:-}
     if [ -z "$inspection" ]; then
         inspection=$(import_inspect_dump "$dump" "$prefix") || return 1
@@ -469,7 +478,7 @@ import_prepare_dump() {
             # knew several servers (one UUID set per line, up to the semicolon).
             # The caller checks this function conditionally, disabling errexit.
             # Stop on read/filter failures before appending a completion marker.
-            import_dump_cat "$dump" | import_view_database_qualifier | sed -E -e '/^(CREATE DATABASE|ALTER DATABASE|USE )/d' \
+            import_dump_cat "$dump" | perl "$IMPORT_SQL_LIB_DIR/prepare-dump.pl" | import_view_database_qualifier | sed -E -e '/^(CREATE DATABASE|ALTER DATABASE|USE )/d' \
                 -e '/^SET @@(GLOBAL|SESSION)\.GTID_PURGED/{' -e ':gtid' -e '/;[[:space:]]*$/!{' -e 'N' -e 'b gtid' -e '}' -e 'd' -e '}' \
                 -e '/^SET @@(GLOBAL|SESSION)\.SQL_LOG_BIN/d' -e '/^INSERT /!s/DEFINER=`[^`]*`@`[^`]*`//g' |
                 import_innodb_row_format - || exit 1

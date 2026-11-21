@@ -2581,6 +2581,11 @@ select_import_source() {
         directory) import_inspect_directory ;;
         remote) import_inspect_remote ;;
     esac
+    case "$IMPORT_SOURCE" in
+        archive) import_is_native_dump "${IMPORT_ARCHIVE_DUMP:-}" || import_require_perl || exit 1 ;;
+        directory) import_is_native_dump "${IMPORT_DB_DUMP:-}" || import_require_perl || exit 1 ;;
+        remote) [ "${IMPORT_REMOTE_DATABASE_FORMAT:-sql}" = directory ] || import_require_perl || exit 1 ;;
+    esac
     import_check_kvs_archive_version
     # Before the operator is asked to confirm, and before .env records the
     # source: a site this stack cannot run stops here.
@@ -5472,6 +5477,11 @@ choose_mariadb_version() {
     fi
 }
 choose_mariadb_version
+# A native SSH export in auto mode falls back to SQL on older targets.
+if [ "$IMPORT_SOURCE" = remote ] && [ "$IMPORT_REMOTE_DATABASE_FORMAT" = directory ] &&
+    [ "$IMPORT_DATABASE_FORMAT" = auto ] && ! import_native_target_supported; then
+    import_require_perl || exit 1
+fi
 
 # Check for KVS archive first (needed for PHP version detection)
 echo ""
