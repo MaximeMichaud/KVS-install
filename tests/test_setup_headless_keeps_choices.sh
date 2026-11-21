@@ -132,6 +132,11 @@ run_case fresh-headless headless '' none
 assert_env "$ENV_FILE" SITE_PREFIX kvs-mysite
 assert_env "$ENV_FILE" COMPOSE_PROJECT_NAME kvs-mysite
 assert_env "$ENV_FILE" SITE_PREFIX_LEGACY ''
+prefix=$(env_value "$ENV_FILE" SITE_PREFIX)
+for resource in "${prefix}-php" "${prefix}_mariadb-data"; do
+    grep -Fi 'default' "$WORK_DIR/.env.example" | grep -Fq "$resource" ||
+        fail "the documented default for mysite.test should name $resource"
+done
 echo "ok 1 - a fresh headless install gets the generated kvs-<domain> prefix"
 
 # 2. A headless re-run over an installed legacy site keeps every saved choice.
