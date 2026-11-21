@@ -48,6 +48,9 @@ func restoreCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			arg := ""
 			if len(args) == 1 {
+				if latest {
+					return usageError{errors.New("a backup argument and --latest cannot be used together")}
+				}
 				arg = args[0]
 			}
 			g := newGuard("the restore stops, and the database is left as it is", nil)

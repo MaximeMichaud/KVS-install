@@ -276,3 +276,11 @@ func TestRestoreSayerUnderQuiet(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreRejectsArchiveWithLatest(t *testing.T) {
+	root := newRoot(t, "docker/.env", "DOMAIN=example.com\n")
+	_, err := runKvsctl(t, "restore", "older.tar", "--latest", "--root", root)
+	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "--latest") || !strings.Contains(err.Error(), "backup") {
+		t.Fatalf("restore with both selectors: exit %d, %v", exitCode(err), err)
+	}
+}
