@@ -876,6 +876,47 @@ if grep -Fq 'Site reload.example started' "${TEST_DIR}/valid/reload-output.log";
     fail "the site was reported as started after a failed Caddy reload"
 fi
 
+# Both first runs may inspect a missing network. A failed create succeeds
+# only when the very same network is present on the second inspection.
+(
+    # shellcheck disable=SC2329  # Exported to the manager process.
+    docker() {
+        printf '%s\n' "$*" >> "$F4_LOG"
+        case "$*" in
+            'network inspect kvs-proxy') [ -f "$F4_NETWORK" ] ;;
+            'network create kvs-proxy')
+                if [ "$F4_WINNER" = yes ]; then : > "$F4_NETWORK"; fi
+                echo "create refused" >&2
+                return 29
+                ;;
+            *) return 64 ;;
+        esac
+    }
+    export -f docker
+    export F4_LOG="$TEST_DIR/f4.log" F4_NETWORK="$TEST_DIR/f4.network" F4_WINNER
+    f4_calls=$'network inspect kvs-proxy\nnetwork create kvs-proxy\nnetwork inspect kvs-proxy'
+    for F4_WINNER in yes no; do
+        rm -f "$F4_NETWORK"
+        : > "$F4_LOG"
+        f4_status=0
+        bash "$valid_script" proxy-network > "$TEST_DIR/f4.out" 2>&1 || f4_status=$?
+        if [ "$F4_WINNER" = yes ]; then
+            [ "$f4_status" -eq 0 ] || fail "proxy-network failed after another creator won"
+            if grep -Eq 'create refused|Created network:' "$TEST_DIR/f4.out"; then
+                fail "proxy-network reported a failed create or claimed the other creator's network"
+            fi
+        else
+            { [ "$f4_status" -eq 29 ] && grep -Fq 'create refused' "$TEST_DIR/f4.out"; } ||
+                fail "proxy-network lost the real create failure"
+        fi
+        [ "$(cat "$F4_LOG")" = "$f4_calls" ] || fail "unexpected network calls: $(cat "$F4_LOG")"
+    done
+    : > "$F4_NETWORK"
+    : > "$F4_LOG"
+    bash "$valid_script" proxy-network || fail "proxy-network refused an existing network"
+    [ "$(cat "$F4_LOG")" = 'network inspect kvs-proxy' ] || fail "recreated an existing network"
+)
+
 caddy_start_log="${TEST_DIR}/valid/caddy-start.log"
 ACME_EMAIL=ops@example.com \
 MOCK_NETWORK_EXISTS=false \

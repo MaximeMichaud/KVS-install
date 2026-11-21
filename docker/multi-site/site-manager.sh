@@ -404,8 +404,16 @@ ensure_proxy_network() {
     fi
 
     log_info "Creating shared proxy network..."
-    docker network create kvs-proxy >/dev/null
-    log_success "Created network: kvs-proxy"
+    local error status
+    if error=$(docker network create kvs-proxy 2>&1); then
+        log_success "Created network: kvs-proxy"
+    else
+        status=$?
+        # A concurrent first run may have created it after our inspection.
+        docker network inspect kvs-proxy >/dev/null 2>&1 && return 0
+        log_error "Could not create kvs-proxy: ${error}" >&2
+        return "$status"
+    fi
 }
 
 # Read unquoted addresses from single-line site headers in the route files,
