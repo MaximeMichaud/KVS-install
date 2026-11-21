@@ -1062,6 +1062,152 @@ grep -Fxq "compose -p kvs-a-test down -v --remove-orphans" "$r1_ok_log" ||
 [ ! -d "$r1_ok_site" ] ||
     fail "a legitimate remove kept the site directory"
 
+# An ordinary error or signal before publication must leave add retryable.
+create_fixture p2
+p2_root="$TEST_DIR/p2/docker/multi-site"
+p2_web="$TEST_DIR/p2/webroots"
+p2_route="$p2_root/caddy/sites/p2.example.caddy"
+p2_site="$p2_root/sites/p2.example"
+p2_add() { KVS_WEBROOT_BASE="$p2_web" bash "$p2_root/site-manager.sh" add p2.example; }
+# Signal both the manager and the command substitution immediately after
+# allocation, before the shell has recorded the newly owned path.
+for p2_step in site webroot route; do
+    case $p2_step in
+        site) p2_sig=TERM ;;
+        webroot) p2_sig=HUP ;;
+        route) p2_sig=INT ;;
+    esac
+    if (
+        # shellcheck disable=SC2329  # Exported to the manager process.
+        mkdir() {
+            command mkdir "$@" || return 1
+            case "${*: -1}" in
+                "$P2_TARGET") kill -s "$P2_SIGNAL" "$$" "$BASHPID" ;;
+            esac
+        }
+        # shellcheck disable=SC2329  # Exported to the manager process.
+        mktemp() {
+            local path
+            path=$(command mktemp "$@") || return 1
+            if [[ "$P2_STEP" = route && "$*" == *'.p2.example.caddy.'* ]]; then
+                kill -s "$P2_SIGNAL" "$$" "$BASHPID"
+            fi
+            printf '%s\n' "$path"
+        }
+        export -f mkdir mktemp
+        case $p2_step in site) P2_TARGET=$p2_site ;; webroot) P2_TARGET=$p2_web/p2.example ;; *) P2_TARGET='' ;; esac
+        export P2_TARGET P2_SIGNAL="$p2_sig" P2_STEP="$p2_step"
+        env --default-signal="$p2_sig" KVS_WEBROOT_BASE="$p2_web" bash "$p2_root/site-manager.sh" add p2.example
+    ) > "$TEST_DIR/p2/out" 2>&1; then
+        fail "add ignored $p2_sig during $p2_step allocation"
+    fi
+    if [ -e "$p2_site" ] || [ -e "$p2_web/p2.example" ] || [ -e "$p2_route" ] ||
+        compgen -G "$p2_root/caddy/sites/.p2.example.caddy.*" >/dev/null; then
+        fail "add lost track of files after $p2_sig during $p2_step allocation"
+    fi
+done
+# Another add can claim the site after the preflight and before mkdir.
+if (
+    # shellcheck disable=SC2329  # Exported to the manager process.
+    mkdir() {
+        if [ "${*: -1}" = "$P2_SITE" ]; then
+            command mkdir -- "$P2_SITE" && printf 'keep\n' > "$P2_SITE/.env"
+        fi
+        command mkdir "$@"
+    }
+    export -f mkdir
+    export P2_SITE="$p2_site"
+    p2_add
+) > "$TEST_DIR/p2/out" 2>&1; then
+    fail "add overwrote a directory claimed by a concurrent add"
+fi
+[ "$(cat "$p2_site/.env")" = keep ] || fail "rollback removed another add's files"
+rm "$p2_site/.env"
+rmdir "$p2_site"
+for p2_mode in error signal; do
+    if (
+        # shellcheck disable=SC2329  # Exported to the manager process.
+        chown() {
+            if [ "$P2_MODE" = signal ]; then kill -TERM "$BASHPID"; else return 17; fi
+        }
+        export -f chown
+        export P2_MODE="$p2_mode"
+        p2_add
+    ) > "$TEST_DIR/p2/out" 2>&1; then
+        fail "add accepted a failed or interrupted webroot setup"
+    fi
+    [ ! -e "$p2_site" ] && [ ! -e "$p2_route" ] && [ ! -e "$p2_web/p2.example" ] ||
+        fail "add left a partial site or webroot after $p2_mode"
+done
+# Keep files that appeared even in a webroot created by this add.
+(
+    # shellcheck disable=SC2329  # Exported to the manager process.
+    chown() { printf 'keep\n' > "$2/content"; return 17; }
+    export -f chown
+    p2_add
+) > "$TEST_DIR/p2/out" 2>&1 && fail "add ignored a webroot error"
+[ "$(cat "$p2_web/p2.example/content")" = keep ] || fail "rollback deleted newly arrived content"
+(
+    # shellcheck disable=SC2329  # Exported to the manager process.
+    chown() { return 17; }
+    export -f chown
+    p2_add
+) > "$TEST_DIR/p2/out" 2>&1 && fail "add accepted a failed chown of a kept webroot"
+[ "$(cat "$p2_web/p2.example/content")" = keep ] && [ ! -e "$p2_site" ] ||
+    fail "rollback removed existing content or prevented another add"
+# Interrupt the route rename on either side of publication. Before it,
+# every generated file must go. After it, the site and route are complete.
+for p2_when in before after; do
+    if (
+        # shellcheck disable=SC2329  # Exported to the manager process.
+        mv() {
+            if [ "${*: -1}" != "$P2_ROUTE" ]; then command mv "$@"; return; fi
+            if [ "$P2_WHEN" = after ]; then command mv "$@" || return 1; fi
+            kill -TERM "$BASHPID"
+        }
+        export -f mv
+        export P2_WHEN="$p2_when" P2_ROUTE="$p2_route"
+        p2_add
+    ) > "$TEST_DIR/p2/out" 2>&1; then
+        fail "the interrupted route rename returned success"
+    fi
+    if compgen -G "$p2_root/caddy/sites/.p2.example.caddy.*" >/dev/null; then
+        fail "interrupting route publication left a temporary route"
+    fi
+    if [ "$p2_when" = before ]; then
+        [ ! -e "$p2_site" ] && [ ! -e "$p2_route" ] || fail "interrupted add left its config"
+    else
+        [ -s "$p2_site/.env" ] && [ -s "$p2_site/docker-compose.yml" ] && [ -s "$p2_route" ] ||
+            fail "interrupted add discarded the site after publishing its route"
+    fi
+done
+for p2_mode in missing empty; do
+    rm -f "$p2_route"
+    [ "$p2_mode" != empty ] || : > "$p2_route"
+    : > "$TEST_DIR/p2/docker.log"
+    if MOCK_DOCKER_LOG="$TEST_DIR/p2/docker.log" KVS_WEBROOT_BASE="$p2_web" \
+        bash "$p2_root/site-manager.sh" start p2.example > "$TEST_DIR/p2/out" 2>&1; then
+        fail "start accepted the $p2_mode route"
+    fi
+    grep -Fq 'proxy-config p2.example' "$TEST_DIR/p2/out" && [ ! -s "$TEST_DIR/p2/docker.log" ] ||
+        fail "start touched Docker or omitted the repair command for a $p2_mode route"
+done
+
+KVS_WEBROOT_BASE="$p2_web" bash "$p2_root/site-manager.sh" proxy-config p2.example >/dev/null
+for p2_file in docker-compose.yml .env; do
+    mv "$p2_site/$p2_file" "$p2_site/held"
+    for p2_mode in missing empty; do
+        [ "$p2_mode" != empty ] || : > "$p2_site/$p2_file"
+        if MOCK_DOCKER_LOG="$TEST_DIR/p2/docker.log" bash "$p2_root/site-manager.sh" start p2.example \
+            > "$TEST_DIR/p2/out" 2>&1; then
+            fail "start accepted the $p2_mode $p2_file"
+        fi
+        { [ ! -s "$TEST_DIR/p2/docker.log" ] && grep -Fq "$p2_file" "$TEST_DIR/p2/out"; } ||
+            fail "start touched Docker or failed to name the $p2_mode $p2_file"
+    done
+    mv "$p2_site/held" "$p2_site/$p2_file"
+done
+
 # R2: a host two sites would both serve makes the Caddy config ambiguous, so
 # every reload fails and a restart takes all sites down. An add must refuse
 # such a host and leave no half-made site.
@@ -1439,29 +1585,18 @@ for r5_override in docker-compose.override.yml compose.override.yaml; do
         fail "R5: down -v did not load the volumes start loads with ${r5_override}: $(cat "${TEST_DIR}/${r5_case}/render.volumes")"
 done
 
-# An add that stops early leaves sites/<domain> without docker-compose.yml,
-# and without an .env when it stopped at the webroot. remove asked for a
-# project name, down -v had no compose file and add said the site exists.
-# remove now finds that nothing of the site runs and deletes the empty
-# directory, and add works again. The webroot base sits under a regular file,
-# which mkdir cannot create even as root.
+# An older add could leave an empty site. remove still recovers it.
 create_fixture r5_half
 r5_root="${TEST_DIR}/r5_half/docker/multi-site"
 r5_site="${r5_root}/sites/r5.example"
 r5_log="${TEST_DIR}/r5_half/docker.log"
-: > "${TEST_DIR}/r5_half/file"
-for r5_attempt in 1 2; do
-    set +e
-    KVS_WEBROOT_BASE="${TEST_DIR}/r5_half/file/www" \
-        bash "${r5_root}/site-manager.sh" add r5.example > "${TEST_DIR}/r5_half/add${r5_attempt}.out" 2>&1
-    r5_status=$?
-    set -e
-    [ "$r5_status" -ne 0 ] || fail "R5: add worked with a webroot it cannot create"
-done
-[ -d "$r5_site" ] && [ -z "$(ls -A "$r5_site")" ] ||
-    fail "R5: the add that stopped did not leave the empty site directory this case needs"
+mkdir -p "$r5_site"
+if KVS_WEBROOT_BASE="${TEST_DIR}/r5_half/webroots" bash "${r5_root}/site-manager.sh" add r5.example \
+    > "${TEST_DIR}/r5_half/add2.out" 2>&1; then
+    fail "R5: add replaced an existing site directory"
+fi
 grep -Fq "Run './site-manager.sh remove r5.example'" "${TEST_DIR}/r5_half/add2.out" ||
-    fail "R5: add of a half-created site did not point to remove: $(cat "${TEST_DIR}/r5_half/add2.out")"
+    fail "R5: add of a half-created site did not point to remove"
 : > "$r5_log"
 set +e
 MOCK_DOCKER_LOG="$r5_log" KVS_WEBROOT_BASE="${TEST_DIR}/r5_half/webroots" \

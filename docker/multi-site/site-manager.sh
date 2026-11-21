@@ -352,7 +352,8 @@ check_caddy_running() {
     fi
 }
 
-reload_caddy() {
+reload_caddy() (
+    lock_routes || return 1
     log_info "Reloading Caddy configuration..."
     # Force reprovisioning even when the route text is unchanged. Site
     # containers can receive a new Docker IP after recreation, and an
@@ -364,7 +365,7 @@ reload_caddy() {
         return 1
     fi
     log_success "Caddy reloaded"
-}
+)
 
 wait_for_caddy() {
     local attempt
@@ -391,12 +392,9 @@ ensure_proxy_network() {
     log_success "Created network: kvs-proxy"
 }
 
-# caddy_hosts_in_use prints every host the current site configs serve, one
-# per line and in lowercase, skipping the file named (the one about to be
-# rewritten). A Caddy site block starts with a line at column zero that ends
-# in "{" and lists one or more addresses, separated by commas or spaces; a
-# hand-written route may give an address a scheme, a port or capitals, which
-# are dropped or folded here. Used to refuse a host two sites would both claim.
+# Read unquoted addresses from single-line site headers in the route files,
+# skipping the file being rewritten. Compare hosts without scheme, port or
+# case distinctions. This line scan does not resolve Caddyfile imports.
 caddy_hosts_in_use() {
     local exclude="$1"
     local file
@@ -405,9 +403,34 @@ caddy_hosts_in_use() {
     for file in "$CADDY_SITES_DIR"/*.caddy; do
         [ -e "$file" ] || continue
         [ "$file" = "$exclude" ] && continue
-        awk '/^[^[:space:]#].*\{[[:space:]]*$/ {
+        awk '{
             line = $0
-            sub(/\{[[:space:]]*$/, "", line)
+            if (marker != "") {
+                # Caddy ends the body on the line that starts with the marker;
+                # the rest of that line holds ordinary tokens (HTML 200).
+                sub(/^[[:space:]]+/, "", line)
+                if (index(line, marker) != 1) next
+                line = substr(line, length(marker) + 1)
+                marker = ""
+            }
+            # Quoted directive arguments can contain literal braces and comments.
+            if (depth) gsub(/"([^"\\]|\\.)*"|`[^`]*`/, "arg", line)
+            sub(/(^|[[:space:]])#.*/, "", line)
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            # A heredoc body is literal, including comments and braces.
+            if (match(line, /(^|[[:space:]])<<[^[:space:]]+/)) {
+                marker = substr(line, RSTART, RLENGTH)
+                sub(/^[[:space:]]*<</, "", marker)
+                next
+            }
+            if (line == "}") {
+                if (depth) depth--
+                next
+            }
+            if (line !~ /(^|[[:space:]])\{$/) next
+            if (depth++ > 0) next
+            sub(/\{$/, "", line)
             gsub(/,/, " ", line)
             count = split(line, addresses, /[[:space:]]+/)
             for (i = 1; i <= count; i++) {
@@ -417,7 +440,12 @@ caddy_hosts_in_use() {
                 sub(/:[0-9]+$/, "", host)
                 if (host != "") print host
             }
-        }' "$file"
+        }' "$file" 2>/dev/null || {
+            # An independent remove may finish during the optimistic scan.
+            [ -e "$file" ] || continue
+            log_error "Could not read Caddy route: ${file}" >&2
+            return 1
+        }
     done
 }
 
@@ -489,7 +517,7 @@ caddy_route_hosts() {
     # every reload then fails and a restart takes all sites down. The www
     # redirect is a claimed host too, so a plain "a.example" (which also
     # serves www.a.example) and a later "www.a.example" collide.
-    in_use=$(caddy_hosts_in_use "${CADDY_SITES_DIR}/${domain}.caddy")
+    in_use=$(caddy_hosts_in_use "${CADDY_SITES_DIR}/${domain}.caddy") || return 1
     for host in "$canonical_host" "$alternate_host"; do
         [ -n "$host" ] || continue
         if grep -Fxq "$host" <<< "$in_use"; then
@@ -504,7 +532,7 @@ write_caddy_site_config() {
     local canonical_host
     local alternate_host=""
     local tls_directive=""
-    local temp_file
+    local temp_file="${5:-}"
     local write_failed=false
 
     caddy_route_hosts "$@" || return 1
@@ -515,7 +543,9 @@ write_caddy_site_config() {
     # own, because a block of writes only reports the status of its last
     # command (an "if" that exits 0 when the route has no www host).
     mkdir -p "$CADDY_SITES_DIR" || return 1
-    temp_file=$(mktemp "${CADDY_SITES_DIR}/.${domain}.caddy.XXXXXX") || return 1
+    if [ -z "$temp_file" ]; then
+        temp_file=$(mktemp "${CADDY_SITES_DIR}/.${domain}.caddy.XXXXXX") || return 1
+    fi
     cat > "$temp_file" << EOF || write_failed=true
 # KVS Site: ${domain}
 ${canonical_host} {
@@ -556,7 +586,8 @@ EOF
     fi
     if [ "$write_failed" = true ] ||
         ! mv -f "$temp_file" "${CADDY_SITES_DIR}/${domain}.caddy"; then
-        rm -f "$temp_file"
+        # add owns its temporary inode and checks it in its EXIT trap.
+        [ -n "${5:-}" ] || rm -f "$temp_file"
         log_error "Could not write the Caddy route for ${domain}"
         return 1
     fi
@@ -575,6 +606,8 @@ configure_primary_site() {
 
     validate_domain "$domain" || return 1
     validate_site_prefix "$site_prefix" || return 1
+    lock_site_directory "$SITES_DIR/$domain" || return 1
+    lock_routes || return 1
 
     validate_primary_site_file || return 1
     existing_domain=$(primary_site_value DOMAIN)
@@ -620,6 +653,8 @@ remove_primary_site() {
 
     validate_domain "$domain" || return 1
     validate_site_prefix "$site_prefix" || return 1
+    lock_site_directory "$SITES_DIR/$domain" || return 1
+    lock_routes || return 1
 
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "kvs-caddy"; then
         log_error "Stop Caddy before removing the primary route"
@@ -772,10 +807,52 @@ select_site_php() {
     log_info "New site: PHP ${php_version}, IONCUBE=${ioncube}"
 }
 
+# In a command substitution, ignore signals until mkdir has returned the
+# inode identity to its caller before the parent handles a pending signal.
+claim_add_directory() {
+    trap '' HUP INT TERM
+    mkdir -- "$1" && stat -c '%d:%i' -- "$1"
+}
+
+# The CLI's EXIT trap runs after the function locals have gone out of scope.
+# Keep only paths acquired by this add. Publishing the route commits the
+# site: even a signal immediately after the rename leaves a complete site.
+rollback_incomplete_add() {
+    local name original current committed=false
+    if [[ -n "$ADD_ROUTE_FD" && ! -e "$ADD_ROUTE_TEMP" && ! -L "$ADD_ROUTE" && -s "$ADD_ROUTE" &&
+        "$ADD_ROUTE" -ef "/dev/fd/$ADD_ROUTE_FD" ]]; then
+        committed=true
+    fi
+    if [[ -n "$ADD_ROUTE_TEMP" && ! -L "$ADD_ROUTE_TEMP" &&
+        ( -z "$ADD_ROUTE_FD" || "$ADD_ROUTE_TEMP" -ef "/dev/fd/$ADD_ROUTE_FD" ) ]]; then
+        rm -f -- "$ADD_ROUTE_TEMP"
+    fi
+    if [[ -n "$ADD_STAGE" && -d "$ADD_STAGE" ]]; then
+        for name in archive.zip .env docker-compose.yml; do
+            # stat without -L compares symlink inodes, including links to the
+            # same archive. The private hard link keeps the inode allocated.
+            if [[ $committed == false ]] &&
+                original=$(stat -c '%d:%i' -- "$ADD_STAGE/$name" 2>/dev/null) &&
+                current=$(stat -c '%d:%i' -- "/dev/fd/6/$name" 2>/dev/null) &&
+                [[ "$current" == "$original" ]]; then
+                rm -f -- "/dev/fd/6/$name"
+            fi
+            rm -f -- "$ADD_STAGE/$name"
+        done
+        rmdir -- "$ADD_STAGE"
+    fi
+    [[ $committed == false ]] || return 0
+    if [[ -n "$ADD_WEBROOT_ID" && "$ADD_WEBROOT_ID" == "$(stat -c '%d:%i' -- "$ADD_WEBROOT" 2>/dev/null)" ]]; then
+        rmdir -- "$ADD_WEBROOT" || log_warn "Keeping non-empty webroot: $ADD_WEBROOT"
+    fi
+    if [[ -n "$ADD_SITE_ID" && "$ADD_SITE_ID" == "$(stat -c '%d:%i' -- "$ADD_SITE" 2>/dev/null)" ]]; then
+        rmdir -- "$ADD_SITE" || log_warn "Keeping non-empty site directory: $ADD_SITE"
+    fi
+}
+
 add_site() {
     local domain="$1"
     validate_domain "$domain" || return 1
-    validate_primary_site_file || return 1
 
     local domain_safe
     domain_safe=$(domain_to_safe "$domain")
@@ -787,6 +864,9 @@ add_site() {
     local resolver="${SCRIPT_DIR}/../bin/resolve-bases.sh"
     local php_fpm_base php_cli_base
 
+    lock_site_directory "$site_dir" || return 1
+
+    validate_primary_site_file || return 1
     primary_domain=$(primary_site_value DOMAIN)
     if [ "$primary_domain" = "$domain" ]; then
         log_error "Domain ${domain} is reserved by the primary site"
@@ -844,20 +924,39 @@ add_site() {
 
     # Create site directory
     mkdir -p "$SITES_DIR" "$CADDY_SITES_DIR"
-    mkdir -p "${site_dir}"
+    ADD_SITE=$site_dir
+    ADD_SITE_ID=""
+    ADD_WEBROOT=$webroot
+    ADD_WEBROOT_ID=""
+    ADD_STAGE=""
+    ADD_ROUTE="${CADDY_SITES_DIR}/${domain}.caddy"
+    ADD_ROUTE_TEMP=""
+    ADD_ROUTE_FD=""
+    trap rollback_incomplete_add EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # mkdir without -p claims the name exclusively. The assignment records
+    # ownership before Bash handles a pending signal.
+    ADD_SITE_ID=$(claim_add_directory "$site_dir")
+    # Pin both directory inodes so a replacement cannot reuse their numbers.
+    exec 6<"$site_dir"
     log_success "Created site directory: ${site_dir}"
 
-    # Create webroot directory
-    local webroot_created=false
-    [ -e "$webroot" ] || webroot_created=true
-    mkdir -p "${webroot}"
+    mkdir -p -- "$WEBROOT_BASE"
+    if [ ! -d "$webroot" ]; then
+        ADD_WEBROOT_ID=$(claim_add_directory "$webroot")
+        exec 7<"$webroot"
+    fi
     chown 1000:1000 "${webroot}"
     log_success "Created webroot: ${webroot}"
 
     # A file bind also limits an older init image to the selected licence.
     # Keep the resolved path in a symlink so shell and Compose quoting cannot
     # reinterpret a special character in the host archive path.
-    ln -s -- "$site_archive" "$site_dir/archive.zip"
+    ADD_STAGE=$(trap '' HUP INT TERM; mktemp -d -- "/dev/fd/6/.add.XXXXXX")
+    ln -s -- "$site_archive" "$ADD_STAGE/archive.zip"
+    ln -PT -- "$ADD_STAGE/archive.zip" "$site_dir/archive.zip"
 
     # Generate .env file. The table prefix is the one of the archive's
     # setup.php (ktvs_ for every archive KVS ships); the init reads it from
@@ -866,7 +965,7 @@ add_site() {
     tables_prefix=$(archive_tables_prefix "$site_archive")
     (
         umask 077
-        cat > "${site_dir}/.env" << EOF
+        cat > "$ADD_STAGE/.env" << EOF
 # Site configuration for ${domain}
 DOMAIN=${domain}
 SITE_PREFIX=${site_prefix}
@@ -906,21 +1005,24 @@ COMPOSE_PROFILES=dragonfly
 CACHE_MEMORY=512
 EOF
     )
+    ln -T -- "$ADD_STAGE/.env" "$site_dir/.env"
     log_success "Generated .env file"
 
-    cp "${SCRIPT_DIR}/docker-compose.site.yml.template" "${site_dir}/docker-compose.yml"
+    cp "${SCRIPT_DIR}/docker-compose.site.yml.template" "$ADD_STAGE/docker-compose.yml"
+    ln -T -- "$ADD_STAGE/docker-compose.yml" "$site_dir/docker-compose.yml"
     log_success "Created docker-compose.yml"
 
-    # Generate Caddy site config. A route that cannot be written leaves no
-    # half-made site behind: the site directory goes, and the webroot too
-    # when this add created it, so the add can be retried. A webroot that
-    # existed before (one remove kept) is left as it was.
-    if ! write_caddy_site_config "$domain" "${CADDY_TLS_MODE:-public}" false auto; then
-        rm -rf "${site_dir}"
-        [ "$webroot_created" = false ] || rm -rf "${webroot}"
-        log_error "Removed the half-created site ${domain}"
-        return 1
-    fi
+    ADD_ROUTE_TEMP=$(
+        trap '' HUP INT TERM
+        mktemp "${CADDY_SITES_DIR}/.${domain}.caddy.XXXXXX"
+    )
+    # Keep the temporary inode open across rename and signal delivery.
+    exec {ADD_ROUTE_FD}<"$ADD_ROUTE_TEMP"
+    lock_routes || return 1
+    write_caddy_site_config "$domain" "${CADDY_TLS_MODE:-public}" false auto "$ADD_ROUTE_TEMP"
+    exec 8<&-
+    rollback_incomplete_add
+    trap - EXIT HUP INT TERM
 
     echo ""
     log_success "Site ${domain} created successfully!"
@@ -946,6 +1048,27 @@ STOPPED_CRON_SITE=""
 stopped_cron_notice() {
     [ -n "$STOPPED_CRON_SITE" ] || return 0
     log_warn "cron of ${STOPPED_CRON_SITE} is stopped: docker compose start cron in ${SITES_DIR}/${STOPPED_CRON_SITE}, or re-run ./site-manager.sh start ${STOPPED_CRON_SITE}"
+}
+
+# Acquire the domain lock first, when the command has a domain. Hold this
+# second lock while checking, publishing, removing or reloading routes.
+lock_routes() {
+    local dir="$SCRIPT_DIR/.locks/.routes"
+    mkdir -p -- "$dir" || return 1
+    exec 8<"$dir" || return 1
+    flock -x 8
+}
+
+# A remove can unlink the whole project. Keep one directory inode per domain
+# beside the projects for the lifetime of all current and future commands.
+lock_site_directory() {
+    local lock_dir="$SCRIPT_DIR/.locks/${1##*/}"
+    mkdir -p -- "$lock_dir" || return 1
+    exec 9<"$lock_dir" || return 1
+    flock -n 9 || {
+        log_error "Could not lock $1 for this site operation. Retry after the other command exits."
+        return 1
+    }
 }
 
 # Inspect the effective bind, including local overrides and Compose interpolation.
@@ -1011,11 +1134,24 @@ start_site() {
 
     local site_dir="${SITES_DIR}/${domain}"
 
+    lock_site_directory "$site_dir" || return 1
+
     if [ ! -d "$site_dir" ]; then
         log_error "Site ${domain} does not exist. Create it first with: ./site-manager.sh add ${domain}"
         exit 1
     fi
 
+    local file route="${CADDY_SITES_DIR}/${domain}.caddy"
+    for file in docker-compose.yml .env; do
+        if [ ! -f "$site_dir/$file" ] || [ ! -s "$site_dir/$file" ]; then
+            log_error "Incomplete site: restore the missing or empty $site_dir/$file before starting"
+            return 1
+        fi
+    done
+    if [ ! -f "$route" ] || [ ! -s "$route" ]; then
+        log_error "Missing or empty Caddy route: ${route}. Restore it or run ./site-manager.sh proxy-config ${domain} with the site's TLS and www settings"
+        return 1
+    fi
     check_caddy_running
 
     log_info "Starting site: ${domain}"
@@ -1116,6 +1252,8 @@ stop_site() {
 
     local site_dir="${SITES_DIR}/${domain}"
 
+    lock_site_directory "$site_dir" || return 1
+
     if [ ! -d "$site_dir" ]; then
         log_error "Site ${domain} does not exist"
         exit 1
@@ -1189,6 +1327,8 @@ remove_site() {
     local site_dir="${SITES_DIR}/${domain}"
     local caddy_config="${CADDY_SITES_DIR}/${domain}.caddy"
     local webroot="${WEBROOT_BASE}/${domain}"
+
+    lock_site_directory "$site_dir" || return 1
 
     if [ ! -d "$site_dir" ]; then
         log_error "Site ${domain} does not exist"
@@ -1296,7 +1436,9 @@ remove_site() {
     fi
 
     # Remove Caddy config
+    lock_routes || return 1
     rm -f "$caddy_config"
+    exec 8<&-
     log_success "Removed Caddy config"
 
     # Remove site directory
@@ -1331,13 +1473,14 @@ list_sites() {
     echo -e "${CYAN}=== KVS Sites ===${NC}"
     echo ""
 
-    if [ ! -d "$SITES_DIR" ] || [ -z "$(ls -A "$SITES_DIR" 2>/dev/null)" ]; then
+    local -a site_dirs=("$SITES_DIR"/*/)
+    if [ ! -d "${site_dirs[0]:-}" ]; then
         log_info "No sites configured yet"
         echo "Add a site with: ./site-manager.sh add <domain>"
         return
     fi
 
-    for site_dir in "$SITES_DIR"/*/; do
+    for site_dir in "${site_dirs[@]}"; do
         if [ -d "$site_dir" ]; then
             local domain
             domain=$(basename "$site_dir")
@@ -1563,6 +1706,9 @@ case "${1:-}" in
         ;;
     proxy-config)
         [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
+        validate_domain "$2" || exit 1
+        lock_site_directory "$SITES_DIR/$2" || exit 1
+        lock_routes || exit 1
         write_caddy_site_config "$2" "${3:-public}" "${4:-false}" "${5:-auto}"
         ;;
     primary-config)
