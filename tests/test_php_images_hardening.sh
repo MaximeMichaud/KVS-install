@@ -245,6 +245,48 @@ test_both_images_install_the_same_yt_dlp() {
     pass "both images install the same checked yt-dlp release, the directory build of their architecture"
 }
 
+check_media_copies() {
+    python3 "$ROOT_DIR/tests/check_media_copies.py" "$1" "$2"
+}
+
+test_media_files_match_in_both_build_contexts() {
+    check_media_copies "$ROOT_DIR/docker/php" "$ROOT_DIR/docker/cron"
+    pass "both images copy identical files to their shared destinations"
+}
+
+test_media_copy_fixtures() {
+    local php_context="$TEST_DIR/media/php" cron_context="$TEST_DIR/media/cron"
+    local dest=/usr/local/share/media-security-policy.xml
+    local context
+
+    mkdir -p "$php_context" "$cron_context"
+    printf 'policy A\n' > "$php_context/media-security-policy.xml"
+    cp "$php_context/media-security-policy.xml" "$cron_context/"
+    printf 'COPY --chmod=0644 ["media-security-policy.xml", "%s/"]\n' "${dest%/*}" > "$php_context/Dockerfile"
+    printf 'COPY renamed.xml %s\n' "$dest" > "$cron_context/Dockerfile"
+    echo 'COPY --chown=0:0 --from=ffmpeg-build /source/ /archive/' >> "$cron_context/Dockerfile"
+    cp "$cron_context/media-security-policy.xml" "$cron_context/renamed.xml"
+    check_media_copies "$php_context" "$cron_context" || fail "identical policies with different names must match"
+
+    printf 'policy B\n' > "$cron_context/renamed.xml"
+    if check_media_copies "$php_context" "$cron_context" > "$TEST_DIR/error" 2>&1; then
+        fail "accepted a divergent renamed policy"
+    fi
+    grep -Fq "$dest" "$TEST_DIR/error" || fail "missing destination in the policy mismatch"
+    cp "$cron_context/media-security-policy.xml" "$cron_context/renamed.xml"
+
+    for context in "$php_context" "$cron_context"; do
+        cp "$context/Dockerfile" "$context/original"
+        echo 'COPY media-security-policy.xml /usr/local/share/extra-policy.xml' >> "$context/Dockerfile"
+        if check_media_copies "$php_context" "$cron_context" > "$TEST_DIR/error" 2>&1; then
+            fail "accepted a media file copied only by ${context##*/}"
+        fi
+        grep -Fq '/usr/local/share/extra-policy.xml' "$TEST_DIR/error" || fail "missing one-sided destination"
+        mv "$context/original" "$context/Dockerfile"
+    done
+    pass "the parity check rejects a changed renamed policy and a one-sided COPY"
+}
+
 test_pecl_extensions_are_built_from_checked_tarballs() {
     local dockerfile
     local run
@@ -886,6 +928,8 @@ test_setup_takes_back_the_jit_block_it_appended() {
     pass "setup.sh restores php.ini when it ends with the JIT block it appended, and only then"
 }
 
+test_media_files_match_in_both_build_contexts
+test_media_copy_fixtures
 test_both_images_pin_a_download_per_architecture
 test_ioncube_loader_is_pinned_and_checked
 test_both_images_build_the_ftp_extension
