@@ -3139,7 +3139,7 @@ EOF
                 status=0
                 run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
                     --yes --gzip --no-size --database-format sql --output "$output" \
-                    "${options[@]}" "$site" || status=$?
+                    ${options[@]+"${options[@]}"} "$site" || status=$?
                 if [ "$failure" != none ]; then
                     [ "$status" -ne 0 ] || fail "$kind accepted a $failure failure"
                     if [ "$present" = yes ]; then
@@ -3174,6 +3174,10 @@ EOF
 test_interrupted_exports_stop_their_database_processes() {
     local work="$TMP_ROOT/cancellation" site="$TMP_ROOT/cancellation-site"
 
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "skip - interrupted export cleanup requires python3"
+        return 0
+    fi
     mkdir -p "$work/bin"
     make_site "$site"
     cat > "$work/bin/mariadb-dump" <<'EOF'
@@ -3288,7 +3292,7 @@ test_exports_refuse_non_regular_destinations() {
             # Bound a regression that tries to open the FIFO for writing.
             PATH="$STUB_BIN:$MIN_BIN" "$(command -v timeout)" 10 "$BASH" "$EXPORT_SCRIPT" \
                 --yes --gzip --no-size --database-format sql --output "$work/$destination" \
-                "${options[@]}" "$site" > "$work/stdout" 2> "$work/stderr" < /dev/null || status=$?
+                ${options[@]+"${options[@]}"} "$site" > "$work/stdout" 2> "$work/stderr" < /dev/null || status=$?
             [ "$status" -eq 1 ] || fail "$kind did not promptly refuse a $destination output"
             grep -Fq 'is not a regular output file' "$work/stderr" ||
                 fail "$kind did not explain the invalid output type"
@@ -3308,6 +3312,10 @@ test_export_replacements_preserve_access_acls() {
     local kind
     local -a options
 
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "skip - replacement access ACLs requires python3"
+        return 0
+    fi
     make_site "$site"
     mkdir -p "$work"
     for kind in dump archive; do
@@ -3331,7 +3339,7 @@ pathlib.Path(sys.argv[2]).write_bytes(os.getxattr(sys.argv[1], "system.posix_acl
 PY
         run_export "$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
             --yes --gzip --no-size --database-format sql --output "$work/export" \
-            "${options[@]}" "$site" || fail "$kind replacement with an ACL failed"
+            ${options[@]+"${options[@]}"} "$site" || fail "$kind replacement with an ACL failed"
         python3 - "$work/export" "$work/acl" <<'PY' || fail "$kind replacement changed its access ACL"
 import os
 import pathlib
@@ -3345,7 +3353,7 @@ PY
             chmod 200 "$work/write-only"
             if run_export "$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
                 --yes --gzip --no-size --database-format sql --output "$work/write-only" \
-                "${options[@]}" "$site"; then
+                ${options[@]+"${options[@]}"} "$site"; then
                 fail "$kind replaced an output whose permissions could not be copied"
             fi
             [ "$(stat -c %a "$work/write-only")" = 200 ] || fail "$kind changed the unreadable output mode"
@@ -3374,7 +3382,7 @@ test_a_fresh_export_is_created_private() {
             umask 022
             run_export "$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
                 --yes --gzip --no-size --database-format sql --output "$work/export" \
-                "${options[@]}" "$site"
+                ${options[@]+"${options[@]}"} "$site"
         ) || fail "a fresh $kind export failed: $(cat "$work/stderr")"
         mode=$(stat -c %a "$work/export")
         [ "$mode" = 600 ] || fail "a fresh $kind export must be mode 600, got $mode"
@@ -3409,7 +3417,7 @@ test_an_output_another_user_owns_is_not_inherited() {
             PATH=$EXPORT_PATH "$BASH" "$0" "$@" > "$work/stdout" 2> "$work/stderr" < /dev/null || exit $?
             stat -c "%u:%g %a" "$work/export"
         ' "$EXPORT_SCRIPT" "$work" --yes --gzip --no-size --database-format sql --output "$work/export" \
-            "${options[@]}" "$site") || fail "a $kind export over another user's output failed: $(cat "$work/stderr")"
+            ${options[@]+"${options[@]}"} "$site") || fail "a $kind export over another user's output failed: $(cat "$work/stderr")"
         [ "$got" = "0:0 600" ] ||
             fail "a $kind export over another user's output must be ours and mode 600, got $got"
     done
@@ -3421,7 +3429,7 @@ test_array_expansions_are_guarded_for_old_bash() {
 
     # bash 4.2 (CentOS 7) and 4.3 (Ubuntu 16.04, Debian 8) stop on "${a[@]}"
     # of an empty array under set -u; the guarded form expands to nothing.
-    bare=$(grep -nE '^[^#]*(^|[^+])"\$\{[A-Za-z_][A-Za-z_0-9]*\[@\]\}"' "$EXPORT_SCRIPT" || true)
+    bare=$(grep -nE '^[^#]*(^|[^+])"\$\{[A-Za-z_][A-Za-z_0-9]*\[@\]\}"' "$EXPORT_SCRIPT" "$REPO_ROOT/tests/test_kvs_export.sh" || true)
     [ -z "$bare" ] || fail "array expansions must be written \${a[@]+\"\${a[@]}\"} for bash 4.2 and 4.3: $bare"
     pass "array expansions are guarded for old bash"
 }

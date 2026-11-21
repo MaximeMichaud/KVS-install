@@ -76,6 +76,12 @@ jobs:
           CI: "true"
         run: .github/scripts/as-uid-1000.sh tests/run.sh
 
+      # CentOS 7 ships Bash 4.2, the oldest the exporter supports. As uid
+      # 1000, like the suites above, and on a tmpfs, whose directory order
+      # the link listings of the suite were written against.
+      - name: exporter suite on Bash 4.2
+        run: docker run --rm --network none --user 1000:1000 --tmpfs /tmp:rw,exec,size=1g -v "$PWD:/src:ro" -w /src centos:7.9.2009@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4 bash tests/test_kvs_export.sh
+
   # The integration suites, on real containers: nginx, Caddy, MariaDB,
   # Manticore and PHP-FPM on internal networks, with synthetic sites. They
   # run on the images docker/images.lock pins, which tests/run-integration.sh

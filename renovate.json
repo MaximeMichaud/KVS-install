@@ -99,12 +99,19 @@
     {
       "description": "The same for the images the workflows run by tag and digest, named one by one",
       "matchManagers": ["custom.regex"],
-      "matchDepNames": ["hadolint/hadolint", "moby/buildkit"],
+      "matchDepNames": ["hadolint/hadolint", "moby/buildkit", "centos"],
       "matchUpdateTypes": ["digest"],
       "groupName": "moved tags",
       "groupSlug": "moved-tags",
       "automerge": false,
       "dependencyDashboardApproval": true
+    },
+    {
+      "description": "CentOS 7 runs the exporter suite on its Bash 4.2, the oldest Bash the exporter supports: a later CentOS would test a newer one",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["centos"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
     },
     {
       "description": "Bubble Tea, Bubbles and Lip Gloss 2 moved to charm.land with a new API, a change of code no bot makes, and the printing of Bubble Tea 2.1.0 above an inline program writes over the terminal history the kvsctl screen prints its notes under: they stay on 1.x",
