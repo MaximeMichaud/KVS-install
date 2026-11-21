@@ -155,25 +155,51 @@ for image in php cron nginx init manticore; do
 done
 grep -Fxq 'updated nginx/Dockerfile' "$TEST_DIR/out" || fail "a write must name the Dockerfiles it updated: $(cat "$TEST_DIR/out")"
 # The compose files run the Alpine of the lock for phpmyadmin-init, and the
-# site template also follows the lock for both cache profiles.
+# site template also follows the lock for both cache profiles. write also
+# refreshes the FFmpeg base anchor of docker-compose.yml. The site template has
+# no such anchor: a site's copy would keep an old digest after the lock moves.
+# Every other line stays.
 for file in "${compose_files[@]}"; do
     grep -Fxq "updated $file" "$TEST_DIR/out" || fail "a write must name $file: $(cat "$TEST_DIR/out")"
     changed=$(diff "$ROOT_DIR/docker/$file" "$docker_dir/$file" | grep -c '^>' || true)
-    expected=1
-    if [[ "$file" == multi-site/* ]]; then
-        expected=3
+    if [ "$file" = docker-compose.yml ]; then
+        pins=2
+        grep -Fxq "x-ffmpeg-base: &ffmpeg-base $(resolve --get debian -)" "$docker_dir/$file" ||
+            fail "the write must refresh the FFmpeg base anchor of $file"
+    else
+        pins=3
         for cache in dragonfly memcached; do
             grep -Fxq "    image: $(resolve --get "$cache")" "$docker_dir/$file" ||
                 fail "the refreshed template lost the locked $cache image"
         done
+        ! grep -Eq 'ffmpeg-base|^[[:space:]]+DEBIAN_BASE:' "$docker_dir/$file" ||
+            fail "$file must leave DEBIAN_BASE to the Dockerfile default"
     fi
-    if [ "$changed" -ne "$expected" ] || ! grep -Fxq "    image: $(resolve --get alpine -)" "$docker_dir/$file"; then
-        fail "the write must align the locked images of $file to the lock: $(diff "$ROOT_DIR/docker/$file" "$docker_dir/$file")"
+    if [ "$changed" -ne "$pins" ] || ! grep -Fxq "    image: $(resolve --get alpine -)" "$docker_dir/$file"; then
+        fail "the write must move only the image pins of $file to the lock: $(diff "$ROOT_DIR/docker/$file" "$docker_dir/$file")"
     fi
 done
 resolve --check-dockerfiles > "$TEST_DIR/out" 2>&1 || fail "aligned Dockerfiles must pass: $(cat "$TEST_DIR/out")"
-[ "$(sed -n 's/^ARG PHP_BASE=//p' "$docker_dir/php/Dockerfile")" = "$(resolve --get php-fpm 8.1)" ] ||
-    fail "the php image must default to the PHP 8.1 FPM base of the lock"
+for pair in "php php-fpm" "cron php-cli"; do
+    read -r image name <<< "$pair"
+    grep -Fxq "ARG PHP_BASE=$(resolve --get "$name" 8.1)" "$docker_dir/$image/Dockerfile" ||
+        fail "$image/Dockerfile must take its runtime base from the refreshed lock"
+    grep -Fxq "ARG DEBIAN_BASE=$(resolve --get debian -)" "$docker_dir/$image/Dockerfile" ||
+        fail "$image/Dockerfile must take its FFmpeg base from the refreshed lock"
+done
+
+# A floating tag in the lock itself must also fail the offline check.
+sed "s|^\(debian${tab}-${tab}[^@]*\)@.*|\1|" "$lock" > "$TEST_DIR/unpinned.lock"
+cp -r "$docker_dir" "$TEST_DIR/unpinned"
+sed -i 's|debian:trixie-slim@sha256:[0-9a-f]*|debian:trixie-slim|g' \
+    "$TEST_DIR/unpinned"/{php,cron,init}/Dockerfile "$TEST_DIR/unpinned/docker-compose.yml" \
+    "$TEST_DIR/unpinned/multi-site/docker-compose.site.yml.template"
+if IMAGES_LOCK="$TEST_DIR/unpinned.lock" RESOLVE_BASES_DOCKER_DIR="$TEST_DIR/unpinned" \
+    "$ROOT_DIR/docker/bin/resolve-bases.sh" --check-dockerfiles > "$TEST_DIR/out" 2>&1; then
+    fail "the offline check accepted an unpinned Debian lock entry"
+fi
+grep -Fq 'debian - entry, which has no pinned digest' "$TEST_DIR/out" ||
+    fail "the floating lock entry must be named: $(cat "$TEST_DIR/out")"
 
 # A default the lock does not pin fails both checks, and names the file.
 sed -i 's|^ARG NGINX_BASE=\(.*\)@sha256:.*$|ARG NGINX_BASE=\1@sha256:'"$(printf '0%.0s' $(seq 64))"'|' "$docker_dir/nginx/Dockerfile"
@@ -363,11 +389,34 @@ structure_case "FROM debian:latest" init \
 structure_case "a lowercase from with a platform" init \
     'text.replace("FROM ${DEBIAN_BASE}", "from --platform=$BUILDPLATFORM debian:latest")' \
     'FROM debian:latest does not build on ${DEBIAN_BASE}'
+for image in php cron; do
+    structure_case "an unpinned Debian default" "$image" \
+        're.sub(r"^ARG DEBIAN_BASE=.*$", "ARG DEBIAN_BASE=debian:trixie-slim", text, flags=re.M)' \
+        'DEBIAN_BASE=debian:trixie-slim, the lock pins'
+    structure_case "swapped FFmpeg and runtime bases" "$image" \
+        'text.replace("FROM ${DEBIAN_BASE} AS", "FROM ${PHP_FROM} AS").replace("FROM ${PHP_FROM}\n", "FROM ${DEBIAN_BASE}\n")' \
+        'ffmpeg-build must be the first stage and build on ${DEBIAN_BASE}'
+    for ref in '${DEBIAN_BASE}' ffmpeg-build; do
+        structure_case "a runtime stage based on $ref" "$image" \
+            "text + 'FROM $ref AS another\n'" "FROM $ref does not build on \${PHP_BASE}"
+    done
+done
+structure_case "a runtime before the FFmpeg stage" php \
+    'text.replace("FROM ${DEBIAN_BASE} AS", "FROM ${PHP_FROM} AS early\nFROM ${DEBIAN_BASE} AS")' \
+    'ffmpeg-build must be the first stage'
+structure_case "a stage-local Debian default" php \
+    're.sub(r"^(ARG DEBIAN_BASE=.*\n)(FROM [^\n]+ AS ffmpeg-build\n)", r"\2\1", text, flags=re.M)' \
+    'declares ARG DEBIAN_BASE= after the first FROM'
+structure_case "a duplicated Debian default" cron \
+    're.sub(r"^(ARG DEBIAN_BASE=.*)$", r"\1\n\1", text, flags=re.M)' \
+    'declares ARG DEBIAN_BASE= 2 times'
+structure_case "the FFmpeg builder as the final image" php \
+    'text.split("FROM ${PHP_FROM}\n")[0]' 'needs a ffmpeg-build stage followed by a runtime stage'
 structure_case "a PHP_FROM that no longer derives from PHP_BASE" php \
     're.sub(r"^ARG PHP_FROM=.*$", "ARG PHP_FROM=php:8.1-fpm", text, count=1, flags=re.M)' \
     'FROM ${PHP_FROM} does not build on ${PHP_BASE}'
 structure_case "a second ARG PHP_FROM line" cron \
-    'text.replace("FROM ${PHP_FROM} AS ffmpeg-build", "ARG PHP_FROM=php:8.1-cli\nFROM ${PHP_FROM} AS ffmpeg-build")' \
+    'text.replace("FROM ${DEBIAN_BASE} AS ffmpeg-build", "ARG PHP_FROM=php:8.1-cli\nFROM ${DEBIAN_BASE} AS ffmpeg-build")' \
     'declares ARG PHP_FROM= 2 times'
 structure_case "a COPY --from an image" cron \
     'text.replace("COPY --from=ffmpeg-build ", "COPY --from=alpine:latest ")' \
@@ -376,7 +425,7 @@ structure_case "a RUN --mount from an image" php \
     'text.replace("--mount=type=bind,from=ffmpeg-build,", "--mount=type=bind,from=busybox:latest,")' \
     'RUN --mount from=busybox:latest is not an earlier stage'
 structure_case "a FROM of a stage defined later" php \
-    'text.replace("FROM ${PHP_FROM} AS ffmpeg-build", "FROM ffmpeg-build AS early\nFROM ${PHP_FROM} AS ffmpeg-build")' \
+    'text.replace("FROM ${DEBIAN_BASE} AS ffmpeg-build", "FROM ffmpeg-build AS early\nFROM ${DEBIAN_BASE} AS ffmpeg-build")' \
     'FROM ffmpeg-build does not build on ${PHP_BASE}'
 # The lines are read the way the parser of Docker reads them: a comment or a
 # blank line neither continues nor ends an instruction, and a continuation
@@ -534,16 +583,16 @@ structure_case "a PHP_FROM with more after the expansion" php \
     're.sub(r"^ARG PHP_FROM=.*$", "ARG PHP_FROM=${PHP_BASE:-php:${PHP_VERSION}-fpm}${PHP_SUFFIX}", text, count=1, flags=re.M)' \
     'FROM ${PHP_FROM} does not build on ${PHP_BASE}'
 structure_case "an argument derived inside a stage" php \
-    'text.replace("FROM ${PHP_FROM} AS ffmpeg-build", "FROM ${PHP_FROM} AS ffmpeg-build\nARG LATER=${PHP_BASE}\nFROM ${LATER} AS later")' \
+    'text.replace("FROM ${DEBIAN_BASE} AS ffmpeg-build", "FROM ${DEBIAN_BASE} AS ffmpeg-build\nARG LATER=${PHP_BASE}\nFROM ${LATER} AS later")' \
     'FROM ${LATER} does not build on ${PHP_BASE}'
 # Docker expands the default of a global argument with the arguments declared
 # before it only: PHP_FROM ahead of PHP_BASE, or PHP_BASE inside a stage,
 # leaves PHP_FROM on the php:<version> tag, whatever PHP_BASE is given.
 structure_case "PHP_FROM declared before PHP_BASE" cron \
     're.sub(r"^(ARG PHP_BASE=.*\n)(ARG PHP_FROM=.*\n)", r"\2\1", text, count=1, flags=re.M)' \
-    'line 16: FROM ${PHP_FROM} does not build on ${PHP_BASE}'
+    'line 21: FROM ${PHP_FROM} does not build on ${PHP_BASE}'
 structure_case "PHP_BASE declared inside the first stage" php \
-    're.sub(r"^(ARG PHP_BASE=.*\n)((?:.*\n)*?FROM \$\{PHP_FROM\} AS ffmpeg-build\n)", r"\2\1", text, count=1, flags=re.M)' \
+    're.sub(r"^(ARG PHP_BASE=.*\n)((?:.*\n)*?FROM \$\{DEBIAN_BASE\} AS ffmpeg-build\n)", r"\2\1", text, count=1, flags=re.M)' \
     'declares ARG PHP_BASE= after the first FROM, where no FROM reads it'
 structure_case "NGINX_BASE declared after the FROM that reads it" nginx \
     're.sub(r"^(ARG NGINX_BASE=.*\n)(FROM \$\{NGINX_BASE\}\n)", r"\2\1", text, count=1, flags=re.M)' \
@@ -591,7 +640,7 @@ structure_case "an escaped space in a FROM flag" nginx \
     'line 7: FROM --platform=linux/amd64${UNSET:+\ has a quote or a backslash'
 structure_case "an escaped space before a from key of a mount" cron \
     'text.replace("--mount=type=bind,from=ffmpeg-build,source=/packages,target=/packages", "--mount=type=bind,source=/packages,target=/packages\\ ,from=busybox:latest")' \
-    'line 132: RUN --mount=type=bind,source=/packages,target=/packages\ has a quote or a backslash'
+    'line 133: RUN --mount=type=bind,source=/packages,target=/packages\ has a quote or a backslash'
 structure_case "a FROM flag after a lone --" nginx \
     'text.replace("FROM ${NGINX_BASE}", "FROM -- --platform=linux/amd64 ${NGINX_BASE}", 1)' \
     'line 7: FROM --platform=linux/amd64 does not build on ${NGINX_BASE}'

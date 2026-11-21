@@ -8,6 +8,9 @@ x-logging: &default-logging
     max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
     max-file: "${DOCKER_LOG_MAX_FILE:-3}"
 
+# The FFmpeg packages for both PHP images use this target-platform base.
+x-ffmpeg-base: &ffmpeg-base debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+
 services:
   nginx:
     build:
@@ -77,6 +80,7 @@ services:
         # default nested in this one would stop Docker Compose older than
         # 2.18 from reading this file.
         PHP_BASE: ${PHP_FPM_BASE:-}
+        DEBIAN_BASE: *ffmpeg-base
     container_name: ${SITE_PREFIX:-kvs}-php
     restart: unless-stopped
     logging: *default-logging
@@ -312,6 +316,7 @@ services:
         PHP_VERSION: ${PHP_VERSION:-8.1}
         # Empty when .env names no base, like PHP_BASE of php-fpm.
         PHP_BASE: ${PHP_CLI_BASE:-}
+        DEBIAN_BASE: *ffmpeg-base
     container_name: ${SITE_PREFIX:-kvs}-cron
     # KVS registers its cron as <hostname>:/var/www/kvs in the site's database
     # and refuses to run, "Duplicate cron operation", for up to 15 minutes

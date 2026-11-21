@@ -82,7 +82,9 @@ services:
         # Empty when the site's .env names no base (a site added before the
         # lock): the Dockerfile then builds from the php:<PHP_VERSION>-fpm
         # tag. A default nested in this one would stop Docker Compose older
-        # than 2.18 from reading this file.
+        # than 2.18 from reading this file. DEBIAN_BASE, the FFmpeg build
+        # base, is left to the Dockerfile default: a site keeps its own copy
+        # of this file, and a pin here would not follow images.lock.
         PHP_BASE: ${PHP_FPM_BASE:-}
     container_name: ${SITE_PREFIX}-php
     restart: unless-stopped

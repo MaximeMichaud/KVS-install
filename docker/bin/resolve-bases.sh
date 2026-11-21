@@ -37,36 +37,44 @@ DEFAULT_PHP_SERIES=8.1
 
 # Dockerfiles whose base build argument defaults to an entry of the lock, as
 # file<TAB>argument<TAB>name<TAB>series of the entry. A plain "docker build",
-# Compose and the release CI build from that default (the CI passes
-# PHP_BASE only for the PHP series it publishes), so it has to be the
-# locked reference. The entry is found by its name and series, never by the
+# Compose and the release CI must build from the same locked references.
+# The entry is found by its name and series, never by the
 # tag the default names: after a tag bump in the tables below, the default
 # still names the old tag, and the entry of the new one replaces it.
+# An optional fifth field reserves an additional base for that named stage.
 DOCKERFILES=(
     "php/Dockerfile	PHP_BASE	php-fpm	${DEFAULT_PHP_SERIES}"
     "cron/Dockerfile	PHP_BASE	php-cli	${DEFAULT_PHP_SERIES}"
     "nginx/Dockerfile	NGINX_BASE	nginx	-"
     "init/Dockerfile	DEBIAN_BASE	debian	-"
     "manticore/Dockerfile	MANTICORE_BASE	manticore	-"
+    "php/Dockerfile	DEBIAN_BASE	debian	-	ffmpeg-build"
+    "cron/Dockerfile	DEBIAN_BASE	debian	-	ffmpeg-build"
 )
 
 # Compose services whose image is an entry of the lock, as
 # file<TAB>service<TAB>name<TAB>series of the entry. phpmyadmin-init runs
 # init.sh with the BusyBox tools of its Alpine, the one the tests run it
 # with and a release pins: a stack without a release would otherwise run
-# whatever alpine:latest is on the day it pulls.
+# whatever alpine:latest is on the day it pulls. The top-level FFmpeg base
+# anchor of docker-compose.yml supplies the build argument for both PHP
+# services. The site template sets none: a site keeps the copy it was made
+# from, so it builds on the Dockerfile default and follows the lock.
 COMPOSE_IMAGES=(
     "multi-site/docker-compose.caddy.yml	caddy	caddy	-"
     "docker-compose.yml	phpmyadmin-init	alpine	-"
     "multi-site/docker-compose.site.yml.template	dragonfly	dragonfly	-"
     "multi-site/docker-compose.site.yml.template	memcached	memcached	-"
     "multi-site/docker-compose.site.yml.template	phpmyadmin-init	alpine	-"
+    "docker-compose.yml	x-ffmpeg-base	debian	-"
 )
 
 # name<TAB>series<TAB>tag. "-" is the series of an image that does not vary.
 # php-fpm and php-cli carry one line per series setup.sh may select
 # (SUPPORTED_PHP_VERSIONS). PHP 7.4 has none: its php:7.4-* images are
 # Debian 11, which lacks packages the PHP-FPM and cron images install.
+# When updating PHP, keep the Debian FFmpeg base on the runtime suite
+# for every PHP series and target architecture.
 BUILD_BASES=(
     "php-fpm	8.1	php:8.1-fpm"
     "php-fpm	8.2	php:8.2-fpm"
@@ -193,7 +201,8 @@ lock_entry() {
 # images), or a stage defined before it, by name: Docker expands the default
 # of a global argument with the arguments declared before it only. COPY
 # --from names an earlier stage or its number, and every from= of RUN
-# --mount an earlier stage, never an image.
+# --mount an earlier stage, never an image. An optional extra base belongs
+# only to its named build stage and cannot be inherited by a runtime stage.
 #
 # The lines are read with these rules of the Dockerfile parser of Docker,
 # for its default escape character: a byte order mark is dropped, and so are
@@ -236,7 +245,7 @@ dockerfile_structure() {
         printf 'line %s: holds a NUL byte, which this check does not read\n' "$nul"
         return 1
     fi
-    LC_ALL=C awk -v arg="$2" -v bom="$(printf '\357\273\277')" '
+    LC_ALL=C awk -v arg="$2" -v build_stage="$3" -v build_arg="$4" -v bom="$(printf '\357\273\277')" '
         function problem(message) { print message; bad = 1 }
         function is_stage(source) { return tolower(source) in stages }
         # A stage number names one of the stages defined so far.
@@ -345,7 +354,7 @@ dockerfile_structure() {
                     problem("line " start ": " instruction " --mount from=" source " is not an earlier stage")
             }
         }
-        function read_instruction(line,    n, w, name, i, value, ref, word, source, rest) {
+        function read_instruction(line,    n, w, name, i, value, ref, word, source, rest, stage) {
             sub(/^[ \t]+/, "", line)
             sub(/[ \t]+$/, "", line)
             n = split(line, w, /[ \t]+/)
@@ -391,9 +400,14 @@ dockerfile_structure() {
                 for (i = 2; i <= n && w[i] ~ /^--/; i++)
                     if (flag(w[i], name) == "--") { i++; break }
                 ref = w[i]
-                if (!base_ref(ref) && !is_stage(ref))
-                    problem("line " start ": FROM " ref " does not build on ${" arg "} or an earlier stage")
-                if (i + 2 <= n && toupper(w[i + 1]) == "AS") stages[tolower(w[i + 2])] = 1
+                stage = (toupper(w[i + 1]) == "AS" ? tolower(w[i + 2]) : "")
+                if (build_stage != "" && stage == build_stage) {
+                    if (ref != "${" build_arg "}" || froms != 0)
+                        problem("line " start ": " build_stage " must be the first stage and build on ${" build_arg "}")
+                } else if (!base_ref(ref) && (!is_stage(ref) || tolower(ref) == build_stage)) {
+                    problem("line " start ": FROM " ref " does not build on ${" arg "} or an earlier runtime stage")
+                }
+                if (stage != "") stages[stage] = 1
                 froms++
             } else if (name == "COPY" || name == "RUN" || name == "ADD") {
                 for (i = 2; i <= n && w[i] ~ /^--/; i++) {
@@ -440,10 +454,18 @@ dockerfile_structure() {
             }
             read_instruction(line)
         }
+        function check_global(key) {
+            if (declared[key] != 1) problem("declares ARG " key "= " (declared[key] + 0) " times instead of once")
+            else if (global[key] != 1) problem("declares ARG " key "= after the first FROM, where no FROM reads it")
+        }
         END {
             if (continued) read_instruction(line)
-            if (declared[arg] != 1) problem("declares ARG " arg "= " (declared[arg] + 0) " times instead of once")
-            else if (global[arg] != 1) problem("declares ARG " arg "= after the first FROM, where no FROM reads it")
+            check_global(arg)
+            if (build_stage != "") {
+                check_global(build_arg)
+                if (!(build_stage in stages) || froms < 2)
+                    problem("needs a " build_stage " stage followed by a runtime stage")
+            }
             for (i = 1; i <= derived_count; i++)
                 if (declared[derived_order[i]] != 1)
                     problem("declares ARG " derived_order[i] "= " declared[derived_order[i]] " times instead of once")
@@ -456,7 +478,8 @@ dockerfile_structure() {
 # them builds on its base argument. Prints what is wrong and fails if
 # anything is, before anything is resolved or compared.
 dockerfile_structures() {
-    local found listed entry file arg path problems line status=0
+    local found listed entry file arg stage path problems line status=0
+    local -A build_stages=() build_args=()
 
     # Dockerfile.dockerignore is the ignore file of a Dockerfile, not one.
     found=$(cd "$DOCKER_DIR" && find . ! -type d \( -name Dockerfile -o -name 'Dockerfile.*' \
@@ -465,7 +488,12 @@ dockerfile_structures() {
         die "cannot list the Dockerfiles under $DOCKER_DIR"
     listed=$'\n'
     for entry in "${DOCKERFILES[@]}"; do
-        listed+="./${entry%%$'\t'*}"$'\n'
+        IFS=$'\t' read -r file arg _ _ stage <<<"$entry"
+        if [ -n "$stage" ]; then
+            build_stages[$file]=$stage
+            build_args[$file]=$arg
+        fi
+        listed+="./${file}"$'\n'
     done
     while IFS= read -r path; do
         [ -n "$path" ] || continue
@@ -474,10 +502,11 @@ dockerfile_structures() {
         status=1
     done <<<"$found"
     for entry in "${DOCKERFILES[@]}"; do
-        IFS=$'\t' read -r file arg _ <<<"$entry"
+        IFS=$'\t' read -r file arg _ _ stage <<<"$entry"
+        [ -z "$stage" ] || continue
         path="${DOCKER_DIR}/${file}"
         [ -f "$path" ] || die "$path does not exist"
-        if ! problems=$(dockerfile_structure "$path" "$arg"); then
+        if ! problems=$(dockerfile_structure "$path" "$arg" "${build_stages[$file]:-}" "${build_args[$file]:-}"); then
             while IFS= read -r line; do
                 printf 'resolve-bases: %s %s\n' "$file" "$line" >&2
             done <<<"$problems"
@@ -494,7 +523,7 @@ dockerfile_bases() {
 
     [ -f "$lock" ] || die "$lock does not exist"
     for entry in "${DOCKERFILES[@]}"; do
-        IFS=$'\t' read -r file arg name series <<<"$entry"
+        IFS=$'\t' read -r file arg name series _ <<<"$entry"
         path="${DOCKER_DIR}/${file}"
         [ -f "$path" ] || die "$path does not exist"
         line=$(grep -m 1 -E "^ARG ${arg}=" "$path") ||
@@ -502,6 +531,8 @@ dockerfile_bases() {
         ref=${line#*=}
         locked=$(lock_entry "$lock" "$name" "$series") ||
             die "$file builds on the $name $series entry, which $lock does not have"
+        [[ $locked =~ @sha256:[0-9a-f]{64}$ ]] ||
+            die "$file builds on the $name $series entry, which has no pinned digest in $lock"
         [ "$ref" != "$locked" ] || continue
         if [ "$mode" = write ]; then
             sed -i "s|^ARG ${arg}=.*\$|ARG ${arg}=${locked}|" "$path"
@@ -528,22 +559,31 @@ service_image() {
 # Compare (check) or align (write) the image of every service of
 # COMPOSE_IMAGES with the lock.
 compose_images() {
-    local mode=$1 lock=$2 entry file service name series path found number ref locked status=0
+    local mode=$1 lock=$2 entry file service name series path found number ref locked prefix status=0
 
     [ -f "$lock" ] || die "$lock does not exist"
     for entry in "${COMPOSE_IMAGES[@]}"; do
         IFS=$'\t' read -r file service name series <<<"$entry"
         path="${DOCKER_DIR}/${file}"
         [ -f "$path" ] || die "$path does not exist"
-        found=$(service_image "$path" "$service") ||
-            die "$path has no image line for the service $service"
+        if [ "$service" = x-ffmpeg-base ]; then
+            prefix='x-ffmpeg-base: &ffmpeg-base '
+            found=$(awk -v prefix="$prefix" '
+                index($0, prefix) == 1 { print NR "\t" substr($0, length(prefix) + 1); count++ }
+                END { exit (count != 1) }' "$path") ||
+                die "$path must declare the FFmpeg base anchor once"
+        else
+            prefix='    image: '
+            found=$(service_image "$path" "$service") ||
+                die "$path has no image line for the service $service"
+        fi
         number=${found%%$'\t'*}
         ref=${found#*$'\t'}
         locked=$(lock_entry "$lock" "$name" "$series") ||
             die "$file runs the $name $series entry for $service, which $lock does not have"
         [ "$ref" != "$locked" ] || continue
         if [ "$mode" = write ]; then
-            sed -i "${number}s|^    image: .*\$|    image: ${locked}|" "$path"
+            sed -i "${number}s|^\(${prefix}\).*\$|\1${locked}|" "$path"
             printf 'updated %s\n' "$file"
         else
             printf 'resolve-bases: %s: the image of %s is %s, the lock pins %s\n' "$file" "$service" "$ref" "$locked" >&2

@@ -392,13 +392,17 @@ done
     ln -s "$ROOT_DIR/.github/scripts" .github/scripts
     cat > docker/bin/resolve-bases.sh <<'STUB'
 #!/bin/bash
-[ "$#" = 3 ] && [ "$1" = --get ] && [ "$2" = php-cli ] && [ "$3" = 8.3 ] || exit 2
+[ "$#" = 3 ] && [ "$1" = --get ] || exit 2
+if [ "$2" = debian ] && [ "$3" = - ]; then printf '%s\n' "$DEBIAN_VALUE"; exit 0; fi
+[ "$2" = php-cli ] && [ "$3" = 8.3 ] || exit 2
 printf '%s\n' "$LOCK_VALUE"
 exit "$LOCK_STATUS"
 STUB
     chmod +x docker/bin/resolve-bases.sh
-    export BASE_NAME=php-cli PHP_SERIES=8.3 GITHUB_OUTPUT="$notes_dir/args" LOCK_VALUE LOCK_STATUS
+    export BASE_NAME=php-cli PHP_SERIES=8.3 GITHUB_OUTPUT="$notes_dir/args" LOCK_VALUE LOCK_STATUS DEBIAN_VALUE
     pin="php:8.3-cli@sha256:$(printf '%064d' 1)"
+    debian_pin="debian:trixie-slim@sha256:$(printf '%064d' 2)"
+    DEBIAN_VALUE=$debian_pin
     for job in images build; do
         json=$release
         [ "$job" != build ] || json=$docker
@@ -427,9 +431,14 @@ STUB
             [ ! -s "$GITHUB_OUTPUT" ] || fail "$job wrote arguments for a $bad PHP base"
         done
         LOCK_VALUE=$pin
+        DEBIAN_VALUE=debian:trixie-slim
+        : > "$GITHUB_OUTPUT"
+        if bash -e -c "$step"; then fail "$job accepted a floating FFmpeg base"; fi
+        [ ! -s "$GITHUB_OUTPUT" ] || fail "$job wrote arguments for a floating FFmpeg base"
+        DEBIAN_VALUE=$debian_pin
         : > "$GITHUB_OUTPUT"
         bash -e -c "$step"
-        printf 'value<<ARGS_EOF\nPHP_VERSION=8.3\nPHP_BASE=%s\nARGS_EOF\n' "$pin" > expected
+        printf 'value<<ARGS_EOF\nPHP_VERSION=8.3\nPHP_BASE=%s\nDEBIAN_BASE=%s\nARGS_EOF\n' "$pin" "$debian_pin" > expected
         cmp expected "$GITHUB_OUTPUT" || fail "$job lost the pinned build arguments"
         : > "$GITHUB_OUTPUT"
         PHP_SERIES='' BASE_NAME='' bash -e -c "$step"
@@ -458,6 +467,45 @@ for series in $php_series; do
     done
 done
 echo "PASS: the matrix builds php-fpm and cron, on a locked base, for the same PHP series"
+
+# Exercise the actual arguments the Buildx action receives for each matrix entry.
+for job in build images; do
+    if [ "$job" = build ]; then json=$docker; else json=$release; fi
+    holds "$json" "the $job job must pass the matrix entry to the build argument script and its output to Buildx" \
+        '.jobs[$job].steps | any(.[]; .id == "args" and .run == ".github/scripts/image-build-args.sh"
+            and .env.BASE_NAME == "${{ matrix.base }}" and .env.PHP_SERIES == "${{ matrix.php }}")
+        and any(.[]; (.uses // "" | startswith("docker/build-push-action@"))
+            and .with["build-args"] == "${{ steps.args.outputs.value }}")' --arg job "$job"
+    while IFS='|' read -r service series base; do
+        output="$notes_dir/build-args"
+        : > "$output"
+        (cd "$ROOT_DIR" && PHP_SERIES=$series BASE_NAME=$base GITHUB_OUTPUT=$output .github/scripts/image-build-args.sh)
+        {
+            echo 'value<<ARGS_EOF'
+            case "$service" in
+                php|cron)
+                    if [ "$service" = php ]; then name=php-fpm; else name=php-cli; fi
+                    echo "PHP_VERSION=$series"
+                    echo "PHP_BASE=$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get "$name" "$series")"
+                    echo "DEBIAN_BASE=$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get debian -)"
+                    ;;
+            esac
+            echo 'ARGS_EOF'
+        } > "$notes_dir/expected"
+        diff -u "$notes_dir/expected" "$output" || fail "$job passes incorrect arguments for $service $series"
+    done < <(jq -r --arg job "$job" '.jobs[$job].strategy.matrix.include[] | [.service, .php, .base] | join("|")' <<<"$json")
+done
+# If the Debian pin is missing, fail before emitting an incomplete build request.
+grep -v '^debian[[:space:]]' "$ROOT_DIR/docker/images.lock" > "$notes_dir/no-debian.lock"
+: > "$output"
+if (cd "$ROOT_DIR" && IMAGES_LOCK="$notes_dir/no-debian.lock" PHP_SERIES=8.1 BASE_NAME=php-cli \
+    GITHUB_OUTPUT=$output .github/scripts/image-build-args.sh) 2> "$notes_dir/error"; then
+    fail "a workflow could build without the FFmpeg base in the lock"
+fi
+if [ -s "$output" ] || ! grep -Fq 'no entry for debian -' "$notes_dir/error"; then
+    fail "a missing FFmpeg base must name the missing entry and leave the output empty"
+fi
+echo "PASS: both image workflows supply the locked PHP and FFmpeg build bases"
 
 for workflow in "$RELEASE" "$ROOT_DIR/.github/workflows/go.yml"; do
     # Outside comments: one says why the images are amd64 only.

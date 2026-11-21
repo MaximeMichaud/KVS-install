@@ -22,7 +22,8 @@
 ARG PHP_VERSION=8.1
 ARG PHP_BASE=php:8.1-fpm@sha256:a3118db1911fdd3b3ac66605122ddc859286688ced86fc860fec6d19cc2d6c55
 ARG PHP_FROM=${PHP_BASE:-php:${PHP_VERSION}-fpm}
-FROM ${PHP_FROM} AS ffmpeg-build
+ARG DEBIAN_BASE=debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+FROM ${DEBIAN_BASE} AS ffmpeg-build
 COPY build-ffmpeg.sh /usr/local/bin/build-ffmpeg
 RUN bash /usr/local/bin/build-ffmpeg
 

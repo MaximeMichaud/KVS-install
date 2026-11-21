@@ -241,7 +241,7 @@ jobs:
         env:
           PHP_SERIES: ${{ matrix.php }}
           BASE_NAME: ${{ matrix.base }}
-        run: ./.github/scripts/image-build-args.sh >> "$GITHUB_OUTPUT"
+        run: .github/scripts/image-build-args.sh
 
       - name: tags and labels
         id: meta

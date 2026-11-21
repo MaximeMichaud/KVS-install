@@ -63,11 +63,22 @@ for spec in php:fpm cron:cli; do
         [ "$line" -lt "$from_line" ] ||
             fail "$dir/Dockerfile must declare $arg before PHP_FROM, whose default reads it: $header"
     done
-    grep -Eq '^FROM \$\{PHP_FROM\}( AS [A-Za-z0-9_-]+)?$' <<< "$(tail -n 1 <<< "$header")" ||
-        fail "$dir/Dockerfile must build FROM \${PHP_FROM}: $header"
-    awk '/^FROM / { stage = 1; next } stage && /^ARG PHP_VERSION$/ { found = 1; exit } END { exit !found }' "$dockerfile" ||
-        fail "$dir/Dockerfile must bring PHP_VERSION into its stage"
+    grep -Fxq 'FROM ${DEBIAN_BASE} AS ffmpeg-build' <<< "$(tail -n 1 <<< "$header")" ||
+        fail "$dir/Dockerfile must build FFmpeg on the target-platform Debian base"
+    [ "$(grep '^FROM ' "$dockerfile" | tail -n 1)" = 'FROM ${PHP_FROM}' ] ||
+        fail "$dir/Dockerfile must run the PHP base on the target platform"
+    awk '/^FROM / { runtime = ($2 == "${PHP_FROM}"); next } runtime && /^ARG PHP_VERSION$/ { found = 1 } END { exit !found }' "$dockerfile" ||
+        fail "$dir/Dockerfile must bring PHP_VERSION into its runtime stage"
+
+    # A PHP-specific instruction or input here would give BuildKit two cache keys.
+    awk '/^FROM / { if (++stages == 2) exit } stages && !/^(#|$)/' "$dockerfile" > "$TEST_DIR/$dir.stage"
+    if grep -Eiq '^[[:space:]]*ARG[[:space:]].*PHP_' "$TEST_DIR/$dir.stage"; then
+        fail "$dir/Dockerfile imports a PHP build argument into the shared FFmpeg stage"
+    fi
 done
+cmp "$TEST_DIR/php.stage" "$TEST_DIR/cron.stage" || fail 'the FFmpeg build instructions differ'
+cmp "$ROOT_DIR/docker/php/build-ffmpeg.sh" "$ROOT_DIR/docker/cron/build-ffmpeg.sh" ||
+    fail 'the FFmpeg build scripts differ'
 echo 'PASS: the PHP-FPM and cron Dockerfiles build an empty PHP_BASE from the php tag of the series'
 
 # render <output> <env file> <compose arguments...>: the model with every
@@ -105,6 +116,7 @@ MANTICORE_PLUGIN_SHA256=$(printf '%064d' 0 | tr 0 c)
 EOF
 
 # 3. The PHP base and the Manticore plugin settings of .env, or nothing.
+debian=$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get debian -)
 for layout in single multi site; do
     case "$layout" in
         single) files=(-f "$ROOT_DIR/docker/docker-compose.yml") ;;
@@ -114,11 +126,20 @@ for layout in single multi site; do
     render "$TEST_DIR/plain.json" "$TEST_DIR/plain.env" "${files[@]}"
     render "$TEST_DIR/set.json" "$TEST_DIR/set.env" "${files[@]}"
 
-    jq -e '.services["php-fpm"].build.args == {"PHP_VERSION": "8.3", "PHP_BASE": ""} and
-        .services.cron.build.args == {"PHP_VERSION": "8.3", "PHP_BASE": ""}' "$TEST_DIR/plain.json" > /dev/null ||
+    # A site's compose file is a copy of the template that stays after the
+    # lock moves, so it must leave DEBIAN_BASE to the Dockerfile default.
+    if [ "$layout" = site ]; then
+        expected='{"PHP_VERSION": "8.3", "PHP_BASE": ""}'
+    else
+        expected=$(jq -cn --arg debian "$debian" '{"PHP_VERSION": "8.3", "PHP_BASE": "", "DEBIAN_BASE": $debian}')
+    fi
+    jq -e --argjson expected "$expected" '.services["php-fpm"].build.args == $expected and
+        .services.cron.build.args == $expected' "$TEST_DIR/plain.json" > /dev/null ||
         fail "$layout: without a base in .env, PHP_BASE must reach the build empty: $(jq -c '[.services["php-fpm"].build.args, .services.cron.build.args]' "$TEST_DIR/plain.json")"
-    jq -e --arg fpm "$fpm" --arg cli "$cli" '.services["php-fpm"].build.args.PHP_BASE == $fpm and
-        .services.cron.build.args.PHP_BASE == $cli' "$TEST_DIR/set.json" > /dev/null ||
+    jq -e --arg fpm "$fpm" --arg cli "$cli" --arg debian "$debian" '.services["php-fpm"].build.args.PHP_BASE == $fpm and
+        .services.cron.build.args.PHP_BASE == $cli and
+        ([.services["php-fpm"], .services.cron] | all(.build.args.DEBIAN_BASE == (if $site then null else $debian end)))' \
+        --argjson site "$([ "$layout" = site ] && echo true || echo false)" "$TEST_DIR/set.json" > /dev/null ||
         fail "$layout: the bases of .env must reach the build: $(jq -c '[.services["php-fpm"].build.args, .services.cron.build.args]' "$TEST_DIR/set.json")"
 
     # What PHP runs, in PHP-FPM or as a KVS task of cron, keeps the
