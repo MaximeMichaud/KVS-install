@@ -1,4 +1,4 @@
-# KVS-install | Tested with 5.5.1, 6.1.2, 6.2.1, 6.3.2, 6.4.0 and 7.0.2
+# KVS-install
 
 [![ShellCheck](https://github.com/MaximeMichaud/KVS-install/workflows/ShellCheck/badge.svg)](https://github.com/MaximeMichaud/KVS-install/actions?query=workflow%3AShellCheck)
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/183a53d1a8ea49619c49d6fc2514c237)](https://app.codacy.com/gh/MaximeMichaud/KVS-install/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
@@ -20,6 +20,11 @@ The script will prompt you to choose between:
 
 1. **Docker (recommended)** - Containerized installation with Docker Compose
 2. **Standalone** - Traditional installation directly on the server
+
+With the default PHP runtime, Docker setup supports KVS 6.2.1 and newer. For older unencoded files,
+an explicit `KVS_PHP_VERSION` can select a Docker runtime if the files support it.
+Standalone installs PHP 7.4 for KVS 6.2.0 and older. Previous installer tests
+included KVS 5.5.1, 6.1.2, 6.2.1, 6.3.2, 6.4.0 and 7.0.2.
 
 ### Docker Installation
 
@@ -468,6 +473,9 @@ images of the release, installs its files, restarts the stack, checks the
 containers and the site, and rolls back by itself when the new version does
 not come up. [cli/README.md](cli/README.md) describes the commands, and
 [docs/releasing.md](docs/releasing.md) how a release is made.
+
+For `kvsctl upgrade`, the current release minimum is KVS 7.0.0.
+Each target release declares its own minimum in `kvs_min`.
 
 An installation kvsctl manages, from `kvsctl adopt` on (its record is
 `kvsctl/state.json`), is upgraded with `kvsctl upgrade` only:
