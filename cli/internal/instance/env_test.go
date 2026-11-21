@@ -415,3 +415,56 @@ func TestEnvEditsRefuseWhereNoLineCanGoBeforeTheLastWord(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvErrorsOmitValues(t *testing.T) {
+	const marker = "PrivateFixtureText"
+	inst := newInstance(t, "DOMAIN=example.com\n")
+	for _, tc := range []struct{ name, line, detail string }{
+		{"doubled quote", "API_TOKEN=\"\"" + marker + "=\"", "API_TOKEN"},
+		{"doubled quote before template", "API_TOKEN=\"\"" + marker + "=${", "API_TOKEN"},
+		{"quote", "SETTING=\"" + marker, "SETTING"},
+		{"key", "BAD!KEY=" + marker, "variable name"},
+		{"template", "SETTING=" + marker + "${", "SETTING"},
+		{"nested-template", "SETTING=" + marker + "${MISSING_FIXTURE:-${}}", "SETTING"},
+		{"required", "SETTING=${MISSING_FIXTURE:?${SOURCE}}", "SETTING"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MISSING_FIXTURE", "")
+			data := []byte("SOURCE=" + marker + "\r\n" + tc.line + "\r\n")
+			if err := os.WriteFile(inst.EnvPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, readErr := ReadEnv(inst.EnvPath)
+			for _, err := range []error{readErr, inst.CheckEnv(data), inst.ReplaceEnv(data)} {
+				if err == nil || strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), tc.detail) {
+					t.Fatalf("expected a redacted error identifying line 2 and %q, got %v", tc.detail, err)
+				}
+			}
+		})
+	}
+	for _, tc := range []struct{ name, line, first, location string }{
+		{"unquoted header", "KVS_STACK_VERSION=\"1.0.0\" AUTH_HEADER=Basic " + marker + "==\n", "KVS_STACK_VERSION", "line 2"},
+		{"header first", "AUTH_HEADER=Basic " + marker + "== KVS_STACK_VERSION=1\n", "AUTH_HEADER", "line 2"},
+		{"ambiguous assignment", "API_TOKEN=\"\"" + marker + "=note KVS_STACK_VERSION=1\n", "API_TOKEN", "line 2"},
+		{"continuation before edit", "API_TOKEN=\"\"" + marker + "=note\\\nKVS_STACK_VERSION=1\n", "API_TOKEN", "line 2"},
+		{"continuation after edit", "KVS_STACK_VERSION=\"1\" " + marker + "=note\\\nNEXT=1\n", "KVS_STACK_VERSION", "line 2"},
+		{"continued last value", "API_TOKEN=\"\"" + marker + "=note\\", "API_TOKEN", "line 2"},
+		{"continued before last word", "API_TOKEN=\"\"" + marker + "=note\\\nWORD", "API_TOKEN", "line 2"},
+		{"continuation into apparent key", "API_TOKEN=note\\\n" + marker + "=note KVS_STACK_VERSION=1\n", "API_TOKEN", "line 3"},
+		{"no certain key", "=\"" + marker + "\"" + marker + "=note KVS_STACK_VERSION=1\n", "", "line 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i := newInstance(t, "DOMAIN=example.test\n"+tc.line)
+			remove := newInstance(t, "DOMAIN=\"example.test\" KVS_STACK_VERSION=1\n"+tc.line)
+			for _, err := range []error{i.SetEnv("KVS_STACK_VERSION", "1.1.0"), remove.UnsetEnv("KVS_STACK_VERSION")} {
+				if err == nil || strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), tc.location) ||
+					!strings.Contains(err.Error(), "KVS_STACK_VERSION") || (tc.first != "" && !strings.Contains(err.Error(), tc.first)) {
+					t.Errorf("expected a redacted write error on %s identifying %q, got %v", tc.location, tc.first, err)
+				}
+			}
+		})
+	}
+	if err := inst.SetEnv("SETTING", marker+"\n"); err == nil || strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "SETTING") {
+		t.Fatalf("expected a redacted write error identifying SETTING, got %v", err)
+	}
+}

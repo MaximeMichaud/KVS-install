@@ -64,11 +64,30 @@ func Scan(data []byte) ([]Entry, error) {
 		}
 		e, next, err := scanEntry(src, start)
 		if err != nil {
-			return entries, fmt.Errorf("line %d: %w", lineOf(src, start), err)
+			return entries, entryError(data, entries, e, err)
 		}
 		entries = append(entries, e)
 		pos = next
 	}
+}
+
+// After a quoted value, Compose may start another setting on the same
+// line. A misplaced quote can make value text look like its key. Only
+// identify the first setting in that chain, including a line that the
+// shell joins to the previous value with a backslash.
+func entryError(data []byte, previous []Entry, e Entry, err error) error {
+	line := e.Line
+	for i := len(previous) - 1; i >= 0; i-- {
+		prev := previous[i]
+		if prev.LineEnd <= e.Start && !continues(data, prev, e.Start) {
+			break
+		}
+		e = prev
+	}
+	if e.Key != "" && strings.IndexFunc(e.Key, unicode.IsSpace) < 0 {
+		return fmt.Errorf("line %d: %s: %w", line, e.Key, err)
+	}
+	return fmt.Errorf("line %d: %w", line, err)
 }
 
 // statementStart is the offset of the next setting at or after pos, past
@@ -121,8 +140,7 @@ func scanEntry(src string, start int) (Entry, int, error) {
 			sep = i
 		case r == '_' || r == '.' || r == '-' || r == '[' || r == ']', unicode.IsLetter(r), unicode.IsNumber(r):
 		default:
-			line, _, _ := strings.Cut(src[keyStart:], "\n")
-			return e, 0, fmt.Errorf("unexpected character %q in variable name %q", string(r), line)
+			return e, 0, errors.New("unexpected character in variable name")
 		}
 		if sep >= 0 {
 			break
@@ -212,8 +230,7 @@ func scanQuoted(src string, e Entry, pos int) (Entry, int, error) {
 		}
 		return e, e.End, nil
 	}
-	line, _, _ := strings.Cut(src[pos:], "\n")
-	return e, 0, fmt.Errorf("unterminated quoted value %s", line)
+	return e, 0, errors.New("unterminated quoted value")
 }
 
 // Parse reads the settings of a .env file into a map, the way compose reads
@@ -237,7 +254,7 @@ func Parse(data []byte, environ func(string) (string, bool)) (map[string]string,
 		v, ok := out[key]
 		return v, ok
 	}
-	for _, e := range entries {
+	for i, e := range entries {
 		if e.Inherited {
 			if v, ok := lookup(e.Key); ok {
 				out[e.Key] = v
@@ -253,7 +270,7 @@ func Parse(data []byte, environ func(string) (string, bool)) (map[string]string,
 			value, err = substitute(value, lookup)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", e.Line, err)
+			return nil, entryError(data, entries[:i], e, err)
 		}
 		out[e.Key] = value
 	}
@@ -367,7 +384,7 @@ func substitute(s string, lookup func(string) (string, bool)) (string, error) {
 		case next == '{':
 			end := templateEnd(s, i)
 			if end < 0 {
-				return "", fmt.Errorf("%w %q", errInvalid, s)
+				return "", errInvalid
 			}
 			// The template ends at the brace that closes its first one,
 			// and what follows that brace in the match is text of its
@@ -379,9 +396,6 @@ func substitute(s string, lookup func(string) (string, bool)) (string, error) {
 			}
 			v, err := braced(expr, lookup)
 			if err != nil {
-				if errors.Is(err, errInvalid) {
-					return "", fmt.Errorf("%w %q", errInvalid, s)
-				}
 				return "", err
 			}
 			after, err := substitute(rest, lookup)
@@ -495,13 +509,6 @@ func braced(expr string, lookup func(string) (string, bool)) (string, error) {
 	case '?':
 		if usable {
 			return value, nil
-		}
-		reason, err := substitute(arg, lookup)
-		if err != nil {
-			return "", err
-		}
-		if reason != "" {
-			return "", fmt.Errorf("required variable %s is missing a value: %s", name, reason)
 		}
 		return "", fmt.Errorf("required variable %s is missing a value", name)
 	}

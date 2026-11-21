@@ -2,6 +2,7 @@ package dotenv
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -347,15 +348,16 @@ func shellHazard(data []byte, entries []Entry, key string) error {
 	for _, l := range linesOf(data, entries) {
 		edited := slices.ContainsFunc(entries[l.first:l.end], func(e Entry) bool { return e.Key == key })
 		if edited && l.first > 0 && entries[l.first-1].Key != key && continues(data, entries[l.first-1], entries[l.first].Start) {
-			return joined(key, entries[l.first-1])
+			return joined(key, data, entries, l.first-1)
 		}
 		if edited && l.end < len(entries) && entries[l.end].Key != key && continues(data, entries[l.end-1], entries[l.end].Start) {
-			return joined(key, entries[l.end-1])
+			return joined(key, data, entries, l.end-1)
 		}
-		for _, e := range entries[l.first:l.end] {
+		for i, e := range entries[l.first:l.end] {
 			for _, name := range stray(data, e) {
 				if (name == key && e.Key != key) || (name != key && edited) {
-					return fmt.Errorf("%s: line %d: the shell of the scripts may take %s= there for a setting, which docker compose reads as part of %q: write each setting as KEY=\"value\" on a line of its own", key, e.Line, name, e.Key)
+					err := errors.New("the shell of the scripts may read an extra setting: write each setting as KEY=\"value\" on a line of its own")
+					return fmt.Errorf("%s: %w", key, entryError(data, entries[:l.first+i], e, err))
 				}
 			}
 		}
@@ -423,7 +425,7 @@ func endJoin(data []byte, entries []Entry, key string) (head, tail []byte, err e
 	}
 	if n := len(entries); n > 0 && continues(data, entries[n-1], len(data)) {
 		if entries[n-1].End == len(data) {
-			return nil, nil, joined(key, entries[n-1])
+			return nil, nil, joined(key, data, entries, n-1)
 		}
 		head = append(head, '\n')
 	}
@@ -459,15 +461,15 @@ func AddAt(data []byte, entries []Entry, key string) (int, error) {
 		return 0, fmt.Errorf("%s: line %d: the file ends with a word that has no = after it and no line break, after a setting on the same line, and a line added there would change how docker compose or the scripts read that line: write the word as KEY=value on a line of its own, or remove it", key, word.Line)
 	}
 	if n > 1 && continues(data, entries[n-2], at) {
-		return 0, joined(key, entries[n-2])
+		return 0, joined(key, data, entries, n-2)
 	}
 	return at, nil
 }
 
-// joined is the refusal of an edit of key next to prev, whose line the
-// shell reads as one with the line after it.
-func joined(key string, prev Entry) error {
-	return fmt.Errorf("%s: line %d: the value of %s ends with a backslash out of quotes, and the shell of the scripts joins the next line to it, which docker compose does not: put that value in quotes", key, prev.Line, prev.Key)
+// joined reports a continuation without identifying a word from its value.
+func joined(key string, data []byte, entries []Entry, i int) error {
+	err := errors.New("a value ends with a backslash out of quotes, and the shell of the scripts joins the next line to it: put that value in quotes")
+	return fmt.Errorf("%s: %w", key, entryError(data, entries[:i], entries[i], err))
 }
 
 // lineBreak is the offset of the line break that ends the line holding
@@ -535,5 +537,5 @@ func quote(value string) (string, error) {
 	case single:
 		return "'" + value + "'", nil
 	}
-	return "", fmt.Errorf("%q cannot be written to .env so that docker compose and the scripts read the same value", value)
+	return "", errors.New("the value cannot be written to .env so that docker compose and the scripts read it identically")
 }

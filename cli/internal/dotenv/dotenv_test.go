@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -925,17 +924,13 @@ func refused(t *testing.T, bash string, data []byte, key string, err error) {
 	}
 	part := []byte(strings.Split(string(data), "\n")[n-1] + "\n")
 	switch {
-	case strings.Contains(msg, "for a setting"):
-		_, rest, _ := strings.Cut(msg, "may take ")
-		name, rest, _ := strings.Cut(rest, "=")
-		_, quoted, _ := strings.Cut(rest, "reads as part of ")
-		quoted, _, _ = strings.Cut(quoted, ":")
-		holder, unquoteErr := strconv.Unquote(quoted)
-		if unquoteErr != nil {
-			t.Errorf("%q: the edit of %s was refused: %v", data, key, err)
-			return
+	case strings.Contains(msg, "extra setting"):
+		// Include every Compose key on the fixture line, even a key Bash
+		// cannot represent. The diagnostic need not quote the value.
+		settings, _ := Parse(part, nil)
+		for k := range settings {
+			keys = append(keys, k)
 		}
-		keys = append(keys, name, holder)
 	case strings.Contains(msg, "backslash"):
 		part = append(part, key+"=1\n"...)
 	default:
@@ -1080,7 +1075,7 @@ func TestGraft(t *testing.T) {
 			t.Errorf("the shell reads %q from %q, %v", read, got, err)
 		}
 	}
-	if got, _, err := Graft([]byte("PATTERN=a\\"), []byte("KVS_X=1\n"), managed); err == nil || !strings.HasPrefix(err.Error(), "KVS_X: line 1: the value of PATTERN ends with a backslash") {
+	if got, _, err := Graft([]byte("PATTERN=a\\"), []byte("KVS_X=1\n"), managed); err == nil || !strings.HasPrefix(err.Error(), "KVS_X: line 1: PATTERN: a value ends with a backslash") {
 		t.Errorf("keys added after a backslash at the end: %q, %v", got, err)
 	}
 }
@@ -1173,8 +1168,8 @@ func TestEditsRefuseWhereNoLineCanGoBeforeTheLastWord(t *testing.T) {
 	for _, tc := range []struct{ name, data, want string }{
 		{"a word after a setting in quotes", "KVS_X=1\nNOTE=\"${KVS_Y}\" SECRET", "KVS_Y: line 2: the file ends with a word that has no = after it and no line break, after a setting on the same line"},
 		{"a word right after a setting in quotes", "KVS_X=1\nexport NOTE='a'SECRET", "KVS_Y: line 2: the file ends with a word that has no = after it and no line break, after a setting on the same line"},
-		{"a word the shell joins to a backslash", "KVS_X=1\nNOTE=a\\\nSECRET", "KVS_Y: line 2: the value of NOTE ends with a backslash out of quotes"},
-		{"a backslash that ends the file", "KVS_X=1\nNOTE=a\\", "KVS_Y: line 2: the value of NOTE ends with a backslash out of quotes"},
+		{"a word the shell joins to a backslash", "KVS_X=1\nNOTE=a\\\nSECRET", "KVS_Y: line 2: NOTE: a value ends with a backslash out of quotes"},
+		{"a backslash that ends the file", "KVS_X=1\nNOTE=a\\", "KVS_Y: line 2: NOTE: a value ends with a backslash out of quotes"},
 	} {
 		if got, err := Set([]byte(tc.data), "KVS_Y", "2"); err == nil || !strings.HasPrefix(err.Error(), tc.want) || got != nil {
 			t.Errorf("%s: Set: %q, %v; want %q", tc.name, got, err, tc.want)
