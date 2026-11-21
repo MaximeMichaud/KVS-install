@@ -133,6 +133,8 @@ inspect() {
             # shellcheck source=/dev/null
             source "$TEST_DIR/filter-defaults.sh"
             # shellcheck source=/dev/null
+            source "$TEST_DIR/override-capture.sh"
+            # shellcheck source=/dev/null
             source "$TEST_DIR/filter-load.sh" || exit $?
         fi
         : > "$TEST_DIR/calls"
@@ -175,6 +177,7 @@ unset SITE_PREFIX SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT
 
 # Exercise the real persistence block and loading order for the next pass.
 # The earlier inspection fixtures intentionally have no .env to update.
+sed -n '/^KVS_DOMAIN_OVERRIDE=/,/^# Check if .env exists/p' "$SETUP" > "$TEST_DIR/override-capture.sh"
 sed -n '/^IMPORT_EXCLUDE=/p; /^IMPORT_INCLUDE=/p' "$SETUP" > "$TEST_DIR/filter-defaults.sh"
 awk '
     $0 == "# Load environment" { capture = 1 }
@@ -676,6 +679,8 @@ source "$TEST_DIR/fetch.sh"
     # The same function still exports a dump first on a full pass.
     : > "$TEST_DIR/calls"
     IMPORT_FILES_ONLY=no IMPORT_REMOTE_DATABASE_FORMAT=sql
+    # A later .env reload changes the variable, not the open SSH session.
+    IMPORT_SSH_PORT=22 IMPORT_REMOTE_PORT=2222
     import_remote_dump() { echo dump >> "$TEST_DIR/calls"; printf 'new export\n' > "$3"; }
     import_fetch_remote > "$TEST_DIR/fetch.out" 2>&1 || fail "a full pass failed: $(cat "$TEST_DIR/fetch.out")"
     provided "$TEST_DIR/fetch.out"

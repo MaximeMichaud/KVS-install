@@ -339,9 +339,17 @@ for grace in 600 10M ' 10m' 10m30 0; do
     grep -Fq "MARIADB_STOP_GRACE_PERIOD must be a duration with its unit, such as 600s or 15m, got '$grace'" grace.err ||
         fail "a refused stop grace period must be named: $(cat grace.err)"
 done
-loaded=$(grep -m 1 -A 1 '^source .env$' "$root/docker/setup.sh")
-grep -Fxq 'check_mariadb_stop_grace_period || exit 1' <<< "$loaded" ||
+# Only the selection of the saved import endpoint may come between loading
+# .env and the check: assignments of IMPORT_ variables and tests of them,
+# with no command substitution.
+loaded=$(awk '$0 == "source .env" { capture = 1; next } capture { print } capture && $0 == "check_mariadb_stop_grace_period || exit 1" { exit }' \
+    "$root/docker/setup.sh")
+before=$(sed '$d' <<< "$loaded")
+if [ "$(tail -n 1 <<< "$loaded")" != 'check_mariadb_stop_grace_period || exit 1' ] ||
+    grep -Evq '^ *(IMPORT_[A-Z_]+=|(el)?if \[ |else$|fi$)' <<< "$before" ||
+    grep -Eq '[$][(]|`' <<< "$before"; then
     fail 'setup.sh must check the stop grace period as soon as it loads .env'
+fi
 mkdir -p reconfigure/bin
 cp "$root/docker/reconfigure.sh" reconfigure/
 touch reconfigure/docker-compose.yml

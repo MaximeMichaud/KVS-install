@@ -164,8 +164,8 @@ ENVIRONMENT VARIABLES:
                           IMPORT_REMOTE_PASSWORD (the user's password, handed
                           to sshpass, never stored). Headless runs need one
                           of the two, and IMPORT_SSH_ACCEPT_NEW=y to trust a
-                          host key that is not in known_hosts yet (a password
-                          implies it).
+                          host key that is not in known_hosts yet. A supplied
+                          password requires a known key unless you opt in.
     IMPORT_SIZE_TIMEOUT=S Seconds the old server spends measuring the site
                           size (300); past that the import goes on with what
                           was counted and the space used on the old server's
@@ -2020,11 +2020,10 @@ IMPORT_ARCHIVE="${IMPORT_ARCHIVE:-}"
 IMPORT_SITE_DIR="${IMPORT_SITE_DIR:-}"
 IMPORT_DB_DUMP="${IMPORT_DB_DUMP:-}"
 IMPORT_REMOTE_HOST="${IMPORT_REMOTE_HOST:-}"
-IMPORT_REMOTE_PORT="${IMPORT_REMOTE_PORT:-22}"
+IMPORT_REMOTE_PORT="${IMPORT_REMOTE_PORT:-}"
 IMPORT_REMOTE_USER="${IMPORT_REMOTE_USER:-root}"
 IMPORT_REMOTE_DIR="${IMPORT_REMOTE_DIR:-}"
 IMPORT_SSH_KEY="${IMPORT_SSH_KEY:-}"
-IMPORT_SSH_ACCEPT_NEW="${IMPORT_SSH_ACCEPT_NEW:-}"
 # The password of the SSH user, for runs nobody attends: handed to sshpass
 # through its environment, never written to .env or anywhere else.
 IMPORT_REMOTE_PASSWORD="${IMPORT_REMOTE_PASSWORD:-}"
@@ -3100,6 +3099,11 @@ import_inspect_remote() {
     fi
     # Its value only, before the detection: no link is known yet.
     import_confirm_external_links /dev/null "" || exit 1
+    # The questionnaire can select another port after .env was read.
+    if [ "${IMPORT_RUN_ACCEPT_NEW_SET:-}" != x ] && [[ -v IMPORT_SAVED_HOST ]] &&
+        [ "$IMPORT_REMOTE_HOST:$IMPORT_REMOTE_PORT" != "$IMPORT_SAVED_HOST:$IMPORT_SAVED_PORT" ]; then
+        IMPORT_SSH_ACCEPT_NEW=""
+    fi
     case "${IMPORT_SSH_ACCEPT_NEW,,}" in
         y|yes|true) accept_new=yes ;;
         *) accept_new=no ;;
@@ -3633,7 +3637,7 @@ import_native_target_supported() {
 import_fetch_remote() {
     local destination="/var/www/$DOMAIN" source dump extension pid transfer_status=0 transfer_logs reserve marker resume_report=""
 
-    source="ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR"
+    source="ssh://$IMPORT_SSH_TARGET:${IMPORT_SSH_PORT:-$IMPORT_REMOTE_PORT}$IMPORT_REMOTE_DIR"
     extension=gz
     if [ "$IMPORT_REMOTE_COMPRESSOR" = zstd ]; then
         extension=zst
@@ -4433,6 +4437,10 @@ warn_if_existing_project_resources() {
 # gives shell variables precedence over .env, so the setup script must do the
 # same in headless mode.
 KVS_DOMAIN_OVERRIDE="${DOMAIN:-}"
+IMPORT_RUN_HOST=${IMPORT_REMOTE_HOST:-}
+IMPORT_RUN_PORT=${IMPORT_REMOTE_PORT:-}
+IMPORT_RUN_ACCEPT_NEW=${IMPORT_SSH_ACCEPT_NEW-}
+IMPORT_RUN_ACCEPT_NEW_SET=${IMPORT_SSH_ACCEPT_NEW+x}
 KVS_EMAIL_OVERRIDE_SET=false
 KVS_EMAIL_OVERRIDE=""
 if [[ -v EMAIL ]]; then
@@ -4463,7 +4471,22 @@ chmod 600 .env
 # Load environment
 unset CLOUDFLARE_ENABLED COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME KVS_IMPORT_COMPLETED KVS_IMPORT_PENDING_RETIREMENT MANTICORE_REBUILD_PENDING
 unset SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT HTTPS_PORT PROJECT_HTTPS_PORT PROJECT_HTTPS_PORT_PINNED TABLES_PREFIX
+unset IMPORT_REMOTE_HOST IMPORT_REMOTE_PORT IMPORT_SSH_ACCEPT_NEW
 source .env
+IMPORT_SAVED_HOST=${IMPORT_REMOTE_HOST:-}
+IMPORT_SAVED_PORT=${IMPORT_REMOTE_PORT:-22}
+IMPORT_REMOTE_HOST=${IMPORT_RUN_HOST:-$IMPORT_SAVED_HOST}
+if [ "$IMPORT_REMOTE_HOST" = "$IMPORT_SAVED_HOST" ]; then
+    IMPORT_REMOTE_PORT=${IMPORT_RUN_PORT:-$IMPORT_SAVED_PORT}
+else
+    IMPORT_REMOTE_PORT=${IMPORT_RUN_PORT:-22}
+fi
+IMPORT_SSH_ACCEPT_NEW=${IMPORT_SSH_ACCEPT_NEW:-}
+if [ "${IMPORT_RUN_ACCEPT_NEW_SET:-}" = x ]; then
+    IMPORT_SSH_ACCEPT_NEW=$IMPORT_RUN_ACCEPT_NEW
+elif [ -z "$IMPORT_SAVED_HOST" ] || [ "$IMPORT_REMOTE_HOST:$IMPORT_REMOTE_PORT" != "$IMPORT_SAVED_HOST:$IMPORT_SAVED_PORT" ]; then
+    IMPORT_SSH_ACCEPT_NEW=""
+fi
 check_mariadb_stop_grace_period || exit 1
 check_cloudflare_configuration || exit 1
 # Capture the parsed saved domain before explicit overrides change it.

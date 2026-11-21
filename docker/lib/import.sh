@@ -2121,6 +2121,7 @@ import_ssh_setup() {
         return 1
     fi
     mkdir -p "$control_dir" && chmod 700 "$control_dir" || return 1
+    IMPORT_SSH_PORT=$port
     IMPORT_SSH_SOCKET_DIR=$control_dir
     IMPORT_SSH_TARGET="${user}@${host}"
     IMPORT_SSH_OPTS=(
@@ -2134,23 +2135,21 @@ import_ssh_setup() {
     IMPORT_SSH_COMMAND=(ssh)
     if [ -n "$password" ]; then
         # sshpass answers ssh's password prompt from SSHPASS, so ssh's
-        # prompts must stay (no batch mode, one attempt), and the host key
-        # of a server not in known_hosts yet is accepted on this first
-        # connection: the answer an operator gives on ssh's question,
-        # which sshpass cannot relay.
+        # password prompt must stay (no batch mode, one attempt).
         import_ensure_tool sshpass || return 1
         SSHPASS=$password
         export SSHPASS
         IMPORT_SSH_COMMAND=(sshpass -e ssh)
         IMPORT_SSH_OPTS+=(-o NumberOfPasswordPrompts=1)
         batch=no
-        accept_new=yes
     fi
     if [ "$batch" = yes ]; then
         IMPORT_SSH_OPTS+=(-o BatchMode=yes)
     fi
     if [ "$accept_new" = yes ]; then
         IMPORT_SSH_OPTS+=(-o StrictHostKeyChecking=accept-new)
+    elif [ -n "$password" ]; then
+        IMPORT_SSH_OPTS+=(-o StrictHostKeyChecking=yes)
     fi
     if [ -n "$key" ]; then
         IMPORT_SSH_OPTS+=(-i "$key" -o IdentitiesOnly=yes)
@@ -2196,7 +2195,28 @@ import_remote_privileges() {
     IMPORT_REMOTE_SUDO_ERROR=""
     IMPORT_REMOTE_SUDO=no
     IMPORT_REMOTE_PREFIX=()
-    uid=$(import_ssh id -u < /dev/null) || return 1
+    # Keep stdout for the uid and relay diagnostics while SSH is running.
+    # The inner substitution returns only the kind of actionable failure.
+    uid=$(
+        exec 3>&1
+        if failure=$(
+            set -o pipefail
+            import_ssh id -u < /dev/null 2>&1 >&3 | {
+                kind=""
+                while IFS= read -r line || [ -n "$line" ]; do
+                    printf '%s\n' "$line" >&2
+                    case "$line" in
+                        'No '*' host key is known for '*) kind=unknown ;;
+                    esac
+                done
+                printf '%s' "$kind"
+            }
+        ); then exit 0; else status=$?; fi
+        if [ "${IMPORT_SSH_COMMAND[0]:-}" = sshpass ] && { [ "$failure" = unknown ] || [ "$status" = 6 ]; }; then
+            echo "  Verify the host key and record it in known_hosts for $IMPORT_SSH_TARGET (port $IMPORT_SSH_PORT), or set IMPORT_SSH_ACCEPT_NEW=y for this run." >&2
+        fi
+        exit 1
+    ) || return 1
     uid=${uid//[!0-9]/}
     if [ "$uid" = 0 ]; then
         IMPORT_REMOTE_PRIVILEGES=root

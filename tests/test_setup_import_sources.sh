@@ -937,7 +937,7 @@ EOF
         [ "${IMPORT_SSH_COMMAND[*]}" = "sshpass -e ssh" ] || exit 2
         [ "${SSHPASS-}" = "s3cret pass" ] || exit 3
         printf '%s\n' "${IMPORT_SSH_OPTS[@]}" | grep -q '^BatchMode=yes$' && exit 4
-        printf '%s\n' "${IMPORT_SSH_OPTS[@]}" | grep -q '^StrictHostKeyChecking=accept-new$' || exit 5
+        printf '%s\n' "${IMPORT_SSH_OPTS[@]}" | grep -q '^StrictHostKeyChecking=yes$' || exit 5
         printf '%s\n' "${IMPORT_SSH_OPTS[@]}" | grep -q '^NumberOfPasswordPrompts=1$' || exit 6
         rsh=$(import_ssh_rsh)
         [[ "$rsh" == "sshpass -e ssh -o ControlMaster=auto"* ]] || exit 7
