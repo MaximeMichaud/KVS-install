@@ -348,8 +348,10 @@ if [ -n "${STUB_DU_SLEEP:-}" ]; then
     # Die on TERM at once, as the real du does, without leaving a sleep
     # behind that would keep the pipe open.
     sleep "$STUB_DU_SLEEP" &
-    trap 'kill $! 2> /dev/null; exit 143' TERM
-    wait $!
+    sleeper=$!
+    printf 'du workers: %s %s\n' "$$" "$sleeper" >> "${STUB_LOG:-/dev/null}"
+    trap 'kill "$sleeper" 2> /dev/null; exit 143' TERM
+    wait "$sleeper"
 fi
 case ${*: -1} in
     --files0-from=*)
@@ -409,7 +411,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill pgrep sleep awk sort stat id chmod chown ls cp mv sync sha256sum getconf mkfifo tee head cut; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc sleep awk sort stat id chmod chown ls cp mv sync sha256sum getconf mkfifo tee head cut; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -894,17 +896,67 @@ EOF
     if import_remote_free_space_check "$out" "$dest" >/dev/null; then fail "4096 tiny files fit in 2 MiB"; fi
 )
 
+assert_walk_workers_stopped() {
+    local du_pid sleeper pid state line
+    grep -q 'du workers:' "$STUB_LOG" || fail "the walk must start a worker"
+    while read -r _ _ du_pid sleeper; do
+        for pid in "$du_pid" "$sleeper"; do
+            [ -r "/proc/$pid/stat" ] || continue
+            line=$(< "/proc/$pid/stat") || continue
+            state=${line##*) }
+            [[ "$state" == Z* ]] || fail "walk process $pid survived the timeout"
+        done
+    done < <(grep '^du workers:' "$STUB_LOG")
+    grep -Eq '(pkill|pgrep): (command )?not found' "$1" && fail "cleanup must work without procps"
+    return 0
+}
+
+test_the_legacy_size_subtotal_survives_a_read_error() {
+    local site="$TMP_ROOT/subtotal-site" bin="$TMP_ROOT/subtotal-bin" out="$TMP_ROOT/subtotal.out" err="$TMP_ROOT/subtotal.err"
+    make_site "$site"
+    mkdir "$bin"
+    cat > "$bin/du" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *--files0-from=/dev/null*) [ "${FORMAT:-root}" = list ]; exit $? ;;
+    *--files0-from=*) [ "$PARTIAL" = no ] || printf '4112\t%s\0' "$SITE/contents" ;;
+    *) [ "$PARTIAL" = no ] || printf '4112\t%s\n' "$2" ;;
+esac
+exit 7
+EOF
+    chmod +x "$bin/du"
+    PARTIAL=yes run_export "$bin:$MIN_BIN" "$out" "$err" detect "$site"
+    assert_key "$out" site_size_status incomplete
+    assert_key "$out" site_size_mb 4
+    assert_key "$out" site_size_entries 1
+    PARTIAL=no run_export "$bin:$MIN_BIN" "$out" "$err" detect "$site"
+    assert_key "$out" site_size_status failed
+    assert_key "$out" site_size_entries 0
+    (
+        source /dev/stdin < <(sed '/^trap kvs_cleanup EXIT/,$d' "$EXPORT_SCRIPT")
+        local status format
+        for format in root list; do
+            status=0
+            SITE="$site" PATH="$bin:$MIN_BIN" PARTIAL=yes FORMAT=$format kvs_measure_worker "$site" "$bin" 1 tar > "$out" || status=$?
+            [ "$status" = 7 ] || fail "$format walk returned $status for du status 7"
+            tr '\0' '\n' < "$out" | grep -q "^4112$(printf '\t')" || fail "$format walk lost the subtotal"
+        done
+    )
+    pass "both du formats report the subtotal and preserve the original error status"
+}
+
 test_the_size_walk_stops_at_its_time_budget() {
     local site="$TMP_ROOT/budget-site"
     local out="$TMP_ROOT/budget.out"
     local err="$TMP_ROOT/budget.err"
-    local started
+    local started bin="$TMP_ROOT/measure-bin" mode
 
     make_site "$site"
     started=$SECONDS
     STUB_DU_SLEEP=20 run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --size-timeout 1 detect "$site" ||
         fail "a walk cut short is not a failure: $(cat "$err")"
     [ $((SECONDS - started)) -lt 10 ] || fail "the walk must be killed at the budget, the run took $((SECONDS - started)) s"
+    # A deadline before the first size record is an incomplete measurement.
     assert_key "$out" site_size_status incomplete
     assert_key "$out" site_size_mb 0
     assert_key "$out" site_size_entries 0
@@ -915,10 +967,119 @@ test_the_size_walk_stops_at_its_time_budget() {
     grep -q "^du done:" "$STUB_LOG" && fail "the du at work must be killed with the walk"
     grep -q "Measuring the site size for at most 1s" "$err" || fail "the budget must be announced: $(cat "$err")"
 
-    # The same budget from the environment, for a run by hand.
-    KVS_EXPORT_SIZE_TIMEOUT=1 STUB_DU_SLEEP=20 run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" ||
-        fail "the budget from the environment must work: $(cat "$err")"
+    assert_walk_workers_stopped "$err"
+
+    # The same budget on a kernel without per-task child lists. Hide just
+    # that procfs feature; the parent PIDs in stat are still real.
+    cat > "$TMP_ROOT/old-procfs" <<'EOF'
+function [ {
+    if [[ $1 == -r && ${2:-} == /proc/*/children ]]; then return 1; fi
+    builtin [ "$@"
+}
+EOF
+    started=$SECONDS
+    BASH_ENV="$TMP_ROOT/old-procfs" KVS_EXPORT_SIZE_TIMEOUT=1 STUB_DU_SLEEP=20 run_export \
+        "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$site" || fail "the budget from the environment must work: $(cat "$err")"
+    [ $((SECONDS - started)) -lt 15 ] || fail "the walk over the old procfs exceeded the budget"
     assert_key "$out" site_size_status incomplete
+    assert_walk_workers_stopped "$err"
+
+    # The clock can cross the deadline while a record is being consumed.
+    # Other complete records already buffered in the pipe must stay unread.
+    cat > "$TMP_ROOT/slow-reader" <<'EOF'
+read() {
+    builtin read "$@" || return $?
+    if [[ ${2:-} == -t && ${line:-} == [0-9]*$'\t'* && ${slow_read_done:-no} == no ]]; then
+        slow_read_done=yes
+        sleep 2
+    fi
+}
+EOF
+    BASH_ENV="$TMP_ROOT/slow-reader" KVS_EXPORT_SIZE_JOBS=1 run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" \
+        --size-timeout 1 detect "$site" || fail "the buffered walk failed: $(cat "$err")"
+    assert_key "$out" site_size_status incomplete
+    assert_key "$out" site_size_entries 0
+
+    mkdir "$bin"
+    cat > "$bin/du" <<'EOF'
+#!/bin/bash
+case "$*" in *--files0-from=/dev/null*) exit 0 ;; esac
+case $WALK_CASE in
+    orphan)
+        sleep 20 &
+        printf 'du workers: %s %s\n' "$$" "$!" >> "$STUB_LOG"
+        exec "$FIXTURE_DU" "$@" ;;
+    partial)
+        printf '1024\t%s\0' "$WALK_SITE/admin/include/setup.php"
+        exit 1 ;;
+    full-error)
+        "$FIXTURE_DU" "$@"
+        exit 1 ;;
+esac
+EOF
+    chmod +x "$bin/du"
+    for mode in job-control setsid; do
+        if [ "$mode" = setsid ]; then
+            command -v setsid >/dev/null || continue
+            ln -s "$(command -v setsid)" "$bin/setsid"
+        fi
+        started=$SECONDS
+        WALK_CASE=orphan FIXTURE_DU="$STUB_BIN/du" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+            --size-timeout 1 detect "$site" || fail "orphaned helper under $mode: $(cat "$err")"
+        [ $((SECONDS - started)) -lt 10 ] || fail "$mode waited for a reparented helper"
+        assert_key "$out" site_size_status incomplete
+        assert_walk_workers_stopped "$err"
+    done
+    for mode in partial full-error; do
+        WALK_CASE=$mode WALK_SITE=$site FIXTURE_DU="$STUB_BIN/du" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+            detect "$site" || fail "detect failed after a measurement error"
+        assert_key "$out" site_size_status incomplete
+        assert_key "$out" site_size_entries_total 4
+        if [ "$mode" = partial ]; then
+            assert_key "$out" site_size_entries 1
+        else
+            assert_key "$out" site_size_entries 4
+        fi
+    done
+    rm -f "$bin/du"
+    cat > "$TMP_ROOT/late-eof" <<'EOF'
+read() {
+    local rc=0
+    builtin read "$@" || rc=$?
+    if [[ $rc == 1 && ${2:-} == -t ]]; then sleep 1.1; fi
+    return "$rc"
+}
+EOF
+    BASH_ENV="$TMP_ROOT/late-eof" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+        --size-timeout 1 detect "$site" || fail "late end of stream failed"
+    assert_key "$out" site_size_status incomplete
+
+    cat > "$bin/find" <<'EOF'
+#!/bin/sh
+case " $* " in *' -maxdepth 2 '*|*' -mindepth 3 '*) sleep 6 ;; esac
+exec "$FIXTURE_FIND" "$@"
+EOF
+    chmod +x "$bin/find"
+    started=$SECONDS
+    FIXTURE_FIND="$MIN_BIN/find" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+        --size-timeout 1 detect "$site" || fail "slow enumeration failed"
+    [ $((SECONDS - started)) -lt 5 ] || fail "enumeration exceeded the measurement deadline"
+    assert_key "$out" site_size_status incomplete
+    assert_key "$out" site_size_entries 0
+    [ "$(detect_value "$out" site_size_seconds)" -ge 1 ] || fail "enumeration time was omitted"
+    rm -f "$bin/find"
+    cat > "$TMP_ROOT/slow-count" <<'EOF'
+read() {
+    if [[ ${2:-} == -d && ${FUNCNAME[1]} == kvs_measure_worker ]]; then sleep 6; fi
+    builtin read "$@"
+}
+EOF
+    started=$SECONDS
+    BASH_ENV="$TMP_ROOT/slow-count" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+        --size-timeout 1 detect "$site" || fail "slow entry count failed"
+    [ $((SECONDS - started)) -lt 5 ] || fail "counting names exceeded the measurement deadline"
+    assert_key "$out" site_size_status incomplete
+    assert_key "$out" site_size_entries_total 0
     pass "the size walk stops at its time budget"
 }
 
@@ -3757,6 +3918,7 @@ test_tools_outside_the_secure_path_are_reported
 test_flat_directories_are_measured_in_batches
 test_the_size_matches_the_selected_transport
 pass "transfer size matches the selected names and transport"
+test_the_legacy_size_subtotal_survives_a_read_error
 test_the_size_walk_stops_at_its_time_budget
 test_the_size_walk_can_be_skipped
 test_a_full_temporary_directory_does_not_shrink_the_site_size

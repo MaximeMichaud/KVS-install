@@ -309,18 +309,51 @@ kvs_warn() {
 # or exit and orphan its active dump during cleanup.
 # shellcheck disable=SC2329  # Called by the EXIT trap's cleanup function.
 kvs_stop_descendants() {
-    local parent="$1" child
+    local parent="$1" child children="" file line
 
-    while IFS= read -r child; do
+    if [ -r "/proc/$parent/task/$parent/children" ]; then
+        for file in /proc/"$parent"/task/*/children; do
+            line=""
+            # Linux writes space-separated PIDs without a trailing newline.
+            { IFS= read -r line < "$file"; } 2>/dev/null || true
+            children+=" $line"
+        done
+    elif command -v pgrep >/dev/null 2>&1; then
+        children=$(exec pgrep -P "$parent") || true
+    else
+        # Older kernels have no task child lists. After the last parenthesis
+        # in stat come the process state and the parent PID. A process name
+        # can itself contain spaces, parentheses or newlines.
+        for file in /proc/[0-9]*/stat; do
+            line=""
+            { IFS= read -r -d '' line < "$file"; } 2>/dev/null || true
+            line=${line##*) ? }
+            [ "${line%% *}" = "$parent" ] || continue
+            child=${file%/stat}
+            children+=" ${child##*/}"
+        done
+    fi
+    for child in $children; do
         if kill -STOP "$child" 2> /dev/null; then
             kvs_stop_descendants "$child"
-            kill -KILL "$child" 2> /dev/null || true
+            kill -KILL "$child" 2> /dev/null || continue
+            # KILL can return before a dying worker releases its files.
+            # Its stopped parent cannot reap it until we finish here. A task
+            # in uninterruptible I/O takes its signal when the kernel wakes it.
+            while { line=$(< "/proc/$child/stat"); } 2>/dev/null; do
+                case ${line##*) } in
+                    [ZXD]" $parent "*) break ;;
+                    ?" $parent "*) sleep 0.01 ;;
+                    *) break ;;
+                esac
+            done
         fi
-    done < <(exec pgrep -P "$parent")
+    done
 }
 
 # shellcheck disable=SC2329  # Runs from the EXIT trap set at the bottom.
 kvs_cleanup() {
+    kvs_stop_measure
     kvs_stop_descendants "$BASHPID"
     # Waiting for one pipeline member can wait for the other members too.
     # Stop all descendants first, then reap our direct children together.
@@ -1230,17 +1263,35 @@ kvs_root_size_kb() {
     return "$status"
 }
 
-kvs_measure_units() {
-    local dir="$1" total="$2" transport="$3" size bytes
-    shift 3
+# The first record announces the name count. Subsequent NUL-terminated
+# size records come from one du, which can omit hard-linked operands.
+kvs_measure_worker() {
+    local SITE_DIR="$1" dir="$2" jobs="$3" transport="$4" total=0 size bytes status=0
+    shift 4
+    if [ -n "$dir" ]; then
+        if kvs_list_measure_units "$dir" "$jobs" 2>/dev/null; then
+            while IFS= read -r -d '' _; do
+                total=$((total + 1))
+            done < "$dir/units"
+        else
+            printf 'WARNING: the list of entries could not be written or enumerated; measuring the site in one pass\n' >&2
+        fi
+    fi
+    printf 'names %d\0' "$((total > 0 ? total : 1))"
     if [ "$total" -gt 0 ] && du -sLk -0 --files0-from=/dev/null >/dev/null 2>&1; then
         printf 'per-entry\0'
-        du -sLk -0 --files0-from="$dir/units" || return 1
+        du -sLk -0 --files0-from="$dir/units" 2>/dev/null || return
     else
         # Apparent size includes sparse extents; -l charges every name. The
         # unfiltered root can bound the payload but cannot prove its size.
-        size=$(kvs_root_size_kb "$SITE_DIR") || return 1
+        size=$(kvs_root_size_kb "$SITE_DIR") || status=$?
+        # Even a failed traversal can emit a valid subtotal for its root.
+        if [[ $size != *$'\t'* || ! ${size%%$'\t'*} =~ ^[0-9]+$ ]]; then
+            [ "$status" != 0 ] || status=1
+            return "$status"
+        fi
         printf '%s\t%s\0' "${size%%$'\t'*}" "$SITE_DIR"
+        [ "$status" = 0 ] || return "$status"
     fi
     if [ "$total" -gt 0 ] && bytes=$(kvs_transfer_bytes "$dir" "$transport" "$@"); then
         printf 'payload %s\0' "$bytes"
@@ -1248,20 +1299,46 @@ kvs_measure_units() {
         # Per-entry du may count a followed name once for several entries. Only the
         # successful root pass above supplies a usable unfiltered bound.
         return 1
+    else
+        printf 'upper-bound\0'
     fi
-    printf 'complete\0'
 }
 
-# Stop the walk. xargs is held first so it starts no further du while the
-# ones at work are killed, then it is released with its own signal.
-kvs_stop_measure() {
-    if [ -n "$MEASURE_PID" ]; then
-        kill -STOP "$MEASURE_PID" 2> /dev/null
-        pkill -TERM -P "$MEASURE_PID" 2> /dev/null
-        kill -TERM "$MEASURE_PID" 2> /dev/null
-        kill -CONT "$MEASURE_PID" 2> /dev/null
-        MEASURE_PID=""
+# Save the group ID before releasing the worker. Job control gives the
+# coprocess its own group on hosts without setsid, including noninteractive
+# bash -s. Its children must inherit that group, even after reparenting.
+kvs_start_measure() {
+    local monitor=no session=no
+    [[ $- != *m* ]] || monitor=yes
+    if command -v setsid >/dev/null; then
+        session=yes
+        set +m
+    else
+        set -m
     fi
+    coproc KVS_WALK {
+        set +m
+        IFS= read -r _ || exit 1
+        if [ "$session" = yes ]; then
+            exec setsid "$BASH" -o pipefail -c "$(declare -f kvs_list_measure_units kvs_measure_worker kvs_transfer_bytes kvs_root_size_kb kvs_rsync_options kvs_glob_escape)"'
+                kvs_measure_worker "$@"
+            ' _ "$SITE_DIR" "$MEASURE_DIR" "$@"
+        fi
+        kvs_measure_worker "$SITE_DIR" "$MEASURE_DIR" "$@"
+    }
+    MEASURE_PID=$!
+    exec 3<&"${KVS_WALK[0]}"
+    if [ "$monitor" = yes ]; then set -m; else set +m; fi
+    printf '\n' >&"${KVS_WALK[1]}"
+}
+
+kvs_stop_measure() {
+    [ -n "$MEASURE_PID" ] || return 0
+    kill -KILL -- "-$MEASURE_PID" 2>/dev/null || true
+    # setsid might not yet have run if the exporter itself was interrupted.
+    kill -KILL "$MEASURE_PID" 2>/dev/null || true
+    wait "$MEASURE_PID" 2>/dev/null || true
+    MEASURE_PID=""
 }
 
 # One line of du -sk: kilobytes, a tab, the path. The kilobytes also go
@@ -1291,6 +1368,17 @@ kvs_add_measure_line() {
     return 0
 }
 
+# Linux uptime is monotonic and includes hundredths, even on Bash 4.2.
+# SECONDS alone can tick just after a short measurement starts.
+kvs_measure_ticks() {
+    local uptime
+    if { read -r uptime _ < /proc/uptime; } 2>/dev/null && [[ $uptime =~ ^[0-9]+\.[0-9][0-9]$ ]]; then
+        now=$((10#${uptime/./}))
+    else
+        now=$((SECONDS * 100))
+    fi
+}
+
 # Report source inventory progress while du visits the directory buckets.
 # Measure the filtered payload separately. If the walk is interrupted the
 # received subtotal describes the source entries reached so far.
@@ -1303,7 +1391,9 @@ kvs_measure_site() {
     local last
     local elapsed=0
     local timed_out="no"
-    local complete=no payload="" allocation="" transport=tar
+    local worker_status=0 pending="" invalid=no
+    local now=0 deadline=0 remaining read_timeout=1
+    local payload="" allocation="" bound=no transport=tar
 
     SITE_SIZE_MB="0"
     SITE_SIZE_STATUS="skipped"
@@ -1319,56 +1409,60 @@ kvs_measure_site() {
         kvs_say "Site size: not measured (--no-size); the filesystem holding the site uses $(kvs_human_mb "$SITE_FS_USED_MB")"
         return 0
     fi
+    start=$SECONDS
+    if [ "$OPT_SIZE_TIMEOUT" -gt 0 ]; then
+        kvs_measure_ticks
+        deadline=$((now + 10#$OPT_SIZE_TIMEOUT * 100))
+    fi
     jobs=$(kvs_measure_jobs)
     MEASURE_DIR=$(mktemp -d 2> /dev/null) || MEASURE_DIR=""
-    if [ -n "$MEASURE_DIR" ] && ! kvs_list_measure_units "$MEASURE_DIR" "$jobs" 2>/dev/null; then
-        # A list cut short would leave part of the site out of an exact
-        # size: the site is measured in one pass instead.
-        kvs_warn "the list of the entries to measure could not be written in ${TMPDIR:-/tmp} (full?); measuring the site in one pass"
-        rm -rf -- "$MEASURE_DIR"
-        MEASURE_DIR=""
-    fi
-    if [ -n "$MEASURE_DIR" ]; then
-        while IFS= read -r -d '' _; do
-            total=$((total + 1))
-        done < "$MEASURE_DIR/units"
-    fi
     if [ -n "$SITE_FS_USED_MB" ]; then
         kvs_say "The filesystem holding the site uses $(kvs_human_mb "$SITE_FS_USED_MB")."
     fi
     if [ "$OPT_SIZE_TIMEOUT" -gt 0 ]; then
-        kvs_say "Measuring the site size for at most $(kvs_elapsed "$OPT_SIZE_TIMEOUT") ($total entries)..."
+        kvs_say "Measuring the site size for at most $(kvs_elapsed "$OPT_SIZE_TIMEOUT")..."
     else
-        kvs_say "Measuring the site size, this can take a while on a large installation ($total entries; --size-timeout bounds it, --no-size skips it)..."
+        kvs_say "Measuring the site size, this can take a while on a large installation (--size-timeout bounds it, --no-size skips it)..."
     fi
     if [ "$OPT_COMMAND" = detect ] && [ "$HAS_RSYNC" = yes ]; then transport=rsync; fi
-    exec 3< <(kvs_measure_units "$MEASURE_DIR" "$total" "$transport" ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"} 2>/dev/null)
-    MEASURE_PID=$!
-    [ "$total" -gt 0 ] || total=1
-    start=$SECONDS
+    kvs_start_measure "$jobs" "$transport" ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}
     last=$start
     while :; do
         line=""
-        if IFS= read -r -t 1 -d '' line <&3; then
-            if [ "$line" = complete ]; then
-                complete=yes
-            elif [[ $line == "payload "* ]]; then
-                read -r payload allocation <<< "${line#payload }"
-            elif [ "$line" = per-entry ]; then
-                MEASURE_PER_ENTRY=yes
-            else
-                kvs_add_measure_line "$line"
-            fi
-        else
-            status=$?
-            if [ "$status" -le 128 ]; then
+        status=0
+        IFS= read -r -t "$read_timeout" -d '' line <&3 || status=$?
+        elapsed=$((SECONDS - start))
+        if [ "$deadline" -gt 0 ] && [ "$((elapsed + 1))" -ge "$OPT_SIZE_TIMEOUT" ]; then
+            kvs_measure_ticks
+            remaining=$((deadline - now))
+            if [ "$remaining" -le 0 ]; then
+                timed_out=yes
+                kvs_stop_measure
                 break
             fi
+            if [ "$remaining" -lt 100 ]; then
+                printf -v read_timeout '0.%02d' "$remaining"
+            fi
         fi
-        elapsed=$((SECONDS - start))
-        if [ "$timed_out" = "no" ] && [ "$OPT_SIZE_TIMEOUT" -gt 0 ] && [ "$elapsed" -ge "$OPT_SIZE_TIMEOUT" ]; then
-            timed_out="yes"
-            kvs_stop_measure
+        pending+=$line
+        if [ "$status" = 0 ]; then
+            case $pending in
+                'names '*) total=${pending#names } ;;
+                'payload '*)
+                    read -r payload allocation <<< "${pending#payload }"
+                    kvs_is_number "$payload" && kvs_is_number "$allocation" || invalid=yes
+                    ;;
+                upper-bound) bound=yes ;;
+                per-entry) MEASURE_PER_ENTRY=yes ;;
+                *) kvs_add_measure_line "$pending" || invalid=yes ;;
+            esac
+            pending=""
+        elif [ "$status" -le 128 ]; then
+            wait "$MEASURE_PID" || worker_status=$?
+            # A wrapper can leave a helper with its output redirected.
+            kill -KILL -- "-$MEASURE_PID" 2>/dev/null || true
+            MEASURE_PID=""
+            break
         fi
         if [ $((SECONDS - last)) -ge 10 ]; then
             kvs_say "  $MEASURE_COUNT of $total entries, $(kvs_human_mb "$((MEASURE_KB / 1024))") so far, $(kvs_elapsed "$elapsed")"
@@ -1376,15 +1470,11 @@ kvs_measure_site() {
         fi
     done
     exec 3<&-
-    MEASURE_PID=""
     rm -rf -- "$MEASURE_DIR"
     MEASURE_DIR=""
     SITE_SIZE_SECONDS=$((SECONDS - start))
     SITE_TOTAL_MB=$((MEASURE_KB / 1024))
     SITE_SIZE_MB=$SITE_TOTAL_MB
-    if [ "$complete" = yes ] && [ "$timed_out" = no ] && [ "$MEASURE_COUNT" -gt 0 ]; then
-        MEASURE_COUNT=$total
-    fi
     SITE_SIZE_ENTRIES=$MEASURE_COUNT
     SITE_SIZE_ENTRIES_TOTAL=$total
     if [ "$timed_out" = "yes" ]; then
@@ -1397,11 +1487,15 @@ kvs_measure_site() {
         kvs_warn "could not measure the size of $SITE_DIR"
         return 0
     fi
-    if [ "$complete" != yes ]; then
-        SITE_SIZE_STATUS=incomplete
-        kvs_warn "site size measurement incomplete"
+    if [ "$worker_status" != 0 ] || [ "$invalid" = yes ] || [ -n "$pending" ] || [ "$total" -le 0 ] ||
+        { [ "$bound" = no ] && [ -z "$payload" ]; }; then
+        SITE_SIZE_STATUS="incomplete"
+        kvs_warn "site size measurement incomplete: measured $MEASURE_COUNT of $total entries"
         return 0
-    elif ! kvs_is_number "$payload" || ! kvs_is_number "$allocation"; then
+    fi
+    # Successful du accounted for every listed name, including aliases.
+    SITE_SIZE_ENTRIES=$total
+    if [ "$bound" = yes ]; then
         SITE_SIZE_STATUS=upper_bound
         SITE_SIZE_MB=$(((MEASURE_KB + 1023) / 1024))
         kvs_say "Site size: at most $(kvs_human_mb "$SITE_SIZE_MB") (unfiltered root)"
