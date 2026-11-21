@@ -791,6 +791,19 @@ include_www_for_domain() {
     [ "$dot_count" -eq 1 ]
 }
 
+# Only a filesystem that refuses directory syncing gets a global retry.
+env_sync_failed() {
+    local target=$1 error=$2
+    if [[ $env_sync_help == *--file-system* ]]; then
+        case "$error" in
+            *": Invalid argument"|*": Operation not supported"|*": Not supported")
+                sync && return 0 ;;
+        esac
+    fi
+    echo "ERROR: $target is in place but its durability is not confirmed. $error" >&2
+    return 1
+}
+
 remove_env_value() {
     local key="$1" env_file="${2:-.env}" data output="" offset=0 record begin end word character complete
     local index following removed cursor temporary preceding
@@ -894,14 +907,28 @@ remove_env_value() {
         done
         output+=${data:cursor:offset-cursor}
     done
-    [ -z "$export_result" ] || printf -v "$export_result" '%s' "$export_prefix"
+    if [ -n "$export_result" ]; then
+        # set_env_value owns this private working copy and publishes it once.
+        printf -v "$export_result" '%s' "$export_prefix"
+        [ "$output" = "$data" ] || printf '%s' "$output" > "$env_file"
+        return
+    fi
     [ "$output" != "$data" ] || return 0
     temporary=$(mktemp "${env_file}.tmp.XXXXXX") || return 1
+    : "${env_sync_help=$(LC_ALL=C sync --help 2>/dev/null || :)}"
     if ! cp -p -- "$env_file" "$temporary" || ! printf '%s' "$output" > "$temporary" ||
+        { [[ $env_sync_help == *--file-system* ]] && ! sync -- "$temporary"; } ||
         ! mv -f -- "$temporary" "$env_file"; then
         rm -f -- "$temporary"
         return 1
     fi
+    local sync_error parent=.
+    local -a directory_args=()
+    if [[ $env_sync_help == *--file-system* ]]; then
+        if [[ $env_file == */* ]]; then parent=${env_file%/*}; fi
+        directory_args=(-- "${parent:-/}")
+    fi
+    sync_error=$(LC_ALL=C sync "${directory_args[@]}" 2>&1) || env_sync_failed "$env_file" "$sync_error"
 }
 
 set_env_value() {
@@ -939,10 +966,17 @@ set_env_value() {
     while IFS= read -r line || [ -n "$line" ]; do
         last_line=$line
     done < "$temporary"
-    if [ "$last_line" != "${env_prefix}${key}=${value}" ] || ! mv -f -- "$temporary" .env; then
+    : "${env_sync_help=$(LC_ALL=C sync --help 2>/dev/null || :)}"
+    if [ "$last_line" != "${env_prefix}${key}=${value}" ] ||
+        { [[ $env_sync_help == *--file-system* ]] && ! sync -- "$temporary"; } ||
+        ! mv -f -- "$temporary" .env; then
         rm -f -- "$temporary"
         return 1
     fi
+    local sync_error
+    local -a directory_args=()
+    if [[ $env_sync_help == *--file-system* ]]; then directory_args=(-- .); fi
+    sync_error=$(LC_ALL=C sync "${directory_args[@]}" 2>&1) || env_sync_failed .env "$sync_error"
 }
 
 # Save the earlier resource identities before replacing the domain or prefix.

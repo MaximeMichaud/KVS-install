@@ -1734,17 +1734,13 @@ kvs_available_mb() {
     printf '%s' "$avail"
 }
 
-# kvs_dirname <path>: the directory part of a path, without dirname (the
-# old server may offer few tools; the tests run with a minimal PATH).
+# Write the exact parent to the caller's variable. Command substitution
+# would strip trailing newlines from a directory name.
 kvs_dirname() {
     local path=$1
-
     case $path in
-        */*)
-            path=${path%/*}
-            printf '%s' "${path:-/}"
-            ;;
-        *) printf '.' ;;
+        */*) path=${path%/*}; printf -v "$2" '%s' "${path:-/}" ;;
+        *) printf -v "$2" '.' ;;
     esac
 }
 
@@ -1762,15 +1758,7 @@ kvs_path_inside_site() {
     local raw resolved link target
 
     [ -n "$SITE_DIR" ] || return 1
-    # As kvs_dirname, kept whole: a directory name ending with a line
-    # break is another directory without it.
-    case $1 in
-        */*)
-            raw=${1%/*}
-            raw=${raw:-/}
-            ;;
-        *) raw=. ;;
-    esac
+    kvs_dirname "$1" raw
 
     # A name under the site, even one that resolves elsewhere through a
     # symlink the site holds (for example contents -> /data). A ".." segment
@@ -2862,6 +2850,8 @@ kvs_archive_excludes() {
 # export intact through dump, compression and tar failures, on the same disk.
 kvs_publish_export() {
     local staged="$1" output="$2"
+    local sync_error
+    local -a directory_args=()
 
     if [ -L "$output" ] || { [ -e "$output" ] && [ ! -f "$output" ]; }; then
         kvs_error "$output is not a regular output file"
@@ -2891,9 +2881,26 @@ kvs_publish_export() {
         kvs_error "could not restrict the permissions of the staged export"
         return 1
     fi
+    # Older coreutils can only flush the whole system. Detect file operand
+    # support up front so an actual write error never selects the fallback.
+    if [[ $(LC_ALL=C sync --help 2>/dev/null) == *--file-system* ]]; then
+        if ! sync -- "$staged"; then
+            kvs_error "could not sync the staged export; the previous output was not replaced"
+            return 1
+        fi
+        directory_args=(-- "$3")
+    fi
     # -T refuses a directory created at the destination during the export.
     if ! mv -fT -- "$staged" "$output"; then
         kvs_error "could not publish $output; the previous output was not replaced"
+        return 1
+    fi
+    if ! sync_error=$(LC_ALL=C sync ${directory_args[@]+"${directory_args[@]}"} 2>&1); then
+        case "$sync_error" in
+            *": Invalid argument"|*": Operation not supported"|*": Not supported")
+                if [ -n "${directory_args[0]:-}" ] && sync; then return 0; fi ;;
+        esac
+        kvs_error "$output is in place but its durability is not confirmed. $sync_error"
         return 1
     fi
 }
@@ -3509,7 +3516,7 @@ kvs_refuse_external_links() {
 }
 
 kvs_command_archive() {
-    local stamp
+    local output_dir stamp
     local output
     local needed
     local dump_name
@@ -3573,7 +3580,8 @@ kvs_command_archive() {
 
     if [ "$output" != "-" ]; then
         # Use the destination filesystem, not a potentially small TMPDIR.
-        STAGING_DIR=$(mktemp -d "$(kvs_dirname "$output")/.kvs-export.XXXXXX" 2> /dev/null) || STAGING_DIR=""
+        kvs_dirname "$output" output_dir
+        STAGING_DIR=$(mktemp -d "$output_dir/.kvs-export.XXXXXX" 2> /dev/null) || STAGING_DIR=""
         if [ -z "$STAGING_DIR" ]; then
             kvs_error "cannot create a staging directory next to $output"
             return 1
@@ -3592,7 +3600,7 @@ kvs_command_archive() {
             kvs_error "the dump failed"
             return 1
         fi
-        kvs_publish_export "$STAGING_DIR/export" "$output" || return 1
+        kvs_publish_export "$STAGING_DIR/export" "$output" "$output_dir" || return 1
         bytes=$(kvs_file_size "$output") || bytes=0
         mb=$((bytes / 1048576))
         kvs_say "Dump written: $output ($(kvs_human_mb "$mb"))"
@@ -3640,7 +3648,7 @@ kvs_command_archive() {
         kvs_error "tar failed"
         return 1
     fi
-    kvs_publish_export "$STAGING_DIR/export" "$output" || return 1
+    kvs_publish_export "$STAGING_DIR/export" "$output" "$output_dir" || return 1
     kvs_report_archive "$output"
     return 0
 }

@@ -399,7 +399,7 @@ make_min_bin() {
     local tool path
 
     mkdir -p "$MIN_BIN"
-    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill pgrep sleep awk sort stat id chmod chown cp mv sha256sum getconf mkfifo tee head cut; do
+    for tool in sed find readlink du df date mktemp rm mkdir ln tar wc uname gzip cat xargs nproc pkill pgrep sleep awk sort stat id chmod chown cp mv sync sha256sum getconf mkfifo tee head cut; do
         path=$(command -v "$tool" 2> /dev/null) || continue
         ln -sf "$path" "$MIN_BIN/$tool"
     done
@@ -2686,6 +2686,33 @@ test_the_dump_is_staged_next_to_the_archive_and_outside_the_site() {
         fail "the dump must be staged next to the archive: $(grep 'stdout:' "$STUB_LOG")"
     find "$work" -maxdepth 1 -name '.kvs-export.*' | grep -q . && fail "the staging directory must be removed: $(ls -A "$work")"
     tar -tf "$work/export.tar" | grep -Fxq "database.sql.zst" || fail "the archive must hold the dump"
+
+    # Two existing directories differ only by the last byte. Check the
+    # actual staging file's grandparent and the directory passed to sync.
+    local exact="$work/"$'parent\n' sync_bin="$work/sync-bin"
+    mkdir "$work/parent" "$exact" "$sync_bin"
+    cat > "$sync_bin/sync" <<'SH'
+#!/bin/bash
+case $1 in
+    --help) echo --file-system ;;
+    --)
+        if [ -d "$2" ]; then
+            [ "$2" -ef "$EXACT_PARENT" ] || exit 1
+            echo directory >> "$SYNC_EVENTS"
+        else
+            stage=${2%/*}
+            [ "${stage%/*}" -ef "$EXACT_PARENT" ] || exit 1
+            echo file >> "$SYNC_EVENTS"
+        fi ;;
+    *) exit 1 ;;
+esac
+SH
+    chmod +x "$sync_bin/sync"
+    EXACT_PARENT="$exact" SYNC_EVENTS="$work/synced" BASH_COMPAT=4.2 run_export "$sync_bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+        -y --dump-only --gzip --database-format=sql --no-size -o "$exact/backup.gz" "$site" ||
+        fail "export under a parent ending in newline: $(cat "$err")"
+    [ -s "$exact/backup.gz" ] && [ "$(cat "$work/synced")" = $'file\ndirectory' ] ||
+        fail "the exact destination directory must hold the stage and be synced"
 
     # An archive or a dump inside the site would be served by its web server.
     status=0

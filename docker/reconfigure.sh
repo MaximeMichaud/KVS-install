@@ -261,9 +261,25 @@ set_env_value() {
         rm -f -- "$temp_file"
         return 1
     fi
+    : "${env_sync_help=$(LC_ALL=C sync --help 2>/dev/null || :)}"
     if [ "$(grep -Fxc "${key}=${value}" "$temp_file")" -ne 1 ] ||
+        { [[ $env_sync_help == *--file-system* ]] && ! sync -- "$temp_file"; } ||
         ! mv -f -- "$temp_file" .env; then
         rm -f -- "$temp_file"
+        return 1
+    fi
+    local sync_error
+    local -a directory_args=()
+    if [[ $env_sync_help == *--file-system* ]]; then directory_args=(-- .); fi
+    if ! sync_error=$(LC_ALL=C sync "${directory_args[@]}" 2>&1); then
+        case "$sync_error" in
+            *": Invalid argument"|*": Operation not supported"|*": Not supported")
+                if [[ $env_sync_help == *--file-system* ]] && sync; then
+                    [ "$(grep -Fxc "${key}=${value}" .env)" -eq 1 ]
+                    return
+                fi ;;
+        esac
+        echo "ERROR: .env is in place but its durability is not confirmed. $sync_error" >&2
         return 1
     fi
     [ "$(grep -Fxc "${key}=${value}" .env)" -eq 1 ]
