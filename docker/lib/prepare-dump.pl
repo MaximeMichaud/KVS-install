@@ -34,9 +34,10 @@ sub peek_bytes {
     return substr($in->{buf}, $at - $in->{base}, $n);
 }
 
-# Return one header token and advance the cursor.
+# Return one token and advance the cursor. In a table value a single string
+# may span megabytes. Body callers can consume such a quote in pieces.
 sub sql_token {
-    my ($in, $s) = @_;
+    my ($in, $s, $split, $delimiter) = @_;
     my $start = $s->{at};
     my $offset = $start - $in->{base};
     return unless available($in, $start, 4);
@@ -44,10 +45,10 @@ sub sql_token {
     my $c = substr($lead, 0, 1);
     my $end = $offset;
     my $kind = 'symbol';
-    if ($c =~ /['"\x60]/) {
-        my $quote = $c;
+    if ($s->{quote} || $c =~ /['"\x60]/) {
+        my $quote = $s->{quote} || $c;
         my $escapes = !$s->{no_backslash} && $quote ne chr(96) && !($quote eq '"' && $s->{ansi});
-        ++$end;
+        ++$end unless $s->{quote};
         $kind = 'quoted';
         while (available($in, $in->{base} + $end, 2)) {
             pos($in->{buf}) = $end;
@@ -57,11 +58,18 @@ sub sql_token {
                 $in->{buf} =~ /\G[^\Q$quote\E]*/gc;
             }
             $end = pos($in->{buf});
+            if ($split && $end - $offset >= 65536) {
+                $s->{quote} = $quote;
+                last;
+            }
             last unless available($in, $in->{base} + $end, 2);
             my $ch = substr($in->{buf}, $end, 1);
             if ($ch eq $quote) {
                 ++$end;
-                last if substr($in->{buf}, $end, 1) ne $quote;
+                if (substr($in->{buf}, $end, 1) ne $quote) {
+                    delete $s->{quote};
+                    last;
+                }
                 ++$end;
             } elsif ($escapes && $ch eq '\\') {
                 $end += length(substr($in->{buf}, $end, 2));
@@ -88,6 +96,12 @@ sub sql_token {
             else { $in->{buf} =~ /\G[\w\$\x80-\xff]+/gc; }
             $end = pos($in->{buf});
             last if $end < length($in->{buf}) || !available($in, $in->{base} + $end, 1);
+        }
+        if ($kind eq 'word' && defined $delimiter && $delimiter ne ';') {
+            # A client delimiter can begin inside a word, as in END$$.
+            my $span = peek_bytes($in, $start, $end - $offset + length($delimiter) - 1);
+            my $cut = index($span, $delimiter);
+            $end = $offset + $cut if $cut > 0 && $cut < $end - $offset;
         }
     } else {
         ++$end;
@@ -124,8 +138,8 @@ sub setting {
             } elsif ("SET$raw;\n" ne $compact) {
                 warn $mode_warning if $header;
                 my $saved = $s->{saved}{lc(join('', @rhs))};
-                $s->{no_backslash} = ($saved && $saved->[0]) // 0;
-                $s->{ansi} = ($saved && $saved->[1]) // 0;
+                $s->{no_backslash} = ($saved && $saved->[0]) // $s->{inherited};
+                $s->{ansi} = ($saved && $saved->[1]) // $s->{guess_ansi};
             }
         }
         if ($lhs =~ /^\@[a-z_0-9]+$/i && join('', @rhs) =~ /^\@\@(?:SESSION\.)?SQL_MODE$/i) {
@@ -149,7 +163,7 @@ sub setting {
             $flush->();
             return $out . $delimiter;
         }
-        my ($kind, $word) = sql_token($in, \%lexer);
+        my ($kind, $word) = sql_token($in, \%lexer, 0, $delimiter || undef);
         $s->{at} = $lexer{at};
         if (!defined $kind) { $flush->(); return $out; }
         if ($word eq ',' && !$depth) { $flush->(); $out .= ','; next; }
@@ -180,13 +194,12 @@ sub version_setting {
     return if $header && $version eq '50003' && $sql =~ /^\s*(?:SQL_MODE|\@saved_sql_mode)\b/i;
     my %inner = (%$s, at => 0);
     my $tail = setting({buf => $sql, base => 0, eof => 1}, \%inner, '', $header);
-    delete $inner{at};
-    @$s{keys %inner} = values %inner;
+    %$s = (%inner, at => $s->{at});
     return $prefix . $tail . $end;
 }
 
 my $in = {buf => '', base => 0};
-my $state = {at => 0};
+my $state = {at => 0, ansi => 0};
 while (length(my $prefix = peek_bytes($in, $state->{at}, 4))) {
     if ($prefix =~ /^SET(?![\w\$\x80-\xff])/i) {
         my (undef, $set) = sql_token($in, $state);
@@ -204,9 +217,195 @@ while (length(my $prefix = peek_bytes($in, $state->{at}, 4))) {
     release_before($in, $state->{at});
 }
 print $compact if !$state->{saw_mode} && available($in, $state->{at}, 1);
-while (my $n = available($in, $state->{at}, 1)) {
-    print substr($in->{buf}, $state->{at} - $in->{base}, $n);
-    $state->{at} += $n;
-    release_before($in, $state->{at});
+# Recognize only the outer definition list. A comma inside an expression or
+# a list of indexed columns cannot begin a new FULLTEXT definition.
+sub ddl_token {
+    my ($s, $token) = @_;
+    my $phase = $s->{phase};
+    if ($phase eq 'start') {
+        $s->{operation} = $token;
+        $s->{phase} = $token eq 'CREATE' || $token eq 'ALTER' ? 'verb' : 'other';
+    } elsif ($phase eq 'verb') {
+        return if $s->{operation} eq 'CREATE' && $token eq 'TEMPORARY';
+        $s->{phase} = $token eq 'TABLE' ? 'name' : 'other';
+    } elsif ($phase eq 'name') {
+        return if $token eq 'IF' || $token eq 'NOT' || $token eq 'EXISTS';
+        $s->{phase} = 'after_name';
+    } elsif ($phase eq 'after_name') {
+        if ($token eq '.') {
+            $s->{phase} = 'name';
+        } elsif ($s->{operation} eq 'CREATE' && $token eq '(') {
+            $s->{depth} = $s->{list_depth} = 1;
+            $s->{phase} = 'item';
+        } elsif ($s->{operation} eq 'ALTER') {
+            $s->{depth} = $s->{list_depth} = 0;
+            $s->{phase} = $token eq 'ADD' ? 'add' : 'other_item';
+        } else {
+            $s->{phase} = 'other';
+        }
+    } elsif ($token eq '(') {
+        $s->{phase} = 'columns' if $phase eq 'fulltext' && $s->{depth} == $s->{list_depth};
+        ++$s->{depth};
+    } elsif ($token eq ')') {
+        --$s->{depth};
+        $s->{phase} = 'options' if $phase eq 'columns' && $s->{depth} == $s->{list_depth};
+        $s->{phase} = 'other' if $s->{depth} < $s->{list_depth};
+    } elsif ($token eq ',' && $s->{depth} == $s->{list_depth}) {
+        $s->{phase} = 'item';
+    } elsif ($phase eq 'item' || $phase eq 'add') {
+        if ($phase eq 'item' && $s->{operation} eq 'ALTER') {
+            $s->{phase} = $token eq 'ADD' ? 'add' : 'other_item';
+        } else {
+            $s->{phase} = $token eq 'FULLTEXT' ? 'fulltext' : 'other_item';
+        }
+    }
 }
+
+# Probe on a copy of the cursor. A different parser, quoted example or
+# incomplete option leaves every byte in the input stream.
+sub option_word {
+    my ($in, $s) = @_;
+    while (1) {
+        my $delimiter = $s->{delimiter};
+        return '' if $delimiter && peek_bytes($in, $s->{at}, length($delimiter)) eq $delimiter;
+        my ($kind, $word) = sql_token($in, $s, 1, $delimiter);
+        return '' unless defined $kind;
+        next if $kind eq 'space' || ($kind eq 'comment' && $word !~ m{^/\*M?!}i);
+        return $word;
+    }
+    return '';
+}
+
+sub parser_option {
+    my ($in, $s) = @_;
+    return unless uc(option_word($in, $s)) eq 'WITH';
+    return unless uc(option_word($in, $s)) eq 'PARSER';
+    my $name = lc(option_word($in, $s));
+    return $name eq 'ngram' || $name eq '`ngram`' || $s->{ansi} && $name eq '"ngram"';
+}
+
+sub option_end {
+    my ($in, $s) = @_;
+    my %probe = %$s;
+    my $prefix = peek_bytes($in, $probe{at}, 8);
+    if ($prefix =~ m{^/\*!50100}i) {
+        my (undef, $wrapped) = sql_token($in, \%probe);
+        return unless $wrapped =~ m{^/\*!50100\s+(.*?)\*/$}s;
+        my $inside = {buf => $1, base => 0, eof => 1};
+        my %inner = (%probe, at => 0, delimiter => undef);
+        return unless parser_option($inside, \%inner) && option_word($inside, \%inner) eq '';
+    } else {
+        return unless $prefix =~ /^WITH(?![\w\$\x80-\xff])/i && parser_option($in, \%probe);
+    }
+    return $probe{at};
+}
+
+sub scan_step {
+    my ($in, $s) = @_;
+    my $start = $s->{at};
+    my $delimiter = $s->{delimiter};
+    if (!$s->{quote} && peek_bytes($in, $start, length($delimiter)) eq $delimiter) {
+        $s->{at} += length($delimiter);
+        $s->{phase} = 'start';
+        return;
+    }
+    # Skip runs of ordinary bytes in INSERTs and routine bodies without
+    # materializing their tokens (a hex literal can span many input chunks).
+    if ($s->{phase} eq 'other' && !$s->{quote} && available($in, $start, 1)) {
+        my $first = substr($delimiter, 0, 1);
+        pos($in->{buf}) = $start - $in->{base};
+        if ($in->{buf} =~ m{\G[^'"\x60/\#\-\Q$first\E]+}gc) {
+            $s->{at} = $in->{base} + pos($in->{buf});
+            return;
+        }
+    }
+    my ($kind, $word) = sql_token($in, $s, 1, $delimiter);
+    if (!defined $kind) { $s->{done} = 1; return; }
+    if ($s->{phase} eq 'options' && $s->{depth} == $s->{list_depth} && $kind ne 'quoted') {
+        my $from = $start;
+        my %probe = %$s;
+        if ($kind eq 'space') {
+            $word =~ /([ \t]*)\z/;
+            $from = $s->{at} - length($1);
+        } else { $probe{at} = $start; }
+        if (defined(my $end = option_end($in, \%probe))) {
+            my $next = peek_bytes($in, $end, 1);
+            my $join = $next =~ /[^\s,);]/ && peek_bytes($in, $end, length($delimiter)) ne $delimiter ? ' ' : '';
+            push @{$s->{edits}}, [$from, $end, $join];
+            $s->{at} = $end;
+            return;
+        }
+    }
+    return if $kind eq 'space';
+    if ($kind eq 'comment') {
+        if ($word =~ m{^/\*M?!}i && $s->{phase} eq 'start') {
+            version_setting($s, $word, 0);
+            $s->{phase} = 'other';
+        }
+        return;
+    }
+    if ($s->{phase} eq 'start' && uc($word) eq 'DELIMITER') {
+        my $at = $s->{at};
+        my $line = '';
+        while (length(my $part = peek_bytes($in, $at, 256))) {
+            $part =~ s/(?<=\n).*//s;
+            $line .= $part;
+            $at += length($part);
+            last if $part =~ /\n\z/;
+        }
+        if ($line =~ /^[ \t]+(?:'([^']+)'|"([^"]+)"|(\S+))/) {
+            $s->{delimiter} = $1 // $2 // $3;
+            $s->{at} = $at;
+            return;
+        }
+    }
+    if ($s->{phase} eq 'start' && uc($word) eq 'SET') {
+        setting($in, $s, $delimiter, 0);
+        return;
+    }
+    ddl_token($s, $kind eq 'quoted' ? 'identifier' : uc($word)) unless $s->{phase} eq 'other';
+}
+
+# The bundled server's default has neither ANSI_QUOTES nor NO_BACKSLASH_ESCAPES.
+# A compact dump inherits its session's backslash handling. Walk the cursors
+# over the same input buffer. Emit a change only once all cursors agree on
+# the exact byte range and replacement. Storage stays independent of dump size.
+my @scans;
+for my $backslash (0, 1) {
+    # Also cover an expression whose resulting ANSI_QUOTES setting is unknown.
+    # For an inherited compact mode ANSI_QUOTES starts at the bundled default.
+    for my $ansi (0, 1) {
+        push @scans, {%$state, phase => 'start', delimiter => ';', edits => [],
+            no_backslash => $state->{no_backslash} // $backslash, inherited => $backslash,
+            ansi => $state->{ansi} // $ansi, guess_ansi => $ansi,
+            saved => {%{$state->{saved} // {}}}};
+    }
+}
+my $written = $state->{at};
+my $converted = 0;
+while (1) {
+    my $until = $written + 65536;
+    for my $scan (@scans) {
+        scan_step($in, $scan) while !$scan->{done} && $scan->{at} < $until;
+    }
+    my ($safe) = sort { $a <=> $b } map { $_->{at} } @scans;
+    while (1) {
+        my ($edit) = sort { $a->[0] <=> $b->[0] }
+            map { @{$_->{edits}} ? $_->{edits}[0] : () } @scans;
+        last if !$edit || $edit->[0] >= $safe;
+        for my $scan (@scans) {
+            my $other = shift @{$scan->{edits}};
+            die "ERROR: SQL parser conversion is ambiguous under different SQL modes. Set SQL_MODE explicitly in the dump before importing.\n"
+                unless $other && $edit->[0] == $other->[0] && $edit->[1] == $other->[1] && $edit->[2] eq $other->[2];
+        }
+        print substr($in->{buf}, $written - $in->{base}, $edit->[0] - $written), $edit->[2];
+        $written = $edit->[1];
+        $converted = 1;
+    }
+    print substr($in->{buf}, $written - $in->{base}, $safe - $written);
+    $written = $safe;
+    release_before($in, $written);
+    last unless grep { !$_->{done} } @scans;
+}
+warn "WARNING: MySQL ngram FULLTEXT indexes will use the default MariaDB parser. Search results may differ.\n" if $converted;
 close STDOUT or die "write dump: $!";

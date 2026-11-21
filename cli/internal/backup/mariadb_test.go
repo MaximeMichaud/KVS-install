@@ -417,6 +417,9 @@ CREATE FUNCTION ktvs_double(n INT) RETURNS INT DETERMINISTIC RETURN n * 2;
 CREATE TABLE ktvs_options (variable VARCHAR(64) PRIMARY KEY, value TEXT);
 CREATE FUNCTION ktvs_mode_text() RETURNS TEXT DETERMINISTIC RETURN "start
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+CREATE TABLE search_text (
+  FULLTEXT KEY ft (body) /*!50100 WITH PARSER ngram */
+);
 end";
 CREATE EVENT ktvs_cleanup ON SCHEDULE EVERY 1 DAY DO DELETE FROM ktvs_comments WHERE comment_id < 0;
 INSERT INTO ktvs_videos VALUES (1, ' first 😀 '), (2, 'second ✓');

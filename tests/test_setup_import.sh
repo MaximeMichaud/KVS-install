@@ -1013,6 +1013,162 @@ test_dump_mode_preserves_invalid_dates_and_zero_ids() {
     pass 'the dump mode preserves invalid dates and zero IDs'
 }
 
+test_ngram_indexes_keep_their_columns_and_use_the_default_parser() {
+    local dump="$TMP_ROOT/ngram.sql" prepared="$TMP_ROOT/prepared-ngram.sql" warnings="$TMP_ROOT/ngram.err"
+    cat > "$dump" <<'SQL'
+CREATE TABLE `ktvs_options` (`variable` varchar(64) PRIMARY KEY, `value` text);
+CREATE TABLE `ktvs_search` (
+  `title` text,
+  `body` text,
+  -- FULLTEXT KEY notes /*!50100 WITH PARSER ngram */
+  FULLTEXT KEY `ft_title` (`title`) /*!50100 WITH PARSER `ngram` */,
+  FULLTEXT KEY `ft_both` (`title`,`body`) /*!50100 WITH PARSER ngram */ COMMENT 'kept',
+  FULLTEXT KEY `other` (`body`) /*!50100 WITH PARSER `other_parser` */,
+  FULLTEXT KEY `literal /*!50100 WITH PARSER ngram */` (`body`) COMMENT 'keep /*!50100 WITH PARSER ngram */'
+) ENGINE=InnoDB;
+INSERT INTO `ktvs_options` VALUES ('sample','/*!50100 WITH PARSER ngram */');
+SQL
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /site /site "$prepared" token >/dev/null 2>"$warnings"
+    grep -Fxq '  FULLTEXT KEY `ft_title` (`title`),' "$prepared" || fail 'the first index and its comma must survive'
+    grep -Fxq "  FULLTEXT KEY \`ft_both\` (\`title\`,\`body\`) COMMENT 'kept'," "$prepared" || fail 'the composite index and its comment must survive'
+    local marker original
+    for marker in 'KEY notes' 'other_parser' 'KEY `literal' "('sample',"; do
+        original=$(grep -F "$marker" "$dump")
+        grep -Fxq "$original" "$prepared" || fail "import changed a line that should be kept: $original"
+    done
+    [ "$(grep -ic 'ngram.*default.*parser' "$warnings")" = 1 ] || fail 'the change of parser must be reported once'
+    import_prepare_dump "$prepared" ktvs_ 7.0.2 /site /site "$TMP_ROOT/ngram-again.sql" token >/dev/null 2>"$warnings"
+    [ ! -s "$warnings" ] || fail 'no warning is due for literal text or another parser'
+    pass 'ngram indexes keep their columns and use the default parser'
+}
+
+test_ngram_only_changes_index_options() {
+    local dump="$TMP_ROOT/ddl.sql" prepared="$TMP_ROOT/prepared-ddl.sql" warnings="$TMP_ROOT/ddl.err"
+    local template="$TMP_ROOT/index-forms" expected="$TMP_ROOT/expected-ddl"
+    make_dump "$dump.body" yes
+    printf "SET SQL_MODE='';\n" > "$dump"
+    cat "$dump.body" >> "$dump"
+    cat > "$template" <<'SQL'
+-- begin index cases
+INSERT INTO ktvs_options VALUES ('row','a doubled '' quote and an escaped \';
+CREATE TABLE fake (
+  FULLTEXT KEY ft (body) /*!50100 WITH PARSER ngram */
+);
+end');
+CREATE TABLE "multi;
+CREATE TABLE fake (
+  FULLTEXT KEY ft (body) /*!50100 WITH PARSER ngram */
+)" (id INT);
+CREATE TABLE `multi``line;
+CREATE TABLE fake (
+  FULLTEXT KEY ft (body) /*!50100 WITH PARSER ngram */
+)` (id INT);
+/* A block comment;
+CREATE TABLE fake (
+  FULLTEXT KEY ft (body) WITH PARSER ngram
+);
+*/
+DELIMITER ;;
+CREATE PROCEDURE p() BEGIN
+  SELECT "start
+CREATE TABLE fake (
+  FULLTEXT KEY ft (body) /*!50100 WITH PARSER ngram */
+);
+end";
+  CREATE TABLE scratch (body TEXT, FULLTEXT KEY ft (body) WITH PARSER ngram);
+END;;
+DELIMITER ;
+CREATE TABLE db.t (body TEXT, id INT, FULLTEXT INDEX ft (body)@DIRECT@,
+  KEY ordinary (id) COMMENT 'WITH PARSER ngram',
+  FULLTEXT (body)
+@VERSIONED@
+  , FULLTEXT KEY adjacent (body) KEY_BLOCK_SIZE=1@ADJACENT@COMMENT 'kept'
+);
+ALTER TABLE db.t ADD COLUMN more TEXT,
+  ADD FULLTEXT INDEX another (more, body)@VERSIONED@,
+  ADD FULLTEXT (body)@DIRECT@, ADD FULLTEXT (more) WITH PARSER ngram_other;
+SET sql_mode='NO_BACKSLASH_ESCAPES,ANSI_QUOTES';
+INSERT INTO ktvs_options VALUES ('backslash','ends in \');
+CREATE TABLE "quoted\name" (body TEXT, FULLTEXT INDEX ft (body)@DIRECT@);
+-- end index cases
+SQL
+    sed -e 's|@DIRECT@| WITH PARSER ngram|g' -e 's|@VERSIONED@| /*!50100 WITH PARSER `ngram` */|g' -e 's|@ADJACENT@|/*!50100 WITH PARSER ngram */|g' "$template" >> "$dump"
+    sed -e 's/@DIRECT@//g' -e 's/@VERSIONED@//g' -e 's/@ADJACENT@/ /g' "$template" > "$expected"
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /site /site "$prepared" token >/dev/null 2>"$warnings"
+    sed -n '/^-- begin index cases$/,/^-- end index cases$/p' "$prepared" |
+        diff -u "$expected" - || fail 'only real index options may change'
+    [ "$(grep -cF 'Search results may differ.' "$warnings")" = 1 ] || fail 'one warning is due for all converted indexes'
+
+    make_dump "$dump.body" yes
+    printf "SET SQL_MODE='';\n" > "$dump"
+    cat "$dump.body" >> "$dump"
+    sed -n '/^-- begin index cases$/,/^DELIMITER ;$/p' "$template" >> "$dump"
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /site /site "$prepared" token >/dev/null 2>"$warnings"
+    [ ! -s "$warnings" ] || fail 'DDL in stored text and routine bodies must not warn'
+    pass 'parser clauses change only after the indexed columns in table DDL'
+}
+
+test_ngram_modes_and_client_delimiters() {
+    local root="$TMP_ROOT/parser-modes" table="CREATE TABLE ktvs_options (variable VARCHAR(64) PRIMARY KEY, value TEXT);"
+    local marker='WITH PARSER ngram'
+    mkdir -p "$root"
+    cat > "$root/path" <<'SQL'
+INSERT INTO ktvs_options VALUES ('path','C:\');
+INSERT INTO ktvs_options VALUES ('sample',';
+CREATE TABLE example (body TEXT, FULLTEXT KEY ft (body) WITH PARSER ngram);
+');
+SQL
+    {
+        echo "$table"
+        cat "$root/path"
+    } > "$root/input"
+    if import_prepare_dump "$root/input" ktvs_ 7.0.2 /site /site "$root/out" token > /dev/null 2>"$root/warnings"; then
+        fail 'an ambiguous compact dump changed stored DDL'
+    fi
+    [ ! -e "$root/out" ] || fail 'ambiguous SQL left a staged import'
+    grep -Fq 'ambiguous' "$root/warnings" || fail 'an ambiguous compact dump must explain why it stopped'
+
+    {
+        echo "$table"
+        echo "SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES,ANSI_QUOTES';"
+        cat "$root/path"
+        cat <<'SQL'
+DELIMITER //
+CREATE TABLE "table\" (body TEXT, FULLTEXT KEY ft (body) WITH /* choice */ PARSER "ngram")//
+ALTER TABLE "table\" ADD FULLTEXT (body) WITH -- before parser
+ PARSER # before name
+ `ngram`//
+DELIMITER $$
+CREATE PROCEDURE p() BEGIN
+  CREATE TABLE nested (body TEXT, FULLTEXT KEY ft (body) WITH PARSER ngram);
+END$$
+CREATE TABLE after_p (body TEXT, FULLTEXT KEY ft (body) WITH PARSER ngram)$$
+ALTER TABLE after_p ADD FULLTEXT (body) WITH PARSER ngram$$
+SET @save=@@SESSION.sql_mode$$
+SET SESSION sql_mode=''$$
+SET SESSION sql_mode=@save$$
+ALTER TABLE after_p ADD FULLTEXT (body) WITH PARSER "ngram"$$
+SET SESSION sql_mode=''$$
+DELIMITER ;
+CREATE TABLE normal (body TEXT, FULLTEXT KEY ft (body) WITH PARSER "ngram");
+SQL
+    } > "$root/input"
+    import_prepare_dump "$root/input" ktvs_ 7.0.2 /site /site "$root/out" token > /dev/null 2>"$root/warnings" || fail 'known SQL modes must prepare'
+    sed -n '/^INSERT INTO ktvs_options VALUES (.*path/,/^DELIMITER \/\//{ /^DELIMITER/d; p; }' "$root/out" |
+        cmp "$root/path" - || fail 'the stored DDL or backslash path changed'
+    grep -Fxq 'CREATE TABLE "table\" (body TEXT, FULLTEXT KEY ft (body))//' "$root/out" || fail 'ANSI identifier or commented parser option'
+    grep -Fxq 'ALTER TABLE "table\" ADD FULLTEXT (body)//' "$root/out" || fail 'line comments between parser keywords'
+    grep -Fxq "  CREATE TABLE nested (body TEXT, FULLTEXT KEY ft (body) $marker);" "$root/out" || fail 'procedure DDL changed'
+    grep -Fxq 'CREATE TABLE after_p (body TEXT, FULLTEXT KEY ft (body))$$' "$root/out" || fail 'custom delimiter following a routine'
+    [ "$(grep -Fxc 'ALTER TABLE after_p ADD FULLTEXT (body)$$' "$root/out")" = 2 ] || fail 'saved mode or delimiter after the parser name'
+    grep -Fxq 'CREATE TABLE normal (body TEXT, FULLTEXT KEY ft (body) WITH PARSER "ngram");' "$root/out" || fail 'double-quoted string consumed as an identifier'
+    [ "$(grep -cF 'Search results may differ.' "$root/warnings")" = 1 ] || fail 'converted indexes must warn once'
+    pass 'client delimiters, SQL modes and compact ambiguity protect stored SQL'
+}
+
+test_ngram_modes_and_client_delimiters
+test_ngram_only_changes_index_options
+test_ngram_indexes_keep_their_columns_and_use_the_default_parser
 test_sql_import_checks_perl_before_confirmation
 test_dump_mode_preserves_invalid_dates_and_zero_ids
 test_php_config_values_are_read_as_kvs_writes_them
