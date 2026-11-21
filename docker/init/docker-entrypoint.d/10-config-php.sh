@@ -39,14 +39,6 @@ adopt_setup_php_binary() {
     log_info "${key%_path} path: $current is not in the container, set to $container_path"
 }
 
-escape_php_single_quoted() {
-    local value="$1"
-
-    value=${value//\\/\\\\}
-    value=${value//\'/\\\'}
-    printf '%s' "$value"
-}
-
 escape_sed_replacement() {
     local value="$1"
 
@@ -139,16 +131,6 @@ adopt_plugin_setting_paths() {
     done
 }
 
-# The single-quoted text of a define in setup_db.php, escapes included, as
-# the first line that defines the name carries it, with any spacing after
-# the comma.
-setup_db_value() {
-    local name="$1"
-
-    sed -n -E "s/^[[:space:]]*define\\('${name}',[[:space:]]*'(([^'\\\\]|\\\\.)*)'\\).*/\\1/p" \
-        "$KVS_PATH/admin/include/setup_db.php" | head -n 1
-}
-
 # Configure setup.php
 if [ -f "$KVS_PATH/admin/include/setup.php" ]; then
     log_info "Configuring setup.php..."
@@ -224,27 +206,95 @@ fi
 # Configure database connection
 if [ -f "$KVS_PATH/admin/include/setup_db.php" ]; then
     log_info "Configuring database connection..."
-    DB_PASSWORD_PHP=$(escape_php_single_quoted "$MARIADB_PASSWORD")
-    DB_PASSWORD_SED=$(escape_sed_replacement "$DB_PASSWORD_PHP")
+    db_file="$KVS_PATH/admin/include/setup_db.php"
+    db_temp=$(
+        umask 077
+        mktemp -- "${db_file%/*}/.setup_db.XXXXXXXX.php"
+    )
+    trap 'rm -f -- "$db_temp"' EXIT
 
-    # Owners write this file by hand, so the comma is followed by any
-    # spacing; every value is read back afterwards, a define the sed did
-    # not reach would leave the site on the old server's database.
-    sed -E -i \
-        -e "s#('DB_HOST',[[:space:]]*)'[^']*'#\\1'mariadb'#" \
-        -e "s#('DB_LOGIN',[[:space:]]*)'[^']*'#\\1'${DOMAIN}'#" \
-        -e "s#('DB_PASS',[[:space:]]*)'([^'\\\\]|\\\\.)*'#\\1'${DB_PASSWORD_SED}'#" \
-        -e "s#('DB_DEVICE',[[:space:]]*)'[^']*'#\\1'${DOMAIN}'#" \
-        "$KVS_PATH/admin/include/setup_db.php"
-    for setting in "DB_HOST=mariadb" "DB_LOGIN=${DOMAIN}" "DB_PASS=${DB_PASSWORD_PHP}" "DB_DEVICE=${DOMAIN}"; do  # pragma: allowlist secret
-        if [ "$(setup_db_value "${setting%%=*}")" != "${setting#*=}" ]; then
-            log_error "setup_db.php does not define ${setting%%=*} as expected after the rewrite"
-            log_error "Check the define('${setting%%=*}', '...') line of admin/include/setup_db.php"
-            exit 1
-        fi
-    done
-    chown 1000:1000 "$KVS_PATH/admin/include/setup_db.php"
-    chmod 600 "$KVS_PATH/admin/include/setup_db.php"
+    # Parse literals without running imported PHP. A password can contain
+    # quotes, backslashes and newlines, including a final newline.
+    php -d short_open_tag=1 /dev/stdin "$db_file" "$db_temp" <<'PHP'
+<?php
+// The constant a string literal names, in either quote style. A
+// double-quoted name with an escape sequence is refused, not decoded.
+function literalName($token) {
+    if (!$token || !$token->is(T_CONSTANT_ENCAPSED_STRING)) {
+        return null;
+    }
+    $inner = substr($token->text, 1, -1);
+    if ($token->text[0] === '"' && str_contains($inner, "\\")) {
+        throw new RuntimeException("setup_db.php names a constant with an escape sequence: write it out");
+    }
+    return $inner;
+}
+
+function settingsIn($source, $values) {
+    $tokens = PhpToken::tokenize($source, TOKEN_PARSE);
+    $code = array_values(array_filter($tokens, fn($t) => !$t->isIgnorable()));
+    $settings = [];
+    foreach ($code as $i => $token) {
+        // define() or \define(); any other call with that name counts too,
+        // so a second definition of a setting is refused, never ignored.
+        if (!$token->is([T_STRING, T_NAME_FULLY_QUALIFIED]) || strtolower(ltrim($token->text, "\\")) !== "define"
+            || ($code[$i + 1]->text ?? "") !== "(") {
+            continue;
+        }
+        $name = literalName($code[$i + 2] ?? null);
+        if ($name === null || !array_key_exists($name, $values)) {
+            continue;
+        }
+        $value = $code[$i + 4] ?? null;
+        if (isset($settings[$name]) || ($code[$i + 3]->text ?? "") !== ","
+            || !$value || !$value->is(T_CONSTANT_ENCAPSED_STRING) || $value->text[0] !== "'"
+            || ($code[$i + 5]->text ?? "") !== ")") {
+            throw new RuntimeException("setup_db.php does not define $name as a single literal");
+        }
+        $settings[$name] = $value;
+    }
+    foreach ($values as $name => $_) {
+        if (!isset($settings[$name])) {
+            throw new RuntimeException("setup_db.php does not define $name as expected");
+        }
+    }
+    return [$tokens, $settings];
+}
+
+$password = getenv("MARIADB_PASSWORD");
+if ($password === false) {
+    fwrite(STDERR, "MARIADB_PASSWORD is missing from the environment\n");
+    exit(1);
+}
+$domain = getenv("DOMAIN");
+$values = ["DB_HOST" => "mariadb", "DB_LOGIN" => $domain, "DB_DEVICE" => $domain, "DB_PASS" => $password];
+try {
+    [$tokens, $settings] = settingsIn(file_get_contents($argv[1]), $values);
+    foreach ($values as $name => $value) {
+        $settings[$name]->text = var_export($value, true);
+    }
+    $output = implode("", $tokens);
+    if (file_put_contents($argv[2], $output) !== strlen($output)) {
+        throw new RuntimeException("Could not write the private setup_db.php");
+    }
+    [, $written] = settingsIn(file_get_contents($argv[2]), $values);
+    foreach ($values as $name => $expected) {
+        $literal = substr($written[$name]->text, 1, -1);
+        if (strtr($literal, ["\\\\" => "\\", "\\'" => "'"]) !== $expected) {
+            throw new RuntimeException("Could not encode $name in setup_db.php");
+        }
+    }
+} catch (ParseError $error) {
+    fwrite(STDERR, "Could not parse setup_db.php\n");
+    exit(1);
+} catch (RuntimeException $error) {
+    fwrite(STDERR, $error->getMessage() . "\n");
+    exit(1);
+}
+PHP
+    chown 1000:1000 "$db_temp"
+    mv -fT -- "$db_temp" "$db_file"
+    trap - EXIT
     log_info "Database configured: mariadb/$DOMAIN"
 else
     log_warn "setup_db.php not found, skipping database configuration"

@@ -76,11 +76,11 @@ write_config_from_sample() {
         echo "ERROR: Could not generate the phpMyAdmin application secret" >&2
         exit 1
     }
-    sed -e "s|cfg\['blowfish_secret'\] = '';|cfg['blowfish_secret'] = '${BLOWFISH}';|" \
-        -e "$HOST_EDIT" \
-        "$1" > "$2"
+    sed -f - -e "$HOST_EDIT" "$1" > "$2" <<EOF
+s|cfg\['blowfish_secret'\] = '';|cfg['blowfish_secret'] = '$BLOWFISH';|
+EOF
     if grep -Fq "\$cfg['blowfish_secret'] = '';" "$2" ||
-        ! grep -Fq "$BLOWFISH" "$2"; then
+        ! printf '%s\n' "$BLOWFISH" | grep -Fq -f - "$2"; then
         echo "ERROR: Could not write the phpMyAdmin application secret" >&2
         exit 1
     fi
