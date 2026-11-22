@@ -142,7 +142,7 @@ holds "$tests" "the shell suites must run every suite as uid 1000, with CI set" 
     'any(.jobs.suites.steps[]; .run == ".github/scripts/as-uid-1000.sh tests/run.sh"
         and (.env.CI | tostring) == "true")'
 holds "$tests" "the exporter suite must run on Bash 4.2" \
-    'any(.jobs.suites.steps[]; .run == "docker run --rm --network none --user 1000:1000 --tmpfs /tmp:rw,exec,size=1g -v \"$PWD:/src:ro\" -w /src centos:7.9.2009@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4 bash tests/test_kvs_export.sh")'
+    'any(.jobs.suites.steps[]; .run == "docker run --rm --network none --user 1000:1000 -v \"$PWD:/src:ro\" -w /src centos:7.9.2009@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4 bash tests/test_kvs_export.sh")'
 holds "$tests" "the Dockerfiles must be checked against the lock" \
     'any(.jobs.suites.steps[]; .run == "./docker/bin/resolve-bases.sh --check-dockerfiles")'
 # The integration suites, in a job of their own, the same way.

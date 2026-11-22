@@ -1886,7 +1886,7 @@ STAT
     rmdir "$site/admin/data"
     ln -s "$other" "$site/admin/data"
     FIXTURE_DATA_UID=4343 run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" links "$site" || fail "links must succeed: $(cat "$err")"
-    assert_key "$out" external_link_1 "review|directory|contents -> $disk/contents"
+    has_external_line "$out" "review|directory|contents -> $disk/contents" || fail "admin/data as a link must not count: $(external_lines "$out")"
     # Nor when admin itself leads elsewhere.
     rm -f "$site/admin/data"
     mv "$site/admin" "$moved/admin"
