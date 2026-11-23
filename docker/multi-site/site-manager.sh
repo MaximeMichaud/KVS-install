@@ -1310,6 +1310,10 @@ EOF
     # Keep the temporary inode open across rename and signal delivery.
     exec {ADD_ROUTE_FD}<"$ADD_ROUTE_TEMP"
     lock_routes || return 1
+    # The first prefix check ran unlocked. primary-config reserves its prefix
+    # under this lock and reads the .env linked above, so one of the two
+    # commands now sees the other's claim on the Compose project.
+    ensure_site_prefix_available "$domain" "$site_prefix" || return 1
     write_caddy_site_config "$domain" "${CADDY_TLS_MODE:-public}" false auto "$ADD_ROUTE_TEMP"
     exec 8<&-
     rollback_incomplete_add
