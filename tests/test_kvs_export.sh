@@ -880,13 +880,57 @@ EOF
     assert_key "$out" site_required_mb 2
     fixture_free_mb=1
     import_remote_free_space_check "$out" "$dest" >/dev/null && fail "preflight rounded the apparent bound down"
-    rm "$small/sparse"
-    for ((i = 0; i < 4096; i++)); do printf x > "$small/contents/$i"; done
-    local allocated
-    allocated=$("$MIN_BIN/du" -sLlk "$small")
-    allocated=${allocated%%$'\t'*}
+    # 8 KiB under 1 MiB of sparse data: the blocks of the other names
+    # carry the copy over 1 MiB.
+    truncate -s 1040384 "$small/sparse"
     REAL_DU="$MIN_BIN/du" REAL_FIND="$MIN_BIN/find" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$small"
-    assert_key "$out" site_required_mb "$(((allocated + 1023) / 1024))"
+    assert_key "$out" site_size_status upper_bound
+    assert_key "$out" site_required_mb 2
+    rm "$small/sparse"
+    # The root totals hide what the copy rounds up: 4096 one-byte files
+    # occupy 16 MiB at the destination, as sparse files (nothing allocated
+    # at the source) and as written ones. The bound covers the blocks of a
+    # fresh copy and stays within 1 MiB of them, for both.
+    local kind required model
+    for kind in sparse written; do
+        if [ "$kind" = sparse ]; then
+            (cd "$small/contents" && truncate -s 1 {0..4095})
+        else
+            for ((i = 0; i < 4096; i++)); do printf x > "$small/contents/$i"; done
+        fi
+        REAL_DU="$MIN_BIN/du" REAL_FIND="$MIN_BIN/find" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$small"
+        assert_key "$out" site_size_status upper_bound
+        model=$(find "$small" -type d -printf 'd\n' -o -type f -printf '%s\n' |
+            awk '$1 == "d" { b++; next } { b += int(($1 + 4095) / 4096) } END { print int((b + 255) / 256) }')
+        [ "$model" = 17 ] || fail "the fixture must need 17 MiB, got $model"
+        required=$(detect_value "$out" site_required_mb)
+        [ "$required" -ge "$model" ] && [ "$required" -le $((model + 1)) ] ||
+            fail "the root bound of $kind one-byte files is $required MiB for a copy of $model MiB"
+        [ "$(detect_value "$out" site_size_mb)" -le "$required" ] || fail "the $kind bound fell below the transfer size"
+        fixture_free_mb=2
+        if import_remote_free_space_check "$out" "$dest" >/dev/null; then fail "4096 $kind files fit in 2 MiB under the root bound"; fi
+        fixture_free_mb=64
+        import_remote_free_space_check "$out" "$dest" >/dev/null || fail "the $kind root bound refused 64 MiB"
+        rm -f "$small/contents/"{0..4095}
+    done
+    for ((i = 0; i < 4096; i++)); do printf x > "$small/contents/$i"; done
+    # Allocation above the rounded apparent bytes stays the bound.
+    mv "$bin/du" "$bin/du.saved"
+    cat > "$bin/du" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -aLlk) "$REAL_DU" "$@" | sed '$s/^[0-9]*/40960/' ;;
+    -sLlb) exec "$REAL_DU" "$@" ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod +x "$bin/du"
+    REAL_DU="$MIN_BIN/du" REAL_FIND="$MIN_BIN/find" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$small"
+    assert_key "$out" site_size_status upper_bound
+    assert_key "$out" site_size_mb 40
+    assert_key "$out" site_required_mb 40
+    rm -f "$bin/du"
+    mv "$bin/du.saved" "$bin/du"
     rm -f "$bin/find"
     REAL_DU="$MIN_BIN/du" run_export "$bin:$MIN_BIN" "$out" "$err" detect "$small"
     assert_key "$out" site_size_status exact
@@ -934,14 +978,54 @@ EOF
     assert_key "$out" site_size_entries 0
     (
         source /dev/stdin < <(sed '/^trap kvs_cleanup EXIT/,$d' "$EXPORT_SCRIPT")
-        local status format
+        local status format size
         for format in root list; do
             status=0
             SITE="$site" PATH="$bin:$MIN_BIN" PARTIAL=yes FORMAT=$format kvs_measure_worker "$site" "$bin" 1 tar > "$out" || status=$?
             [ "$status" = 7 ] || fail "$format walk returned $status for du status 7"
             tr '\0' '\n' < "$out" | grep -q "^4112$(printf '\t')" || fail "$format walk lost the subtotal"
         done
+        # A du killed during the root pass has listed names, not the root:
+        # the size of the last one is no subtotal.
+        cat > "$bin/du" <<'EOF'
+#!/bin/sh
+case "$1" in -a*) printf '4\t%s/contents/a\n8\t%s/contents/b\n' "$2" "$2" ;; esac
+kill -KILL $$
+EOF
+        status=0
+        PATH="$bin:$MIN_BIN" kvs_root_size_kb "$site" > "$out" || status=$?
+        [ "$status" = 137 ] || fail "a killed du returned $status"
+        [ ! -s "$out" ] || fail "a killed du left a subtotal: $(cat "$out")"
+        status=0
+        PATH="$bin:$MIN_BIN" kvs_measure_worker "$site" "" 1 tar > "$out" || status=$?
+        [ "$status" = 137 ] || fail "the walk returned $status for a killed du"
+        [ "$(tr '\0' '\n' < "$out")" = "names 1" ] || fail "the walk sent a record for a killed du: $(tr '\0' '\n' < "$out")"
+        # The total is the line of the root, whatever its path holds.
+        local odd="$TMP_ROOT/subtotal-odd"$'\n'"77777"$'\t'"z"
+        mkdir -p "$odd"
+        printf x > "$odd/f"
+        size=$(PATH="$MIN_BIN" kvs_root_size_kb "$odd") || fail "the root with a line break was not measured"
+        [ "${size%%$'\t'*}" -lt 1024 ] || fail "a line of the root path was read as the total: ${size%%$'\t'*}"
+        cat > "$bin/du" <<'EOF'
+#!/bin/sh
+printf '9\t%s\nanother name\n' "${2%%
+*}"
+EOF
+        status=0
+        size=$(PATH="$bin:$MIN_BIN" kvs_root_size_kb "$odd") || status=$?
+        [ "$status" = 1 ] && [ -z "$size" ] || fail "a line that only starts like the root was read as the total: $status $size"
     )
+    rm -f "$bin/du"
+    cat > "$bin/du" <<'EOF'
+#!/bin/sh
+case "$1" in -a*) printf '4\t%s/contents/a\n8\t%s/contents/b\n' "$2" "$2" ;; esac
+kill -KILL $$
+EOF
+    chmod +x "$bin/du"
+    run_export "$bin:$MIN_BIN" "$out" "$err" detect "$site"
+    assert_key "$out" site_size_status failed
+    assert_key "$out" site_size_entries 0
+    grep -q "could not measure the size" "$err" || fail "a killed du must be reported as no measurement: $(cat "$err")"
     pass "both du formats report the subtotal and preserve the original error status"
 }
 

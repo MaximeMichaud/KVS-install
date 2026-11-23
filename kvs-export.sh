@@ -1241,9 +1241,29 @@ kvs_transfer_bytes() {
 
 # Count each followed name in both walks. BusyBox truncates apparent
 # bytes when -b and -k are combined, and sparse files need their length.
+# du -a ends with the total -s prints and has one line for each name. The
+# apparent bytes and that count follow the path: the bound of the
+# destination allocation is built on them. Only the line of the root is a
+# total: a du killed on the way ends on the size of one file, and a site
+# path can hold a line break.
 kvs_root_size_kb() {
-    local allocated apparent status=0
-    allocated=$(du -sLlk "$1" 2>/dev/null) || status=$?
+    local allocated apparent bytes="" names status=0
+    allocated=$(du -aLlk "$1" 2>/dev/null | KVS_DU_ROOT=$1 LC_ALL=C awk '
+        BEGIN { n = split(ENVIRON["KVS_DU_ROOT"], want, "\n"); if (n < 1) n = 1 }
+        { last[NR % n] = $0 }
+        END {
+            kb = ""
+            if (NR >= n) {
+                line = last[(NR - n + 1) % n]
+                i = index(line, "\t")
+                if (i > 1 && substr(line, 1, i - 1) !~ /[^0-9]/ && substr(line, i + 1) == (want[1] "")) {
+                    kb = substr(line, 1, i - 1)
+                    for (j = 2; j <= n; j++) if ((last[(NR - n + j) % n] "") != (want[j] "")) kb = ""
+                }
+            }
+            printf "%s\t%d\n", kb, NR
+        }') || status=$?
+    names=${allocated##*$'\t'}
     allocated=${allocated%%$'\t'*}
     if [[ ! $allocated =~ ^[0-9]+$ ]]; then
         [ "$status" != 0 ] || status=1
@@ -1253,20 +1273,21 @@ kvs_root_size_kb() {
         apparent=$(du -sLlb "$1" 2>/dev/null) || status=$?
         apparent=${apparent%%$'\t'*}
         if [[ $apparent =~ ^[0-9]+$ ]]; then
+            bytes=$apparent
             apparent=$(((apparent + 1023) / 1024))
             if (( apparent > allocated )); then allocated=$apparent; fi
         elif [ "$status" = 0 ]; then
             status=1
         fi
     fi
-    printf '%s\t%s\n' "$allocated" "$1"
+    printf '%s\t%s\t%s\t%s\n' "$allocated" "$1" "$bytes" "$names"
     return "$status"
 }
 
 # The first record announces the name count. Subsequent NUL-terminated
 # size records come from one du, which can omit hard-linked operands.
 kvs_measure_worker() {
-    local SITE_DIR="$1" dir="$2" jobs="$3" transport="$4" total=0 size bytes status=0
+    local SITE_DIR="$1" dir="$2" jobs="$3" transport="$4" total=0 size bytes apparent names status=0
     shift 4
     if [ -n "$dir" ]; then
         if kvs_list_measure_units "$dir" "$jobs" 2>/dev/null; then
@@ -1292,6 +1313,10 @@ kvs_measure_worker() {
         fi
         printf '%s\t%s\0' "${size%%$'\t'*}" "$SITE_DIR"
         [ "$status" = 0 ] || return "$status"
+        names=${size##*$'\t'}
+        apparent=${size%$'\t'*}
+        apparent=${apparent##*$'\t'}
+        size=${size%%$'\t'*}
     fi
     if [ "$total" -gt 0 ] && bytes=$(kvs_transfer_bytes "$dir" "$transport" "$@"); then
         printf 'payload %s\0' "$bytes"
@@ -1300,7 +1325,14 @@ kvs_measure_worker() {
         # successful root pass above supplies a usable unfiltered bound.
         return 1
     else
-        printf 'upper-bound\0'
+        # The copy rounds every file up to whole 4 KiB blocks and spends one
+        # on each directory, which neither total above shows for sparse,
+        # inlined or compressed files. One block for each name on top of the
+        # apparent bytes covers that. A name holding a line break counts
+        # twice, which keeps the bound one.
+        apparent=$(((apparent + names * 4096 + 1023) / 1024))
+        (( apparent > size )) || apparent=$size
+        printf 'upper-bound %s\0' "$apparent"
     fi
 }
 
@@ -1393,7 +1425,7 @@ kvs_measure_site() {
     local timed_out="no"
     local worker_status=0 pending="" invalid=no
     local now=0 deadline=0 remaining read_timeout=1
-    local payload="" allocation="" bound=no transport=tar
+    local payload="" allocation="" bound=no bound_kb="" transport=tar
 
     SITE_SIZE_MB="0"
     SITE_SIZE_STATUS="skipped"
@@ -1452,7 +1484,11 @@ kvs_measure_site() {
                     read -r payload allocation <<< "${pending#payload }"
                     kvs_is_number "$payload" && kvs_is_number "$allocation" || invalid=yes
                     ;;
-                upper-bound) bound=yes ;;
+                'upper-bound '*)
+                    bound=yes
+                    bound_kb=${pending#upper-bound }
+                    kvs_is_number "$bound_kb" || invalid=yes
+                    ;;
                 per-entry) MEASURE_PER_ENTRY=yes ;;
                 *) kvs_add_measure_line "$pending" || invalid=yes ;;
             esac
@@ -1498,6 +1534,7 @@ kvs_measure_site() {
     if [ "$bound" = yes ]; then
         SITE_SIZE_STATUS=upper_bound
         SITE_SIZE_MB=$(((MEASURE_KB + 1023) / 1024))
+        SITE_REQUIRED_MB=$(((bound_kb + 1023) / 1024))
         kvs_say "Site size: at most $(kvs_human_mb "$SITE_SIZE_MB") (unfiltered root)"
         return 0
     fi
