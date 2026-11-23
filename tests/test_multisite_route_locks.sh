@@ -44,12 +44,14 @@ done
 # Check the critical section from an independent open file description.
 # The initial optimistic add check can run unlocked; its final check cannot.
 awk() {
-    if [[ ${*: -1} == "${REMOVE_DURING_READ:-}" ]]; then
-        bash "$multi/site-manager.sh" remove old.example <<< $'yes\nn' > "$work/remove-out" || return 1
-    fi
-    if [[ ${*: -1} == "${UNREADABLE_ROUTE:-}" ]]; then return 2; fi
-    if [[ ${*: -1} == "$multi/caddy/sites/seed.example.caddy" ]] &&
-        ! flock -n "$locks/.routes" true; then touch "$work/checked"; fi
+    local arg
+    for arg in "$@"; do
+        if [[ $arg == "${REMOVE_DURING_READ:-}" ]]; then
+            bash "$multi/site-manager.sh" remove old.example <<< $'yes\nn' > "$work/remove-out" || return 1
+        fi
+        if [[ $arg == "$multi/caddy/sites/seed.example.caddy" ]] &&
+            ! flock -n "$locks/.routes" true; then touch "$work/checked"; fi
+    done
     command awk "$@"
 }
 mv() {
@@ -147,11 +149,16 @@ for domain in new.example first.example second.example; do
     [[ ! -e "$routes/$domain.caddy" && ! -e "$multi/sites/$domain" && ! -e "$KVS_WEBROOT_BASE/$domain" ]]
 done
 cmp "$work/operator" "$routes/operator.caddy"
-if UNREADABLE_ROUTE="$routes/operator.caddy" bash "$manager" proxy-config media.example public false false > "$work/out" 2>&1; then
+# A route that is present and cannot be read stops the publication.
+rm "$routes/operator.caddy"
+mkdir "$routes/operator.caddy"
+if bash "$manager" proxy-config media.example public false false > "$work/out" 2>&1; then
     echo "proxy-config published without reading every operator route"; exit 1
 fi
 grep -Fq "Could not read Caddy route: $routes/operator.caddy" "$work/out"
 cmp "$work/before" "$routes/media.example.caddy"
+rmdir "$routes/operator.caddy"
+cp "$work/operator" "$routes/operator.caddy"
 bash "$manager" proxy-config ignored.example internal false false > "$work/out"
 ACME_EMAIL=ops@example.com bash "$manager" caddy-start > "$work/out"
 [[ -e "$work/proxy-started" && -e "$work/reloaded" ]]

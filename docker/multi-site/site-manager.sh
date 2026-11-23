@@ -444,61 +444,286 @@ ensure_proxy_network() {
     fi
 }
 
-# Read unquoted addresses from single-line site headers in the route files,
-# skipping the file being rewritten. Compare hosts without scheme, port or
-# case distinctions. This line scan does not resolve Caddyfile imports.
+# Read the site addresses Caddy takes from the route files, skipping the
+# file being rewritten, and print each host without scheme, port or case
+# distinctions. The scan follows Caddy's lexer and address parser: quoted
+# and backquoted tokens, comments, heredocs, a header continued after a
+# trailing comma or opened by a brace on the next line, snippet definitions,
+# and top-level imports of snippets and of files under this directory with
+# their positional arguments. It does not expand environment placeholders,
+# variadic or block arguments, and reads neither the main Caddyfile nor an
+# absolute import path outside /etc/caddy/sites.
 caddy_hosts_in_use() {
     local exclude="$1"
-    local file
+    local file scan line
+    local -a files=()
+    # Caddy imports the route files in the byte order of their names, and a
+    # snippet must be defined before the import that uses it.
+    local LC_ALL=C
 
     [ -d "$CADDY_SITES_DIR" ] || return 0
     for file in "$CADDY_SITES_DIR"/*.caddy; do
         [ -e "$file" ] || continue
         [ "$file" = "$exclude" ] && continue
-        awk '{
-            line = $0
-            if (marker != "") {
-                # Caddy ends the body on the line that starts with the marker;
-                # the rest of that line holds ordinary tokens (HTML 200).
-                sub(/^[[:space:]]+/, "", line)
-                if (index(line, marker) != 1) next
-                line = substr(line, length(marker) + 1)
-                marker = ""
-            }
-            # Quoted directive arguments can contain literal braces and comments.
-            if (depth) gsub(/"([^"\\]|\\.)*"|`[^`]*`/, "arg", line)
-            sub(/(^|[[:space:]])#.*/, "", line)
-            sub(/^[[:space:]]+/, "", line)
-            sub(/[[:space:]]+$/, "", line)
-            # A heredoc body is literal, including comments and braces.
-            if (match(line, /(^|[[:space:]])<<[^[:space:]]+/)) {
-                marker = substr(line, RSTART, RLENGTH)
-                sub(/^[[:space:]]*<</, "", marker)
-                next
-            }
-            if (line == "}") {
-                if (depth) depth--
-                next
-            }
-            if (line !~ /(^|[[:space:]])\{$/) next
-            if (depth++ > 0) next
-            sub(/\{$/, "", line)
-            gsub(/,/, " ", line)
-            count = split(line, addresses, /[[:space:]]+/)
-            for (i = 1; i <= count; i++) {
-                host = tolower(addresses[i])
-                sub(/^[a-z][a-z0-9+.-]*:\/\//, "", host)
-                sub(/\/.*$/, "", host)
-                sub(/:[0-9]+$/, "", host)
-                if (host != "") print host
-            }
-        }' "$file" 2>/dev/null || {
+        # Not every awk survives reading a directory: check here.
+        if [ ! -f "$file" ] || [ ! -r "$file" ]; then
             # An independent remove may finish during the optimistic scan.
             [ -e "$file" ] || continue
             log_error "Could not read Caddy route: ${file}" >&2
             return 1
-        }
+        fi
+        files+=("$file")
     done
+    [ "${#files[@]}" -gt 0 ] || return 0
+
+    # The C locale makes awk work on bytes, in every implementation.
+    scan=$(LC_ALL=C CADDY_SCAN_EXCLUDE="$exclude" CADDY_SCAN_SITES="$CADDY_SITES_DIR" awk '
+        # Lines "H host" name a served host, lines "F path" a file that
+        # could not be read.
+        function slurp(path,    line, text, status) {
+            text = ""
+            while ((status = (getline line < path)) > 0) text = text line "\n"
+            close(path)
+            if (status < 0) print "F " path
+            return text
+        }
+        function push(text, newline, path) {
+            tokens++
+            token[tokens] = text
+            first[tokens] = newline
+            origin[tokens] = path
+        }
+        # Split a file into Caddyfile tokens and return the index of its
+        # first one. first[] marks a token that starts a line.
+        function lex(path,    text, start, size, i, ch, val, started, quote, esc, comment, newline, marker, at) {
+            text = slurp(path)
+            gsub(/\r/, "", text)
+            # Caddy separates tokens at any Unicode space: vertical tab,
+            # form feed, U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028,
+            # U+2029, U+202F, U+205F and U+3000.
+            gsub(/[\013\014]|\302[\205\240]|\341\232\200|\342\200[\200-\212\250\251\257]|\342\201\237|\343\200\200/, " ", text)
+            start = tokens + 1
+            size = length(text)
+            newline = 1
+            val = ""
+            quote = ""
+            for (i = 1; i <= size; i++) {
+                ch = substr(text, i, 1)
+                if (quote != "") {
+                    if (esc) {
+                        # Only an escaped double quote loses its backslash.
+                        if (ch != "\"") val = val "\\"
+                        esc = 0
+                    } else if (ch == "\\" && quote == "\"") {
+                        # A backslash is literal between backquotes.
+                        esc = 1
+                        continue
+                    } else if (ch == quote) {
+                        push(val, newline, path)
+                        newline = 0; val = ""; started = 0; quote = ""
+                        continue
+                    }
+                    val = val ch
+                    continue
+                }
+                if (ch == "\\" && !esc) {
+                    esc = 1
+                    continue
+                }
+                if (ch == " " || ch == "\t" || ch == "\n") {
+                    if (ch == "\n" && !esc && val ~ /^<<[A-Za-z0-9_-]+$/) {
+                        # A heredoc body is literal up to its marker; the
+                        # rest of that line holds ordinary tokens.
+                        marker = substr(val, 3)
+                        push("<<", newline, path)
+                        newline = 0; val = ""; started = 0
+                        at = index(substr(text, i + 1), marker)
+                        if (!at) break
+                        i += at + length(marker) - 1
+                        continue
+                    }
+                    if (started) {
+                        push(val, newline, path)
+                        newline = 0; val = ""; started = 0
+                    }
+                    if (ch == "\n") {
+                        # An escaped line break continues the line.
+                        if (esc) esc = 0
+                        else newline = 1
+                        comment = 0
+                    }
+                    continue
+                }
+                if (ch == "#" && !started) comment = 1
+                if (comment) continue
+                if (!started && (ch == "\"" || ch == "`")) {
+                    quote = ch
+                    started = 1
+                    continue
+                }
+                if (esc) {
+                    val = val "\\"
+                    esc = 0
+                }
+                val = val ch
+                started = 1
+            }
+            if (started) push(val, newline, path)
+            return start
+        }
+        # Replace the positional arguments of the import being expanded.
+        function expand(text, level,    out, position) {
+            if (!level || !index(text, "{args")) return text
+            out = ""
+            while (match(text, /[{]args(\[[0-9]+\]|\.[0-9]+)[}]/)) {
+                position = substr(text, RSTART, RLENGTH)
+                gsub(/[^0-9]/, "", position)
+                out = out substr(text, 1, RSTART - 1) argument[level, position + 0]
+                text = substr(text, RSTART + RLENGTH)
+            }
+            return out text
+        }
+        function serve(address,    parts, count, k, host) {
+            count = split(address, parts, ",")
+            for (k = 1; k <= count; k++) {
+                host = tolower(parts[k])
+                sub(/^[a-z][a-z0-9+.-]*:\/\//, "", host)
+                sub(/\/.*$/, "", host)
+                sub(/:[0-9]+$/, "", host)
+                if (host != "") print "H " host
+            }
+        }
+        function read_file(path, level,    start) {
+            if (path == ENVIRON["CADDY_SCAN_EXCLUDE"] || (path in active)) return
+            active[path] = 1
+            start = lex(path)
+            parse(start, tokens + 1, level)
+            delete active[path]
+        }
+        # Caddy resolves a relative import from the directory of the file
+        # that holds the directive. The container sees this directory as
+        # /etc/caddy/sites.
+        function import_files(pattern, from, level,    path, quoted, command, found, list, count, k) {
+            if (pattern ~ /^\//) {
+                if (index(pattern, "/etc/caddy/sites/") != 1) return
+                path = ENVIRON["CADDY_SCAN_SITES"] substr(pattern, 17)
+            } else {
+                path = from
+                sub(/[^\/]*$/, "", path)
+                path = path pattern
+            }
+            count = 0
+            if (path ~ /[*?[]/) {
+                quoted = path
+                gsub(/\047/, "\047\\\047\047", quoted)
+                command = "sh -c \047IFS=; for f in $1; do [ -f \"$f\" ] && printf \"%s\\n\" \"$f\"; done\047 sh \047" quoted "\047"
+                while ((command | getline found) > 0) list[++count] = found
+                close(command)
+            } else {
+                # Some awk implementations abort on a directory.
+                quoted = path
+                gsub(/\047/, "\047\\\047\047", quoted)
+                if (system("[ -f \047" quoted "\047 ]") == 0) list[++count] = path
+                else print "F " path
+            }
+            for (k = 1; k <= count; k++) read_file(list[k], level)
+        }
+        # Walk the tokens from index i to stop - 1. depth, pending and
+        # another carry over an import, which Caddy expands in place.
+        function parse(i, stop, level,    start, text, j, k, nesting, name, count) {
+            start = i
+            for (; i < stop; i++) {
+                text = token[i]
+                if (depth) {
+                    if (text == "{") depth++
+                    else if (text == "}") depth--
+                    continue
+                }
+                if (text == "import" && (first[i] || i == start)) {
+                    name = ""
+                    count = -1
+                    for (j = i + 1; j < stop && !first[j] && token[j] != "{"; j++) {
+                        if (count < 0) name = expand(token[j], level)
+                        else argument[level + 1, count] = expand(token[j], level)
+                        count++
+                    }
+                    for (k = count; k < arity[level + 1]; k++) argument[level + 1, k] = ""
+                    arity[level + 1] = count
+                    if (j < stop && !first[j]) {
+                        # A block passed to the import holds no site address.
+                        nesting = 1
+                        for (j++; j < stop && nesting; j++) {
+                            if (token[j] == "{") nesting++
+                            else if (token[j] == "}") nesting--
+                        }
+                    }
+                    if ((name in snippet_start) && !(("(" name) in active)) {
+                        active["(" name] = 1
+                        parse(snippet_start[name], snippet_stop[name], level + 1)
+                        delete active["(" name]
+                    } else if (name != "" && !(name in snippet_start)) {
+                        import_files(name, origin[i], level + 1)
+                    }
+                    i = j - 1
+                    continue
+                }
+                if (text == "{") {
+                    if (pending == 1 && address[1] ~ /^&?\(.*\)$/) {
+                        # A snippet or a named route: no site of its own.
+                        # Keep a snippet for the imports that follow.
+                        nesting = 1
+                        for (j = i + 1; j < stop; j++) {
+                            if (token[j] == "{") nesting++
+                            else if (token[j] == "}" && --nesting == 0) break
+                        }
+                        name = substr(address[1], 2, length(address[1]) - 2)
+                        if (address[1] ~ /^\(/ && !(name in snippet_start)) {
+                            snippet_start[name] = i + 1
+                            snippet_stop[name] = j
+                        }
+                        i = j
+                    } else {
+                        for (j = 1; j <= pending; j++) serve(address[j])
+                        depth = 1
+                    }
+                    pending = 0
+                    another = 0
+                    continue
+                }
+                # A header continues on the next line after a trailing comma.
+                if ((first[i] || i == start) && !another) pending = 0
+                text = expand(text, level)
+                another = (text ~ /,$/)
+                address[++pending] = text
+            }
+        }
+        BEGIN {
+            for (root = 1; root < ARGC; root++) {
+                # An unbalanced route must not hide the names of the next.
+                depth = 0
+                pending = 0
+                another = 0
+                read_file(ARGV[root], 0)
+            }
+        }' "${files[@]}") || {
+        log_error "Could not read the Caddy routes in ${CADDY_SITES_DIR}" >&2
+        return 1
+    }
+    while IFS= read -r line; do
+        case "$line" in
+            "H "*)
+                printf '%s\n' "${line#H }"
+                ;;
+            "F "*)
+                # An independent remove may finish during the optimistic
+                # scan, and Caddy itself refuses a missing import.
+                file=${line#F }
+                [ -e "$file" ] || continue
+                log_error "Could not read Caddy route: ${file}" >&2
+                return 1
+                ;;
+        esac
+    done <<< "$scan"
 }
 
 # caddy_route_hosts settles the route of a site: it checks the TLS and www
