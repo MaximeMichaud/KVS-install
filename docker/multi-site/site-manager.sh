@@ -1386,18 +1386,25 @@ lock_site_directory() {
 # Inspect the effective bind, including local overrides and Compose interpolation.
 # The cached init may still pick the first archive visible in a directory.
 check_site_archive_mount() {
-    local domain="$1" mount source path selected count=0
+    local domain="$1" mount source webroot path selected count=0
     if ! mount=$(set -o pipefail
         docker compose --profile setup config --format json kvs-init |
-            jq -er '[.services["kvs-init"].volumes[]? | select(.type == "bind" and
+            jq -er '([.services["kvs-init"].volumes[]? | select(.type == "bind" and .target == "/var/www/kvs")
+                | .source][0] // "") as $webroot
+                | [.services["kvs-init"].volumes[]? | select(.type == "bind" and
                 (.target == "/kvs-archive" or (.target | startswith("/kvs-archive/"))))]
                 | if length == 0 then "none" elif length != 1 then error("multiple archive binds")
-                  else .[0] | (if .target == "/kvs-archive" then "dir" else "file" end) + "\n" + .source end'
+                  else .[0] | (if .target == "/kvs-archive" then "dir" else "file" end) + "\n" + .source
+                    + "\n" + $webroot end'
     ); then
         log_error "Could not inspect the kvs-init archive mount. Check the Compose configuration and that jq is installed."
         return 1
     fi
     source=${mount#*$'\n'}
+    # The command substitution drops the newline before an empty webroot.
+    webroot=""
+    [[ "$source" != *$'\n'* ]] || webroot=${source#*$'\n'}
+    source=${source%%$'\n'*}
     case "$mount" in
         none) return 0 ;;
         file$'\n'*)
@@ -1414,6 +1421,20 @@ check_site_archive_mount() {
     # shellcheck source=/dev/null
     source "${SCRIPT_DIR}/../init/lib/kvs-archive.sh" || return 1
     selected=$(select_kvs_archive "$source" "$domain") || return 1
+    # The init extracts an archive into an empty webroot, or to resume its
+    # own interrupted extraction (init/docker-entrypoint.d/00-extract.sh).
+    # The webroot can be a link to another disk: look inside it, as Docker does.
+    # Without one it fails after cron is stopped: refuse here instead.
+    if [ -z "$selected" ] && [ -n "$webroot" ] &&
+        [ ! -f "$webroot/.kvs-extraction-complete" ] &&
+        { [ -f "$webroot/.kvs-extraction-in-progress" ] ||
+            [ -z "$(find "$webroot/" -mindepth 1 -maxdepth 1 \
+                ! -name '.kvs-extraction-complete.tmp.*' \
+                ! -name '.kvs-extraction-in-progress.tmp.*' -print -quit 2>/dev/null)" ]; }; then
+        log_error "No KVS archive in $source, and $webroot holds no site yet: kvs-init needs the archive to install $domain."
+        log_error "Place the site's KVS_*.zip in $source, then retry."
+        return 1
+    fi
     for path in "$source"/KVS_*.zip; do
         [ ! -f "$path" ] || count=$((count + 1))
     done

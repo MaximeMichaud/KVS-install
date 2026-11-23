@@ -1,5 +1,5 @@
 #!/bin/bash
-# A start that fails must leave the site's cron as it found it.
+# A start that fails, or that cannot run its init, must leave the site's cron as it found it.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
@@ -94,4 +94,69 @@ start running
 expect "successful start" 0 running
 [[ $(restarts) == 0 ]]
 if grep -Fq 'cron of media.example' "$work/start"; then echo "FAIL: cron notice after a successful start"; exit 1; fi
-echo "PASS: a failed start restores a cron that was running and reports one it leaves stopped"
+
+# A site created before the file bind mounts the whole archive directory.
+# With no archive in it, the init can only fail on a webroot it has to
+# fill: start must say so while cron still runs.
+site=$PWD/multi-site/sites/media.example
+webroot=$work/www/media.example
+legacy_compose() {
+    printf 'services:\n  kvs-init:\n    image: fixture\n    volumes:\n' > "$site/docker-compose.yml"
+    printf '      - %s\n' "$@" >> "$site/docker-compose.yml"
+}
+legacy_compose "$webroot:/var/www/kvs" ../../../kvs-archive:/kvs-archive:ro
+sed -i '/^KVS_SITE_ARCHIVE=/d' "$site/.env"
+rm "$site/archive.zip"
+mv kvs-archive/KVS_media.zip "$work/moved.zip"
+refused() {
+    start running
+    expect "$1" 1 running
+    if grep -Fxq 'compose stop cron' "$work/calls"; then echo "FAIL: $1: cron was stopped for an init that cannot run"; exit 1; fi
+    grep -Fq "No KVS archive in $PWD/kvs-archive, and $webroot holds no site yet" "$work/start" ||
+        { cat "$work/start"; echo "FAIL: $1: the missing archive was not named"; exit 1; }
+}
+accepted() {
+    start running
+    expect "$1" 0 running
+    grep -Fxq 'compose --profile setup run --rm --no-deps kvs-init' "$work/calls"
+}
+[[ -d $webroot && -z $(ls -A "$webroot") ]]
+refused "empty webroot"
+# Leftovers of an interrupted marker write are not a site.
+touch "$webroot/.kvs-extraction-in-progress.tmp.Ab12Cd"
+refused "empty webroot with a temporary marker"
+rm "$webroot/.kvs-extraction-in-progress.tmp.Ab12Cd"
+rmdir "$webroot"
+refused "missing webroot"
+# An interrupted extraction resumes from the archive, even with setup.php there.
+mkdir -p "$webroot/admin/include"
+touch "$webroot/admin/include/setup.php" "$webroot/.kvs-extraction-in-progress"
+refused "interrupted extraction"
+# An installed site needs no archive, with or without the completion marker.
+rm "$webroot/.kvs-extraction-in-progress"
+accepted "site installed before the markers"
+touch "$webroot/.kvs-extraction-complete" "$webroot/.kvs-extraction-in-progress"
+accepted "completed extraction"
+# The webroot path can be a link to the site on another disk.
+rm "$webroot/.kvs-extraction-complete" "$webroot/.kvs-extraction-in-progress"
+mv "$webroot" "$work/disk2"
+ln -s "$work/disk2" "$webroot"
+accepted "installed site behind a linked webroot"
+rm -r "$work/disk2"
+mkdir "$work/disk2"
+refused "empty linked webroot"
+rm "$webroot"
+rmdir "$work/disk2"
+mkdir "$webroot"
+# Files the init will not overwrite get its own diagnosis, not this one.
+touch "$webroot/operator-file"
+accepted "unmarked files"
+rm "$webroot/operator-file"
+# A Compose file that binds no webroot gives nothing to judge by.
+legacy_compose ../../../kvs-archive:/kvs-archive:ro
+accepted "no webroot bind"
+# With the archive back, the empty webroot is installed from it.
+legacy_compose "$webroot:/var/www/kvs" ../../../kvs-archive:/kvs-archive:ro
+mv "$work/moved.zip" kvs-archive/KVS_media.zip
+accepted "archive present"
+echo "PASS: a failed start restores a cron that was running, and a start that lacks its archive leaves cron alone"
