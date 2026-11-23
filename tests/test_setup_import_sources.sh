@@ -1230,7 +1230,9 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         [ -d "$destination/tmp" ] && [ ! -e "$destination/tmp/upload.part" ] || exit 54
         [ ! -e "$destination/backup" ] && [ ! -e "$destination/.well-known" ] && [ ! -e "$destination/contents/videos_sources" ] || exit 55
         [ -f "$destination/contents/videos/1.mp4" ] || exit 56
-        grep -q "^script exec tar -C '$site' --wildcards '--exclude=./tmp/\*' --no-wildcards '--exclude=./backup' --no-wildcards '--exclude=./.well-known' --no-wildcards '--exclude=./contents/videos_sources' -chf - .\$" "$bin/ssh.log" || exit 57
+        # GNU tar keeps the command line it always had; another tar gets the escaped names.
+        grep -Fq "*'GNU tar'*) exec tar -C '$site' --wildcards '--exclude=./tmp/*' --no-wildcards '--exclude=./backup' --no-wildcards '--exclude=./.well-known' --no-wildcards '--exclude=./contents/videos_sources' -chf - . ;;" "$bin/ssh.log" || exit 57
+        grep -Fq "*) exec tar -C '$site' '--exclude=./tmp/*' '--exclude=./backup' '--exclude=./.well-known' '--exclude=./contents/videos_sources' -chf - . ;; esac" "$bin/ssh.log" || exit 59
         import_remote_files "$site" "$destination" no 'backup' 2>/dev/null && exit 58
         rm -rf "$site/tmp" "$site/backup" "$site/.well-known" "$site/contents/videos_sources"
 

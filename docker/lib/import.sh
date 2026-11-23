@@ -3657,6 +3657,7 @@ import_remote_files() (
     local -a transfer_status=()
     local -a patterns=("${@:4}")
     local -a tar_excludes=()
+    local -a tar_glob_excludes=()
     local -a du_excludes=()
 
     if [[ ! "$jobs" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
@@ -3682,14 +3683,19 @@ import_remote_files() (
         esac
         # rsync takes these exclusions from kvs_rsync_options. du and tar
         # match a name as it is written (".c[1]" is no wildcard): only the
-        # "/*" that leaves what a directory holds behind is one.
+        # "/*" that leaves what a directory holds behind is one. GNU tar is
+        # told so with --wildcards and --no-wildcards. Another tar (BusyBox)
+        # stops on these options before it reads a file, and reads every
+        # exclude as a wildcard pattern: it gets the names escaped instead.
         excluded=${pattern%/\*}
         if [ "$excluded" != "$pattern" ]; then
             du_excludes+=("--exclude=.$(import_glob_escape "$excluded")/*")
             tar_excludes+=(--wildcards "$(import_shquote "--exclude=.$(import_glob_escape "$excluded")/*")")
+            tar_glob_excludes+=("$(import_shquote "--exclude=.$(import_glob_escape "$excluded")/*")")
         else
             du_excludes+=("--exclude=.$(import_glob_escape "$excluded")")
             tar_excludes+=(--no-wildcards "$(import_shquote "--exclude=.$excluded")")
+            tar_glob_excludes+=("$(import_shquote "--exclude=.$(import_glob_escape "$excluded")")")
         fi
     done
     scope=$(import_count_scope "${patterns[@]}")
@@ -4012,12 +4018,21 @@ import_remote_files() (
     # the site path and the excludes quoted for sh (import_shquote), is the
     # script on its standard input.
     local -a pipe_status=()
-    local remote_tar
+    # With exclusions, the same sh on the old server asks its tar what it
+    # is and runs the command line written for it.
+    local remote_tar remote_glob_tar
     remote_tar="exec tar -C $(import_shquote "$dir")"
+    remote_glob_tar=$remote_tar
     for pattern in ${tar_excludes[@]+"${tar_excludes[@]}"}; do
         remote_tar+=" $pattern"
     done
+    for pattern in ${tar_glob_excludes[@]+"${tar_glob_excludes[@]}"}; do
+        remote_glob_tar+=" $pattern"
+    done
     remote_tar+=" -chf - ."
+    if [ "${#tar_excludes[@]}" -gt 0 ]; then
+        remote_tar="case \$(tar --version 2>/dev/null </dev/null) in *'GNU tar'*) $remote_tar ;; *) $remote_glob_tar -chf - . ;; esac"
+    fi
     import_ssh "${IMPORT_REMOTE_PREFIX[@]}" sh -s <<< "$remote_tar" | tar -xf - --no-same-owner --anchored --no-recursion --exclude=. -C "$destination"
     pipe_status=("${PIPESTATUS[@]}")
     case "${pipe_status[0]}" in

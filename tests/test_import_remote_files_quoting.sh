@@ -20,9 +20,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # from ssh, and its standard input. A command the quoting failed to contain
 # leaves a trace here; the words it saw are logged.
 login_shell=bash
+remote_bin=""
 import_ssh() {
     printf '%s\n' "$*" >> "$TEST_DIR/login-shell.log"
-    "$login_shell" -c "$*"
+    PATH="${remote_bin:+$remote_bin:}$PATH" "$login_shell" -c "$*"
 }
 IMPORT_REMOTE_PREFIX=()
 IMPORT_SSH_TARGET=old-server
@@ -46,9 +47,9 @@ excluded() {
     local name="$1" dest="$TEST_DIR/dest"
     mkdir -p "$site/$name"
     printf 'secret\n' > "$site/$name/secret.txt"
-    run_fallback "$dest" "/$name" || fail "$login_shell, $2: the transfer failed: $(cat "$TEST_DIR/out")"
-    [ -f "$dest/index.php" ] || fail "$login_shell, $2: the site files did not come through: $(cat "$TEST_DIR/out")"
-    [ ! -e "$dest/$name" ] || fail "$login_shell, $2: the excluded directory came through"
+    run_fallback "$dest" "/$name" || fail "$login_shell, $remote_tar_kind tar, $2: the transfer failed: $(cat "$TEST_DIR/out")"
+    [ -f "$dest/index.php" ] || fail "$login_shell, $remote_tar_kind tar, $2: the site files did not come through: $(cat "$TEST_DIR/out")"
+    [ ! -e "$dest/$name" ] || fail "$login_shell, $remote_tar_kind tar, $2: the excluded directory came through"
     rm -rf "${site:?}/$name"
 }
 
@@ -61,7 +62,7 @@ literal() {
     mkdir -p "$site/$sibling"
     printf 'kept\n' > "$site/$sibling/kept.txt"
     excluded "$name" "$3"
-    [ -f "$dest/$sibling/kept.txt" ] || fail "$login_shell, $3: '$sibling' must not be read as matching '$name'"
+    [ -f "$dest/$sibling/kept.txt" ] || fail "$login_shell, $remote_tar_kind tar, $3: '$sibling' must not be read as matching '$name'"
     rm -rf "${site:?}/$sibling"
 }
 
@@ -72,42 +73,91 @@ children() {
     mkdir -p "$site/$name" "$site/$sibling"
     printf 'left\n' > "$site/$name/left.txt"
     printf 'kept\n' > "$site/$sibling/kept.txt"
-    run_fallback "$dest" "/$name/*" || fail "$login_shell, $3: the transfer failed: $(cat "$TEST_DIR/out")"
-    [ -d "$dest/$name" ] && [ ! -e "$dest/$name/left.txt" ] || fail "$login_shell, $3: what is under '$name' must stay behind, the directory must come"
-    [ -f "$dest/$sibling/kept.txt" ] || fail "$login_shell, $3: '$sibling' must not be read as matching '$name'"
+    run_fallback "$dest" "/$name/*" || fail "$login_shell, $remote_tar_kind tar, $3: the transfer failed: $(cat "$TEST_DIR/out")"
+    [ -d "$dest/$name" ] && [ ! -e "$dest/$name/left.txt" ] || fail "$login_shell, $remote_tar_kind tar, $3: what is under '$name' must stay behind, the directory must come"
+    [ -f "$dest/$sibling/kept.txt" ] || fail "$login_shell, $remote_tar_kind tar, $3: '$sibling' must not be read as matching '$name'"
     rm -rf "${site:?}/$name" "${site:?}/$sibling"
 }
+
+# The tar of the old server, first on its PATH only: the one of this host
+# (GNU), a tar that stops on the GNU-only matching options and reads every
+# exclude as a wildcard pattern, as BusyBox does, and BusyBox itself where
+# this host has one. The local side always unpacks with the tar of this host.
+real_tar=$(command -v tar)
+mkdir -p "$TEST_DIR/plain-tar"
+cat > "$TEST_DIR/plain-tar/tar" <<STUB
+#!/bin/sh
+[ "\$1" != --version ] || { echo "tar: unrecognized option '--version'" >&2; exit 1; }
+for word in "\$@"; do
+    case "\$word" in
+        --wildcards | --no-wildcards | --anchored | --no-anchored)
+            echo "tar: unrecognized option '\$word'" >&2
+            exit 1
+            ;;
+    esac
+done
+exec "$real_tar" "\$@"
+STUB
+chmod +x "$TEST_DIR/plain-tar/tar"
+# GNU tar, with the words it was run with: it must keep the command line it
+# always had, with the name as it is under --no-wildcards.
+mkdir -p "$TEST_DIR/gnu-tar"
+cat > "$TEST_DIR/gnu-tar/tar" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TEST_DIR/gnu-tar.log"
+exec "$real_tar" "\$@"
+STUB
+chmod +x "$TEST_DIR/gnu-tar/tar"
+tars=(gnu plain)
+busybox=""
+for candidate in "$(command -v busybox 2>/dev/null || true)" /usr/lib/initramfs-tools/bin/busybox /usr/lib/initcpio/busybox; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" tar --help 2>&1 | grep -q -- '--exclude'; then
+        busybox=$candidate
+        mkdir -p "$TEST_DIR/busybox-tar"
+        ln -s "$busybox" "$TEST_DIR/busybox-tar/tar"
+        tars+=(busybox)
+        break
+    fi
+done
 
 shells=(bash sh)
 if command -v fish > /dev/null 2>&1; then
     shells+=(fish)
 fi
-for login_shell in "${shells[@]}"; do
-    rm -f "$marker" "$TEST_DIR/login-shell.log"
-    # Injection, POSIX style and fish style: no command runs on the old server.
-    run_fallback "$TEST_DIR/d1" "/.a';touch $marker;'" || true
-    [ ! -e "$marker" ] || fail "$login_shell: a crafted exclude ran a command on the old server"
-    run_fallback "$TEST_DIR/d2" "/.a\\';touch $marker;#" || true
-    [ ! -e "$marker" ] || fail "$login_shell: a crafted exclude with a backslash ran a command on the old server"
-    [ -f "$TEST_DIR/d2/index.php" ] || fail "$login_shell: the transfer did not carry the site files: $(cat "$TEST_DIR/out")"
-    # Names the exclusion must still match exactly.
-    excluded ".cache" "a plain name"
-    excluded ".o'brien" "a name with a quote"
-    excluded '.dollar$(touch X)`id`;#!' "a name with shell expansions"
-    excluded '.two  spaces	tab' "a name with spaces and a tab"
-    excluded '.-dash' "a name with a dash"
-    excluded '.back\slash' "a name with a backslash"
-    excluded '.ends\' "a name ending in a backslash"
-    literal '.c[1]' '.c1' "a name with brackets"
-    literal '.st*r' '.star' "a name with an asterisk"
-    literal '.q?' '.qx' "a name with a question mark"
-    literal '.b\x' '.bx' "a backslash before a plain character"
-    children '.st*r' '.star' "the entries under a name with an asterisk"
-    # The login shell saw no data from the old server.
-    while IFS= read -r words; do
-        [ "$words" = "sh -s" ] || fail "$login_shell: the login shell was handed more than sh -s: $words"
-    done < "$TEST_DIR/login-shell.log"
-    [ -s "$TEST_DIR/login-shell.log" ] || fail "$login_shell: the transfer never reached the old server"
+for remote_tar_kind in "${tars[@]}"; do
+    remote_bin="$TEST_DIR/$remote_tar_kind-tar"
+    for login_shell in "${shells[@]}"; do
+        rm -f "$marker" "$TEST_DIR/login-shell.log"
+        # Injection, POSIX style and fish style: no command runs on the old server.
+        run_fallback "$TEST_DIR/d1" "/.a';touch $marker;'" || true
+        [ ! -e "$marker" ] || fail "$login_shell: a crafted exclude ran a command on the old server"
+        run_fallback "$TEST_DIR/d2" "/.a\\';touch $marker;#" || true
+        [ ! -e "$marker" ] || fail "$login_shell: a crafted exclude with a backslash ran a command on the old server"
+        [ -f "$TEST_DIR/d2/index.php" ] || fail "$login_shell: the transfer did not carry the site files: $(cat "$TEST_DIR/out")"
+        # Names the exclusion must still match exactly.
+        excluded ".cache" "a plain name"
+        excluded ".o'brien" "a name with a quote"
+        excluded '.dollar$(touch X)`id`;#!' "a name with shell expansions"
+        excluded '.two  spaces	tab' "a name with spaces and a tab"
+        excluded '.-dash' "a name with a dash"
+        excluded '.back\slash' "a name with a backslash"
+        excluded '.ends\' "a name ending in a backslash"
+        literal '.c[1]' '.c1' "a name with brackets"
+        literal '.st*r' '.star' "a name with an asterisk"
+        literal '.q?' '.qx' "a name with a question mark"
+        literal '.b\x' '.bx' "a backslash before a plain character"
+        children '.st*r' '.star' "the entries under a name with an asterisk"
+        # The login shell saw no data from the old server.
+        while IFS= read -r words; do
+            [ "$words" = "sh -s" ] || fail "$login_shell: the login shell was handed more than sh -s: $words"
+        done < "$TEST_DIR/login-shell.log"
+        [ -s "$TEST_DIR/login-shell.log" ] || fail "$login_shell: the transfer never reached the old server"
+    done
+    if [ "$remote_tar_kind" = gnu ]; then
+        grep -Fq -- "--no-wildcards --exclude=./.c[1] -chf - ." "$TEST_DIR/gnu-tar.log" || fail "GNU tar must get a name as it is, under --no-wildcards"
+        grep -Fq -- "--wildcards --exclude=./.st\*r/* -chf - ." "$TEST_DIR/gnu-tar.log" || fail "GNU tar must get the entries of a directory under --wildcards"
+        ! grep -- ' -chf - \.$' "$TEST_DIR/gnu-tar.log" | grep -v -- '-wildcards --exclude=' | grep -q . || fail "GNU tar was run without its matching options"
+    fi
 done
 
-echo "PASS: the tar fallback hands the old server's login shell only sh -s, and excludes every name, literally (${shells[*]})"
+echo "PASS: the tar fallback hands the old server's login shell only sh -s, and excludes every name, literally (${shells[*]}; old server tar: ${tars[*]})"
