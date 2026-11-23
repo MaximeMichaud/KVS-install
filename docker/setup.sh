@@ -2982,10 +2982,11 @@ import_remote_load_excludes() {
 
 # import_remote_free_space_check <report> <destination> [source] [stage]
 # The site and its dump must fit under the destination. An exact size that
-# does not fit stops the import. A size cut short or skipped is checked
-# through its upper bound, the usage of the old server's filesystem: when
-# even that fits, fine; otherwise nothing is known, so the import goes on
-# with a warning rather than refusing a site that may well fit. When an
+# does not fit stops the import. A size cut short, skipped or absent from
+# the report is checked through its upper bound, the usage of the old
+# server's filesystem: when even that fits, fine; otherwise nothing is
+# known, so the import goes on with a warning rather than refusing a site
+# that may well fit. When an
 # earlier pass from the same source wrote under the destination, possibly
 # cut short, the dump alone is checked here: what is left of the files is
 # only known once the transfer is planned, and import_remote_files checks
@@ -2994,7 +2995,7 @@ import_remote_free_space_check() {
     local report="$1"
     local destination="$2"
     local source="${3:-}"
-    local stage="${4:-pending}" status size db used marker hint required
+    local stage="${4:-pending}" status size db used marker hint required text
 
     status=$(import_kv "$report" site_size_status)
     size=$(import_kv "$report" site_size_mb)
@@ -3002,7 +3003,12 @@ import_remote_free_space_check() {
     [[ "$required" =~ ^[0-9]+$ ]] && size=$required
     db=$(import_remote_database_space_mb "$report" "$stage" "$destination") || return 1
     used=$(import_kv "$report" site_fs_used_mb)
-    [[ "$size" =~ ^[0-9]+$ ]] || size=0
+    if ! [[ "$size" =~ ^[0-9]+$ ]]; then
+        # A report without a figure does not describe a site of 0 MB, whatever
+        # its status says: the size is unknown.
+        case "$status" in exact|""|upper_bound) status=absent ;; esac
+        size=0
+    fi
     if [ "$db" -gt 0 ] && ! import_free_space_mb_ok "$db" "$destination"; then
         echo -e "${RED}ERROR: not enough free space for the dumps and loaded database under $destination${NC}"
         return 1
@@ -3031,15 +3037,30 @@ import_remote_free_space_check() {
             fi
             ;;
         *)
+            # Without a size, free space that cannot be read still stops the
+            # import, as it does for a measured size.
+            if [ "$status" = absent ] && ! import_free_space_mb_ok "$db" "$destination"; then
+                echo -e "${RED}ERROR: not enough free space for the site, dumps and loaded database under $destination${NC}"
+                return 1
+            fi
             # Report an uncertain site size with the final, combined budget.
             [ "$stage" != before-prefix ] || return 0
             if [[ "$used" =~ ^[0-9]+$ ]] && import_free_space_mb_ok "$((used + db))" "$destination"; then
                 return 0
             fi
-            # A pass into an earlier one skips the measure whatever the timeout.
+            # A pass into an earlier one skips the measure whatever the timeout,
+            # and no timeout brings back a figure the report left out.
             hint=" IMPORT_SIZE_TIMEOUT=0 measures the whole site."
-            [ "$status" != skipped ] || hint=""
-            echo -e "${YELLOW}The site size is not known exactly ($(import_remote_size_text "$report")), so the free space under $destination is not checked against it.${hint}${NC}"
+            text=$(import_remote_size_text "$report")
+            case "$status" in
+                skipped) hint="" ;;
+                absent)
+                    hint=""
+                    text="the old server reported no size, at most $used MB (the filesystem usage)"
+                    [[ "$used" =~ ^[0-9]+$ ]] || text="the old server reported neither a size nor its filesystem usage"
+                    ;;
+            esac
+            echo -e "${YELLOW}The site size is not known exactly ($text), so the free space under $destination is not checked against it.${hint}${NC}"
             ;;
     esac
     return 0

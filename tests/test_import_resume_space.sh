@@ -128,6 +128,68 @@ rm "$(import_count_file "$resume")"
     grep -Fq 'site size is not known exactly' "$tmp/out" || fail 'unknown size skipped the first-pass check'
     ! grep -Fq 'IMPORT_SIZE_TIMEOUT=0' "$tmp/out" || fail 'a resumed pass offered a measure it skips'
 )
+# A report without a numeric size describes an unknown site, not an empty
+# one: check the filesystem bound and say so when it does not fit.
+(
+    RED='' YELLOW='' NC=''
+    # shellcheck source=/dev/null
+    source <(sed -n '/^import_remote_size_text() {/,/^}/p' "$root/docker/setup.sh")
+    for fields in none status-only exact exact-text upper-bound; do
+        case "$fields" in
+            none) : ;;
+            status-only) printf 'site_size_status=\n' ;;
+            exact) printf 'site_size_status=exact\n' ;;
+            exact-text) printf 'site_size_status=exact\nsite_size_mb=?\nsite_required_mb=\n' ;;
+            upper-bound) printf 'site_size_status=upper_bound\n' ;;
+        esac > "$tmp/absent.report"
+        printf 'site_fs_used_mb=50\ndb_size_mb=0\n' >> "$tmp/absent.report"
+        AVAILABLE=3 import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" > "$tmp/out" 2>&1 || fail "$fields: an absent size must not stop the import"
+        grep -Fq 'reported no size, at most 50 MB' "$tmp/out" || fail "$fields: an absent size passed for a site of 0 MB: $(cat "$tmp/out")"
+        ! grep -Fq 'IMPORT_SIZE_TIMEOUT=0' "$tmp/out" || fail "$fields: offered a measure that returns no figure"
+        AVAILABLE=3 import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" '' before-prefix > "$tmp/out" 2>&1 || fail "$fields: refused before the prefix"
+        [ ! -s "$tmp/out" ] || fail "$fields: warned twice, before the final budget"
+        AVAILABLE=55 import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" > "$tmp/out" 2>&1 || fail "$fields: the bound fits"
+        [ ! -s "$tmp/out" ] || fail "$fields: warned although the filesystem bound fits"
+        # A resumed pass without a saved count reaches the same check.
+        IMPORT_RESUME_SPACE_REPORT="$tmp/absent.report" IMPORT_TRANSFER_RESERVE_MB=0 COUNT_STATUS=12 AVAILABLE=3 \
+            import_remote_files "$tmp/source" "$resume" no > "$tmp/out" 2>&1 || fail "$fields: an absent size prevented the resumed copy"
+        grep -Fq 'reported no size, at most 50 MB' "$tmp/out" || fail "$fields: a resumed pass took an absent size for 0 MB"
+    done
+    # Free space that cannot be read stops an absent size at every stage,
+    # as it stops a measured one.
+    printf 'site_size_status=exact\nsite_fs_used_mb=50\ndb_size_mb=0\n' > "$tmp/absent.report"
+    for stage in pending before-prefix received; do
+        # shellcheck disable=SC2329  # Called by the sourced check.
+        if (df() { :; }; import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" '' "$stage") > "$tmp/out" 2>&1; then
+            fail "$stage: unreadable free space let an absent size through: $(cat "$tmp/out")"
+        fi
+        grep -Fq 'ERROR: not enough free space for the site' "$tmp/out" || fail "$stage: unreadable free space gave the wrong reason: $(cat "$tmp/out")"
+    done
+    # Without the filesystem usage either, the warning names no bound.
+    printf 'site_size_status=exact\ndb_size_mb=0\n' > "$tmp/absent.report"
+    AVAILABLE=55 import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" > "$tmp/out" 2>&1 || fail 'no size and no usage must not stop the import'
+    grep -Fq '(the old server reported neither a size nor its filesystem usage)' "$tmp/out" || fail "an absent usage was shown as a figure: $(cat "$tmp/out")"
+    # A measure cut short, failed or skipped keeps its own wording without a figure.
+    for status in incomplete failed skipped; do
+        printf 'site_size_status=%s\nsite_fs_used_mb=50\ndb_size_mb=0\n' "$status" > "$tmp/absent.report"
+        AVAILABLE=3 import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" > "$tmp/out" 2>&1 || fail "$status: an unfinished measure must not stop the import"
+        grep -Fq 'site size is not known exactly' "$tmp/out" || fail "$status: missing warning"
+        ! grep -Fq 'reported no size' "$tmp/out" || fail "$status: an unfinished measure was reported as a missing figure: $(cat "$tmp/out")"
+        if [ "$status" = skipped ]; then
+            ! grep -Fq 'IMPORT_SIZE_TIMEOUT=0' "$tmp/out" || fail 'a skipped measure offered the timeout'
+        else
+            grep -Fq 'IMPORT_SIZE_TIMEOUT=0 measures the whole site.' "$tmp/out" || fail "$status: the timeout advice was lost"
+        fi
+        # shellcheck disable=SC2329  # Called by the sourced check.
+        (df() { :; }; import_remote_free_space_check "$tmp/absent.report" "$tmp/absent") > "$tmp/out" 2>&1 || fail "$status: unreadable free space must keep warning only"
+    done
+    # A measured size keeps its verdicts, zero included.
+    printf 'site_size_status=exact\nsite_size_mb=0\nsite_fs_used_mb=50\ndb_size_mb=0\n' > "$tmp/absent.report"
+    AVAILABLE=3 import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" > "$tmp/out" 2>&1 || fail 'a measured empty site was refused'
+    [ ! -s "$tmp/out" ] || fail 'a measured empty site was reported as unknown'
+    printf 'site_size_status=exact\nsite_size_mb=9\nsite_fs_used_mb=50\ndb_size_mb=0\n' > "$tmp/absent.report"
+    if AVAILABLE=3 import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" > "$tmp/out" 2>&1; then fail 'an exact size that does not fit must stop'; fi
+)
 # Model independent mount points at the four allocation paths.
 cd "$tmp"
 mkdir -p import mariadb/init data/volumes existing-volume
