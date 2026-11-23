@@ -138,6 +138,8 @@ DB_DIRECTORY_AUTH="site"
 DB_DIRECTORY_ROOT_REASON=""
 SITE_SIZE_MB="0"
 SITE_REQUIRED_MB=""
+# yes or no once kvs_tar_is_gnu has asked the tar of this server.
+TAR_IS_GNU=""
 SITE_SIZE_STATUS="skipped"
 SITE_SIZE_SECONDS="0"
 SITE_SIZE_ENTRIES="0"
@@ -3080,11 +3082,17 @@ kvs_command_dump() {
 # The tar options that leave the excluded entries out of the archive. The
 # members start with the site directory name, so the patterns are anchored
 # there (GNU tar; a pattern would otherwise match anywhere down the tree).
+# A tar that is not GNU tar, the one of BusyBox, stops on these matching
+# options: it gets every name escaped, since it reads an exclude as a
+# wildcard pattern, and nothing else. It also matches a pattern below any
+# directory: kvs_refuse_unanchored_excludes has looked for a path it would
+# wrongly leave behind.
 kvs_archive_excludes() {
     local pattern
 
     TAR_EXCLUDES=()
-    if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
+    kvs_tar_is_gnu
+    if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] && [ "$TAR_IS_GNU" = yes ]; then
         TAR_EXCLUDES=(--anchored)
         # A name matches as it is written; only the "/*" that leaves what
         # a directory holds behind is a wildcard, with the name escaped.
@@ -3094,6 +3102,13 @@ kvs_archive_excludes() {
                 *) TAR_EXCLUDES+=(--no-wildcards "--exclude=${KVS_ARCHIVE_SITE_DIR}${pattern}") ;;
             esac
         done
+    elif [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
+        for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
+            case $pattern in
+                */\*) TAR_EXCLUDES+=("--exclude=${KVS_ARCHIVE_SITE_DIR}$(kvs_glob_escape "${pattern%/\*}")/*") ;;
+                *) TAR_EXCLUDES+=("--exclude=${KVS_ARCHIVE_SITE_DIR}$(kvs_glob_escape "$pattern")") ;;
+            esac
+        done
     fi
     # The staging directory, by its unique name at any depth: tar may meet
     # it again inside the site through a symlink in a followed target or a
@@ -3101,8 +3116,68 @@ kvs_archive_excludes() {
     # staging www link, and the site behind it, again and again until the
     # disk is full.
     if [ -n "$STAGING_DIR" ]; then
-        TAR_EXCLUDES+=(--no-anchored "--exclude=${STAGING_DIR##*/}")
+        if [ "$TAR_IS_GNU" = yes ]; then
+            TAR_EXCLUDES+=(--no-anchored "--exclude=${STAGING_DIR##*/}")
+        else
+            TAR_EXCLUDES+=("--exclude=${STAGING_DIR##*/}")
+        fi
     fi
+}
+
+# Whether the tar of this server is GNU tar, asked once, in TAR_IS_GNU. The
+# archive options, the reading of its exit status and the check below all
+# depend on it.
+kvs_tar_is_gnu() {
+    [ -z "$TAR_IS_GNU" ] || return 0
+    case $(tar --version 2> /dev/null < /dev/null) in
+        *'GNU tar'*) TAR_IS_GNU=yes ;;
+        *) TAR_IS_GNU=no ;;
+    esac
+}
+
+# Without --anchored, the pattern of www/backup also matches below a
+# directory of the site that is itself named www: www/lib/www/backup would
+# stay behind with it, unseen. For a tar that is not GNU tar, look for such
+# a path among those that travel, and refuse the archive when there is one.
+# Such a tar may also have no --exclude at all (BusyBox is built without it
+# on some systems): it is tried on an empty directory first. Both answers
+# depend on this server, the site and the exclusions alone, so they come
+# before the dump.
+kvs_refuse_unanchored_excludes() {
+    local pattern rel tail site found probe status=0
+    local -a kept=() clash=()
+
+    kvs_tar_is_gnu
+    [ "$TAR_IS_GNU" = no ] && [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] || return 0
+    if ! probe=$(mktemp -d 2> /dev/null) || ! mkdir "$probe/empty"; then
+        [ -z "$probe" ] || rm -rf -- "$probe"
+        kvs_error "cannot create a temporary directory, set TMPDIR to a writable filesystem"
+        return 1
+    fi
+    tar -chf - "--exclude=${KVS_ARCHIVE_SITE_DIR}/tmp/*" -C "$probe" empty > /dev/null 2>&1 < /dev/null || status=$?
+    rm -rf -- "$probe"
+    if [ "$status" != 0 ]; then
+        kvs_error "the tar of this server is not GNU tar and cannot leave the excluded paths out of the archive (it has no --exclude)"
+        kvs_say "Install GNU tar and run the export again."
+        return 1
+    fi
+    site=$(kvs_glob_escape "$SITE_DIR")
+    for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
+        rel=$(kvs_glob_escape "${pattern%/\*}")
+        tail=""
+        [ "$pattern" = "${pattern%/\*}" ] || tail="/*"
+        kept+=(-o -path "$site$rel")
+        clash+=(-o -path "$site/$KVS_ARCHIVE_SITE_DIR$rel$tail" -o -path "$site/*/$KVS_ARCHIVE_SITE_DIR$rel$tail")
+    done
+    # A directory find cannot read is one tar cannot read either.
+    found=$(find -L "$SITE_DIR" \( "${kept[@]:1}" \) -prune -o \( "${clash[@]:1}" \) -prune -print 2> /dev/null < /dev/null) || true
+    [ -n "$found" ] || return 0
+    kvs_error "the tar of this server is not GNU tar and would leave these paths out of the archive with the excluded ones:"
+    while IFS= read -r pattern; do
+        kvs_say "  $pattern"
+    done <<< "$found"
+    kvs_say "Install GNU tar, or move them out of a directory named $KVS_ARCHIVE_SITE_DIR."
+    return 1
 }
 
 # Copy permissions without reading old archive data into the new export.
@@ -3197,6 +3272,9 @@ kvs_publish_export() {
 # it is missing, and one that shrank is padded with zeros. tar's lines name
 # them, and the archive is called complete only when every line is a plain
 # change. $1 is tar's exit status and $2 a file holding its standard error.
+# A tar that is not GNU tar gets no such tolerance: the one of BusyBox exits
+# 1 on every error, a full disk and a file it cannot open included, so any
+# status but 0 fails the archive. Its lines are still shown.
 kvs_archive_tar_ok() {
     local status="$1" errfile="$2" line member
     local removed="" shrank="" other="no"
@@ -3219,7 +3297,8 @@ kvs_archive_tar_ok() {
         done < "$errfile"
     fi
     [ "$status" -eq 0 ] && return 0
-    [ "$status" -eq 1 ] || return 1
+    kvs_tar_is_gnu
+    [ "$status" -eq 1 ] && [ "$TAR_IS_GNU" = yes ] || return 1
     kvs_warn "files changed, were removed, or shrank under the site while the archive was read"
     [ -z "$removed" ] || kvs_warn "missing from the archive, removed before tar read them:$removed"
     [ -z "$shrank" ] || kvs_warn "padded with zeros in the archive, they shrank while tar read them:$shrank"
@@ -3823,6 +3902,7 @@ kvs_command_archive() {
     if [ "$OPT_DUMP_ONLY" != "yes" ]; then
         kvs_refuse_dangling_links || return 1
         kvs_refuse_external_links || return 1
+        kvs_refuse_unanchored_excludes || return 1
     fi
     if ! kvs_confirm "Continue? [Y/n]"; then
         kvs_say "Aborted, nothing was written."

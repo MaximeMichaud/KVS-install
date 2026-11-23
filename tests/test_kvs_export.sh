@@ -1369,6 +1369,165 @@ test_excluded_and_included_paths_change_what_travels() {
     pass "excluded and included paths change what travels"
 }
 
+# The tar of BusyBox stops on --anchored, --wildcards and --no-wildcards.
+# The stub refuses them as it does and is GNU tar otherwise, which reads a
+# bare exclude the same way: a wildcard pattern matched below any directory.
+test_exclusions_reach_a_tar_that_is_not_gnu_tar() {
+    local site="$TMP_ROOT/plain-tar-site" out="$TMP_ROOT/plain-tar.out" err="$TMP_ROOT/plain-tar.err"
+    local archive="$TMP_ROOT/plain-tar.tar" bin kind busybox logged expected
+
+    make_site_with_extras "$site"
+    # A hidden entry stays behind under its own name, brackets included.
+    mkdir -p "$site/.c[1]" "$site/.c1" "$site/b\\q" "$site/bq" "$site/backup/www/backup"
+    echo x > "$site/.c[1]/x"
+    echo x > "$site/.c1/keep"
+    echo x > "$site/b\\q/x"
+    echo x > "$site/bq/keep"
+    echo x > "$site/backup/www/backup/old"
+    busybox=$(command -v busybox || true)
+    [ -x "$busybox" ] || busybox=/usr/lib/initcpio/busybox
+    mkdir -p "$TMP_ROOT/plain-tar-probe"
+    for kind in refusing no-exclude busybox; do
+        bin="$TMP_ROOT/plain-tar-$kind"
+        mkdir -p "$bin"
+        if [ "$kind" = busybox ]; then
+            [ -x "$busybox" ] || continue
+            ln -s "$busybox" "$bin/tar"
+        else
+            cat > "$bin/tar" <<'EOF'
+#!/bin/sh
+for arg do
+    case $arg in
+        --version | --anchored | --no-anchored | --wildcards | --no-wildcards)
+            echo "tar: unrecognized option '$arg'" >&2
+            exit 1 ;;
+        --exclude=*)
+            # BusyBox is built without --exclude on some systems.
+            case $0 in */plain-tar-no-exclude/tar)
+                echo "tar: unrecognized option '$arg'" >&2
+                exit 1 ;;
+            esac ;;
+    esac
+done
+[ -z "${TAR_ARGV_LOG:-}" ] || printf 'tar argv:%s\n' "$(printf ' [%s]' "$@")" >> "$TAR_ARGV_LOG"
+"$REAL_TAR" "$@" || exit
+# The error of the archive itself, not of a probe.
+case " $* " in *' www '*) [ -z "${PLAIN_TAR_ERROR:-}" ] || { echo "tar: $PLAIN_TAR_ERROR" >&2; exit 1; } ;; esac
+EOF
+            chmod +x "$bin/tar"
+        fi
+        if [ "$kind" = refusing ]; then
+            # The staging directory stays out by its name, without an option.
+            rm -f "$archive" "$TMP_ROOT/plain-tar.argv"
+            TAR_ARGV_LOG="$TMP_ROOT/plain-tar.argv" REAL_TAR="$MIN_BIN/tar" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+                -y -o "$archive" archive "$site" || fail "$kind tar: the archive failed: $(cat "$err")"
+            grep -F ' [www] ' "$TMP_ROOT/plain-tar.argv" | grep -Eq '\] \[--exclude=\.kvs-export\.[^]]*\] \[-C\] ' ||
+                fail "$kind tar lost the staging exclusion: $(cat "$TMP_ROOT/plain-tar.argv")"
+            # Status 1 of such a tar is any error, never "files changed".
+            rm -f "$archive"
+            PLAIN_TAR_ERROR="can't open 'www/admin/include/setup.php': Permission denied" REAL_TAR="$MIN_BIN/tar" \
+                run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" archive "$site" &&
+                fail "$kind tar: status 1 must fail the export"
+            grep -q "^ERROR: tar failed" "$err" || fail "$kind tar: the failure must be reported: $(cat "$err")"
+            grep -Fq "Permission denied" "$err" || fail "$kind tar: its own error must be shown: $(cat "$err")"
+            grep -q "Archive written\|files changed" "$err" && fail "$kind tar: a failed archive was announced: $(cat "$err")"
+            [ ! -e "$archive" ] || fail "$kind tar: a failed archive was published"
+            PLAIN_TAR_ERROR="write error: No space left on device" REAL_TAR="$MIN_BIN/tar" \
+                run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o - archive "$site" &&
+                fail "$kind tar: status 1 must fail the archive on stdout"
+            grep -q "^ERROR: tar failed, the archive on stdout is incomplete" "$err" ||
+                fail "$kind tar: the stdout failure must be reported: $(cat "$err")"
+        fi
+        # A tar without --exclude cannot write this archive: it is refused
+        # before the dump. The BusyBox of the host can be such a build.
+        if ! REAL_TAR="$MIN_BIN/tar" "$bin/tar" -cf /dev/null --exclude=none -C "$TMP_ROOT" plain-tar-probe 2> /dev/null; then
+            [ "$kind" != refusing ] || fail "the refusing tar must know --exclude"
+            rm -f "$archive"
+            REAL_TAR="$MIN_BIN/tar" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" \
+                --exclude backup --exclude 'b\q' --include .c1 archive "$site" && fail "$kind tar: a tar without --exclude must stop the export"
+            grep -q "^ERROR: the tar of this server is not GNU tar and cannot leave the excluded paths out" "$err" ||
+                fail "$kind tar: the refusal must explain: $(cat "$err")"
+            grep -q "unrecognized option\|tar failed" "$err" && fail "$kind tar: the archive was attempted: $(cat "$err")"
+            grep 'mariadb-dump argv:' "$STUB_LOG" | grep -Fvq '[--help]' && fail "$kind tar: the refusal came after the dump was started"
+            [ ! -e "$archive" ] || fail "$kind tar: the refused archive was written"
+            continue
+        fi
+        [ "$kind" != no-exclude ] || fail "the tar without --exclude accepted it"
+        rm -f "$archive"
+        REAL_TAR="$MIN_BIN/tar" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" \
+            --exclude backup --exclude 'b\q' --include .c1 archive "$site" || fail "$kind tar: the archive with exclusions failed: $(cat "$err")"
+        grep -q "unrecognized option" "$err" && fail "$kind tar was given an option it does not know: $(cat "$err")"
+        archive_lists "$archive" -Fxq "kvs-export.manifest" || fail "$kind tar: the archive must be complete"
+        archive_lists "$archive" -Fxq "www/tmp/" || fail "$kind tar: tmp travels as an empty directory"
+        archive_lists "$archive" -Fq "www/tmp/upload.part" && fail "$kind tar: temporary files must not travel"
+        archive_lists "$archive" -Fq "www/admin/logs/debug_sql_post.txt" && fail "$kind tar: the query log must not travel"
+        archive_lists "$archive" -Fxq "www/admin/logs/cron.txt" || fail "$kind tar: the other logs travel"
+        archive_lists "$archive" -Fq "www/backup" && fail "$kind tar: an excluded directory must not travel"
+        archive_lists "$archive" -Fq 'www/.c[1]' && fail "$kind tar: a name with brackets must not travel"
+        archive_lists "$archive" -Fxq "www/.c1/keep" || fail "$kind tar: the brackets of an excluded name matched another one"
+        archive_lists "$archive" -Fq 'www/b\q' && fail "$kind tar: a name with a backslash must not travel"
+        archive_lists "$archive" -Fxq "www/bq/keep" || fail "$kind tar: the backslash of an excluded name matched another one"
+        archive_lists "$archive" -Fxq "www/lib/a.php" || fail "$kind tar: an unknown directory travels"
+
+        # This tar would also leave www/lib/www/backup behind: no archive.
+        mkdir -p "$site/lib/www/backup"
+        echo x > "$site/lib/www/backup/wanted"
+        rm -f "$archive"
+        REAL_TAR="$MIN_BIN/tar" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" \
+            --exclude backup --exclude 'b\q' --include .c1 archive "$site" && fail "$kind tar: a path the patterns also match must stop the archive"
+        grep 'mariadb-dump argv:' "$STUB_LOG" | grep -Fvq '[--help]' && fail "$kind tar: the refusal came after the dump was started"
+        grep -q "is not GNU tar" "$err" || fail "$kind tar: the refusal must explain: $(cat "$err")"
+        grep -Fxq "  $site/lib/www/backup" "$err" || fail "$kind tar: the refusal must name the path: $(cat "$err")"
+        grep -Fq "$site/backup/www/backup" "$err" && fail "$kind tar: a path that stays behind anyway was named"
+        [ ! -e "$archive" ] || fail "$kind tar: the refused archive was written"
+        rm -rf "$site/lib/www"
+        # The same below a directory whose contents alone stay behind.
+        mkdir -p "$site/www/tmp"
+        echo x > "$site/www/tmp/wanted"
+        REAL_TAR="$MIN_BIN/tar" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" \
+            --exclude backup --exclude 'b\q' --include .c1 archive "$site" && fail "$kind tar: contents the patterns also match must stop the archive"
+        grep -Fxq "  $site/www/tmp/wanted" "$err" || fail "$kind tar: the refusal must name the file: $(cat "$err")"
+        rm -rf "$site/www"
+        # tar follows a link named www, and so does the search.
+        mkdir -p "$site/kept/backup" "$site/x"
+        echo x > "$site/kept/backup/wanted"
+        ln -s ../kept "$site/x/www"
+        REAL_TAR="$MIN_BIN/tar" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" \
+            --exclude backup --exclude 'b\q' --include .c1 archive "$site" && fail "$kind tar: a path reached through a link must stop the archive"
+        grep -Fxq "  $site/x/www/backup" "$err" || fail "$kind tar: the refusal must name the linked path: $(cat "$err")"
+        rm -rf "$site/x" "$site/kept"
+    done
+
+    # GNU tar keeps the command line it had, and archives those paths.
+    mkdir -p "$site/lib/www/backup" "$TMP_ROOT/plain-tar-gnu"
+    echo x > "$site/lib/www/backup/wanted"
+    cat > "$TMP_ROOT/plain-tar-gnu/tar" <<'EOF'
+#!/bin/bash
+case " $* " in *' -chf '*) printf 'tar argv:%s\n' "$(printf ' [%s]' "$@")" >> "$TAR_ARGV_LOG" ;; esac
+exec "$REAL_TAR" "$@"
+EOF
+    chmod +x "$TMP_ROOT/plain-tar-gnu/tar"
+    rm -f "$archive" "$TMP_ROOT/plain-tar.argv"
+    TAR_ARGV_LOG="$TMP_ROOT/plain-tar.argv" REAL_TAR="$MIN_BIN/tar" run_export "$TMP_ROOT/plain-tar-gnu:$STUB_BIN:$MIN_BIN" "$out" "$err" \
+        -y -o "$archive" --exclude backup --exclude 'b\q' --include .c1 archive "$site" || fail "GNU tar: the archive failed: $(cat "$err")"
+    archive_lists "$archive" -Fxq "www/lib/www/backup/wanted" || fail "GNU tar must keep the anchored patterns"
+    archive_lists "$archive" -Fq 'www/.c[1]' && fail "GNU tar: a name with brackets must not travel"
+    logged=$(sed -e 's/ \[--no-anchored\] \[--exclude=\.kvs-export\.[^]]*\].*//' -e 's/^.*\[-chf\] \[[^]]*\]//' <(grep -F ' [www] ' "$TMP_ROOT/plain-tar.argv"))
+    # Every exclude follows the option that says how GNU tar reads it.
+    [[ $logged == ' [--anchored] '* ]] || fail "GNU tar lost --anchored: $logged"
+    for expected in '[--wildcards] [--exclude=www/tmp/*]' '[--wildcards] [--exclude=www/admin/data/tmp/*]' \
+        '[--wildcards] [--exclude=www/admin/smarty/template-c/*]' '[--no-wildcards] [--exclude=www/admin/logs/debug_sql_post.txt]' \
+        '[--no-wildcards] [--exclude=www/.well-known]' '[--no-wildcards] [--exclude=www/backup]' \
+        '[--no-wildcards] [--exclude=www/.c[1]]' '[--no-wildcards] [--exclude=www/b\q]'; do
+        [[ $logged == *" $expected"* ]] || fail "GNU tar lost $expected: $logged"
+        logged=${logged/" $expected"/}
+    done
+    [ "$logged" = ' [--anchored]' ] || fail "the options of GNU tar changed: $logged"
+    grep -F ' [www] ' "$TMP_ROOT/plain-tar.argv" | grep -Eq ' \[--no-anchored\] \[--exclude=\.kvs-export\.[^]]*\] \[-C\] ' ||
+        fail "GNU tar lost the staging exclusion: $(cat "$TMP_ROOT/plain-tar.argv")"
+    pass "exclusions reach a tar that is not GNU tar"
+}
+
 test_named_paths_are_normalised_and_a_missing_one_is_reported() {
     local site="$TMP_ROOT/noncanon-site"
     local out="$TMP_ROOT/noncanon.out"
@@ -4044,6 +4203,7 @@ test_a_full_temporary_directory_does_not_shrink_the_site_size
 test_detect_reports_the_entries_and_what_stays_behind
 test_storage_servers_keep_their_columns
 test_excluded_and_included_paths_change_what_travels
+test_exclusions_reach_a_tar_that_is_not_gnu_tar
 test_named_paths_are_normalised_and_a_missing_one_is_reported
 test_detect_lists_the_links_leading_out_of_the_site
 test_a_contents_directory_on_another_disk_needs_no_question
