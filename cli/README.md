@@ -153,7 +153,12 @@ stay with the installation, even if Git tracks them. Older records stop
 managing these paths on read. Any local entry at a new release path,
 including a dangling link, blocks the plan and synchronization. Move it
 aside to proceed. A path created during the copy also blocks publication.
-Recovery removes only journaled temporaries. For a target-only file with
+Recovery removes only journaled temporaries. To drop a temporary without
+removing another entry that took its name, kvsctl first moves the name into
+a `.kvsctl-<number>.d` directory beside it and gives such an entry its name
+back. If that name is taken again, the entry stays in that directory, and
+apply or recovery stops and names it: move the entry away, then run
+`kvsctl recover`. For a target-only file with
 unrecognized contents and no recorded creation, it prints the path and
 keeps the file while restoring the previous version.
 Both bundle readers reject paths needed as both files and directories before

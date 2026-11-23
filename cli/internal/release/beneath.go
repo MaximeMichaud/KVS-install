@@ -282,18 +282,21 @@ func lay(srcRoot, root, rel string, managed bool, journal *SyncJournal) error {
 	if err != nil {
 		return err
 	}
+	var st unix.Stat_t
+	if err := unix.Fstat(int(tmp.Fd()), &st); err != nil {
+		tmp.Close()
+		_ = unix.Unlinkat(dirfd, tmpName, 0)
+		return err
+	}
 	published := false
 	defer func() {
 		if !published {
-			_ = unix.Unlinkat(dirfd, tmpName, 0)
+			// A temporary that cannot be dropped stays: the journal
+			// names it, and recovery removes it.
+			_ = dropTemp(dirfd, tmpName, uint64(st.Dev), st.Ino, filepath.Join(root, dir))
 		}
 	}()
 	if journal != nil {
-		var st unix.Stat_t
-		if err := unix.Fstat(int(tmp.Fd()), &st); err != nil {
-			tmp.Close()
-			return err
-		}
 		pending := PendingCopy{File: rel, Temporary: path.Join(dir, tmpName), Device: uint64(st.Dev), Inode: st.Ino}
 		if err := journal.Pending(pending); err != nil {
 			tmp.Close()
@@ -329,10 +332,13 @@ func lay(srcRoot, root, rel string, managed bool, journal *SyncJournal) error {
 		// ENOTSUP and EOPNOTSUPP are the same errno on Linux.
 		switch err {
 		case unix.ENOSYS, unix.EINVAL, unix.EOPNOTSUPP:
-			err = linkNew(dirfd, tmpName, dirfd, name, 0)
-			if err == nil {
-				// Until unlink completes, both names refer to the journaled inode.
-				err = unix.Unlinkat(dirfd, tmpName, 0)
+			if err = linkNew(dirfd, tmpName, dirfd, name, 0); err == nil {
+				// The file is published: both names refer to the
+				// journaled inode until the temporary one is gone.
+				published = true
+				if err := dropTemp(dirfd, tmpName, uint64(st.Dev), st.Ino, filepath.Join(root, dir)); err != nil {
+					return err
+				}
 			}
 		}
 		if err != nil {
@@ -345,6 +351,76 @@ func lay(srcRoot, root, rel string, managed bool, journal *SyncJournal) error {
 	published = true
 	if !managed && journal != nil {
 		return journal.Created(rel)
+	}
+	return nil
+}
+
+// asideSuffix names, after a temporary, the directory dropTemp moves that
+// temporary into.
+const asideSuffix = ".d"
+
+// dropTemp removes the temporary name tmpName of the directory dirfd, whose
+// file is the inode ino of the device dev. No call removes a name only
+// while it still refers to a given file, and the directory is not kvsctl's
+// alone: another entry may have taken the name since kvsctl made it. The
+// name is therefore renamed into a directory made for it, which moves
+// whatever stands there without replacing anything, and is only removed
+// inside that directory once it is known to be the temporary. dir names
+// dirfd in an error.
+func dropTemp(dirfd int, tmpName string, dev, ino uint64, dir string) error {
+	aside := tmpName + asideSuffix
+	if err := unix.Mkdirat(dirfd, aside, 0o700); err != nil {
+		return &os.PathError{Op: "mkdir", Path: filepath.Join(dir, aside), Err: err}
+	}
+	afd, err := openat(dirfd, aside, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: filepath.Join(dir, aside), Err: err}
+	}
+	defer unix.Close(afd)
+	// A temporary that is already gone leaves the directory empty.
+	if err := unix.Renameat(dirfd, tmpName, afd, tmpName); err != nil && !errors.Is(err, unix.ENOENT) {
+		_ = unix.Unlinkat(dirfd, aside, unix.AT_REMOVEDIR)
+		return &os.PathError{Op: "rename", Path: filepath.Join(dir, tmpName), Err: err}
+	}
+	return settleAside(dirfd, afd, tmpName, dev, ino, dir)
+}
+
+// settleAside empties and removes the directory dropTemp made for tmpName,
+// open as afd. The temporary goes. Anything else took the name of the
+// temporary and belongs to someone else: it gets its name back unless that
+// name is taken again, and then stays where it is, named in the error.
+func settleAside(dirfd, afd int, tmpName string, dev, ino uint64, dir string) error {
+	aside := tmpName + asideSuffix
+	kept := filepath.Join(dir, aside, tmpName)
+	st, err := statAt(afd, tmpName, kept)
+	if err != nil {
+		return err
+	}
+	switch {
+	case st == nil:
+	case st.Mode&unix.S_IFMT == unix.S_IFREG && uint64(st.Dev) == dev && st.Ino == ino:
+		err = unix.Unlinkat(afd, tmpName, 0)
+	case st.Mode&unix.S_IFMT == unix.S_IFDIR:
+		// A directory has one name: only a rename gives it back.
+		err = unix.Renameat(afd, tmpName, dirfd, tmpName)
+	default:
+		err = unix.Linkat(afd, tmpName, dirfd, tmpName, 0)
+		if errors.Is(err, unix.EEXIST) {
+			// A run stopped after this link left the entry under both
+			// names: it has its name back already.
+			if back, serr := statAt(dirfd, tmpName, filepath.Join(dir, tmpName)); serr == nil && back != nil && back.Dev == st.Dev && back.Ino == st.Ino {
+				err = nil
+			}
+		}
+		if err == nil {
+			err = unix.Unlinkat(afd, tmpName, 0)
+		}
+	}
+	if err == nil {
+		err = unix.Unlinkat(dirfd, aside, unix.AT_REMOVEDIR)
+	}
+	if err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("%s holds an entry that took the name of a kvsctl temporary, %s, and could not get that name back (%w): move it away", filepath.Join(dir, aside), filepath.Join(dir, tmpName), err)
 	}
 	return nil
 }
@@ -397,14 +473,24 @@ func RemovePending(root string, pending PendingCopy) error {
 		return err
 	}
 	defer unix.Close(fd)
-	st, err := statAt(fd, path.Base(tmp), filepath.Join(root, tmp))
+	// A run stopped while it dropped its temporary left the directory made
+	// for that, empty or not.
+	afd, err := openat(fd, base+asideSuffix, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC)
+	if err == nil {
+		err = settleAside(fd, afd, base, pending.Device, pending.Inode, filepath.Join(root, path.Dir(tmp)))
+		unix.Close(afd)
+		if err != nil {
+			return err
+		}
+	}
+	st, err := statAt(fd, base, filepath.Join(root, tmp))
 	if err != nil || st == nil {
 		return err
 	}
 	if uint64(st.Dev) != pending.Device || st.Ino != pending.Inode || st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil
 	}
-	if err := unix.Unlinkat(fd, path.Base(tmp), 0); err != nil && !errors.Is(err, unix.ENOENT) {
+	if err := unix.Unlinkat(fd, base, 0); err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}
 	return nil

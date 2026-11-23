@@ -816,6 +816,153 @@ func TestNewFilePublicationFallback(t *testing.T) {
 	}
 }
 
+// The directory a file is laid in is not kvsctl's alone: an entry that takes
+// the name of the temporary, once the link fallback published the file or
+// before a publication that fails, is not the temporary and stays.
+func TestTemporaryNameTakenByAnotherEntry(t *testing.T) {
+	const file = "conf/site.conf"
+	for _, tc := range []struct {
+		name      string
+		renameErr error
+		directory bool
+	}{
+		{name: "file after the link", renameErr: unix.ENOSYS},
+		{name: "directory after the link", renameErr: unix.ENOSYS, directory: true},
+		{name: "file before a refused publication", renameErr: unix.EEXIST},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, src := t.TempDir(), t.TempDir()
+			writeTree(t, src, map[string]string{file: "release"})
+			saved := filepath.Join(root, "saved")
+			if tc.directory {
+				writeTree(t, saved, map[string]string{"inside": "local copy"})
+			} else {
+				writeTree(t, root, map[string]string{"saved": "local copy"})
+			}
+			oldRename, oldLink := renameNew, linkNew
+			t.Cleanup(func() { renameNew, linkNew = oldRename, oldLink })
+			var taken string
+			take := func(tmp string) {
+				taken = filepath.Join(root, "conf", tmp)
+				if err := os.Remove(taken); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(saved, taken); err != nil {
+					t.Fatal(err)
+				}
+			}
+			renameNew = func(fromFD int, from string, toFD int, to string, flags uint) error {
+				if tc.renameErr == unix.EEXIST {
+					take(from)
+				}
+				return tc.renameErr
+			}
+			linkNew = func(fromFD int, from string, toFD int, to string, flags int) error {
+				if err := unix.Linkat(fromFD, from, toFD, to, flags); err != nil {
+					return err
+				}
+				take(from)
+				return nil
+			}
+			err := Sync(src, root, []string{file}, nil)
+			want := []string{filepath.Base(taken)}
+			if tc.renameErr == unix.EEXIST {
+				if !errors.Is(err, unix.EEXIST) {
+					t.Fatalf("refused publication: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := content(t, filepath.Join(root, file)); got != "release" {
+					t.Fatalf("published file = %q", got)
+				}
+				want = append(want, "site.conf")
+			}
+			if tc.directory {
+				taken = filepath.Join(taken, "inside")
+			}
+			if data, err := os.ReadFile(taken); err != nil || string(data) != "local copy" {
+				t.Fatalf("the entry that took the name of the temporary: %q, %v", data, err)
+			}
+			if got := names(t, filepath.Join(root, "conf")); !slices.Equal(got, want) {
+				t.Fatalf("conf/ holds %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A run stopped while it dropped a temporary leaves the directory made for
+// that. Recovery removes it with the temporary, gives another entry its
+// name back, and names one that cannot get it back.
+func TestRemovePendingSettlesAnInterruptedDrop(t *testing.T) {
+	const tmp = "conf/.kvsctl-123"
+	setup := func(t *testing.T, files map[string]string) (string, PendingCopy) {
+		root := t.TempDir()
+		writeTree(t, root, map[string]string{"conf/own": "release"})
+		var st unix.Stat_t
+		if err := unix.Stat(filepath.Join(root, "conf/own"), &st); err != nil {
+			t.Fatal(err)
+		}
+		mkdir(t, filepath.Join(root, tmp+".d"))
+		writeTree(t, root, files)
+		return root, PendingCopy{File: "conf/site.conf", Temporary: tmp, Device: uint64(st.Dev), Inode: st.Ino}
+	}
+	inside := tmp + ".d/.kvsctl-123"
+	t.Run("temporary", func(t *testing.T) {
+		root, pending := setup(t, nil)
+		if err := os.Link(filepath.Join(root, "conf/own"), filepath.Join(root, inside)); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemovePending(root, pending); err != nil {
+			t.Fatal(err)
+		}
+		if got := names(t, filepath.Join(root, "conf")); !slices.Equal(got, []string{"own"}) {
+			t.Fatalf("conf/ holds %q", got)
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		root, pending := setup(t, nil)
+		if err := RemovePending(root, pending); err != nil {
+			t.Fatal(err)
+		}
+		if got := names(t, filepath.Join(root, "conf")); !slices.Equal(got, []string{"own"}) {
+			t.Fatalf("conf/ holds %q", got)
+		}
+	})
+	t.Run("another entry", func(t *testing.T) {
+		root, pending := setup(t, map[string]string{inside: "local copy"})
+		if err := RemovePending(root, pending); err != nil {
+			t.Fatal(err)
+		}
+		if got := names(t, filepath.Join(root, "conf")); !slices.Equal(got, []string{".kvsctl-123", "own"}) || content(t, filepath.Join(root, tmp)) != "local copy" {
+			t.Fatalf("conf/ holds %q", got)
+		}
+	})
+	t.Run("another entry already linked back", func(t *testing.T) {
+		root, pending := setup(t, map[string]string{inside: "local copy"})
+		if err := os.Link(filepath.Join(root, inside), filepath.Join(root, tmp)); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemovePending(root, pending); err != nil {
+			t.Fatal(err)
+		}
+		if got := names(t, filepath.Join(root, "conf")); !slices.Equal(got, []string{".kvsctl-123", "own"}) || content(t, filepath.Join(root, tmp)) != "local copy" {
+			t.Fatalf("conf/ holds %q", got)
+		}
+	})
+	t.Run("name taken again", func(t *testing.T) {
+		root, pending := setup(t, map[string]string{inside: "local copy", tmp: "second copy"})
+		err := RemovePending(root, pending)
+		if err == nil || !strings.Contains(err.Error(), filepath.Join(root, tmp+".d")) || !strings.Contains(err.Error(), "move it away") {
+			t.Fatalf("RemovePending = %v, want the directory named", err)
+		}
+		if content(t, filepath.Join(root, inside)) != "local copy" || content(t, filepath.Join(root, tmp)) != "second copy" {
+			t.Fatal("an entry was lost")
+		}
+	})
+}
+
 func TestSyncReplacesEmptyManagedAncestor(t *testing.T) {
 	for _, remaining := range []string{"conf/extra", "conf/extra/nested", "conf/extra/nested/deeper"} {
 		t.Run(remaining, func(t *testing.T) {
