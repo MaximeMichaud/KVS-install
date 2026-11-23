@@ -2201,6 +2201,93 @@ w3_run
 [ "$(find "${TEST_DIR}/w3_kept_620/webroots/w3.example" -type f -exec sha256sum {} + | sort)" = "$w3_kept_sum" ] ||
     fail "W3: the refused add changed the kept webroot"
 
+# The init keeps a webroot that holds setup.php and never extracts the
+# archive: the kept site's table prefix is the one in use. add read the
+# archive alone, so it refused a kept historical prefix because of a
+# hand-made archive nothing would install, and recorded the archive's
+# prefix for a site that runs with another one.
+# w3_kept_prefix <name> <kept setup.php line> <archive prefix>
+w3_kept_prefix() {
+    w3_kept "$1" "$w3_plain" 7.0.2
+    w3_kept_root="${TEST_DIR}/$1/webroots/w3.example"
+    printf '%s\n' '<?php' "$2" > "${w3_kept_root}/admin/include/setup.php"
+    w3_zip "${w3_dir}/KVS_7.0.2_[w3.example].zip" admin/include/functions_base.php:plain \
+        "admin/include/setup.php:prefix=$3"
+    w3_kept_sum=$(find "$w3_kept_root" -type f -exec sha256sum {} + | sort)
+}
+w3_kept_prefix w3_kept_legacy "\$config['tables_prefix']='café_';" café_
+w3_run
+w3_expect 8.1 NO "a kept historical prefix with a hand-made archive of the same prefix"
+grep -Fxq 'TABLES_PREFIX=café_' "$w3_env" ||
+    fail "W3: the kept historical prefix was not recorded: $(grep '^TABLES_PREFIX=' "$w3_env")"
+grep -Fq "keeping non-ASCII TABLES_PREFIX 'café_' only because this site already uses it" "$w3_out" ||
+    fail "W3: the kept historical prefix was recorded without its migration notice: $(cat "$w3_out")"
+[ "$(find "$w3_kept_root" -type f -exec sha256sum {} + | sort)" = "$w3_kept_sum" ] ||
+    fail "W3: add changed the kept site"
+w3_kept_prefix w3_kept_ascii "\$config['tables_prefix']='old_';" abc_
+w3_run
+w3_expect 8.1 NO "a kept site whose prefix differs from the archive"
+grep -Fxq 'TABLES_PREFIX=old_' "$w3_env" ||
+    fail "W3: the archive's prefix replaced the kept site's: $(grep '^TABLES_PREFIX=' "$w3_env")"
+# A kept ASCII site is not refused for an archive the init will not read.
+w3_kept_prefix w3_kept_unread "\$config['tables_prefix']='old_';" café_
+w3_run
+w3_expect 8.1 NO "a kept ASCII site with a non-ASCII archive"
+grep -Fxq 'TABLES_PREFIX=old_' "$w3_env" || fail "W3: an unused archive decided the prefix of a kept site"
+# A setup.php without a usable prefix gives ktvs_, as the init decides.
+w3_kept_prefix w3_kept_none "\$config['tables_prefix']='a-b';" abc_
+w3_run
+w3_expect 8.1 NO "a kept site without a usable prefix"
+grep -Fxq 'TABLES_PREFIX=ktvs_' "$w3_env" || fail "W3: an unusable kept prefix did not fall back to ktvs_"
+grep -Fxq "WARNING: No usable tables_prefix in ${w3_kept_root}/admin/include/setup.php (got 'a-b'), using ktvs_" "$w3_out" ||
+    fail "W3: the ktvs_ fallback of a kept site was not explained: $(cat "$w3_out")"
+# Backslash sequences in the value are printed as written, never interpreted.
+w3_kept_prefix w3_kept_escape "\$config['tables_prefix']='a\\033[31mRED\\cb';" abc_
+w3_run
+w3_expect 8.1 NO "a kept prefix with backslash sequences"
+grep -Fxq 'TABLES_PREFIX=ktvs_' "$w3_env" || fail "W3: a prefix with backslashes did not fall back to ktvs_"
+grep -Fxq "WARNING: No usable tables_prefix in ${w3_kept_root}/admin/include/setup.php (got 'a\\033[31mRED\\cb'), using ktvs_" "$w3_out" ||
+    fail "W3: the fallback notice interpreted or cut the kept value: $(cat -v "$w3_out")"
+# Control characters cannot name tables: nothing is created.
+w3_kept_prefix w3_kept_control "\$config['tables_prefix']='a"$'\x01'"b_';" abc_
+w3_run
+{ [ "$w3_status" -ne 0 ] && grep -Fq 'cannot use table prefix' "$w3_out"; } ||
+    fail "W3: a kept prefix with a control character was accepted: $(cat "$w3_out")"
+[ ! -e "${TEST_DIR}/w3_kept_control/docker/multi-site/sites/w3.example" ] ||
+    fail "W3: the refused kept prefix created the site directory"
+[ "$(find "$w3_kept_root" -type f -exec sha256sum {} + | sort)" = "$w3_kept_sum" ] ||
+    fail "W3: the refused add changed the kept site"
+# A setup.php add cannot read is not taken for a site without a prefix.
+if [ "$(id -u)" -ne 0 ]; then
+    w3_kept_prefix w3_kept_private "\$config['tables_prefix']='old_';" abc_
+    chmod 000 "${w3_kept_root}/admin/include/setup.php"
+    w3_run
+    chmod 600 "${w3_kept_root}/admin/include/setup.php"
+    { [ "$w3_status" -ne 0 ] && grep -Fq "cannot read ${w3_kept_root}/admin/include/setup.php" "$w3_out"; } ||
+        fail "W3: an unreadable kept setup.php was accepted: $(cat "$w3_out")"
+    [ ! -e "${TEST_DIR}/w3_kept_private/docker/multi-site/sites/w3.example" ] ||
+        fail "W3: the unreadable kept setup.php created the site directory"
+fi
+# Only the marker of an interrupted extraction makes the init extract over
+# setup.php: the archive decides again, and a new non-ASCII one is refused.
+w3_kept_prefix w3_kept_resumed "\$config['tables_prefix']='old_';" abc_
+: > "${w3_kept_root}/.kvs-extraction-in-progress"
+w3_run
+w3_expect 8.1 NO "a webroot whose extraction was interrupted"
+grep -Fxq 'TABLES_PREFIX=abc_' "$w3_env" || fail "W3: an interrupted extraction did not leave the prefix to the archive"
+w3_kept_prefix w3_kept_resumed_legacy "\$config['tables_prefix']='old_';" café_
+: > "${w3_kept_root}/.kvs-extraction-in-progress"
+w3_run
+{ [ "$w3_status" -ne 0 ] && grep -Fq 'a new archive table prefix must contain only ASCII' "$w3_out"; } ||
+    fail "W3: a non-ASCII archive the init would extract was accepted: $(cat "$w3_out")"
+# Both markers: the extraction finished, the site is kept.
+w3_kept_prefix w3_kept_done "\$config['tables_prefix']='old_';" abc_
+: > "${w3_kept_root}/.kvs-extraction-in-progress"
+: > "${w3_kept_root}/.kvs-extraction-complete"
+w3_run
+w3_expect 8.1 NO "a webroot whose extraction completed"
+grep -Fxq 'TABLES_PREFIX=old_' "$w3_env" || fail "W3: a completed extraction did not keep the site's prefix"
+
 # Compose prefers a variable of the environment over the site's .env, so an
 # IONCUBE exported for an add gave every site started or stopped from the
 # same shell its value. add reads it; start, stop and remove drop it, and the

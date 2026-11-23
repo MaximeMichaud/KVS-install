@@ -183,6 +183,34 @@ archive_tables_prefix() {
     printf '%s\n' "$prefix"
 }
 
+# The table prefix of the KVS site an earlier remove kept in <webroot>, read
+# and classified as the init's get_tables_prefix does: that init keeps the
+# site and never extracts the archive, so its setup.php decides, a historical
+# non-ASCII prefix included.
+kept_site_tables_prefix() {
+    local setup="$1/admin/include/setup.php" pattern prefix
+
+    if [ ! -r "$setup" ]; then
+        echo "ERROR: cannot read $setup, which holds the table prefix of the kept site." >&2
+        return 1
+    fi
+    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
+    prefix=$(sed -n -E "$pattern" "$setup" | head -n 1)
+    if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+        if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
+            echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
+        elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
+            echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables and setup.php of the kept site together." >&2
+            return 1
+        else
+            # Not log_warn: echo -e would interpret backslashes of the value.
+            printf '%s\n' "WARNING: No usable tables_prefix in ${setup} (got '${prefix}'), using ktvs_" >&2
+            prefix=ktvs_
+        fi
+    fi
+    printf '%s\n' "$prefix"
+}
+
 # The single-mode primary records its identity in docker/.env, next to the
 # multi-site directory, not in the .primary.env reservation (which exists only
 # once multi mode is set up). Read its Compose project name so a new site
@@ -924,15 +952,23 @@ add_site() {
 
     # The PHP series, the IonCube setting and the table prefix come from the
     # archive, by the rules setup.sh applies to the primary site, before
-    # anything is created; the series and IonCube from a webroot an earlier
-    # remove kept, when it holds a KVS site.
+    # anything is created; from a webroot an earlier remove kept instead,
+    # when it holds a KVS site (the prefix: when the init will keep it).
     local site_archive
     local webroot="${WEBROOT_BASE}/${domain}"
     select_site_archive "$domain" || return 1
     site_archive=$(realpath -e -- "$site_archive") || return 1
     select_site_php "$site_archive" "$webroot" || return 1
+    # The init keeps a webroot that holds setup.php and extracts nothing,
+    # unless only its marker of an interrupted extraction is there: the
+    # kept site's prefix is then the one in use, whatever the archive has.
     local tables_prefix
-    tables_prefix=$(archive_tables_prefix "$site_archive") || return 1
+    if [ -f "${webroot}/admin/include/setup.php" ] &&
+        { [ -f "${webroot}/.kvs-extraction-complete" ] || [ ! -f "${webroot}/.kvs-extraction-in-progress" ]; }; then
+        tables_prefix=$(kept_site_tables_prefix "$webroot") || return 1
+    else
+        tables_prefix=$(archive_tables_prefix "$site_archive") || return 1
+    fi
 
     # The build bases of the PHP series, pinned by digest in
     # docker/images.lock, as setup.sh writes them for the primary site
