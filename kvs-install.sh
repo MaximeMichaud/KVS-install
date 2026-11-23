@@ -1602,6 +1602,41 @@ function inIfBody($source, $tokens, $at) {
     return false;
 }
 
+// True when the element at tokens $from..$to is written without an assignment
+// operator of its own: as an entry of a list() or [] destructuring, nested or
+// not, or as the key or value target of a foreach.
+function isWriteTarget($tokens, $from, $to) {
+    $depth = 0;
+    $as = false;
+    for ($open = $from - 1; $open >= 0; --$open) {
+        list($type, $text) = $tokens[$open];
+        if ($type === T_AS && !$depth) $as = true;
+        if (in_array($type, [T_CURLY_OPEN, T_DOLLAR_OPEN_CURLY_BRACES], true)) $text = '{';
+        elseif (defined('T_ATTRIBUTE') && $type === T_ATTRIBUTE) $text = '[';
+        elseif ($type !== null) continue;
+        if (in_array($text, [')', ']', '}'], true)) ++$depth;
+        elseif (in_array($text, ['(', '[', '{'], true) && --$depth < 0) break;
+    }
+    if ($open < 1 || $tokens[$open][0] !== null) return false;
+    list($type, $before) = $tokens[$open - 1];
+    if ($tokens[$open][1] === '(') {
+        if ($type === T_FOREACH) return $as;
+        if ($type !== T_LIST) return false;
+        --$open;
+    } elseif ($tokens[$open][1] !== '[' || $before === ']' || in_array($type, [T_VARIABLE, T_STRING], true)) {
+        // A block, or the subscript of a variable, property or constant.
+        return false;
+    }
+    $depth = 0;
+    for ($close = $to + 1; $close < count($tokens); ++$close) {
+        if ($tokens[$close][0] !== null) continue;
+        if (in_array($tokens[$close][1], ['(', '['], true)) ++$depth;
+        elseif (in_array($tokens[$close][1], [')', ']'], true) && --$depth < 0) break;
+    }
+    if (($tokens[$close + 1][1] ?? '') === '=') return true;
+    return isWriteTarget($tokens, $open, $close);
+}
+
 $source = file_get_contents($file);
 if ($source === false) refuse('could not read the configuration');
 try {
@@ -1638,23 +1673,31 @@ foreach ($tokens as $i => $token) {
     while (($tokens[$close][1] ?? '') === ')') ++$close;
     if (($tokens[$close][1] ?? '') !== ']') continue;
     $operator = $tokens[$close+1][1] ?? '';
-    if ($operator !== '=' && !in_array($tokens[$close+1][0] ?? null, $compound, true)) continue;
+    $assigned = $operator === '=' || in_array($tokens[$close+1][0] ?? null, $compound, true);
+    if (!$assigned && !isWriteTarget($tokens, $start, $close)) continue;
     if ($start !== $i) {
         // Grouping parentheses can be removed. Function-call parentheses cannot.
         if (!parses(substr_replace($source, ' $config ', $tokens[$start][2],
                 $tokens[$end][2] + 1 - $tokens[$start][2]))) continue;
     }
+    if (!$assigned) refuse('ambiguous destructuring or foreach target');
     if ($operator !== '=') refuse('computed assignment (compound operator ' . $operator . ')');
     ++$assignments;
     if (!atFileScope(substr($source, 0, $tokens[$start][2]))) {
         if (!inIfBody($source, $tokens, $start)) refuse('ambiguous assignment (expected a standalone if, elseif or else override)');
         // Stop at the end of this statement, including when its RHS contains a closure.
-        $braces = 0;
+        $braces = $groups = 0;
         for ($rhs = $close + 2; $rhs < count($tokens); ++$rhs) {
             list($type, $text) = $tokens[$rhs];
             if (($type === null && $text === '{') || $type === T_CURLY_OPEN || $type === T_DOLLAR_OPEN_CURLY_BRACES) ++$braces;
             if ($type === null && $text === '}') --$braces;
             if (!$braces && (($type === null && $text === ';') || $type === T_CLOSE_TAG)) break;
+            if ($type === null && ($text === '(' || $text === '[')) ++$groups;
+            if ($type === null && ($text === ')' || $text === ']')) --$groups;
+            // and, or and xor bind less tightly than =: the assignment is their operand.
+            if (!$braces && !$groups && in_array($type, [T_LOGICAL_AND, T_LOGICAL_OR, T_LOGICAL_XOR], true)) {
+                refuse('ambiguous assignment (operand of ' . $text . ')');
+            }
             if (($type === null && $text === '=') || in_array($type, $compound, true)) {
                 refuse('ambiguous chained assignment');
             }

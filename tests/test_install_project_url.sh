@@ -259,6 +259,52 @@ for statement in \
   refuse ambiguous "$statement"
 done
 
+# Writes without an assignment operator next to the key: destructuring and
+# foreach targets, and an override that is an operand of and, or, xor.
+target="\$config['project_url']"
+for statement in \
+  "[$target] = ['second'];" "list($target) = ['second'];" "list('k' => $target) = ['k' => 'second'];" \
+  "[\$x, [\$y, [$target]]] = [1, [2, ['second']]];" "[, &$target] = \$pair;" \
+  "[\$config[b'project_url']] = ['second'];" "[((\$config))[('project_url')]] = ['second'];" \
+  "foreach (['second'] as $target) {}" "foreach (['second'] as \$key => $target);" \
+  "foreach (['second' => 1] as $target => \$value) {}" "foreach ([['second']] as [\$x, $target]): endforeach;" \
+  "foreach ([['second']] as list($target)) {}" "if (true) [$target] = ['second'];" \
+  "if (true) { [$target] = ['second']; }" "\$x = [$target] = ['second'];" \
+  "if (true) { $target = 'second' and strlen('x'); }" "if (true) $target = \$url or exit;" \
+  "if (true): $target = \$url xor \$x; endif;" \
+  "[\"{\$key}\" => $target] = ['k' => 'second'];" "[\"\${key}\" => $target] = ['k' => 'second'];" \
+  "foreach ([#[Pure] fn() => 1] as $target) {}"; do
+  printf '%s\n' '<?php' "$main" "$statement" >"$file"
+  php -l "$file" >/dev/null || fail "fixture does not parse: $statement"
+  refuse ambiguous "$statement"
+done
+
+# Reads in the same positions stay accepted, and logical operators inside a
+# group or a closure of an override's value.
+cat >"$file" <<'PHP'
+<?php
+$config['project_url'] = 'https://old.test';
+$list = [$config['project_url'], 'x'];
+$map = ['k' => $config['project_url'], $config['project_url'] => 1];
+foreach ([$config['project_url']] as $value) { $seen[$config['project_url']] = $value; }
+foreach ($list as $key => $value) echo $config['project_url'];
+foreach (array_map(fn($x) => $config['project_url'], $list) as $value) {}
+$seen[$config['project_url']] = [1];
+$object->seen[0][$config['project_url']] = 1;
+[$first] = [$config['project_url']];
+list($a, $b) = [$config['project_url'], 2];
+$text = "{$config['project_url']}/x";
+if ([$config['project_url']] == $list) { $f = function () use ($config) { return [$config['project_url']]; }; }
+if ($mobile) { $config['project_url'] = ($a and $b) ? 'm' : 'n'; }
+if ($mobile) $config['project_url'] = $f(function () { return 1 and 2; }, [1 or 2]);
+elseif ($tablet) $config['project_url'] = function () { return 1 xor 2; };
+foreach ($f(function ($x) { foreach ($x as $y) {} }) ?: $config['project_url'] as $value) {}
+PHP
+php -l "$file" >/dev/null || fail 'read fixture does not parse'
+sed "s|https://old.test|https://$URL|" "$file" >"$work/expected"
+install_KVS >/dev/null || fail 'a read of project_url was refused'
+cmp "$work/expected" "$file" || fail 'a read of project_url changed'
+
 # Only the main literal changes, including with nested, unbraced and alternative bodies.
 cat >"$file" <<'PHP'
 <?php
