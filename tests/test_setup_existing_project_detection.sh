@@ -307,6 +307,7 @@ mv() {
     body=body[:begin]+"\nENABLE_MANTICORE=true # Keep the search container in this fixture.\n"+body[end:]
     body=body.replace('if [ "$MODE" = multi ]; then prepare_multi_site_proxy || exit 1; fi',
                       ': # Proxy provisioning is outside this retirement fixture.')
+    body=body.replace('\ncaddy_email_before_volume_removal || exit 1\n', '\n: # Nor is the Caddy email check.\n')
     point = '\nstop_for_configured_ports || exit 1\n'
     assert body.count(point) == 1
     body = body.replace(point, '''

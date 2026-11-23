@@ -73,6 +73,14 @@ setup_port() (
     port_conflicts_to_resolve() { return 1; }
     # shellcheck source=/dev/null
     source <(sed -n '/^stop_for_configured_ports() {/,/^}/p' "$root/docker/setup.sh")
+    # The Caddy email check needs the real route manager: only the cases
+    # that install it run the check.
+    # shellcheck disable=SC2329
+    caddy_email_before_volume_removal() { :; }
+    if [ "${CADDY_EMAIL_CHECK:-no}" = yes ]; then
+        # shellcheck source=/dev/null
+        source <(sed -n '/^caddy_email_before_volume_removal() {/,/^}/p' "$root/docker/setup.sh")
+    fi
     # shellcheck disable=SC2329
     run_step() { shift; "$@"; }
     # shellcheck disable=SC2329
@@ -118,6 +126,7 @@ setup_port() (
         /^if \[ "${DEV_SSL_INTELLIGENT:-false}" = true \]; then/,/^fi$/p;
         /^require_compose_config || exit 1$/p; /^dns_retries_left=\$DNS_RETRY_ATTEMPTS/,/^done$/p; /^import_stage_dump$/p;
         /^check_configured_ports || exit 1$/p; /^MODE=\$PREVIOUS_MODE$/p; /^configure_mode || exit /p;
+        /^caddy_email_before_volume_removal || exit 1$/p;
         /^stop_for_configured_ports || exit 1$/p; /^replace_setup_database_volume || exit 1$/p;
         /^run_step "Initializing KVS"/,+1p; /^    run_step "Starting Nginx" docker compose up -d --force-recreate nginx$/p;
         /^PUBLIC_HTTPS_PORT_SUFFIX=""/,/^echo -e.*Website:/{ /^echo -e.*Website:/!p; }' "$root/docker/setup.sh")
@@ -478,4 +487,77 @@ if HEADLESS='' setup_port < /dev/null > out 2>&1; then fail "missing interactive
 cmp .env before || fail "EOF overwrote the port"
 HEADLESS='' setup_port <<< 443 > out || fail "interactive proxy port was rejected"
 grep -Fxq 'PROJECT_HTTPS_PORT=443' .env || fail "interactive proxy port was lost"
+
+# A self-signed multi-site primary needs no EMAIL, but a saved route of
+# another site may need a certificate from Let's Encrypt: Caddy is then
+# refused at the end of the run. A run that replaces the database volume
+# must refuse before the stop and the deletion, with the real route manager
+# reading the saved routes. A run that deletes nothing goes on.
+rm -rf multi-site
+mkdir -p multi-site/caddy/sites
+cp "$root/docker/multi-site/site-manager.sh" multi-site/
+# caddy_case <refused|deleted|kept> <EMAIL> <route body> [volume: yes|no]
+caddy_case() {
+    local want=$1 email=$2 route=$3 volume=${4:-yes} status=0
+    printf 'other.test {\n%s    reverse_proxy web:80\n}\n' "$route" > multi-site/caddy/sites/other.caddy
+    printf '%s\n' MODE=multi SSL_PROVIDER=selfsigned "EMAIL=$email" > .env
+    rm -f stopped volume
+    [ "$volume" = no ] || touch volume
+    DOCKER_HOST=unix:///nonexistent.sock CADDY_EMAIL_CHECK=yes EMAIL=$email setup_port > out 2>&1 || status=$?
+    case $want in
+        refused)
+            [ "$status" = 1 ] || fail "an unusable Caddy email (EMAIL=$email) did not stop the run: $(cat out)"
+            [ -e volume ] && [ ! -e stopped ] ||
+                fail "the run stopped the project or deleted the volume before refusing the Caddy email"
+            { grep -Fq 'No ACME email for Caddy' out &&
+                grep -Fq 'stopped before deleting the database volume disposable, which was kept' out &&
+                grep -Fq "Set EMAIL to a valid address in $PWD/.env" out; } ||
+                fail "the Caddy email refusal does not say what to do: $(cat out)"
+            ! grep -Fq 'caddy-start' out ||
+                fail "the refusal also tells the operator to start Caddy by hand: $(cat out)" ;;
+        deleted)
+            [ "$status" = 0 ] || fail "a usable Caddy configuration (EMAIL=$email) was refused: $(cat out)"
+            [ ! -e volume ] && [ -e stopped ] || fail "the approved volume replacement did not run" ;;
+        kept)
+            [ "$status" = 0 ] || fail "a run that deletes no volume was refused for the Caddy email: $(cat out)"
+            ! grep -Fq 'No ACME email for Caddy' out ||
+                fail "a run that deletes no volume ran the early Caddy email check" ;;
+    esac
+}
+caddy_case refused '' ''
+caddy_case refused admin@example.com ''
+caddy_case deleted ops@site.test ''
+caddy_case deleted '' '    tls internal\n'
+caddy_case kept '' '' no
+# The import volume counts as well; the resume path and single-site mode
+# never recreate Caddy.
+(
+    # shellcheck source=/dev/null
+    source <(sed -n '/^caddy_email_before_volume_removal() {/,/^}/p' "$root/docker/setup.sh")
+    printf 'other.test {\n    reverse_proxy web:80\n}\n' > multi-site/caddy/sites/other.caddy
+    printf '%s\n' MODE=multi SSL_PROVIDER=selfsigned EMAIL= > .env
+    export DOCKER_HOST=unix:///nonexistent.sock
+    # shellcheck disable=SC2034  # Read by the sourced check.
+    EMAIL='' SETUP_VOLUME_TO_DELETE=''
+    # shellcheck disable=SC2034
+    MODE=multi RESUME_IMPORT=false IMPORT_VOLUME_TO_DELETE=imported
+    if caddy_email_before_volume_removal > out 2>&1; then fail "the import volume was not protected"; fi
+    grep -Fq 'database volume imported, which was kept' out || fail "the refusal does not name the import volume"
+    RESUME_IMPORT=true
+    caddy_email_before_volume_removal > out 2>&1 || fail "the resume path ran the early Caddy email check"
+    # shellcheck disable=SC2034
+    MODE=single RESUME_IMPORT=false
+    caddy_email_before_volume_removal > out 2>&1 || fail "single-site mode ran the Caddy email check"
+)
+# The check is the line after the one that writes the primary route, above
+# the removal of the unused containers, the retirement and the stop.
+line_of() { grep -nFx -- "$1" "$root/docker/setup.sh" | cut -d: -f1; }
+# shellcheck disable=SC2016
+route_line=$(line_of 'if [ "$MODE" = multi ]; then prepare_multi_site_proxy || exit 1; fi')
+check_line=$(line_of 'caddy_email_before_volume_removal || exit 1')
+retire_line=$(line_of 'retirement_finish || exit 1')
+stop_line=$(line_of 'stop_for_configured_ports || exit 1')
+[[ "$route_line $check_line $retire_line $stop_line" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]] &&
+    [ "$check_line" -eq "$((route_line + 1))" ] && [ "$check_line" -lt "$retire_line" ] && [ "$check_line" -lt "$stop_line" ] ||
+    fail "the Caddy email check is not between the primary route and the first stop"
 echo "PASS: setup and reconfigure preserve the self-signed site's external HTTPS port"

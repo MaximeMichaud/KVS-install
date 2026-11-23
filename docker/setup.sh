@@ -6737,6 +6737,32 @@ check_configured_ports() {
     STOP_PROJECT_FOR_PORTS=true
 }
 
+# In multi-site mode the Caddy step near the end of the run refuses an
+# unusable EMAIL while a saved route needs a certificate from Let's Encrypt
+# (a self-signed primary needs none, a site added later does). That refusal
+# is already certain here, with the primary route written: a run that is
+# about to delete a database volume stops now, before this project is
+# stopped for it, instead of ending with an error after the deletion.
+# A run that keeps its volumes goes on and reports Caddy at its end, and the
+# resume path does not recreate Caddy.
+caddy_email_before_volume_removal() {
+    local volume="${SETUP_VOLUME_TO_DELETE:-}${IMPORT_VOLUME_TO_DELETE:-}" output
+
+    if [ "$MODE" != multi ] || [ "${RESUME_IMPORT:-false}" = true ] || [ -z "$volume" ]; then
+        return 0
+    fi
+    # The route manager ends its refusal with the caddy-start command, which
+    # is not what this run needs: its error line is shown without that hint.
+    if output=$(env ACME_EMAIL="${EMAIL:-}" ./multi-site/site-manager.sh caddy-acme-check 2>&1); then
+        [ -z "$output" ] || printf '%s\n' "$output"
+        return 0
+    fi
+    printf '%s\n' "$output" | grep -vF 'site-manager.sh caddy-start' >&2 || true
+    echo -e "${RED}ERROR: The setup stopped before deleting the database volume ${volume}, which was kept: Caddy could not be started at the end of this run.${NC}" >&2
+    echo "Set EMAIL to a valid address in $PWD/.env (or pass EMAIL=<address>), then run the setup again." >&2
+    return 1
+}
+
 stop_for_configured_ports() {
     local stopped=false
     local -a timeout_args=()
@@ -7272,6 +7298,7 @@ check_configured_ports || exit 1
 MODE=$PREVIOUS_MODE
 configure_mode || exit $?
 if [ "$MODE" = multi ]; then prepare_multi_site_proxy || exit 1; fi
+caddy_email_before_volume_removal || exit 1
 docker stop "${SITE_PREFIX}-$unused_cache" >/dev/null 2>&1 || true
 docker rm "${SITE_PREFIX}-$unused_cache" >/dev/null 2>&1 || true
 if [ "$ENABLE_MANTICORE" != true ]; then
