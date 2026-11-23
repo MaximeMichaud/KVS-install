@@ -995,6 +995,59 @@ func TestSyncReplacesEmptyManagedAncestor(t *testing.T) {
 	}
 }
 
+// Only a directory the check before the first change saw gives way to a
+// release file. One made afterwards, where the previous release had files
+// that are gone, is not the release's: it stays, with what was made in it,
+// and stops the apply.
+func TestApplyKeepsADirectoryMadeAfterTheCheck(t *testing.T) {
+	const file = "conf/extra"
+	for _, tc := range []struct {
+		name, old, made string
+		late            bool
+	}{
+		{name: "seen by the check", old: "conf/extra/nested/old.conf", made: "conf/extra"},
+		{name: "seen by the check with the old layout", old: "conf/extra/nested/old.conf", made: "conf/extra/nested"},
+		{name: "late, old file two levels down", old: "conf/extra/nested/old.conf", made: "conf/extra", late: true},
+		{name: "late, old file directly in it", old: "conf/extra/old.conf", made: "conf/extra", late: true},
+		{name: "late, with the old layout", old: "conf/extra/nested/old.conf", made: "conf/extra/nested", late: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, src := t.TempDir(), t.TempDir()
+			writeTree(t, src, map[string]string{file: "release"})
+			dest := filepath.Join(mkdir(t, filepath.Join(root, "conf")), "extra")
+			made := filepath.Join(root, tc.made)
+			if !tc.late {
+				if err := os.MkdirAll(made, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			problems, standing := conflicts(root, []string{file}, []string{tc.old})
+			if len(problems) != 0 {
+				t.Fatal(problems)
+			}
+			if tc.late {
+				if err := os.MkdirAll(made, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := apply(src, root, []string{file}, []string{tc.old}, standing, nil)
+			if !tc.late {
+				if err != nil || content(t, dest) != "release" {
+					t.Fatalf("an empty managed directory seen by the check: %v", err)
+				}
+				return
+			}
+			info, statErr := os.Lstat(made)
+			if statErr != nil {
+				t.Fatalf("the directory made after the check is gone: %v, apply = %v", statErr, err)
+			}
+			if !errors.Is(err, unix.EEXIST) || !strings.Contains(err.Error(), dest) || info.Mode() != os.ModeDir|0o700 {
+				t.Fatalf("a directory made after the check: %v, %v", err, info.Mode())
+			}
+		})
+	}
+}
+
 func TestSyncPublishesMaxLengthName(t *testing.T) {
 	root, src := t.TempDir(), t.TempDir()
 	file := "conf/" + strings.Repeat("x", 255)

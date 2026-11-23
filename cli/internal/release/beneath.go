@@ -594,14 +594,23 @@ func (e *ConflictError) Error() string {
 // Only paths owned by the previous release can give way. A directory the
 // release used is replaceable only when it holds no local entries.
 func Conflicts(root string, files, previous []string) []string {
+	problems, _ := conflicts(root, files, previous)
+	return problems
+}
+
+// conflicts is Conflicts, and also lists the directories that stand where
+// the release lays a file: with no problem reported, each of them holds
+// nothing but directories the previous release used.
+func conflicts(root string, files, previous []string) (problems []string, standing map[string]bool) {
 	// Older state can name local files even when the new bundle is valid.
 	for _, list := range [][]string{files, previous} {
 		for _, name := range list {
 			if !releasePath(name, false) {
-				return []string{fmt.Sprintf("%q is outside the release paths", name)}
+				return []string{fmt.Sprintf("%q is outside the release paths", name)}, nil
 			}
 		}
 	}
+	standing = map[string]bool{}
 	shipped := map[string]bool{}
 	for _, f := range files {
 		shipped[f] = true
@@ -614,7 +623,6 @@ func Conflicts(root string, files, previous []string) []string {
 		}
 		old[f] = true
 	}
-	var problems []string
 	seen := map[string]bool{}
 	report := func(msg string) {
 		if !seen[msg] {
@@ -666,6 +674,7 @@ func Conflicts(root string, files, previous []string) []string {
 			continue
 		}
 		if info.IsDir() {
+			standing[f] = true
 			if other := foreign(root, f, old); other != "" {
 				report(fmt.Sprintf("%s is a directory, where the release lays a file, and it holds %s, which the release does not ship: move it away", filepath.Join(root, f), other))
 				continue
@@ -683,7 +692,7 @@ func Conflicts(root string, files, previous []string) []string {
 			dirsOf(f, func(string) string { return "" })
 		}
 	}
-	return problems
+	return problems, standing
 }
 
 // foreign is the first entry in a managed directory that would survive

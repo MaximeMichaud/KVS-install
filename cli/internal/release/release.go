@@ -558,9 +558,19 @@ func Sync(src, root string, files, previous []string) error {
 }
 
 func SyncWithJournal(src, root string, files, previous []string, journal *SyncJournal) error {
-	if problems := Conflicts(root, files, previous); len(problems) > 0 {
+	problems, standing := conflicts(root, files, previous)
+	if len(problems) > 0 {
 		return &ConflictError{Problems: problems}
 	}
+	return apply(src, root, files, previous, standing, journal)
+}
+
+// apply is Sync once conflicts found nothing in the way. standing lists the
+// directories it saw where the new set lays a file: only those give way.
+// Where it saw none, nothing of the previous release was left below that
+// path, so what is there now was made since and is not removed: it stops
+// the file that needs its place.
+func apply(src, root string, files, previous []string, standing map[string]bool, journal *SyncJournal) error {
 	old := map[string]bool{}
 	for _, f := range previous {
 		old[f] = true
@@ -581,12 +591,19 @@ func SyncWithJournal(src, root string, files, previous []string, journal *SyncJo
 		if keep[f] {
 			continue
 		}
-		standing, err := remove(root, f, needed, keep)
+		late := false
+		for dir := path.Dir(f); dir != "."; dir = path.Dir(dir) {
+			late = late || keep[dir] && !standing[dir]
+		}
+		if late {
+			continue
+		}
+		left, err := remove(root, f, needed, keep)
 		if err != nil {
 			return err
 		}
-		if standing != "" {
-			dirs[standing] = true
+		if left != "" {
+			dirs[left] = true
 		}
 	}
 	for _, f := range files {
