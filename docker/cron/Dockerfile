@@ -95,7 +95,7 @@ RUN set -eux; \
             libsodium-dev libsqlite3-dev libssl-dev libxml2-dev zlib1g-dev patch; \
         security_dir=/usr/local/share/php-security; \
         mkdir -p "$security_dir"; \
-        curl -fsSL -o "$security_dir/php81.patch" \
+        curl -fsSL --retry 5 --retry-all-errors --retry-max-time 120 -o "$security_dir/php81.patch" \
             "https://github.com/php/php-src/commit/${PHP81_SECURITY_COMMIT}.patch"; \
         echo "${PHP81_SECURITY_SHA256}  $security_dir/php81.patch" | sha256sum -c -; \
         options="$(php-config --configure-options)"; \
@@ -200,10 +200,10 @@ RUN set -eux; \
 # shipped headers makes sure no stub is ever newer than its header: the build
 # compiles what the release ships and downloads nothing else.
 RUN set -eux; \
-    curl -fsSL -o /tmp/memcached.tgz \
+    curl -fsSL --retry 5 --retry-all-errors --retry-max-time 120 -o /tmp/memcached.tgz \
         "https://pecl.php.net/get/memcached-${PECL_MEMCACHED_VERSION}.tgz"; \
     echo "${PECL_MEMCACHED_SHA256}  /tmp/memcached.tgz" | sha256sum -c -; \
-    curl -fsSL -o /tmp/imagick.tgz \
+    curl -fsSL --retry 5 --retry-all-errors --retry-max-time 120 -o /tmp/imagick.tgz \
         "https://pecl.php.net/get/imagick-${PECL_IMAGICK_VERSION}.tgz"; \
     echo "${PECL_IMAGICK_SHA256}  /tmp/imagick.tgz" | sha256sum -c -; \
     docker-php-source extract; \
@@ -239,7 +239,7 @@ RUN set -eux; \
         arm64) loaders=aarch64; sha256="${IONCUBE_SHA256_ARM64}" ;; \
         *) echo "no ionCube loader is pinned for ${arch}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/ioncube.tar.gz \
+    curl -fsSL --retry 5 --retry-all-errors --retry-max-time 120 -o /tmp/ioncube.tar.gz \
         "https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_${loaders}_${IONCUBE_VERSION}.tar.gz"; \
     echo "${sha256}  /tmp/ioncube.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/ioncube.tar.gz -C /tmp; \
@@ -262,7 +262,7 @@ RUN set -eux; \
         arm64) asset=yt-dlp_linux_aarch64.zip; sha256="${YT_DLP_SHA256_ARM64}" ;; \
         *) echo "no yt-dlp build is pinned for ${arch}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/yt-dlp.zip \
+    curl -fsSL --retry 5 --retry-all-errors --retry-max-time 120 -o /tmp/yt-dlp.zip \
         "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/${asset}"; \
     echo "${sha256}  /tmp/yt-dlp.zip" | sha256sum -c -; \
     mkdir -p "/usr/local/lib/yt-dlp/${YT_DLP_VERSION}"; \

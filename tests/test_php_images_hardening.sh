@@ -12,8 +12,10 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TEST_DIR=$(mktemp -d /tmp/kvs-php-images.XXXXXX)
 TESTS_RUN=0
+DOWNLOAD_SERVER_PID=""
 
 cleanup() {
+    [ -z "$DOWNLOAD_SERVER_PID" ] || kill "$DOWNLOAD_SERVER_PID" 2>/dev/null || true
     rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
@@ -108,6 +110,105 @@ one_instruction_with() {
     printf '%s\n' "$found"
 }
 
+# Every download of the two builds (the PHP 8.1 security patch, the PECL
+# tarballs, the ionCube loaders and yt-dlp) is one curl command, and a build
+# has no other chance than that command: a 503 of the server, or a
+# connection it drops, once failed a whole image. The options each command
+# has, taken from the Dockerfile, are given to the real curl against a local
+# server that answers 503 twice, or drops the first connection, before it
+# serves the file, and that asks on another path to come back much later.
+test_build_downloads_are_retried() {
+    local server="$TEST_DIR/flaky-server.py"
+    local port_file="$TEST_DIR/flaky-server.port"
+    local dockerfile commands command options port path attempt status
+    local -A seen=()
+
+    command -v curl > /dev/null 2>&1 || fail "curl is required to run the download options of the builds"
+    cat > "$server" << 'PY'
+import http.server
+import sys
+
+requests = {}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        count = requests[self.path] = requests.get(self.path, 0) + 1
+        if self.path.startswith("/unavailable/") and count <= 2:
+            self.send_error(503)
+        elif self.path.startswith("/dropped/") and count <= 1:
+            self.close_connection = True
+        elif self.path.startswith("/later/"):
+            self.send_response(503)
+            self.send_header("Retry-After", "600")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            body = f"{self.path} served at request {count}\n".encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+with open(sys.argv[1], "w", encoding="utf-8") as port_file:
+    port_file.write(f"{server.server_address[1]}\n")
+server.serve_forever()
+PY
+    python3 "$server" "$port_file" &
+    DOWNLOAD_SERVER_PID=$!
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [ ! -s "$port_file" ] || break
+        sleep 0.1
+    done
+    [ -s "$port_file" ] || fail "the local download server did not start"
+    port=$(cat "$port_file")
+
+    for dockerfile in "$PHP_DOCKERFILE" "$CRON_DOCKERFILE"; do
+        # The commands of the instructions, one per line.
+        commands=$(dockerfile_instructions_with "$dockerfile" 'curl ' | sed 's/; /\n/g' | grep -E '^(RUN )?curl ' || true)
+        [ "$(grep -c . <<< "$commands")" = 5 ] ||
+            fail "$dockerfile must download five files with curl: $commands"
+        while IFS= read -r command; do
+            [[ "$command" =~ ^curl\ (.*)\ -o\ [^\ ]+\ \"https://[^\"]+\"$ ]] ||
+                fail "$dockerfile: a download this test cannot read: $command"
+            options=${BASH_REMATCH[1]}
+            [ -z "${seen[$options]:-}" ] || continue
+            seen[$options]=1
+            for path in unavailable dropped; do
+                # The options are the words of the Dockerfile's command.
+                # shellcheck disable=SC2086
+                if ! no_proxy=127.0.0.1 curl $options -o "$TEST_DIR/download" \
+                    "http://127.0.0.1:${port}/${path}/${#seen[@]}" 2> "$TEST_DIR/download.err"; then
+                    fail "$dockerfile: 'curl $options' gave up on a server that was $path at first: $(cat "$TEST_DIR/download.err")"
+                fi
+            done
+            [ "$(cat "$TEST_DIR/download")" = "/dropped/${#seen[@]} served at request 2" ] ||
+                fail "$dockerfile: 'curl $options' did not keep the file of its last attempt"
+            # A server that asks to come back in ten minutes does not hold
+            # the build that long: curl gives up by itself and reports the
+            # 503, well before the 30 seconds it is given here. Its exit
+            # status is not read: the checksum that follows every download
+            # is what refuses a file that did not arrive.
+            status=0
+            # shellcheck disable=SC2086
+            no_proxy=127.0.0.1 timeout 30 curl $options -o "$TEST_DIR/download" \
+                "http://127.0.0.1:${port}/later/${#seen[@]}" 2> "$TEST_DIR/download.err" || status=$?
+            if [ "$status" -eq 124 ] || ! grep -Fq 'error: 503' "$TEST_DIR/download.err"; then
+                fail "$dockerfile: 'curl $options' waited as long as the server asked (status $status)"
+            fi
+        done <<< "$commands"
+    done
+    kill "$DOWNLOAD_SERVER_PID"
+    wait "$DOWNLOAD_SERVER_PID" 2>/dev/null || true
+    DOWNLOAD_SERVER_PID=""
+    pass "every download of the two builds is tried again after a 503 and after a dropped connection, within a time limit"
+}
+
 # The ionCube loader and yt-dlp are native code: each architecture an image
 # builds for has its own download, pinned by its own sha256, and the build
 # picks the one of the architecture it builds (TARGETARCH, or dpkg for the
@@ -171,7 +272,7 @@ test_ioncube_loader_is_pinned_and_checked() {
             fail "$dockerfile does not take the aarch64 loaders, checked by IONCUBE_SHA256_ARM64, on arm64"
         [[ "$run" == *'*) echo "no ionCube loader is pinned for ${arch}" >&2; exit 1 ;;'* ]] ||
             fail "$dockerfile must refuse an architecture it pins no loader for"
-        [[ "$run" == *'curl -fsSL -o /tmp/ioncube.tar.gz "https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_${loaders}_${IONCUBE_VERSION}.tar.gz";'* ]] ||
+        [[ "$run" == *'curl -fsSL --retry 5 --retry-all-errors --retry-max-time 120 -o /tmp/ioncube.tar.gz "https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_${loaders}_${IONCUBE_VERSION}.tar.gz";'* ]] ||
             fail "$dockerfile does not download the versioned ionCube tarball of its architecture"
         # The download is checked before anything reads it.
         before_extract=${run%%tar -xzf*}
@@ -319,7 +420,7 @@ test_pecl_extensions_are_built_from_checked_tarballs() {
         before_build=${run%%tar -xzf*}
         for extension in memcached imagick; do
             upper=${extension^^}
-            [[ "$before_build" == *"curl -fsSL -o /tmp/${extension}.tgz \"https://pecl.php.net/get/${extension}-\${PECL_${upper}_VERSION}.tgz\""* ]] ||
+            [[ "$before_build" == *"curl -fsSL --retry 5 --retry-all-errors --retry-max-time 120 -o /tmp/${extension}.tgz \"https://pecl.php.net/get/${extension}-\${PECL_${upper}_VERSION}.tgz\""* ]] ||
                 fail "$dockerfile does not download the $extension release tarball"
             check="echo \"\${PECL_${upper}_SHA256}  /tmp/${extension}.tgz\" | sha256sum -c -"
             [[ "$before_build" == *"$check"* ]] ||
@@ -931,6 +1032,7 @@ test_setup_takes_back_the_jit_block_it_appended() {
 test_media_files_match_in_both_build_contexts
 test_media_copy_fixtures
 test_both_images_pin_a_download_per_architecture
+test_build_downloads_are_retried
 test_ioncube_loader_is_pinned_and_checked
 test_both_images_build_the_ftp_extension
 test_both_images_install_the_same_yt_dlp
