@@ -114,11 +114,19 @@ DELETE FROM ktvs_admin_servers;
 SET @cdn = 'https://cdn.test/?source=https://site.test/contents/nested';
 INSERT INTO ktvs_admin_servers (urls, expected, streaming_skip_ssl_check) VALUES
     (CONCAT(@cdn, CHAR(13,10), 'https://site.test/contents/a', CHAR(10), 'https://www.site.test:443/contents/b'),
-     CONCAT(@cdn, CHAR(13,10), 'https://site.test:8443/contents/a', CHAR(10), 'https://site.test:8443/contents/b'), 0);
+     CONCAT(@cdn, CHAR(13,10), 'https://site.test:8443/contents/a', CHAR(10), 'https://site.test:8443/contents/b'), 0),
+    -- http endpoints of the site, first or later in the field, as both installers rewrite them.
+    (CONCAT('http://site.test/contents/c', CHAR(10), @cdn, CHAR(10), 'http://www.site.test:81/contents/d'),
+     CONCAT('https://site.test:8443/contents/c', CHAR(10), @cdn, CHAR(10), 'https://site.test:8443/contents/d'), 0),
+    ('http://cdn.test/contents/e', 'http://cdn.test/contents/e', 0),
+    -- Names that only contain the site's name are other hosts.
+    ('http://sub.site.test/contents/x', 'http://sub.site.test/contents/x', 0),
+    ('http://site.test.example/contents/x', 'http://site.test.example/contents/x', 0),
+    ('http://sitextest/contents/x', 'http://sitextest/contents/x', 0);
 SQL
 reconfigure_urls > "$work/reconfigure.log"
-grep -Fxq 'matching=1 stale=0' "$work/reconfigure.log"
-[ "$(mariadb fixture -N -e 'SELECT urls = BINARY expected FROM ktvs_admin_servers')" = 1 ] ||
+grep -Fxq 'matching=2 stale=0' "$work/reconfigure.log"
+[ "$(mariadb fixture -N -e 'SELECT MIN(urls = BINARY expected), COUNT(*) FROM ktvs_admin_servers')" = $'1\t6' ] ||
     { echo "FAIL: reconfiguration did not rewrite exactly the local URL lines" >&2; exit 1; }
 mariadb fixture <<'SQL'
 UPDATE ktvs_admin_servers SET urls = CONCAT('https://site.test:8443/contents/a', CHAR(13,10), 'https://site.test/contents/b');
@@ -126,6 +134,17 @@ CREATE TRIGGER keep_urls BEFORE UPDATE ON ktvs_admin_servers FOR EACH ROW SET NE
 SQL
 if reconfigure_urls > "$work/reconfigure.log" 2>&1; then
     echo "FAIL: reconfiguration accepted a stale second URL" >&2
+    exit 1
+fi
+grep -Fq 'do not match the requested state' "$work/reconfigure.log"
+# An http endpoint that stays behind is stale as well.
+mariadb fixture <<'SQL'
+DROP TRIGGER keep_urls;
+UPDATE ktvs_admin_servers SET urls = CONCAT('https://site.test:8443/contents/a', CHAR(10), 'http://site.test/contents/b');
+CREATE TRIGGER keep_urls BEFORE UPDATE ON ktvs_admin_servers FOR EACH ROW SET NEW.urls = OLD.urls;
+SQL
+if reconfigure_urls > "$work/reconfigure.log" 2>&1; then
+    echo "FAIL: reconfiguration accepted a stale http URL" >&2
     exit 1
 fi
 grep -Fq 'do not match the requested state' "$work/reconfigure.log"

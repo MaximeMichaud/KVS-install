@@ -2000,7 +2000,9 @@ fi
 # Replace only this project's bounded storage prefix. The optional old port is
 # consumed, so repeated runs and 443/non-443 transitions remain idempotent.
 DOMAIN_PATTERN=${DOMAIN//./[.]}
-STORAGE_PREFIX="https://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/"
+# http endpoints move too, as the init step 40-configure-database.sh and
+# the standalone installer rewrite them.
+STORAGE_PREFIX="https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/contents/"
 CANONICAL_PREFIX="${SERVER_URL//./[.]}/contents/"
 run_application_update_query \
     "urls = REGEXP_REPLACE(urls, '(?m)^${STORAGE_PREFIX}', '${SERVER_URL}/contents/')" \
