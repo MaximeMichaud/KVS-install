@@ -1350,7 +1350,13 @@ stopped_cron_notice() {
 lock_routes() {
     local dir="$SCRIPT_DIR/.locks/.routes"
     mkdir -p -- "$dir" || return 1
-    exec 8<"$dir" || return 1
+    # reconfigure.sh holds both locks across its route transaction and calls
+    # primary-config with them open on 8 and 9, saying so in
+    # KVS_SITE_LOCKS_INHERITED: lock that open file again instead of waiting
+    # on a second one for the caller's own lock.
+    if [ "${KVS_SITE_LOCKS_INHERITED:-}" != 1 ] || [ ! /dev/fd/8 -ef "$dir" ]; then
+        exec 8<"$dir" || return 1
+    fi
     flock -n 8 && return 0
     log_info "Waiting for another route operation to finish..."
     flock -x 8
@@ -1361,7 +1367,9 @@ lock_routes() {
 lock_site_directory() {
     local lock_dir="$SCRIPT_DIR/.locks/${1##*/}"
     mkdir -p -- "$lock_dir" || return 1
-    exec 9<"$lock_dir" || return 1
+    if [ "${KVS_SITE_LOCKS_INHERITED:-}" != 1 ] || [ ! /dev/fd/9 -ef "$lock_dir" ]; then
+        exec 9<"$lock_dir" || return 1
+    fi
     flock -n 9 || {
         log_error "Could not lock $1 for this site operation. Retry after the other command exits."
         return 1

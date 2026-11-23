@@ -1135,10 +1135,60 @@ rollback_multi_application_state() {
     return 0
 }
 
+# The two locks of site-manager.sh, in its order: the primary domain's, then
+# the route lock. Told by KVS_SITE_LOCKS_INHERITED, site-manager.sh locks the
+# files it finds open on 9 and 8 again, so the primary-config called in
+# between shares them.
+lock_caddy_route_state() {
+    local locks="multi-site/.locks"
+
+    if ! mkdir -p -- "$locks/$DOMAIN" "$locks/.routes" ||
+        ! exec 9<"$locks/$DOMAIN"; then
+        echo -e "${RED}ERROR: Could not lock the Caddy routes${NC}"
+        return 1
+    fi
+    if ! flock -n 9; then
+        echo -e "${RED}ERROR: Another site-manager.sh command is working on ${DOMAIN}. Retry after it exits.${NC}"
+        exec 9<&-
+        return 1
+    fi
+    if ! exec 8<"$locks/.routes"; then
+        echo -e "${RED}ERROR: Could not lock the Caddy routes${NC}"
+        unlock_caddy_route_state
+        return 1
+    fi
+    flock -n 8 && return 0
+    echo -e "${CYAN}Waiting for another route operation to finish...${NC}"
+    if ! flock -x 8; then
+        echo -e "${RED}ERROR: Could not lock the Caddy routes${NC}"
+        unlock_caddy_route_state
+        return 1
+    fi
+}
+
+# Unlock before closing, so that no process that still has the descriptors
+# keeps the locks. The docker calls made under the locks do not get them
+# (8<&- 9<&-): one that outlives a killed run, which unlocks nothing, would
+# hold both locks until it ends.
+unlock_caddy_route_state() {
+    flock -u 8 2>/dev/null || true
+    flock -u 9 2>/dev/null || true
+    exec 8<&- 9<&-
+}
+
 restore_caddy_route_state() {
-    local rollback_failed=false
+    local status=0
 
     [ "$CADDY_ROLLBACK_ARMED" = true ] || return 0
+    restore_locked_caddy_route_state || status=$?
+    unlock_caddy_route_state
+    return "$status"
+}
+
+# Runs with the locks configure_multi_route took before its backup.
+restore_locked_caddy_route_state() {
+    local rollback_failed=false
+
     if [ "$CADDY_ROUTE_EXISTED" = true ]; then
         if ! rm -f -- "$CADDY_ROUTE_FILE" ||
             ! cp -a -- "$CADDY_ROLLBACK_DIR/route" "$CADDY_ROUTE_FILE"; then
@@ -1161,10 +1211,10 @@ restore_caddy_route_state() {
         return 1
     fi
     if ! docker exec kvs-caddy caddy validate --config /etc/caddy/Caddyfile \
-        >/dev/null 2>&1 ||
+        >/dev/null 2>&1 8<&- 9<&- ||
         ! docker exec kvs-caddy caddy reload --force \
             --config /etc/caddy/Caddyfile \
-        >/dev/null 2>&1; then
+        >/dev/null 2>&1 8<&- 9<&-; then
         echo -e "${RED}ERROR: Restored Caddy configuration could not be reloaded${NC}"
         return 1
     fi
@@ -1475,19 +1525,29 @@ configure_multi_route() {
     local running_container_names
 
     [ "$SSL_PROVIDER" != "selfsigned" ] || tls_mode="internal"
-    if ! running_container_names=$(docker ps --format '{{.Names}}' 2>/dev/null); then
-        echo -e "${RED}ERROR: Could not inspect Caddy state${NC}"
-        return 1
-    fi
-    if ! grep -Fxq kvs-caddy <<< "$running_container_names"; then
-        echo -e "${RED}ERROR: kvs-caddy must be running for multi-site reconfiguration${NC}"
-        return 1
-    fi
     CADDY_ROUTE_FILE="multi-site/caddy/sites/${DOMAIN}.caddy"
     CADDY_RESERVATION_FILE="multi-site/sites/.primary.env"
     CADDY_ROUTE_EXISTED=false
     CADDY_RESERVATION_EXISTED=false
+    # Held from the backup to the commit or the end of the rollback, so the
+    # backup is the state the rollback replaces and no other command's route
+    # or reservation is written in between.
+    lock_caddy_route_state || return 1
+    # Under the route lock: a caddy-start that replaces the container holds
+    # it, so this waits for the new one instead of finding none.
+    if ! running_container_names=$(exec 8<&- 9<&-
+        docker ps --format '{{.Names}}' 2>/dev/null); then
+        unlock_caddy_route_state
+        echo -e "${RED}ERROR: Could not inspect Caddy state${NC}"
+        return 1
+    fi
+    if ! grep -Fxq kvs-caddy <<< "$running_container_names"; then
+        unlock_caddy_route_state
+        echo -e "${RED}ERROR: kvs-caddy must be running for multi-site reconfiguration${NC}"
+        return 1
+    fi
     if ! CADDY_ROLLBACK_DIR=$(mktemp -d); then
+        unlock_caddy_route_state
         echo -e "${RED}ERROR: Could not create the Caddy rollback directory${NC}"
         return 1
     fi
@@ -1495,6 +1555,7 @@ configure_multi_route() {
         if ! cp -a -- "$CADDY_ROUTE_FILE" "$CADDY_ROLLBACK_DIR/route"; then
             rm -rf -- "$CADDY_ROLLBACK_DIR" || true
             CADDY_ROLLBACK_DIR=''
+            unlock_caddy_route_state
             echo -e "${RED}ERROR: Could not back up the current Caddy route${NC}"
             return 1
         fi
@@ -1505,6 +1566,7 @@ configure_multi_route() {
             "$CADDY_ROLLBACK_DIR/reservation"; then
             rm -rf -- "$CADDY_ROLLBACK_DIR" || true
             CADDY_ROLLBACK_DIR=''
+            unlock_caddy_route_state
             echo -e "${RED}ERROR: Could not back up the primary reservation${NC}"
             return 1
         fi
@@ -1512,18 +1574,18 @@ configure_multi_route() {
     fi
 
     CADDY_ROLLBACK_ARMED=true
-    if ! ./multi-site/site-manager.sh primary-config \
+    if ! KVS_SITE_LOCKS_INHERITED=1 ./multi-site/site-manager.sh primary-config \
         "$DOMAIN" "$SITE_PREFIX" "$tls_mode" "$USE_WWW"; then
         echo -e "${RED}ERROR: Could not generate the updated primary Caddy route${NC}"
         return 1
     fi
     if ! docker exec kvs-caddy caddy validate --config /etc/caddy/Caddyfile \
-        >/dev/null; then
+        >/dev/null 8<&- 9<&-; then
         echo -e "${RED}ERROR: Caddy rejected the updated primary route${NC}"
         return 1
     fi
     if ! docker exec kvs-caddy caddy reload --force \
-        --config /etc/caddy/Caddyfile; then
+        --config /etc/caddy/Caddyfile 8<&- 9<&-; then
         echo -e "${RED}ERROR: Caddy could not reload the updated primary route${NC}"
         return 1
     fi
@@ -1532,6 +1594,7 @@ configure_multi_route() {
     # states after it, including when the shell receives INT or TERM.
     MULTI_TRANSACTION_COMMITTED=true
     CADDY_ROLLBACK_ARMED=false
+    unlock_caddy_route_state
     if ! rm -rf -- "$CADDY_ROLLBACK_DIR"; then
         echo -e "${YELLOW}WARNING: Caddy was updated, but ${CADDY_ROLLBACK_DIR} could not be removed${NC}"
     fi
