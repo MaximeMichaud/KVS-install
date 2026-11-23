@@ -240,6 +240,83 @@ SH
   done
 )
 
+# acme.sh deploys with "cat source > destination". The double does the same,
+# so a destination linked to the cache is emptied unless the installer stops.
+test_linked_certificate_destinations() (
+  # shellcheck source=kvs-install.sh
+  source "$INSTALLER"
+  DOMAIN=site.example.test SSL_PROVIDER=letsencrypt
+  local work acme cache live layout status nginx_dir
+  work=$(mktemp -d) || return 1
+  trap 'rm -rf "$work"' EXIT
+  acme="$work/acme client"
+  cache="$work/cached pair"
+  nginx_dir="$work/nginx dir"
+  live="$nginx_dir/ssl/$DOMAIN"
+  mkdir -p "$live" "$cache" || return 1
+  export LINK_FIXTURE="$work" DOMAIN
+  generate_selfsigned_cert() { touch "$work/selfsigned"; }
+  cat > "$acme" <<'SH'
+#!/bin/bash
+set -eu
+cache="$LINK_FIXTURE/cached pair"
+case "$1" in
+  --issue) exit "$ISSUE_STATUS" ;;
+  --info) echo "DOMAIN_CONF=$cache/$DOMAIN.conf" ;;
+  --install-cert)
+    [[ $5 == --key-file && $7 == --fullchain-file ]]
+    cat "$cache/$DOMAIN.key" > "$6"
+    cat "$cache/fullchain.cer" > "$8"
+    touch "$LINK_FIXTURE/deployed" ;;
+  *) exit 64 ;;
+esac
+SH
+  chmod +x "$acme"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+    -subj "/CN=$DOMAIN" -keyout "$work/key" -out "$work/chain" 2>/dev/null || return 1
+
+  for layout in symlinks relative hardlinks leaf ca; do
+    for ISSUE_STATUS in 0 2; do
+      export ISSUE_STATUS
+      rm -f "$work/deployed" "$live/"{key,cert}.pem "$cache"/*
+      cp "$work/key" "$cache/$DOMAIN.key"
+      cp "$work/chain" "$cache/fullchain.cer"
+      cp "$work/chain" "$cache/$DOMAIN.cer"
+      cp "$work/chain" "$cache/ca.cer"
+      cp "$work/key" "$live/key.pem"
+      cp "$work/chain" "$live/cert.pem"
+      case "$layout" in
+        symlinks)
+          ln -sf "$cache/$DOMAIN.key" "$live/key.pem"
+          ln -sf "$cache/fullchain.cer" "$live/cert.pem" ;;
+        relative) ln -sf "../../../cached pair/$DOMAIN.key" "$live/key.pem" ;;
+        hardlinks) ln -f "$cache/fullchain.cer" "$live/cert.pem" ;;
+        leaf) ln -sf "$cache/$DOMAIN.cer" "$live/cert.pem" ;;
+        ca) ln -sf "$cache/ca.cer" "$live/cert.pem" ;;
+      esac
+      status=0
+      KVS_NGINX_DIR="$nginx_dir" issue_site_certificate "$acme" --issue > "$work/log" 2>&1 || status=$?
+      assert_equal 1 "$status" "deployed over the cache ($layout, issue status $ISSUE_STATUS)" || return 1
+      [[ ! -e "$work/deployed" && ! -e "$work/selfsigned" ]] ||
+        fail "deployed or replaced a pair linked to the cache ($layout)" || return 1
+      cmp -s "$work/key" "$cache/$DOMAIN.key" && cmp -s "$work/chain" "$cache/fullchain.cer" &&
+        cmp -s "$work/key" "$live/key.pem" && cmp -s "$work/chain" "$live/cert.pem" ||
+        fail "changed the cached or served pair ($layout)" || return 1
+
+      # The printed commands separate the files; the next run then deploys.
+      sed -n 's/^  //p' "$work/log" > "$work/separate.sh"
+      [[ -s "$work/separate.sh" ]] || fail "no command printed for $layout: $(<"$work/log")" || return 1
+      bash "$work/separate.sh" || fail "the printed commands failed for $layout" || return 1
+      [[ ! -L "$live/key.pem" && ! -L "$live/cert.pem" ]] || fail "a link is left for $layout" || return 1
+      KVS_NGINX_DIR="$nginx_dir" issue_site_certificate "$acme" --issue > "$work/log" 2>&1 ||
+        fail "refused separate files after the printed commands ($layout): $(<"$work/log")" || return 1
+      [[ -e "$work/deployed" ]] && cmp -s "$work/key" "$cache/$DOMAIN.key" &&
+        cmp -s "$work/chain" "$cache/fullchain.cer" && cmp -s "$work/key" "$live/key.pem" &&
+        cmp -s "$work/chain" "$live/cert.pem" || fail "did not deploy separate files ($layout)" || return 1
+    done
+  done
+)
+
 run_test() {
   local name="$1"
   local function_name="$2"
@@ -253,6 +330,7 @@ run_test() {
 }
 
 failures=0
+run_test "certificate destinations linked to the acme.sh cache are refused" test_linked_certificate_destinations || failures=$((failures + 1))
 run_test "reusing a certificate keeps its renewal authority visible" test_reused_certificate_authority || failures=$((failures + 1))
 run_test "documented native certificate choices" test_documented_certificate_settings || failures=$((failures + 1))
 run_test "documented database_ver is honoured" test_documented_database_ver_is_honoured || failures=$((failures + 1))

@@ -1990,7 +1990,8 @@ certificate_domain_names() {
 }
 
 check_acme_certificate() {
-    local acme="$1" status="$2" ssl_dir="$3" info current expected="" conf key chain key_pub cert_pub
+    local acme="$1" status="$2" ssl_dir="$3" info current expected="" conf key chain key_pub cert_pub dest source linked=0
+    local -a copies=()
     info=$("$acme" --info -d "$DOMAIN" --ecc) || return 1
     conf=$(sed -n 's/^DOMAIN_CONF=//p' <<< "$info")
     if [[ "$conf" != /* ]]; then
@@ -2002,6 +2003,24 @@ check_acme_certificate() {
     if ! key_pub=$(openssl pkey -in "$key" -passin pass: -pubout) ||
        ! cert_pub=$(openssl x509 -in "$chain" -pubkey -noout) || [[ "$key_pub" != "$cert_pub" ]]; then
         printf 'Cannot verify a matching public key in %s and %s. Repair the cached pair before deployment.\n' "$key" "$chain" >&2
+        return 1
+    fi
+    # acme.sh deploys with "cat source > destination": a destination that is
+    # one of its own cached files, through a link, is emptied before it is read.
+    for dest in "$ssl_dir/key.pem" "$ssl_dir/cert.pem"; do
+        for source in "$key" "$chain" "${conf%/*}/$DOMAIN.cer" "${conf%/*}/ca.cer"; do
+            [[ "$dest" -ef "$source" ]] || continue
+            if ((linked == 0)); then
+                echo "acme.sh would overwrite its own cached files while deploying the certificate of $DOMAIN, and can empty them:" >&2
+            fi
+            linked=1
+            printf '%s is the same file as %s\n' "$dest" "$source" >&2
+            copies+=("$(printf '  cp --remove-destination %q %q' "$source" "$dest")")
+        done
+    done
+    if ((linked)); then
+        echo "The certificate was not deployed. Replace each link with a copy, then run the installer again:" >&2
+        printf '%s\n' "${copies[@]}" >&2
         return 1
     fi
     if ((status == 2)); then
@@ -2037,7 +2056,7 @@ CERTIFICATE_MODE=""
 # the warning gives the commands to run, one after the other.
 issue_site_certificate() {
     local acme="$1"
-    local ssl_dir="/etc/nginx/ssl/$DOMAIN" status=0
+    local ssl_dir="${KVS_NGINX_DIR:-/etc/nginx}/ssl/$DOMAIN" status=0
     shift
 
     "$acme" "$@" || status=$?
