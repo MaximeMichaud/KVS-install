@@ -329,4 +329,39 @@ DB_NAME=café.test refusal 'the database name or table prefix is not supported b
 TABLES_PREFIX=café_ refusal 'the database name or table prefix is not supported by the native bundle'
 table=café_options refusal 'a table name is not supported by the native bundle'
 refusal 'the source schema compatibility counts could not be verified'
+
+# The import progress query takes the prefix as SQL text: the same values
+# must reach it under every locale, and none that is not ASCII. Another
+# prefix loses the table count alone; the rows that do not use it still run
+# and the progress line says "? tables created" with their figures.
+# shellcheck source=/dev/null
+source <(extract docker/lib/database.sh database_import_snapshot; extract docker/lib/database.sh database_progress_line; extract docker/lib/database.sh database_size_text)
+database_root_query() {
+    cat > snapshot.sql
+    ! grep -q "^SELECT 'tables'" snapshot.sql || printf 'tables\t7\n'
+    grep -q "^SELECT 'pool'" snapshot.sql && grep -q "^SELECT 'active'" snapshot.sql || return 1
+    printf 'pool\t134217728\nactive\t1\n'
+}
+long_prefix=$(printf 'x%.0s' {1..33})
+for lang in "${locales[@]}"; do
+    for prefix in café_ ｋ_ a²_ a™_ 'a b_' "a'_" "$long_prefix"; do
+        rm -f snapshot.sql
+        snapshot=$(TABLES_PREFIX=$prefix LC_ALL=$lang DOMAIN=site.test database_import_snapshot) ||
+            fail "the import progress query was dropped for prefix '$prefix' under $lang"
+        ! grep -Fq -- "$prefix" snapshot.sql || fail "prefix '$prefix' reached the SQL text under $lang"
+        ! grep -q "information_schema.tables" snapshot.sql || fail "tables were counted for prefix '$prefix' under $lang"
+        line=$(LC_ALL=$lang database_progress_line 5 "$snapshot" '')
+        [[ "$line" == *'; ? tables created; buffer pool 128.0 MiB; 1 active SQL sessions'* ]] ||
+            fail "wrong progress line for prefix '$prefix' under $lang: $line"
+    done
+    for prefix in ktvs_ Abc_9 ''; do
+        rm -f snapshot.sql
+        snapshot=$(TABLES_PREFIX=$prefix LC_ALL=$lang DOMAIN=site.test database_import_snapshot) ||
+            fail "the import progress query refused prefix '$prefix' under $lang"
+        grep -Fq "LENGTH('${prefix:-ktvs_}'))='${prefix:-ktvs_}'" snapshot.sql ||
+            fail "the import progress query lost prefix '$prefix' under $lang"
+        line=$(LC_ALL=$lang database_progress_line 5 "$snapshot" '')
+        [[ "$line" == *'; 7 tables created; buffer pool 128.0 MiB'* ]] || fail "wrong progress line for '$prefix' under $lang: $line"
+    done
+done
 echo 'ASCII domain, project and database identifier checks passed.'

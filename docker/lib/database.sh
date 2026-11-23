@@ -25,14 +25,21 @@ database_root_query() {
 }
 
 database_import_snapshot() {
-    local prefix="${TABLES_PREFIX:-ktvs_}"
-    [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || return 1
+    local prefix="${TABLES_PREFIX:-ktvs_}" tables=""
+    # The letters are listed: a range follows the collation of the locale
+    # and admits other characters there. Any other prefix stays out of the
+    # SQL text: only the table count is left out (the byte length the query
+    # takes of the prefix counts its characters only when they are ASCII)
+    # and the progress line shows "? tables created" with the other figures.
+    if [[ "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+        tables="SELECT 'tables', COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND LEFT(table_name, LENGTH('$prefix'))='$prefix' AND table_type='BASE TABLE';"
+    fi
     # Never print SQL text or row values. The process list only supplies
     # operation/state and a quoted table identifier for known statements.
     database_root_query --batch --skip-column-names --database="$DOMAIN" 2>/dev/null <<SQL
 SET SESSION max_statement_time=2;
 SET SESSION lock_wait_timeout=1;
-SELECT 'tables', COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND LEFT(table_name, LENGTH('$prefix'))='$prefix' AND table_type='BASE TABLE';
+$tables
 SELECT 'pool', @@innodb_buffer_pool_size;
 SELECT 'active', COUNT(*) FROM information_schema.processlist WHERE id<>CONNECTION_ID() AND db=DATABASE() AND command<>'Sleep';
 SELECT LOWER(variable_name), variable_value FROM information_schema.global_status WHERE variable_name='INNODB_DATA_WRITTEN';
