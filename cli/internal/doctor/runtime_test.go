@@ -271,6 +271,33 @@ func TestCacheUsesSiteRoute(t *testing.T) {
 		{"computed", "$config['memcache_server']=getenv('CACHE');", "cache:11211", "VERSION fixture", OK},
 		{"fallback protocol failure", "$config['memcache_server']=getenv('CACHE');", "cache:11211", "ERROR", Fail},
 		{"other host", "$config['memcache_server']='elsewhere.test';", "cache:11211", "VERSION fixture", OK},
+		// A literal port counts as PHP evaluates it, whatever its spelling.
+		{"separated port", loopback + "$config['memcache_port']=11_212;", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"hexadecimal port", loopback + "$config['memcache_port']=0x2BCC;", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"octal port", loopback + "$config['memcache_port']=0o25714;", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"legacy octal port", loopback + "$config['memcache_port']=025714;", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"binary port", loopback + "$config['memcache_port']=0b10101111001100;", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"signed port", loopback + "$config['memcache_port']=+11212;", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"binary string port", loopback + "$config['memcache_port']=b'11212';", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"spaced string port", loopback + "$config['memcache_port']=' 11212 ';", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"tabbed string port", loopback + "$config['memcache_port']='\t11212\n';", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"signed string port", loopback + "$config['memcache_port']='+11212';", "127.0.0.1:11212", "VERSION fixture", OK},
+		{"negative string port", loopback + "$config['memcache_port']='-11212';", "cache:11211", "VERSION fixture", Fail},
+		{"inner space string port", loopback + "$config['memcache_port']='+ 11212';", "cache:11211", "VERSION fixture", Fail},
+		{"other host with a signed string port", "$config['memcache_server']='elsewhere.test';$config['memcache_port']=' +11212 ';", "cache:11211", "VERSION fixture", OK},
+		// Anything else than one integer literal is not evaluated.
+		{"port sum", loopback + "$config['memcache_port']=11212+1;", "cache:11211", "VERSION fixture", OK},
+		{"port concatenation", loopback + "$config['memcache_port']='11212'.'0';", "cache:11211", "VERSION fixture", OK},
+		{"float port", loopback + "$config['memcache_port']=11212.0;", "cache:11211", "VERSION fixture", OK},
+		{"signed float port", loopback + "$config['memcache_port']=+1.5;", "cache:11211", "VERSION fixture", OK},
+		{"float string port", loopback + "$config['memcache_port']='11212.0';", "cache:11211", "VERSION fixture", OK},
+		{"exponent string port", loopback + "$config['memcache_port']='1e3';", "cache:11211", "VERSION fixture", OK},
+		{"separated port out of range", loopback + "$config['memcache_port']=65_536;", "cache:11211", "VERSION fixture", Fail},
+		{"negative hexadecimal port", loopback + "$config['memcache_port']=-0x2BCC;", "cache:11211", "VERSION fixture", Fail},
+		{"integer port beyond PHP integers", loopback + "$config['memcache_port']=999999999999999999999999;", "cache:11211", "VERSION fixture", Fail},
+		{"other host with a negative port", "$config['memcache_server']='elsewhere.test';$config['memcache_port']=-1;", "cache:11211", "VERSION fixture", Fail},
+		{"other host with a port out of range", "$config['memcache_server']='elsewhere.test';$config['memcache_port']='65536';", "cache:11211", "VERSION fixture", Fail},
+		{"other host with a computed port", "$config['memcache_server']='elsewhere.test';$config['memcache_port']=intval(getenv('PORT'));", "cache:11211", "VERSION fixture", OK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, _ := fixture(t)
@@ -282,7 +309,8 @@ func TestCacheUsesSiteRoute(t *testing.T) {
 			if result.Status != tc.status {
 				t.Errorf("got %+v, want %s", result, tc.status)
 			}
-			if tc.name == "computed" || tc.name == "fallback protocol failure" {
+			if slices.Contains([]string{"computed", "fallback protocol failure", "port sum", "port concatenation", "float port", "signed float port",
+				"float string port", "exponent string port"}, tc.name) {
 				if !strings.Contains(strings.Join(result.Details, " "), "route was not read from setup.php") {
 					t.Errorf("missing fallback detail: %+v", result)
 				}
@@ -291,7 +319,8 @@ func TestCacheUsesSiteRoute(t *testing.T) {
 					t.Errorf("fallback endpoint %q, %v", attempt, err)
 				}
 			}
-			if tc.name == "negative port" || tc.name == "invalid string port" {
+			if slices.Contains([]string{"negative port", "invalid string port", "separated port out of range", "negative hexadecimal port",
+				"integer port beyond PHP integers", "negative string port", "inner space string port", "other host with a negative port", "other host with a port out of range"}, tc.name) {
 				if !strings.Contains(result.Message, "port is invalid") {
 					t.Errorf("missing invalid port diagnostic: %+v", result)
 				}

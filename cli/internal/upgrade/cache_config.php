@@ -79,6 +79,21 @@ function skipProbePreamble(&$tokens, $dir) {
     array_splice($tokens, 1, $i - 1);
 }
 
+// The value of a PHP integer literal in any base, with or without digit
+// separators. PHP turns an integer too large for it into a float: no port.
+// Null for any other token, a real float included.
+function integerLiteral($token) {
+    $digits = str_replace('_', '', $token[1]);
+    if (!in_array($token[0], [T_LNUMBER, T_DNUMBER], true)
+        || !preg_match('/^(?:0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO]?[0-7]*|[1-9][0-9]*)$/D', $digits)) {
+        return null;
+    }
+    if ($token[0] === T_DNUMBER) { return PHP_INT_MAX; }
+    if (preg_match('/^0[xX]/', $digits)) { return hexdec($digits); }
+    if (preg_match('/^0[bB]/', $digits)) { return bindec($digits); }
+    return $digits[0] === '0' ? octdec($digits) : (int) $digits;
+}
+
 function cacheAnswers($host, $port) {
     $socket = @fsockopen($host === '::1' ? '[::1]' : $host, $port, $errno, $error, 3);
     if (!$socket) { return false; }
@@ -198,15 +213,26 @@ try {
         $plain = $depth === 0 && ($previous[0] === T_OPEN_TAG || $previous[1] === ';');
         $plain = $plain && ($tokens[$i + 3][1] ?? '') === ']' && ($tokens[$i + 4][1] ?? '') === '=';
         if ($mode === 'probe' && (!$plain || isset($values[$name]))) { probeComposeAlias($before); }
-        // A negative integer or a string containing non-digits is a
-        // literal invalid port. Expressions still use the alias.
+        // A literal port is read as PHP evaluates it: an integer in any
+        // spelling, signed or not, or a string, binary prefix included,
+        // that PHP converts to an integer: digits with an optional sign
+        // between optional whitespace. A negative integer or a string
+        // that is not numeric is an invalid port. A float, as a number
+        // or in a string, and other expressions still use the alias.
         if ($mode === 'probe' && $name === 'memcache_port') {
-            $negative = $literal[1] === '-' && ($tokens[$i + 6][0] ?? 0) === T_LNUMBER
-                && ($tokens[$i + 7][1] ?? '') === ';';
-            $invalidString = $literal[0] === T_CONSTANT_ENCAPSED_STRING && ($tokens[$i + 6][1] ?? '') === ';'
-                && strpos($literal[1], '\\') === false && !ctype_digit(substr($literal[1], 1, -1));
-            if ($negative || $invalidString) {
-                $values[$name] = ['plain' => true, 'value' => ''];
+            $signed = $literal[0] === 0 && in_array($literal[1], ['-', '+'], true);
+            $at = $i + ($signed ? 6 : 5);
+            $number = isset($tokens[$at]) ? integerLiteral($tokens[$at]) : null;
+            if ($number !== null && ($tokens[$at + 1][1] ?? '') === ';') {
+                $values[$name] = ['plain' => true, 'value' => $literal[1] === '-' ? '' : (string) $number];
+                continue;
+            }
+            if ($literal[0] === T_CONSTANT_ENCAPSED_STRING && ($tokens[$i + 6][1] ?? '') === ';'
+                && strpos($literal[1], '\\') === false) {
+                $text = substr(ltrim($literal[1], 'bB'), 1, -1);
+                $integer = preg_match('/^[ \t\n\r\x0B\f]*([+-]?)([0-9]+)[ \t\n\r\x0B\f]*$/D', $text, $m);
+                $values[$name] = ['plain' => $integer || !is_numeric($text),
+                    'value' => $integer && $m[1] !== '-' ? $m[2] : ''];
                 continue;
             }
         }
@@ -237,12 +263,17 @@ try {
             $prefix = $argv[4] ?? 'kvs';
             $local = array_merge(['cache', 'dragonfly', 'memcached', "$prefix-dragonfly", "$prefix-memcached"], array_slice($argv, 5));
         }
-        if (!$loopback && !in_array($host, $local, true)) { probeComposeAlias($before, 'other'); }
+        // A literal port outside 1-65535 is wrong on any host: say so
+        // before the alias stands in for a host outside the local routes.
+        $invalidPort = $plainPort && (!ctype_digit((string) ($values['memcache_port']['value'] ?? '11211'))
+            || $port < 1 || $port > 65535);
+        if (!$loopback && !in_array($host, $local, true)) {
+            if ($invalidPort) { echo 'invalid-port'; exit; }
+            probeComposeAlias($before, 'other');
+        }
         if ($before === '') { echo 'no-backend'; exit; }
         if (!$plainPort) { probeComposeAlias($before); }
-        if (!ctype_digit((string) ($values['memcache_port']['value'] ?? '11211')) || $port < 1 || $port > 65535) {
-            echo 'invalid-port'; exit;
-        }
+        if ($invalidPort) { echo 'invalid-port'; exit; }
         if (cacheAnswers($host, $port)) { echo 'ok'; exit; }
         echo $loopback ? 'loopback-failed' : 'failed';
         exit;
