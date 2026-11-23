@@ -271,6 +271,7 @@ func TestCacheUsesSiteRoute(t *testing.T) {
 		{"computed", "$config['memcache_server']=getenv('CACHE');", "cache:11211", "VERSION fixture", OK},
 		{"fallback protocol failure", "$config['memcache_server']=getenv('CACHE');", "cache:11211", "ERROR", Fail},
 		{"other host", "$config['memcache_server']='elsewhere.test';", "cache:11211", "VERSION fixture", OK},
+		{"other host protocol failure", "$config['memcache_server']='elsewhere.test';", "cache:11211", "ERROR", Fail},
 		// A literal port counts as PHP evaluates it, whatever its spelling.
 		{"separated port", loopback + "$config['memcache_port']=11_212;", "127.0.0.1:11212", "VERSION fixture", OK},
 		{"hexadecimal port", loopback + "$config['memcache_port']=0x2BCC;", "127.0.0.1:11212", "VERSION fixture", OK},
@@ -317,6 +318,19 @@ func TestCacheUsesSiteRoute(t *testing.T) {
 				attempt, err := os.ReadFile(path + ".attempt")
 				if err != nil || string(attempt) != "cache:11211" {
 					t.Errorf("fallback endpoint %q, %v", attempt, err)
+				}
+			}
+			// A host outside the local routes is not probed: the report
+			// must say that the alias stood in for it, and why.
+			if slices.Contains([]string{"other host", "other host protocol failure", "other host with a computed port", "other host with a signed string port"}, tc.name) {
+				detail := strings.Join(result.Details, " ")
+				if !strings.Contains(result.Message, "alias") || !strings.Contains(detail, "configured host is outside the local cache routes") ||
+					!strings.Contains(detail, "cache:11211") || strings.Contains(detail, "route was not read from setup.php") {
+					t.Errorf("missing nonlocal fallback detail: %+v", result)
+				}
+				attempt, err := os.ReadFile(path + ".attempt")
+				if err != nil || string(attempt) != "cache:11211" {
+					t.Errorf("nonlocal fallback endpoint %q, %v", attempt, err)
 				}
 			}
 			if slices.Contains([]string{"negative port", "invalid string port", "separated port out of range", "negative hexadecimal port",
