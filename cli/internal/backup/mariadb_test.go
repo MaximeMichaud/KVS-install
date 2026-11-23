@@ -161,7 +161,10 @@ func startMariaDB() {
 	// same.
 	created.name = name
 	created.Unlock()
-	run := exec.Command("docker", "run", "--detach", "--name", name,
+	// The tests and the code they run reach the server through docker exec
+	// alone. Without a network, the root password written in this file
+	// opens it to no other container of the engine and to no host address.
+	run := exec.Command("docker", "run", "--detach", "--network", "none", "--name", name,
 		"--label", labelTests, "--label", fmt.Sprintf("%s=%d", labelPID, os.Getpid()), "--label", labelHost+"="+host,
 		"--env", "MARIADB_ROOT_PASSWORD="+rootPassword, "--env", "MARIADB_DATABASE="+siteDatabase,
 		"--env", "MARIADB_INITDB_SKIP_TZINFO=1", image)
@@ -940,6 +943,18 @@ func openTransaction(t *testing.T, sql string) (commit func()) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return commit
+}
+
+// The server of the tests is on no network: docker exec is the only way in.
+func TestMariaDBHasNoNetwork(t *testing.T) {
+	name := mariadbServer(t)
+	out, err := exec.Command("docker", "container", "inspect", "--format", "{{.HostConfig.NetworkMode}}", name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker container inspect %s: %v: %s", name, err, out)
+	}
+	if mode := strings.TrimSpace(string(out)); mode != "none" {
+		t.Errorf("%s runs with the network mode %q, want none", name, mode)
+	}
 }
 
 // A container that a run of these tests left behind, its test process
