@@ -396,19 +396,25 @@ check_caddy_running() {
     fi
 }
 
-reload_caddy() (
-    lock_routes || return 1
+# For a caller that holds the route lock.
+reload_caddy_locked() {
     log_info "Reloading Caddy configuration..."
     # Force reprovisioning even when the route text is unchanged. Site
     # containers can receive a new Docker IP after recreation, and an
     # unchanged reload would otherwise keep an upstream marked unhealthy until
     # the next active-health interval.
+    # Docker does not inherit the lock: see start_caddy.
     if ! docker exec kvs-caddy caddy reload --force \
-        --config /etc/caddy/Caddyfile; then
+        --config /etc/caddy/Caddyfile 8<&-; then
         log_error "Failed to reload Caddy configuration"
         return 1
     fi
     log_success "Caddy reloaded"
+}
+
+reload_caddy() (
+    lock_routes || return 1
+    reload_caddy_locked
 )
 
 wait_for_caddy() {
@@ -1899,8 +1905,9 @@ resolve_caddy_acme_email() {
 
 start_caddy() {
     # The ACME check and Compose must see the same routes, and
-    # primary-remove deletes its route only while Caddy is stopped: hold the
-    # route lock from the check until Compose has started the proxy.
+    # primary-remove deletes its route only while Caddy is stopped. A reload
+    # from start or remove fails while Compose replaces the container. Hold
+    # the route lock from the check until the new proxy has loaded the routes.
     lock_routes || return 1
     resolve_caddy_acme_email || return 1
 
@@ -1915,9 +1922,8 @@ start_caddy() {
     # An empty ACME_EMAIL leaves the compose file default, for routes that
     # need no ACME account.
     ACME_EMAIL="$CADDY_ACME_EMAIL" docker compose -p multi-site -f docker-compose.caddy.yml up -d 8<&-
-    exec 8<&-
-    wait_for_caddy
-    reload_caddy
+    wait_for_caddy 8<&-
+    reload_caddy_locked
     log_success "Caddy proxy started"
 }
 

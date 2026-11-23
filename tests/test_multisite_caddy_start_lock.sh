@@ -55,8 +55,27 @@ docker() {
             lock_not_inherited || return 24
             if [[ $phase == email && -e $routes/public.example.caddy ]]; then touch "$work/unchecked-route"; fi
             if [[ $phase == primary && -e $routes/primary.example.caddy ]]; then touch "$work/started-with-primary"; fi
-            touch "$work/running" ;;
-        'exec kvs-caddy wget '*|'exec kvs-caddy caddy reload '*) return 0 ;;
+            touch "$work/running"
+            if [[ $phase == reload ]]; then
+                # The container is being replaced: a reload fails until the
+                # new proxy answers.
+                touch "$work/replacing"
+                await_file "$work/reload-failed" 20 || true
+            fi ;;
+        'exec kvs-caddy wget '*)
+            route_lock_held || return 23
+            lock_not_inherited || return 24
+            if [[ $phase == reload ]]; then
+                await_file "$work/reload-failed" 10 || true
+                touch "$work/ready"
+            fi ;;
+        'exec kvs-caddy caddy reload '*)
+            route_lock_held || return 23
+            lock_not_inherited || return 24
+            if [[ $phase == reload && ! -e $work/ready ]]; then
+                touch "$work/reload-failed"
+                return 1
+            fi ;;
         'ps '*|'volume '*|*' down -v --remove-orphans') return 0 ;;
         *) echo "Unexpected Docker call: $*" >&2; return 90 ;;
     esac
@@ -112,4 +131,16 @@ wait "$remover" || fail "primary-remove failed: $(cat "$work/remove")"
 [[ -e $work/running && ! -e $routes/primary.example.caddy && ! -e $multi/sites/.primary.env ]] ||
     fail 'primary-remove or caddy-start did not finish'
 
-echo "PASS: caddy-start holds the route lock from its ACME check to the start of the proxy"
+# A remove that reaches its reload while caddy-start replaces the proxy
+# waits for the new one instead of failing after the site is gone.
+phase=reload
+actor=start timeout 30 bash "$manager" caddy-start > "$work/start" 2>&1 & starter=$!
+await_file "$work/replacing" 100 || fail "caddy-start did not reach Compose: $(cat "$work/start")"
+printf 'yes\nn\n' | timeout 30 bash "$manager" remove public.example > "$work/remove" 2>&1 ||
+    fail "remove failed during the replacement of the proxy: $(cat "$work/remove")"
+wait "$starter" || fail "caddy-start failed: $(cat "$work/start")"
+[[ ! -e $work/reload-failed ]] || fail 'a reload ran while the proxy was being replaced'
+command grep -Fq 'Site public.example removed completely' "$work/remove" || fail 'remove did not finish'
+[[ ! -e $routes/public.example.caddy && ! -e $multi/sites/public.example ]] || fail 'remove left the site'
+
+echo "PASS: caddy-start holds the route lock from its ACME check until the new proxy has loaded the routes"
