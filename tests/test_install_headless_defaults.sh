@@ -317,6 +317,250 @@ SH
   done
 )
 
+# acme.sh --install-cert saves every destination and the reload command it
+# is given and clears the ones it is not given. The double stores them in the
+# same file format, deploys the same way and runs the reload command.
+test_saved_acme_deployment_settings() (
+  # shellcheck source=kvs-install.sh
+  source "$INSTALLER"
+  DOMAIN=site.example.test SSL_PROVIDER=letsencrypt EMAIL=admin@example.test
+  local work acme cache live conf status own='service nginx force-reload' saved expected nginx_dir served
+  work=$(mktemp -d) || return 1
+  trap 'rm -rf "$work"' EXIT
+  acme="$work/acme-client"
+  cache="$work/cached pair"
+  nginx_dir="$work/nginx dir"
+  live="$nginx_dir/ssl/$DOMAIN"
+  conf="$cache/$DOMAIN.conf"
+  mkdir -p "$live" "$cache" "$work/other service" "$work/bin" || return 1
+  export SAVED_FIXTURE="$work" DOMAIN
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$SAVED_FIXTURE/services"\n[ "$1" != broken ] && [ ! -e "$SAVED_FIXTURE/$1-down" ]\n' > "$work/bin/service"
+  chmod +x "$work/bin/service"
+  PATH="$work/bin:$PATH"
+  generate_selfsigned_cert() { touch "$work/selfsigned"; }
+  cat > "$acme" <<'SH'
+#!/bin/bash
+set -eu
+cache="$SAVED_FIXTURE/cached pair"
+conf="$cache/$DOMAIN.conf"
+case "$1" in
+  --issue) exit "${ISSUE_STATUS:-2}" ;;
+  --info) echo "DOMAIN_CONF=$conf" ;;
+  --install-cert)
+    [[ $2 == --ecc && $3 == -d && $4 == "$DOMAIN" ]]
+    shift 4
+    cert="" key="" ca="" chain="" reload=""
+    while (($#)); do
+      case "$1" in
+        --cert-file) cert=$2 ;; --key-file) key=$2 ;; --ca-file) ca=$2 ;;
+        --fullchain-file) chain=$2 ;; --reloadcmd) reload=$2 ;; *) exit 64 ;;
+      esac
+      shift 2
+    done
+    {
+      grep -v -e '^Le_Real' -e '^Le_ReloadCmd=' "$conf" || :
+      printf "Le_RealCertPath='%s'\nLe_RealCACertPath='%s'\nLe_RealKeyPath='%s'\n" "$cert" "$ca" "$key"
+      printf "Le_ReloadCmd='%s'\n" "${reload:+__ACME_BASE64__START_$(printf '%s' "$reload" | base64 -w 0)__ACME_BASE64__END_}"
+      printf "Le_RealFullChainPath='%s'\n" "$chain"
+    } > "$conf.new"
+    mv "$conf.new" "$conf"
+    [[ -z "$cert" ]] || cat "$cache/$DOMAIN.cer" > "$cert"
+    [[ -z "$ca" ]] || cat "$cache/ca.cer" > "$ca"
+    cat "$cache/$DOMAIN.key" > "$key"
+    cat "$cache/fullchain.cer" > "$chain"
+    [[ -z "$reload" ]] || (set +e; eval "$reload") ;;
+  *) exit 64 ;;
+esac
+SH
+  chmod +x "$acme"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+    -subj "/CN=$DOMAIN" -keyout "$cache/$DOMAIN.key" -out "$cache/fullchain.cer" 2>/dev/null || return 1
+  cp "$cache/fullchain.cer" "$cache/$DOMAIN.cer"
+  cp "$cache/fullchain.cer" "$cache/ca.cer"
+  # Sets "saved" to the recorded reload command, decoded.
+  recorded() {
+    saved=$(sed -n "s/^Le_ReloadCmd='__ACME_BASE64__START_\(.*\)__ACME_BASE64__END_'\$/\1/p" "$conf" | base64 -d)
+  }
+  record() {
+    "$acme" --install-cert --ecc -d "$DOMAIN" --key-file "$live/key.pem" --fullchain-file "$live/cert.pem" "$@" >/dev/null
+    : > "$work/services"
+    rm -f "$work/other service/"*.pem
+  }
+  run() {
+    status=0
+    KVS_NGINX_DIR="$nginx_dir" issue_site_certificate "$acme" --issue -d "$DOMAIN" > "$work/log" 2>&1 || status=$?
+  }
+
+  # No saved settings: the installer's own destinations and reload command.
+  echo "Le_Domain='$DOMAIN'" > "$conf"
+  : > "$work/services"
+  ISSUE_STATUS=0 run
+  recorded
+  assert_equal "0:$own:nginx force-reload" "$status:$saved:$(<"$work/services")" "first deployment" || return 1
+  grep -Fxq "Le_RealCertPath=''" "$conf" && grep -Fxq "Le_RealCACertPath=''" "$conf" &&
+    grep -Fxq "Le_Domain='$DOMAIN'" "$conf" || fail "first deployment saved other destinations" || return 1
+
+  # Destinations and a second service added by the operator survive a
+  # re-run, a fresh issue included, and both services are reloaded once.
+  for ISSUE_STATUS in 2 0; do
+    export ISSUE_STATUS
+    record --cert-file "$work/other service/cert.pem" --ca-file "$work/other service/ca.pem" \
+      --reloadcmd "$own && service 'other one' reload"
+    run
+    recorded
+    assert_equal "0:$own && service 'other one' reload" "$status:$saved" "re-run with added settings ($ISSUE_STATUS)" || return 1
+    grep -Fxq "Le_RealCertPath='$work/other service/cert.pem'" "$conf" &&
+      grep -Fxq "Le_RealCACertPath='$work/other service/ca.pem'" "$conf" &&
+      grep -Fxq "Le_RealKeyPath='$live/key.pem'" "$conf" && grep -Fxq "Le_RealFullChainPath='$live/cert.pem'" "$conf" ||
+      fail "the added destinations were not kept: $(<"$conf")" || return 1
+    cmp -s "$cache/$DOMAIN.cer" "$work/other service/cert.pem" && cmp -s "$cache/ca.cer" "$work/other service/ca.pem" ||
+      fail "the added destinations were not deployed" || return 1
+    assert_equal "nginx force-reload"$'\n'"other one reload" "$(<"$work/services")" "reloads of a re-run ($ISSUE_STATUS)" || return 1
+  done
+  export ISSUE_STATUS=2
+
+  # A command that never reloaded nginx runs after the installer's own; a
+  # second run changes nothing more. Its last line is a comment and its
+  # first uses ||: the joined command must still parse and group them.
+  expected="service broken reload || service other reload"$'\n'"# end"
+  record --reloadcmd "$expected"
+  run
+  recorded
+  assert_equal "0:nginx force-reload"$'\n'"broken reload"$'\n'"other reload" "$status:$(<"$work/services")" "joined reload command" || return 1
+  [[ "$saved" == "$own"* && "$saved" == *"$expected"* ]] || fail "joined command lost a part: $saved" || return 1
+  expected=$saved
+  run
+  recorded
+  assert_equal "0:$expected" "$status:$saved" "joined command must stay as it is on the next run" || return 1
+  # The saved part is one group: a failed nginx reload runs none of it.
+  touch "$work/nginx-down"
+  : > "$work/services"
+  run
+  rm "$work/nginx-down"
+  assert_equal "1:nginx force-reload"$'\n'"nginx force-reload" "$status:$(<"$work/services")" "failed nginx reload before a joined command" || return 1
+  grep -Fxq "Could not deploy the still-valid certificate for $DOMAIN" "$work/log" && ! grep -Fq WARNING "$work/log" ||
+    fail "a failed nginx reload was not reported as a failed deployment: $(<"$work/log")" || return 1
+
+  # A command that only mentions the nginx reload is joined like any other.
+  expected="service other reload # was: $own"
+  record --reloadcmd "$expected"
+  run
+  recorded
+  assert_equal "0:nginx force-reload"$'\n'"other reload" "$status:$(<"$work/services")" "command naming the nginx reload in a comment" || return 1
+  [[ "$saved" == "$own && {"* ]] || fail "a mention of the nginx reload was taken for the reload: $saved" || return 1
+  # A command the join cannot hold is replaced, and shown, not half run.
+  expected="service other reload \\"
+  record --reloadcmd "$expected"
+  run
+  recorded
+  assert_equal "0:$own:nginx force-reload" "$status:$saved:$(<"$work/services")" "saved command ending in a backslash" || return 1
+  grep -Fxq "$expected" "$work/log" || fail "the replaced command was not shown: $(<"$work/log")" || return 1
+
+  # A kept setting that fails is not the site's failure. With the cached
+  # pair in place for nginx the run goes on as public; with another pair
+  # served it stops and leaves that pair alone. Never a self-signed one.
+  for ISSUE_STATUS in 2 0; do
+    export ISSUE_STATUS
+    rm -f "$work/selfsigned"
+    record --reloadcmd "$own && service other reload"
+    touch "$work/other-down"
+    CERTIFICATE_MODE=""
+    run
+    rm "$work/other-down"
+    assert_equal "0:public:nginx force-reload"$'\n'"other reload"$'\n'"nginx force-reload" "$status:$CERTIFICATE_MODE:$(<"$work/services")" \
+      "failed added reload command ($ISSUE_STATUS)" || return 1
+    grep -F WARNING "$work/log" | grep -Fq "other" && [[ ! -e "$work/selfsigned" ]] ||
+      fail "a failed added reload command was not reported, or fell back ($ISSUE_STATUS): $(<"$work/log")" || return 1
+    # The same with nginx itself failing: a failed deployment, no fallback.
+    record --reloadcmd "$own && service other reload"
+    touch "$work/nginx-down"
+    CERTIFICATE_MODE=""
+    run
+    rm "$work/nginx-down"
+    assert_equal "1:" "$status:$CERTIFICATE_MODE" "failed nginx reload with a kept command ($ISSUE_STATUS)" || return 1
+    grep -q "^Could not deploy .* for $DOMAIN" "$work/log" && [[ ! -e "$work/selfsigned" ]] ||
+      fail "a failed nginx reload with a kept command was not a failed deployment ($ISSUE_STATUS)" || return 1
+
+    mkdir -p "$work/removed"
+    record --cert-file "$work/removed/cert.pem"
+    rm -r "$work/removed"
+    CERTIFICATE_MODE=""
+    run
+    assert_equal "0:public" "$status:$CERTIFICATE_MODE" "added destination removed, cached pair served ($ISSUE_STATUS)" || return 1
+    grep -F WARNING "$work/log" | grep -Fq "$work/removed/cert.pem" && [[ ! -e "$work/selfsigned" ]] ||
+      fail "a removed added destination was not reported, or fell back ($ISSUE_STATUS)" || return 1
+
+    for served in key.pem cert.pem; do
+      mkdir -p "$work/removed"
+      record --cert-file "$work/removed/cert.pem"
+      rm -r "$work/removed"
+      echo "previous $served" > "$live/$served"
+      CERTIFICATE_MODE=""
+      run
+      assert_equal "1::previous $served" "$status:$CERTIFICATE_MODE:$(<"$live/$served")" \
+        "added destination removed, another $served served ($ISSUE_STATUS)" || return 1
+      grep -Fq "$work/removed/cert.pem" "$work/log" && [[ ! -e "$work/selfsigned" ]] ||
+        fail "the failing destination was not named, or fell back ($served, $ISSUE_STATUS)" || return 1
+      cp "$cache/$DOMAIN.key" "$live/key.pem"
+      cp "$cache/fullchain.cer" "$live/cert.pem"
+    done
+  done
+  export ISSUE_STATUS=2
+
+  # A command saved without base64 by an old acme.sh is read too.
+  record
+  sed -i "s/^Le_ReloadCmd=.*/Le_ReloadCmd='$own \&\& service old reload'/" "$conf"
+  run
+  recorded
+  assert_equal "0:$own && service old reload" "$status:$saved" "plain saved command" || return 1
+
+  # The commands printed for a CA switch and after a failed issue keep the
+  # added settings as well.
+  for ISSUE_STATUS in 2 1; do
+    export ISSUE_STATUS
+    SSL_PROVIDER=zerossl
+    record --cert-file "$work/other service/cert.pem" --reloadcmd "$own; service other reload"
+    run
+    assert_equal 0 "$status" "run before the printed command ($ISSUE_STATUS)" || return 1
+    "$acme" --install-cert --ecc -d "$DOMAIN" --key-file "$live/key.pem" --fullchain-file "$live/cert.pem" >/dev/null
+    rm -f "$work/other service/cert.pem"
+    sed -n 's/^  \(.* --install-cert \)/\1/p' "$work/log" > "$work/printed.sh"
+    bash "$work/printed.sh" >/dev/null || fail "the printed command failed ($ISSUE_STATUS): $(<"$work/printed.sh")" || return 1
+    recorded
+    assert_equal "$own; service other reload" "$saved" "reload command of the printed command ($ISSUE_STATUS)" || return 1
+    grep -Fxq "Le_RealCertPath='$work/other service/cert.pem'" "$conf" && [[ -s "$work/other service/cert.pem" ]] ||
+      fail "the printed command dropped the added destination ($ISSUE_STATUS)" || return 1
+    SSL_PROVIDER=letsencrypt
+  done
+  export ISSUE_STATUS=2
+
+  # acme.sh holds one key and one full chain destination: the installer's
+  # replace others, and the run says which ones.
+  record
+  sed -i -e "s|^Le_RealKeyPath=.*|Le_RealKeyPath='$work/other service/key.pem'|" \
+    -e "s|^Le_RealFullChainPath=.*|Le_RealFullChainPath='$work/other service/chain.pem'|" "$conf"
+  run
+  assert_equal 0 "$status" "run over other key and chain destinations" || return 1
+  grep -F "$work/other service/key.pem" "$work/log" | grep -Fq "$live/key.pem" &&
+    grep -F "$work/other service/chain.pem" "$work/log" | grep -Fq "$live/cert.pem" ||
+    fail "replaced destinations were not named: $(<"$work/log")" || return 1
+  grep -Fxq "Le_RealKeyPath='$live/key.pem'" "$conf" || fail "the site key destination was not saved" || return 1
+  run
+  ! grep -Fq " replaces " "$work/log" || fail "a replacement was reported for the site's own destinations" || return 1
+
+  # An added destination that is a cached file is refused like the site's.
+  record --cert-file "$work/other service/cert.pem" --ca-file "$work/other service/ca.pem"
+  ln -s "$cache/ca.cer" "$work/other service/ca.pem"
+  cp "$conf" "$work/conf.before"
+  rm -f "$work/selfsigned"
+  run
+  assert_equal 1 "$status" "deployed over a cached file through an added destination" || return 1
+  cmp -s "$conf" "$work/conf.before" && [[ -s "$cache/ca.cer" && ! -e "$work/selfsigned" ]] &&
+    grep -Fq "$work/other service/ca.pem is the same file as $cache/ca.cer" "$work/log" ||
+    fail "an added destination linked to the cache was not refused cleanly: $(<"$work/log")" || return 1
+)
+
 run_test() {
   local name="$1"
   local function_name="$2"
@@ -331,6 +575,7 @@ run_test() {
 
 failures=0
 run_test "certificate destinations linked to the acme.sh cache are refused" test_linked_certificate_destinations || failures=$((failures + 1))
+run_test "acme.sh settings added by the operator survive a re-run" test_saved_acme_deployment_settings || failures=$((failures + 1))
 run_test "reusing a certificate keeps its renewal authority visible" test_reused_certificate_authority || failures=$((failures + 1))
 run_test "documented native certificate choices" test_documented_certificate_settings || failures=$((failures + 1))
 run_test "documented database_ver is honoured" test_documented_database_ver_is_honoured || failures=$((failures + 1))

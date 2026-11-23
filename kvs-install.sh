@@ -1989,9 +1989,60 @@ certificate_domain_names() {
   printf '%s\n' "$names"
 }
 
+# Prints one setting of an acme.sh domain configuration file. acme.sh stores
+# each as NAME='value' and wraps the reload command in base64.
+acme_saved_setting() {
+    local value
+    [[ -r "$1" ]] || return 0
+    value=$(sed -n "s/^$2='\(.*\)'\$/\1/p" "$1" | tail -n 1)
+    if [[ "$value" == __ACME_BASE64__START_*__ACME_BASE64__END_ ]]; then
+        value=${value#__ACME_BASE64__START_}
+        base64 -d <<< "${value%__ACME_BASE64__END_}" 2>/dev/null
+    else
+        printf '%s' "$value"
+    fi
+}
+
+# Sets ACME_DEPLOY_ARGS, the destinations and reload command of the site's
+# --install-cert. acme.sh replaces every one it saved for the certificate
+# with what it is given, an absent option included: the certificate and CA
+# destinations and the reload command an operator added are given back.
+ACME_DEPLOY_ARGS=()
+ACME_CACHE_DIR=""
+acme_deploy_settings() {
+    local acme="$1" ssl_dir="$2" reload="service nginx force-reload" conf saved name joined
+    conf=$("$acme" --info -d "$DOMAIN" --ecc 2>/dev/null | sed -n 's/^DOMAIN_CONF=//p')
+    ACME_CACHE_DIR=${conf%/*}
+    saved=$(acme_saved_setting "$conf" Le_ReloadCmd)
+    if [[ "$saved" == "$reload"* ]]; then
+        # The installer's own command, or one it already joined.
+        reload=$saved
+    elif [[ -n "$saved" ]]; then
+        joined=$reload$' && {\n'"$saved"$'\n}'
+        if bash -n <<< "$joined" 2>/dev/null; then
+            reload=$joined
+        else
+            printf 'The reload command saved in acme.sh cannot run after the nginx reload and is replaced by "%s". It was:\n%s\n' \
+                "$reload" "$saved" >&2
+        fi
+    fi
+    ACME_DEPLOY_ARGS=(--key-file "$ssl_dir/key.pem" --fullchain-file "$ssl_dir/cert.pem" --reloadcmd "$reload")
+    for name in Cert:--cert-file CACert:--ca-file; do
+        saved=$(acme_saved_setting "$conf" "Le_Real${name%%:*}Path")
+        [[ -z "$saved" ]] || ACME_DEPLOY_ARGS+=("${name#*:}" "$saved")
+    done
+    for name in Key:key.pem FullChain:cert.pem; do
+        saved=$(acme_saved_setting "$conf" "Le_Real${name%%:*}Path")
+        if [[ -n "$saved" && "$saved" != "$ssl_dir/${name#*:}" ]]; then
+            printf 'Deploying to %s replaces %s in the acme.sh settings, which hold one destination of this kind per certificate.\n' \
+                "$ssl_dir/${name#*:}" "$saved" >&2
+        fi
+    done
+}
+
 check_acme_certificate() {
-    local acme="$1" status="$2" ssl_dir="$3" info current expected="" conf key chain key_pub cert_pub dest source linked=0
-    local -a copies=()
+    local acme="$1" status="$2" ssl_dir="$3" info current expected="" conf key chain key_pub cert_pub dest source linked=0 i
+    local -a copies=() dests=()
     info=$("$acme" --info -d "$DOMAIN" --ecc) || return 1
     conf=$(sed -n 's/^DOMAIN_CONF=//p' <<< "$info")
     if [[ "$conf" != /* ]]; then
@@ -2007,7 +2058,13 @@ check_acme_certificate() {
     fi
     # acme.sh deploys with "cat source > destination": a destination that is
     # one of its own cached files, through a link, is emptied before it is read.
-    for dest in "$ssl_dir/key.pem" "$ssl_dir/cert.pem"; do
+    dests=("$ssl_dir/key.pem" "$ssl_dir/cert.pem")
+    for ((i = 0; i < ${#ACME_DEPLOY_ARGS[@]}; i += 2)); do
+        case "${ACME_DEPLOY_ARGS[i]}" in
+            --cert-file|--ca-file) dests+=("${ACME_DEPLOY_ARGS[i + 1]}") ;;
+        esac
+    done
+    for dest in "${dests[@]}"; do
         for source in "$key" "$chain" "${conf%/*}/$DOMAIN.cer" "${conf%/*}/ca.cer"; do
             [[ "$dest" -ef "$source" ]] || continue
             if ((linked == 0)); then
@@ -2035,8 +2092,7 @@ check_acme_certificate() {
                 printf 'The certificate is valid. Its renewal authority is %s. To switch to %s, run:\n' \
                     "${current:-unknown}" "$SSL_PROVIDER" >&2
                 printf '  %q --renew -d %q --ecc --server %q --force &&\n' "$acme" "$DOMAIN" "$SSL_PROVIDER" >&2
-                printf '  %q --install-cert --ecc -d %q --key-file %q --fullchain-file %q --reloadcmd %q\n' \
-                    "$acme" "$DOMAIN" "$ssl_dir/key.pem" "$ssl_dir/cert.pem" "service nginx force-reload" >&2
+                printf '  %q --install-cert --ecc -d %q%s\n' "$acme" "$DOMAIN" "$(printf ' %q' "${ACME_DEPLOY_ARGS[@]}")" >&2
             fi
         fi
     fi
@@ -2056,18 +2112,39 @@ CERTIFICATE_MODE=""
 # the warning gives the commands to run, one after the other.
 issue_site_certificate() {
     local acme="$1"
-    local ssl_dir="${KVS_NGINX_DIR:-/etc/nginx}/ssl/$DOMAIN" status=0
+    local ssl_dir="${KVS_NGINX_DIR:-/etc/nginx}/ssl/$DOMAIN" status=0 kept
     shift
 
+    acme_deploy_settings "$acme" "$ssl_dir"
     "$acme" "$@" || status=$?
     if ((status == 0 || status == 2)); then
         check_acme_certificate "$acme" "$status" "$ssl_dir" || return 1
-        if "$acme" --install-cert --ecc -d "$DOMAIN" \
-            --key-file "$ssl_dir/key.pem" --fullchain-file "$ssl_dir/cert.pem" \
-            --reloadcmd "service nginx force-reload"; then
+        if "$acme" --install-cert --ecc -d "$DOMAIN" "${ACME_DEPLOY_ARGS[@]}"; then
             CERTIFICATE_MODE=public
             echo "SSL certificate installed"
             return 0
+        fi
+        # A kept destination or reload command is not the site's: its
+        # failure never replaces the pair nginx serves with a self-signed one.
+        if [[ "${ACME_DEPLOY_ARGS[*]}" != "--key-file $ssl_dir/key.pem --fullchain-file $ssl_dir/cert.pem --reloadcmd service nginx force-reload" ]]; then
+            kept=$(printf ' %q' "${ACME_DEPLOY_ARGS[@]:4}")
+            if cmp -s -- "$ACME_CACHE_DIR/$DOMAIN.key" "$ssl_dir/key.pem" &&
+               cmp -s -- "$ACME_CACHE_DIR/fullchain.cer" "$ssl_dir/cert.pem"; then
+                # acme.sh does not say which part failed: nginx itself must reload.
+                if ! service nginx force-reload; then
+                    if ((status == 2)); then
+                        echo "Could not deploy the still-valid certificate for $DOMAIN" >&2
+                    else
+                        echo "Could not deploy the certificate for $DOMAIN: the nginx reload failed" >&2
+                    fi
+                    return 1
+                fi
+                CERTIFICATE_MODE=public
+                echo "${red}WARNING: the certificate of $DOMAIN is in place for nginx, but acme.sh reported a failure. Check the destinations and the reload command kept from its settings:${normal}$kept" >&2
+                return 0
+            fi
+            echo "Could not deploy the certificate of $DOMAIN: nginx keeps the pair it had. Check the destinations and the reload command kept from the acme.sh settings:$kept" >&2
+            return 1
         fi
         if ((status == 2)); then
             echo "Could not deploy the still-valid certificate for $DOMAIN" >&2
@@ -2087,7 +2164,7 @@ issue_site_certificate() {
         echo "  $acme --register-account -m <your email> --server zerossl"
       fi
       echo "  $acme $*"
-      echo "  $acme --install-cert --ecc -d $DOMAIN --key-file $ssl_dir/key.pem --fullchain-file $ssl_dir/cert.pem --reloadcmd 'service nginx force-reload'"
+      echo "  $acme --install-cert --ecc -d $DOMAIN$(printf ' %q' "${ACME_DEPLOY_ARGS[@]}")"
       if [[ "$SSL_PROVIDER" == "zerossl" && -z "${EMAIL:-}" ]]; then
         echo "ZeroSSL needs an email for the account: put yours in place of <your email>."
       fi
