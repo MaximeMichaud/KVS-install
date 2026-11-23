@@ -1554,14 +1554,26 @@ start_site() {
             admin_password=$(openssl rand -base64 30 | tr -d '/+=' | cut -c 1-32)
         fi
     fi
-    KVS_ADMIN_PASSWORD="$admin_password" \
-        docker compose --profile setup run --rm --no-deps kvs-init
+    # Show the one-time password before kvs-init runs, as setup.sh does.
+    # 35-harden-admin-users.sh applies it early: an initialization that
+    # fails or is killed after that step ends this start, and the next one
+    # finds a hardened account and generates nothing, so a password shown
+    # only after a successful run would be lost.
     if [ "$generated_admin_password" = true ]; then
         echo "Admin login: ${admin_login}"
         echo "One-time admin password: ${admin_password}"
-        echo "Save it now; it is not written to the site .env file."
+        echo "Save it now; it is set during initialization and is not written to the site .env file."
     fi
+    local init_status=0
+    KVS_ADMIN_PASSWORD="$admin_password" \
+        docker compose --profile setup run --rm --no-deps kvs-init || init_status=$?
     unset admin_password
+    if [ "$init_status" -ne 0 ]; then
+        if [ "$generated_admin_password" = true ]; then
+            log_warn "Initialization failed. Keep the password above: it is the admin password unless the next start prints a new one."
+        fi
+        return "$init_status"
+    fi
 
     # Start all services
     log_info "Starting services..."
@@ -1572,6 +1584,9 @@ start_site() {
     reload_caddy
 
     log_success "Site ${domain} started!"
+    if [ "$generated_admin_password" = true ]; then
+        echo "The one-time admin password was shown above, before the initialization output."
+    fi
     echo ""
     echo "Access your site at: https://${domain}"
     echo "Admin panel: https://${domain}/admin/"

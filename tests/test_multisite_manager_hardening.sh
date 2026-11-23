@@ -249,6 +249,13 @@ docker() {
                 if [ "${MOCK_KVS_INIT_STATUS:-0}" -ne 0 ]; then
                     return "$MOCK_KVS_INIT_STATUS"
                 fi
+                # MOCK_KVS_INIT_KILLED_AFTER_ADMIN: the initialization is
+                # killed after its admin step replaced the credential.
+                if [ "${MOCK_KVS_INIT_KILLED_AFTER_ADMIN:-false}" = true ]; then
+                    printf '%s\n' 'kvs-init killed after the admin step'
+                    printf '%s\n' hardened > "$MOCK_ADMIN_STATE_FILE"
+                    return 137
+                fi
                 if [ -n "${MOCK_ADMIN_STATE_FILE:-}" ]; then
                     printf '%s\n' hardened > "$MOCK_ADMIN_STATE_FILE"
                 fi
@@ -681,6 +688,17 @@ KVS_WEBROOT_BASE="$valid_webroot" \
 if grep -Fq 'One-time admin password:' "$second_start_output"; then
     fail "the second start regenerated an already hardened admin password"
 fi
+# The password is above the initialization output: the last lines of a start
+# that generated one point back to it, without repeating it, and a start
+# that generated none, or that failed, says nothing of the kind.
+pointer='The one-time admin password was shown above, before the initialization output.'
+[ "$(sed 's/\x1b\[[0-9;]*m//g' "$first_start_output" | grep -Fx -A 1 '[OK] Site example.com started!' | tail -n 1)" = "$pointer" ] ||
+    fail "a completed start did not point back to the password it showed: $(tail -n 3 "$first_start_output")"
+[ "$(grep -Fc 'deterministic-test-password' "$first_start_output")" -eq 1 ] ||
+    fail "a completed start repeated the generated password"
+if grep -Fq "$pointer" "$second_start_output"; then
+    fail "a start that generated no password pointed back to one"
+fi
 [ "$(wc -l < "$admin_generation_log")" -eq 1 ] ||
     fail "the admin password generator did not run exactly once across two starts"
 [ "$(sed -n '1p' "$admin_password_log")" = set ] &&
@@ -742,6 +760,63 @@ grep -Fxq 'Admin login: boss' "$renamed_output" ||
     fail "the one-time password was not shown with the renamed account's login"
 grep -Fq 'One-time admin password:' "$renamed_output" ||
     fail "a renamed account with the archive password got no one-time password"
+
+# An initialization killed after its admin step replaced the credential ends
+# the start with its status, and the next start finds a hardened account and
+# generates nothing: the password is shown before kvs-init runs, once, and
+# the failed start says that it stays the one to use.
+interrupted_state="${TEST_DIR}/valid/admin-state-interrupted"
+interrupted_output="${TEST_DIR}/valid/interrupted-start.log"
+interrupted_retry="${TEST_DIR}/valid/interrupted-retry.log"
+interrupted_generation_log="${TEST_DIR}/valid/interrupted-generation.log"
+printf '%s\n' default > "$interrupted_state"
+: > "$interrupted_generation_log"
+set +e
+MOCK_KVS_INIT_KILLED_AFTER_ADMIN=true \
+MOCK_ADMIN_STATE_FILE="$interrupted_state" \
+MOCK_OPENSSL_LOG="$interrupted_generation_log" \
+KVS_WEBROOT_BASE="$valid_webroot" \
+    bash "$valid_script" start example.com > "$interrupted_output" 2>&1
+interrupted_status=$?
+set -e
+[ "$interrupted_status" -eq 137 ] ||
+    fail "a killed initialization did not end the start with its status: ${interrupted_status}"
+grep -Fxq hardened "$interrupted_state" ||
+    fail "the interrupted initialization fixture did not replace the credential"
+MOCK_ADMIN_STATE_FILE="$interrupted_state" \
+MOCK_OPENSSL_LOG="$interrupted_generation_log" \
+KVS_WEBROOT_BASE="$valid_webroot" \
+    bash "$valid_script" start example.com > "$interrupted_retry" 2>&1
+if grep -Fq 'One-time admin password:' "$interrupted_retry"; then
+    fail "the start after an interrupted initialization replaced a hardened password"
+fi
+[ "$(wc -l < "$interrupted_generation_log")" -eq 1 ] ||
+    fail "the admin password generator did not run exactly once around an interrupted initialization"
+interrupted_lines=$(grep -n -F -x -e 'Admin login: admin' \
+    -e 'One-time admin password: deterministic-test-password' \
+    -e 'kvs-init killed after the admin step' "$interrupted_output" | cut -d : -f 2- | paste -sd '|')
+[ "$interrupted_lines" = 'Admin login: admin|One-time admin password: deterministic-test-password|kvs-init killed after the admin step' ] ||
+    fail "the password an interrupted initialization applied was not shown before kvs-init ran: ${interrupted_lines}"
+sed 's/\x1b\[[0-9;]*m//g' "$interrupted_output" |
+    grep -Fxq '[WARN] Initialization failed. Keep the password above: it is the admin password unless the next start prints a new one.' ||
+    fail "a failed initialization did not say which admin password is in effect"
+# A failed initialization that had no password to show does not mention one.
+interrupted_kept="${TEST_DIR}/valid/interrupted-kept.log"
+set +e
+MOCK_KVS_INIT_STATUS=43 \
+MOCK_ADMIN_STATE_FILE="$interrupted_state" \
+KVS_WEBROOT_BASE="$valid_webroot" \
+    bash "$valid_script" start example.com > "$interrupted_kept" 2>&1
+interrupted_kept_status=$?
+set -e
+[ "$interrupted_kept_status" -eq 43 ] ||
+    fail "a failed initialization did not end the start with its status: ${interrupted_kept_status}"
+if grep -Fq "$pointer" "$interrupted_output" "$interrupted_retry" "$interrupted_kept"; then
+    fail "a start that failed, or that generated no password, pointed back to one"
+fi
+if grep -Fq 'Keep the password above' "$interrupted_retry" "$interrupted_kept"; then
+    fail "a start that showed no password mentioned one"
+fi
 
 check_failure_state="${TEST_DIR}/valid/admin-state-check-failure"
 check_failure_output="${TEST_DIR}/valid/check-failure-start.log"
