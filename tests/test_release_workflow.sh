@@ -160,7 +160,7 @@ listed=$(sed -n '/^suites=($/,/^)$/s/^ *\(integration_[^ ]*\)$/\1/p' "$ROOT_DIR/
 for suite in "$ROOT_DIR"/tests/integration_*; do
     name=${suite##*/}
     grep -Fxq "$name" <<<"$listed" && continue
-    grep -Fxq "\"\$TEST_DIR/$name\"" "$ROOT_DIR/tests/run.sh" && continue
+    grep -Fxq "    \"\$TEST_DIR/$name\"" "$ROOT_DIR/tests/run.sh" && continue
     jq -e --arg run "tests/$name" 'any(.jobs[].steps[]?; (.run // "") | contains($run))' \
         <<<"$docker" >/dev/null && continue
     fail "no workflow runs tests/$name: list it in tests/run-integration.sh"
