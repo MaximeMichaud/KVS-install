@@ -1013,6 +1013,91 @@ test_dump_mode_preserves_invalid_dates_and_zero_ids() {
     pass 'the dump mode preserves invalid dates and zero IDs'
 }
 
+# A dump file made of several dumps, one after the other, restores the
+# saved mode at the end of each and sets its own again at the start of
+# the next: every such assignment allows invalid dates, the creation mode
+# of a routine (version 50003) and SQL text in rows or routine bodies stay.
+test_dump_mode_allows_invalid_dates_after_the_header() {
+    local dump="$TMP_ROOT/later-mode.sql" prepared="$TMP_ROOT/prepared-later-mode.sql" warnings="$TMP_ROOT/later-mode.err"
+    local expected="$TMP_ROOT/expected-later-mode.sql" allowed=",ALLOW_INVALID_DATES"
+    local save="/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;"
+    local restore='/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;'
+    local long
+    # More than the 64 KiB the filter reads at a time, before the second header.
+    long=$(head -c 100000 /dev/zero | tr '\0' x)
+
+    make_dump "$dump.body" yes
+    {
+        printf '%s\n' "$save"
+        cat "$dump.body"
+        printf '%s\n' "INSERT INTO \`ktvs_options\` VALUES ('long','$long');" "$restore"
+        cat <<SQL
+-- begin later modes
+$save
+INSERT INTO \`ktvs_options\` VALUES ('row','
+SET SQL_MODE=''STRICT_ALL_TABLES'';
+$save
+');
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'STRICT_TRANS_TABLES,NO_ZERO_DATE' */ ;
+DELIMITER ;;
+CREATE PROCEDURE \`p\`() BEGIN
+  SET SESSION sql_mode='TRADITIONAL';
+END ;;
+DELIMITER ;
+CREATE PROCEDURE \`q\`() SET SESSION sql_mode='TRADITIONAL';
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+$restore
+SET SESSION sql_mode = '';
+SET @a = 'SQL_MODE', sql_mode='ANSI_QUOTES' , @b = 2;
+SET sql_mode="NO_BACKSLASH_ESCAPES";
+SET sql_mode='allow_invalid_dates,NO_AUTO_VALUE_ON_ZERO';
+SET sql_mode=@OLD_SQL_MODE;
+SET @@GLOBAL.sql_mode='';
+DELIMITER \$\$
+SET LOCAL sql_mode='PIPES_AS_CONCAT'\$\$
+DELIMITER ;
+-- end later modes
+SQL
+    } > "$dump"
+    sed -n '/^-- begin later modes$/,/^-- end later modes$/p' "$dump" > "$expected"
+    # Line 2 is the header of the second dump; the row holding its text is line 6.
+    sed -i -e "2s/NO_AUTO_VALUE_ON_ZERO'/NO_AUTO_VALUE_ON_ZERO$allowed'/" \
+        -e "s/^SET SESSION sql_mode = '';\$/SET SESSION sql_mode = 'ALLOW_INVALID_DATES';/" \
+        -e "s/sql_mode='ANSI_QUOTES' ,/sql_mode='ANSI_QUOTES$allowed' ,/" \
+        -e "s/^SET LOCAL sql_mode='PIPES_AS_CONCAT'/SET LOCAL sql_mode='PIPES_AS_CONCAT$allowed'/" "$expected"
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /site /site "$prepared" token >/dev/null 2>"$warnings" ||
+        fail "a dump made of two dumps must prepare: $(cat "$warnings")"
+    grep -Fxq "${save/NO_AUTO_VALUE_ON_ZERO/NO_AUTO_VALUE_ON_ZERO$allowed}" <(head -n 5 "$prepared") ||
+        fail 'the header of the first dump must still allow invalid dates'
+    sed -n '/^-- begin later modes$/,/^-- end later modes$/p' "$prepared" |
+        diff -u "$expected" - || fail 'every literal session mode after the header, and nothing else, must allow invalid dates'
+    grep -Fq "('long','$long');" "$prepared" || fail 'the long row before the second header changed'
+    [ ! -s "$warnings" ] || fail "a mode assignment after the header must not warn: $(cat "$warnings")"
+    import_prepare_dump "$prepared" ktvs_ 7.0.2 /site /site "$prepared.again" token >/dev/null 2>"$warnings" ||
+        fail "a prepared dump must prepare again: $(cat "$warnings")"
+    sed -n '/^-- begin later modes$/,/^-- end later modes$/p' "$prepared.again" |
+        diff -u "$expected" - || fail 'a prepared dump must not change when it is prepared again'
+
+    # A compact dump does not say how it reads a backslash. Read one way,
+    # the two assignments below are statements; read the other way, they
+    # are text inside a value. The import goes on with their bytes as they
+    # were and says so once.
+    cat > "$dump" <<'SQL'
+CREATE TABLE `ktvs_options` (`variable` varchar(64) PRIMARY KEY, `value` text);
+INSERT INTO `ktvs_options` VALUES ('path','C:\');
+SET sql_mode='ANSI';
+SET sql_mode='';
+SQL
+    import_prepare_dump "$dump" ktvs_ 7.0.2 /site /site "$prepared" token >/dev/null 2>"$warnings" ||
+        fail "an ambiguous mode assignment must not stop the import: $(cat "$warnings")"
+    sed -n '/^CREATE TABLE/,$p' "$prepared" | head -n 4 | cmp -s "$dump" - ||
+        fail 'an ambiguous mode assignment must stay as it is'
+    [ "$(grep -c 'SQL_MODE assignment after the dump header is ambiguous' "$warnings")" = 1 ] && [ "$(wc -l < "$warnings")" = 1 ] ||
+        fail "an ambiguous mode assignment must be reported once: $(cat "$warnings")"
+    pass 'session modes set after the header allow invalid dates, routine modes and SQL text stay'
+}
+
 test_ngram_indexes_keep_their_columns_and_use_the_default_parser() {
     local dump="$TMP_ROOT/ngram.sql" prepared="$TMP_ROOT/prepared-ngram.sql" warnings="$TMP_ROOT/ngram.err"
     cat > "$dump" <<'SQL'
@@ -1093,10 +1178,11 @@ CREATE TABLE "quoted\name" (body TEXT, FULLTEXT INDEX ft (body)@DIRECT@);
 -- end index cases
 SQL
     sed -e 's|@DIRECT@| WITH PARSER ngram|g' -e 's|@VERSIONED@| /*!50100 WITH PARSER `ngram` */|g' -e 's|@ADJACENT@|/*!50100 WITH PARSER ngram */|g' "$template" >> "$dump"
-    sed -e 's/@DIRECT@//g' -e 's/@VERSIONED@//g' -e 's/@ADJACENT@/ /g' "$template" > "$expected"
+    sed -e 's/@DIRECT@//g' -e 's/@VERSIONED@//g' -e 's/@ADJACENT@/ /g' \
+        -e "s/^SET sql_mode='NO_BACKSLASH_ESCAPES,ANSI_QUOTES';\$/SET sql_mode='NO_BACKSLASH_ESCAPES,ANSI_QUOTES,ALLOW_INVALID_DATES';/" "$template" > "$expected"
     import_prepare_dump "$dump" ktvs_ 7.0.2 /site /site "$prepared" token >/dev/null 2>"$warnings"
     sed -n '/^-- begin index cases$/,/^-- end index cases$/p' "$prepared" |
-        diff -u "$expected" - || fail 'only real index options may change'
+        diff -u "$expected" - || fail 'only real index options and the session mode may change'
     [ "$(grep -cF 'Search results may differ.' "$warnings")" = 1 ] || fail 'one warning is due for all converted indexes'
 
     make_dump "$dump.body" yes
@@ -1171,6 +1257,7 @@ test_ngram_only_changes_index_options
 test_ngram_indexes_keep_their_columns_and_use_the_default_parser
 test_sql_import_checks_perl_before_confirmation
 test_dump_mode_preserves_invalid_dates_and_zero_ids
+test_dump_mode_allows_invalid_dates_after_the_header
 test_php_config_values_are_read_as_kvs_writes_them
 test_site_validation_accepts_a_kvs_site_and_refuses_the_rest
 test_archive_version_is_read_from_the_zip

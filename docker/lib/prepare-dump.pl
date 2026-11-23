@@ -6,6 +6,7 @@ use re '/aa';
 
 my $compact = "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(\@\@SESSION.sql_mode, ''), 'ALLOW_INVALID_DATES');\n";
 my $mode_warning = "WARNING: Unrecognized header SQL_MODE assignment. Invalid dates may be stored as zero.\n";
+my $later_mode_warning = "WARNING: An SQL_MODE assignment after the dump header is ambiguous under different SQL modes and stays unchanged. Invalid dates may be stored as zero.\n";
 
 # Cursors use absolute byte offsets. Peeking may refill the buffer but never
 # consumes input. Release bytes once the caller has finished with them.
@@ -117,14 +118,17 @@ sub set_modes {
 }
 
 # Consume SET assignments up to the client delimiter. Preserve everything
-# except the insertion inside a recognized session SQL_MODE literal.
+# except the insertion inside a recognized session SQL_MODE literal: in the
+# header ($header is 1, with its warnings) and in a later statement of the
+# body ($header is 2), where a second dump appended to the first sets its
+# own mode after the first one restored the saved mode.
 sub setting {
     my ($in, $s, $delimiter, $header) = @_;
     my %lexer = %$s;
     my ($out, $raw, $lhs, @rhs) = ('', '', '');
     my ($depth, $assigned, $value_end) = (0, 0, 0);
     my $flush = sub {
-        if ($header && $lhs =~ /^(?:GLOBAL |\@\@GLOBAL\.|PERSIST(?:_ONLY)? )SQL_MODE$/i) {
+        if ($header == 1 && $lhs =~ /^(?:GLOBAL |\@\@GLOBAL\.|PERSIST(?:_ONLY)? )SQL_MODE$/i) {
             warn $mode_warning;
             $s->{saw_mode} = 1;
         } elsif ($lhs =~ /^(?:(?:SESSION|LOCAL) |\@\@(?:(?:SESSION|LOCAL)\.)?)?SQL_MODE$/i) {
@@ -136,7 +140,7 @@ sub setting {
                     substr($raw, $value_end - 1, 0) = ($modes eq '' ? '' : ',') . 'ALLOW_INVALID_DATES';
                 }
             } elsif ("SET$raw;\n" ne $compact) {
-                warn $mode_warning if $header;
+                warn $mode_warning if $header == 1;
                 my $saved = $s->{saved}{lc(join('', @rhs))};
                 $s->{no_backslash} = ($saved && $saved->[0]) // $s->{inherited};
                 $s->{ansi} = ($saved && $saved->[1]) // $s->{guess_ansi};
@@ -190,8 +194,10 @@ sub version_setting {
     my ($s, $token, $header) = @_;
     return unless $token =~ m{\A(/\*M?!([0-9]*)\s*SET(?![\w\$\x80-\xff]))(.*)(\*/)\z}is;
     my ($prefix, $version, $sql, $end) = ($1, $2, $3, $4);
-    # The dump tools save and set a routine's creation mode under 50003.
-    return if $header && $version eq '50003' && $sql =~ /^\s*(?:SQL_MODE|\@saved_sql_mode)\b/i;
+    # The dump tools save and set a routine's creation mode under 50003: it
+    # ends the header, and stays as it is in the body.
+    return if $header == 1 && $version eq '50003' && $sql =~ /^\s*(?:SQL_MODE|\@saved_sql_mode)\b/i;
+    $header = 0 if $header == 2 && $version eq '50003';
     my %inner = (%$s, at => 0);
     my $tail = setting({buf => $sql, base => 0, eof => 1}, \%inner, '', $header);
     %$s = (%inner, at => $s->{at});
@@ -339,7 +345,8 @@ sub scan_step {
     return if $kind eq 'space';
     if ($kind eq 'comment') {
         if ($word =~ m{^/\*M?!}i && $s->{phase} eq 'start') {
-            version_setting($s, $word, 0);
+            my $rewritten = version_setting($s, $word, 2);
+            push @{$s->{edits}}, [$start, $s->{at}, $rewritten, 'mode'] if defined $rewritten && $rewritten ne $word;
             $s->{phase} = 'other';
         }
         return;
@@ -360,7 +367,10 @@ sub scan_step {
         }
     }
     if ($s->{phase} eq 'start' && uc($word) eq 'SET') {
-        setting($in, $s, $delimiter, 0);
+        my $from = $s->{at};
+        my $rewritten = setting($in, $s, $delimiter, 2);
+        push @{$s->{edits}}, [$from, $s->{at}, $rewritten, 'mode']
+            if $rewritten ne peek_bytes($in, $from, $s->{at} - $from);
         return;
     }
     ddl_token($s, $kind eq 'quoted' ? 'identifier' : uc($word)) unless $s->{phase} eq 'other';
@@ -383,6 +393,7 @@ for my $backslash (0, 1) {
 }
 my $written = $state->{at};
 my $converted = 0;
+my $later_mode_warned = 0;
 while (1) {
     my $until = $written + 65536;
     for my $scan (@scans) {
@@ -393,14 +404,22 @@ while (1) {
         my ($edit) = sort { $a->[0] <=> $b->[0] }
             map { @{$_->{edits}} ? $_->{edits}[0] : () } @scans;
         last if !$edit || $edit->[0] >= $safe;
-        for my $scan (@scans) {
-            my $other = shift @{$scan->{edits}};
+        my @agree = grep {
+            my $other = $_->{edits}[0];
+            $other && $edit->[0] == $other->[0] && $edit->[1] == $other->[1] && $edit->[2] eq $other->[2]
+        } @scans;
+        shift @{$_->{edits}} for @agree;
+        if (@agree < @scans) {
             die "ERROR: SQL parser conversion is ambiguous under different SQL modes. Set SQL_MODE explicitly in the dump before importing.\n"
-                unless $other && $edit->[0] == $other->[0] && $edit->[1] == $other->[1] && $edit->[2] eq $other->[2];
+                unless $edit->[3];
+            # Only some readings of a compact dump see this mode assignment
+            # as a statement: its bytes stay, as before it was looked for.
+            warn $later_mode_warning unless $later_mode_warned++;
+            next;
         }
         print substr($in->{buf}, $written - $in->{base}, $edit->[0] - $written), $edit->[2];
         $written = $edit->[1];
-        $converted = 1;
+        $converted = 1 unless $edit->[3];
     }
     print substr($in->{buf}, $written - $in->{base}, $safe - $written);
     $written = $safe;

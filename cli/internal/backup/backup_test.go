@@ -1185,7 +1185,16 @@ func TestRestoreDumpSQLMode(t *testing.T) {
 		"DELIMITER ;;\nCREATE FUNCTION f() RETURNS TEXT DETERMINISTIC RETURN \"head\n" + mode + "\ntail\";;\nDELIMITER ;\n"
 	const fallback = "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'ALLOW_INVALID_DATES');\n"
 	long := "-- " + strings.Repeat("x", 8209) + "\r\n"
+	// A second dump appended to the first: its header follows the restore of
+	// the saved mode. kvsctl backup writes one dump and restore replays the
+	// body as it is; the setup import also takes combined files and extends
+	// the later header. The two paths differ here on purpose.
+	const restoreMode = "/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;\n"
+	const secondRows = "\nINSERT INTO ktvs_options VALUES ('second','2021-02-31');\n" + restoreMode
+	const secondDump = restoreMode + mode + secondRows
+	const setupSecondDump = restoreMode + start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end + secondRows
 	for _, c := range []struct{ name, prefix, input, want string }{
+		{"second_dump", "", mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
 		{"block_boundary", "/*" + strings.Repeat("x", 4095) + "*/ ", mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
 		{"standard", long, mode, start + "NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES" + end},
 		{"compatible", "/*M!999999\\- enable the sandbox mode */\n/*!40101 SET NAMES utf8mb4 */;\n",
@@ -1212,6 +1221,12 @@ func TestRestoreDumpSQLMode(t *testing.T) {
 			body := "\r\n" + table + "INSERT INTO ktvs_options VALUES ('mode',\"begin\n" + mode + "\nend\");\n" + routine
 			input := c.prefix + c.input + body
 			want := c.prefix + c.want + body
+			setupWant := want
+			if c.name == "second_dump" {
+				input += secondDump
+				want += secondDump
+				setupWant += setupSecondDump
+			}
 			dir := t.TempDir()
 			path := createSQL(t, dir, input)
 			log, err := os.CreateTemp(dir, "restore-log")
@@ -1246,7 +1261,7 @@ func TestRestoreDumpSQLMode(t *testing.T) {
 				}
 			}
 			_, prepared, ok := strings.Cut(got, "/*M!110300 SET SESSION character_set_collations='' */;\n")
-			if !ok || !strings.HasPrefix(prepared, want+"\n-- kvs-install import\n") {
+			if !ok || !strings.HasPrefix(prepared, setupWant+"\n-- kvs-install import\n") {
 				t.Error("setup changed the wrong SQL bytes")
 			}
 		})
