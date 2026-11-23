@@ -25,11 +25,64 @@ provided() {
     if grep -F 'command not found' "$1"; then fail 'a function the test does not provide was called'; fi
 }
 
+# This suite reads setup.sh through fixed lines: the limits of the blocks
+# it runs and the order of the steps of the main flow. When one of them is
+# reworded or moved away, the suite says which one, instead of ending on
+# the status of a pipeline, extracting nothing or running half a block.
+# setup_line <first|last> <ERE>: the number of the first or last line of
+# setup.sh the pattern matches.
+setup_line() {
+    local lines
+    lines=$(grep -En -- "$2" "$SETUP" | cut -d: -f1) || true
+    [ -n "$lines" ] || fail "setup.sh no longer has a line this suite reads: $2"
+    if [ "$1" = first ]; then head -n 1; else tail -n 1; fi <<< "$lines"
+}
+# setup_has <ERE...>: every pattern matches a line of setup.sh.
+setup_has() {
+    local pattern
+    for pattern in "$@"; do
+        setup_line first "$pattern" > /dev/null
+    done
+}
+# setup_block <start ERE> <end ERE> [<later ERE>]: the block the suite
+# extracts from the first start line ends on the next end line, and that
+# one comes before the next later line: an end line that matches again
+# further down must not stretch the block.
+setup_block() {
+    local start end later
+    start=$(setup_line first "$1")
+    end=$(LIMIT="$2" awk -v start="$start" 'NR > start && $0 ~ ENVIRON["LIMIT"] { print NR; exit }' "$SETUP")
+    [ -n "$end" ] || fail "setup.sh no longer ends the block this suite reads from '$1' on: $2"
+    [ -n "${3:-}" ] || return 0
+    later=$(LIMIT="$3" awk -v start="$start" 'NR > start && $0 ~ ENVIRON["LIMIT"] { print NR; exit }' "$SETUP")
+    [ -n "$later" ] || fail "setup.sh no longer has a line this suite reads after '$1': $3"
+    [ "$end" -lt "$later" ] || fail "setup.sh no longer ends the block this suite reads from '$1' on: $2 (expected before $3)"
+}
+# The helpers themselves, in a shell that stops on a failing command as
+# this suite does.
+helpers=$(declare -f fail setup_line setup_has setup_block)
+for block_case in 'no-end|^import_files_only\(\) \{$|^a line setup\.sh never had$||on: ^a line setup\.sh never had$' \
+    'end-before-start|^    import_files_only$|^import_files_only\(\) \{$||on: ^import_files_only\(\) \{$' \
+    'stretched|^retirement_load initial |^stop_for_configured_ports |^select_import_source$|on: ^stop_for_configured_ports  (expected before ^select_import_source$)'; do
+    IFS='|' read -r block_name block_start block_end block_later block_text <<< "$block_case"
+    if missing=$(bash -euo pipefail -c "$helpers"$'\nSETUP=$1; shift; setup_block "$@"; echo found' _ "$SETUP" "$block_start" "$block_end" "$block_later" 2>&1); then
+        fail "$block_name: a block without its limit went unnoticed"
+    fi
+    [[ "$missing" == "FAIL: setup.sh no longer ends the block this suite reads from '$block_start' $block_text" ]] || fail "$block_name: the limit must be named: $missing"
+done
+if missing=$(bash -euo pipefail -c "$helpers"$'\nSETUP=$1; shift; setup_has "$@"; echo found' _ "$SETUP" \
+    '^import_files_only\(\) \{$' '^a line setup\.sh never had$' 2>&1); then
+    fail 'a missing line of setup.sh went unnoticed'
+fi
+[ "$missing" = 'FAIL: setup.sh no longer has a line this suite reads: ^a line setup\.sh never had$' ] || fail "a missing line of setup.sh must be named: $missing"
+[ "$(setup_line first '^}$')" -lt "$(setup_line last '^}$')" ] || fail 'setup_line must tell the first matching line from the last'
+
 # extract <function...>: the functions of setup.sh, with /var/www/ moved
 # under the test directory.
 extract() {
     local name
     for name in "$@"; do
+        setup_has "^$name\\(\\) \\{\$"
         awk -v signature="$name() {" '$0 == signature { capture = 1 } capture { print } capture && /^}$/ { exit }' "$SETUP"
     done | sed "s|/var/www/|$TEST_DIR/www/|g"
 }
@@ -177,6 +230,9 @@ unset SITE_PREFIX SITE_PREFIX_LEGACY SITE_PREFIX_RESELECT
 
 # Exercise the real persistence block and loading order for the next pass.
 # The earlier inspection fixtures intentionally have no .env to update.
+setup_block '^KVS_DOMAIN_OVERRIDE=' '^# Check if \.env exists' '^# Load environment$'
+setup_has '^IMPORT_EXCLUDE=' '^IMPORT_INCLUDE='
+setup_block '^# Load environment$' '^check_mariadb_stop_grace_period ' '^# Domain validation$'
 sed -n '/^KVS_DOMAIN_OVERRIDE=/,/^# Check if .env exists/p' "$SETUP" > "$TEST_DIR/override-capture.sh"
 sed -n '/^IMPORT_EXCLUDE=/p; /^IMPORT_INCLUDE=/p' "$SETUP" > "$TEST_DIR/filter-defaults.sh"
 awk '
@@ -368,21 +424,23 @@ pass 'IMPORT_FILES_ONLY is yes or no, with the old server only, and documented'
 
 # The pass ends before anything that writes .env, picks images, stops
 # containers or deletes a volume: right after the domain is known.
-branch=$(grep -n '^    import_files_only$' "$SETUP" | cut -d: -f1)
-[ -n "$branch" ] || fail 'the main flow must run import_files_only'
+branch=$(setup_line first '^    import_files_only$')
 sed -n "$((branch - 1))p;$((branch + 1))p" "$SETUP" | tr '\n' ' ' | grep -Fq 'if [ "$IMPORT_FILES_ONLY" = yes ]; then     exit 0' ||
     fail 'the pass of the files alone must exit right after it'
 for later in '^retirement_load initial \|\| exit 1$' '^retirement_prepare_identity \|\| exit 1$' '^select_import_source$' '^import_require_empty_volume$' \
     '^stop_for_configured_ports \|\| exit 1$' '^import_fetch_source$' '^import_stage_dump$'; do
-    line=$(grep -En -- "$later" "$SETUP" | head -n 1 | cut -d: -f1)
-    [ -n "$line" ] && [ "$line" -gt "$branch" ] || fail "the pass of the files alone must end before '$later'"
+    line=$(setup_line first "$later")
+    [ "$line" -gt "$branch" ] || fail "the pass of the files alone must end before '$later'"
 done
-validated=$(grep -n 'ERROR: Invalid domain format: \$DOMAIN' "$SETUP" | tail -n 1 | cut -d: -f1)
+validated=$(setup_line last 'ERROR: Invalid domain format: \$DOMAIN')
 [ "$validated" -lt "$branch" ] || fail 'the domain must be validated before the pass of the files alone'
 pass 'the pass of the files alone ends before .env, the images, the containers and the volume are touched'
 
 # Exercise the production loading and override order. These configuration
 # checks are unrelated to the saved-domain comparison and touch no host.
+setup_block '^# Load environment$' '^# Domain validation$' '^if \[ -n "\$KVS_DOMAIN_OVERRIDE" \]; then$'
+setup_block '^if \[ -n "\$KVS_DOMAIN_OVERRIDE" \]; then$' '^lowercase_domain$' '^retirement_load initial '
+setup_block '^retirement_load initial ' '^require_single_kvs_archive ' '^select_import_source$'
 {
     printf '%s\n' 'check_mariadb_stop_grace_period() { :; }' 'check_cloudflare_configuration() { :; }'
     awk '$0 == "# Load environment" { capture = 1 } $0 == "# Domain validation" { exit } capture { print }' "$SETUP"
