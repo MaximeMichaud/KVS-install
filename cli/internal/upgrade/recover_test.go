@@ -144,6 +144,60 @@ func TestRecoverAfterLinkBeforeUnlink(t *testing.T) {
 	}
 }
 
+// A stop right after the temporary of conf/extra/site.conf is made leaves
+// an empty file the journal knows by name only, in a directory the version
+// being restored needs as a file. Recovery removes it and finishes. A file
+// with content under that name is not the temporary: it stays, and blocks
+// the restore until it is moved.
+func TestRecoverAfterAStopBeforeTheTemporaryIsIdentified(t *testing.T) {
+	const file = "conf/extra/site.conf"
+	const tmp = "conf/extra/.kvsctl-1234567890"
+	for _, local := range []string{"", "saved by the operator"} {
+		s := newStack(t, "", rel{version: "1.0.0", files: map[string]string{file: "delivery"}},
+			rel{version: "1.1.0", files: map[string]string{"conf/extra": "installed"}})
+		if err := s.upgrade(s.runner(quick)); err != nil {
+			t.Fatal(err)
+		}
+		s.fresh()
+		s.rep.cut = isStep(KindStepStart, StepApply)
+		cutRun(t, s.rep, func() { _ = s.rollback(s.runner(quick)) })
+		j := s.journal()
+		if j == nil || !j.Applied || j.Pending != nil || len(j.Created) != 0 {
+			t.Fatalf("unexpected journal: %+v", j)
+		}
+		dir := filepath.Join(s.root, "conf/extra")
+		if err := os.Remove(dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		temp := filepath.Join(s.root, tmp)
+		if err := os.WriteFile(temp, []byte(local), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		j.Pending = &release.PendingCopy{File: file, Temporary: tmp}
+		if err := s.runner(quick).Inst.SaveJournal(j); err != nil {
+			t.Fatal(err)
+		}
+		s.fresh()
+		err := s.recover(s.runner(quick))
+		if local != "" {
+			if err == nil || !strings.Contains(err.Error(), temp) || s.journal() == nil || s.file(tmp) != local {
+				t.Fatalf("recover with a local file under the journaled name: %v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.back("1.1.0")
+		if got := s.file("conf/extra"); got != "installed" {
+			t.Fatalf("restored conf/extra = %q", got)
+		}
+	}
+}
+
 func TestRecoverInterruptedRollbackTargetOnly(t *testing.T) {
 	const policy = "docker/policy.xml"
 	for _, kind := range []string{"local", "delivered", "recorded creation"} {

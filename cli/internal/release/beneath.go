@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
@@ -208,7 +209,7 @@ func WriteFile(root, rel string, data []byte, mode os.FileMode, prepare func(f *
 	}
 	defer unix.Close(dirfd)
 	name, dir := path.Base(rel), filepath.Join(root, path.Dir(rel))
-	tmpName, tmp, err := createTemp(dirfd, name)
+	tmpName, tmp, err := createTemp(dirfd, name, nil)
 	if err != nil {
 		return err
 	}
@@ -278,7 +279,15 @@ func lay(srcRoot, root, rel string, managed bool, journal *SyncJournal) error {
 	}
 	defer unix.Close(dirfd)
 	name := path.Base(rel)
-	tmpName, tmp, err := createTemp(dirfd, name)
+	// The journal names the temporary before it exists: a run stopped at
+	// any point leaves no file the journal does not name.
+	var reserve func(string) error
+	if journal != nil {
+		reserve = func(tmpName string) error {
+			return journal.Pending(PendingCopy{File: rel, Temporary: path.Join(dir, tmpName)})
+		}
+	}
+	tmpName, tmp, err := createTemp(dirfd, name, reserve)
 	if err != nil {
 		return err
 	}
@@ -434,18 +443,46 @@ func tempPrefix(name string) string {
 	return ".kvsctl-"
 }
 
-// Use the open directory as CreateTemp's parent. Looking it up again
-// through root would let a concurrent directory change redirect the copy.
-func createTemp(dirfd int, name string) (string, *os.File, error) {
-	tmp, err := os.CreateTemp("/proc/self/fd/"+strconv.Itoa(dirfd), tempPrefix(name)+"*")
-	if err != nil {
-		return "", nil, err
+// tempNumber draws the suffix of a temporary name.
+var tempNumber = rand.Uint32
+
+// createTemp makes a new, empty file in the directory dirfd for a copy of
+// name, under a name nothing there has. reserve, when it is not nil, is
+// told that name before the file is made, and again with another one when
+// something took the first in between. The file is made through the open
+// directory: looking it up again through root would let a concurrent
+// directory change redirect the copy.
+func createTemp(dirfd int, name string, reserve func(tmpName string) error) (string, *os.File, error) {
+	dir := "/proc/self/fd/" + strconv.Itoa(dirfd)
+	for range 10000 {
+		tmpName := tempPrefix(name) + strconv.FormatUint(uint64(tempNumber()), 10)
+		if st, err := statAt(dirfd, tmpName, filepath.Join(dir, tmpName)); err != nil {
+			return "", nil, err
+		} else if st != nil {
+			continue
+		}
+		if reserve != nil {
+			if err := reserve(tmpName); err != nil {
+				return "", nil, err
+			}
+		}
+		tmp, err := os.OpenFile(filepath.Join(dir, tmpName), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		return tmpName, tmp, nil
 	}
-	return path.Base(tmp.Name()), tmp, nil
+	return "", nil, fmt.Errorf("no free temporary name for %s", name)
 }
 
 // PendingCopy names the temporary reserved in the destination directory.
-// Its inode distinguishes it from a local file later given the same name.
+// It is journaled twice: before the temporary is made, with no device and
+// no inode, then with them before any byte is copied. The inode
+// distinguishes the temporary from a local file later given the same name;
+// without one, only an empty file can be the temporary.
 type PendingCopy struct {
 	File      string `json:"file"`
 	Temporary string `json:"temporary"`
@@ -487,7 +524,16 @@ func RemovePending(root string, pending PendingCopy) error {
 	if err != nil || st == nil {
 		return err
 	}
-	if uint64(st.Dev) != pending.Device || st.Ino != pending.Inode || st.Mode&unix.S_IFMT != unix.S_IFREG {
+	switch {
+	case st.Mode&unix.S_IFMT != unix.S_IFREG:
+		return nil
+	case pending.Device == 0 && pending.Inode == 0:
+		// The run stopped before it journaled the file it had made, and
+		// so before it wrote to it.
+		if st.Size != 0 {
+			return nil
+		}
+	case uint64(st.Dev) != pending.Device || st.Ino != pending.Inode:
 		return nil
 	}
 	if err := unix.Unlinkat(fd, base, 0); err != nil && !errors.Is(err, unix.ENOENT) {

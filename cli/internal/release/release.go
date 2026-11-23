@@ -537,8 +537,9 @@ func listBundle(r io.Reader, want []string, limit int64) ([]string, map[string][
 	return files, kept, nil
 }
 
-// SyncJournal records a single in-flight temporary before copying any bytes
-// and each new release path after its successful no-replace publication.
+// SyncJournal records a single in-flight temporary, by name before it is
+// made and by inode before any byte is copied, and each new release path
+// after its successful no-replace publication.
 type SyncJournal struct {
 	Pending func(PendingCopy) error
 	Created func(file string) error

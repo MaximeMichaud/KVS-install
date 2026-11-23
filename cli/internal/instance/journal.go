@@ -104,7 +104,8 @@ type Journal struct {
 	RestoreDB bool   `json:"restore_db,omitempty"`
 	// Files lists the release files of To, relative to the root.
 	Files []string `json:"files,omitempty"`
-	// Pending is the temporary currently being filled or published.
+	// Pending is the temporary being made, filled or published: its name
+	// is recorded before the file exists, its inode before it is filled.
 	Pending *release.PendingCopy `json:"pending,omitempty"`
 	// Created lists target-only files successfully published by this run.
 	Created []string `json:"created,omitempty"`

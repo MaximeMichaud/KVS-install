@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -353,8 +354,19 @@ func TestJournalTemporaryCleanup(t *testing.T) {
 					t.Fatalf("pending %+v, previous %q", copy, last)
 				}
 				info, err := os.Lstat(filepath.Join(root, copy.Temporary))
-				if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
-					t.Fatalf("journal must identify an empty reservation before copying: %v %v", info, err)
+				if copy.Inode == 0 {
+					// The name is journaled before the file exists.
+					if copy.Device != 0 || !os.IsNotExist(err) {
+						t.Fatalf("journal must name the temporary before making it: %+v, %v", copy, err)
+					}
+					pending = copy
+					return nil
+				}
+				if err != nil || !info.Mode().IsRegular() || info.Size() != 0 || copy.Temporary != pending.Temporary || pending.Inode != 0 {
+					t.Fatalf("journal must identify the empty reservation it named before copying: %+v after %+v, %v %v", copy, pending, info, err)
+				}
+				if st := info.Sys().(*syscall.Stat_t); st.Ino != copy.Inode || uint64(st.Dev) != copy.Device {
+					t.Fatalf("journal identifies another file than %s: %+v", copy.Temporary, copy)
 				}
 				pending = copy
 				return nil
@@ -391,6 +403,120 @@ func TestJournalTemporaryCleanup(t *testing.T) {
 		if got := content(t, filepath.Join(root, file)); got != want {
 			t.Errorf("%s: %q", file, got)
 		}
+	}
+}
+
+// A run stopped between making its temporary and journaling its inode
+// leaves the name in the journal and an empty file: recovery removes it.
+// Anything else at that name is not the temporary and stays.
+func TestRemovePendingOfATemporaryJournaledByNameOnly(t *testing.T) {
+	const tmp = "conf/.kvsctl-123"
+	pending := PendingCopy{File: "conf/site.conf", Temporary: tmp}
+	for _, tc := range []struct {
+		name  string
+		make  func(t *testing.T, full string)
+		stays bool
+	}{
+		{name: "nothing", make: func(*testing.T, string) {}},
+		{name: "empty file", make: func(t *testing.T, full string) {
+			writeTree(t, filepath.Dir(full), map[string]string{filepath.Base(full): ""})
+		}},
+		{name: "file with content", stays: true, make: func(t *testing.T, full string) {
+			writeTree(t, filepath.Dir(full), map[string]string{filepath.Base(full): "local"})
+		}},
+		{name: "directory", stays: true, make: func(t *testing.T, full string) { mkdir(t, full) }},
+		{name: "link", stays: true, make: func(t *testing.T, full string) { symlink(t, "site.conf", full) }},
+		{name: "fifo", stays: true, make: func(t *testing.T, full string) {
+			if err := unix.Mkfifo(full, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTree(t, root, map[string]string{"conf/site.conf": ""})
+			full := filepath.Join(root, tmp)
+			tc.make(t, full)
+			if err := RemovePending(root, pending); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(full); (err == nil) != tc.stays {
+				t.Fatalf("%s after recovery: %v, stays = %v", tmp, err, tc.stays)
+			}
+			if got := content(t, filepath.Join(root, "conf/site.conf")); got != "" {
+				t.Fatalf("the neighbor changed: %q", got)
+			}
+		})
+	}
+}
+
+// A name taken between its journal entry and the creation of the temporary
+// is left alone: the copy goes to another name, journaled in turn. A name
+// already taken is never journaled: recovery would take an empty local file
+// under it for the temporary.
+func TestTemporaryNameTakenBeforeItsCreation(t *testing.T) {
+	root, src := t.TempDir(), t.TempDir()
+	const name = "conf/site.conf"
+	writeTree(t, src, map[string]string{name: "release"})
+	writeTree(t, root, map[string]string{"conf/.kvsctl-7": ""})
+	draws := []uint32{7, 8, 9}
+	oldNumber := tempNumber
+	t.Cleanup(func() { tempNumber = oldNumber })
+	tempNumber = func() uint32 {
+		n := draws[0]
+		draws = draws[1:]
+		return n
+	}
+	var named []string
+	journal := &SyncJournal{
+		Pending: func(copy PendingCopy) error {
+			if copy.Inode == 0 {
+				named = append(named, copy.Temporary)
+				if len(named) == 1 {
+					writeTree(t, root, map[string]string{copy.Temporary: "local"})
+				}
+			} else if copy.Temporary != named[len(named)-1] {
+				t.Fatalf("identified %s, named %q", copy.Temporary, named)
+			}
+			return nil
+		},
+		Created: func(string) error { return nil },
+	}
+	if err := SyncWithJournal(src, root, []string{name}, nil, journal); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(named, []string{"conf/.kvsctl-8", "conf/.kvsctl-9"}) {
+		t.Fatalf("journaled names: %q", named)
+	}
+	if content(t, filepath.Join(root, named[0])) != "local" || content(t, filepath.Join(root, name)) != "release" {
+		t.Fatal("the local file or the release file is wrong")
+	}
+	if got := names(t, filepath.Join(root, "conf")); !slices.Equal(got, []string{".kvsctl-7", ".kvsctl-8", "site.conf"}) {
+		t.Fatalf("conf/ holds %q", got)
+	}
+}
+
+// A journal that cannot take the name of the temporary stops the copy
+// before any file is made.
+func TestNoTemporaryWithoutItsJournalEntry(t *testing.T) {
+	root, src := t.TempDir(), t.TempDir()
+	const name = "conf/site.conf"
+	writeTree(t, src, map[string]string{name: "release"})
+	refused := errors.New("journal refused")
+	err := SyncWithJournal(src, root, []string{name}, nil, &SyncJournal{
+		Pending: func(copy PendingCopy) error {
+			if copy.Inode != 0 || exists(filepath.Join(root, copy.Temporary)) {
+				t.Fatalf("a temporary was made without its journal entry: %+v", copy)
+			}
+			return refused
+		},
+		Created: func(string) error { return nil },
+	})
+	if !errors.Is(err, refused) {
+		t.Fatalf("Sync = %v", err)
+	}
+	if got := names(t, filepath.Join(root, "conf")); len(got) != 0 {
+		t.Fatalf("conf/ holds %q", got)
 	}
 }
 
