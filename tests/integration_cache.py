@@ -195,7 +195,21 @@ http { server { listen 80; location = /cache-probe.php {
                     return True
                 eventually(ticked, timeout=75)
                 record(f"{label}: scheduled cron tick completed cache operations")
+                # The entrypoint starts a relay that stopped again.
+                listening = "$s=@fsockopen('127.0.0.1',11211,$e,$m,1); exit($s ? 0 : 1);"
                 for service in ("php-fpm", "cron"):
+                    execute(service, "pkill", "-x", "socat")
+                for service in ("php-fpm", "cron"):
+                    eventually(lambda: execute(service, "php", "-r", listening).returncode == 0)
+                assert http_probe("127.0.0.1")["ok"]
+                record(f"{label}: a stopped loopback relay is started again in PHP-FPM and cron")
+                # The loop that does it is the parent of the listening relay,
+                # the oldest socat: stop it first, then the relay stays
+                # stopped. Its command line is the entrypoint's, which is not
+                # matched by name: the fixture and the images call it
+                # differently, and so does Docker's init where one runs.
+                for service in ("php-fpm", "cron"):
+                    execute(service, "sh", "-c", "kill $(ps -o ppid= -p $(pgrep -o -x socat))")
                     execute(service, "pkill", "-x", "socat")
                 for service in ("php-fpm", "cron"):
                     execute(service, "php", "-r",

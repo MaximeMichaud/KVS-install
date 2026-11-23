@@ -30,7 +30,21 @@ start_memcache_loopback() {
         return
     fi
 
-    socat "TCP4-LISTEN:${port},bind=127.0.0.1,reuseaddr,fork" "TCP:${host}:${port}" &
+    # The relay is the only route to the cache of a site whose setup.php
+    # names 127.0.0.1, and nothing else looks at it: this loop outlives the
+    # exec at the end of this script, as a child of the container's main
+    # process, and starts a relay that stopped again. To run without the
+    # relay, set KVS_MEMCACHE_LOOPBACK=false and recreate the container: a
+    # kill by this script's name would also reach Docker's init where the
+    # service has one, and stop the container.
+    (
+        while :; do
+            status=0
+            socat "TCP4-LISTEN:${port},bind=127.0.0.1,reuseaddr,fork" "TCP:${host}:${port}" || status=$?
+            echo "WARNING: the Memcache loopback 127.0.0.1:${port} stopped (status ${status}), starting it again in 2 seconds" >&2
+            sleep 2
+        done
+    ) &
     echo "Memcache loopback: 127.0.0.1:${port} -> ${host}:${port}"
 }
 
