@@ -18,7 +18,7 @@ chown() { :; }
 docker() {
     case "$*" in
         'compose -p multi-site -f docker-compose.caddy.yml up -d')
-            flock -n "$locks/.routes" true || return 23
+            if flock -n "$locks/.routes" true; then return 23; fi
             touch "$work/proxy-started" ;;
         'exec kvs-caddy caddy reload '*)
             if flock -n "$locks/.routes" true; then return 23; fi

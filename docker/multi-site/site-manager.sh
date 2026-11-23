@@ -1341,6 +1341,8 @@ lock_routes() {
     local dir="$SCRIPT_DIR/.locks/.routes"
     mkdir -p -- "$dir" || return 1
     exec 8<"$dir" || return 1
+    flock -n 8 && return 0
+    log_info "Waiting for another route operation to finish..."
     flock -x 8
 }
 
@@ -1896,17 +1898,24 @@ resolve_caddy_acme_email() {
 }
 
 start_caddy() {
+    # The ACME check and Compose must see the same routes, and
+    # primary-remove deletes its route only while Caddy is stopped: hold the
+    # route lock from the check until Compose has started the proxy.
+    lock_routes || return 1
     resolve_caddy_acme_email || return 1
 
     log_info "Starting Caddy proxy..."
     mkdir -p "$CADDY_SITES_DIR"
-    ensure_proxy_network
+    # The lock must end with this command: Docker does not inherit it, so a
+    # Compose that outlives a killed caddy-start does not keep it.
+    ensure_proxy_network 8<&-
     cd "$SCRIPT_DIR"
     # Preserve the historical implicit Compose project and its certificate
     # volumes while still using the externally managed kvs-proxy network.
     # An empty ACME_EMAIL leaves the compose file default, for routes that
     # need no ACME account.
-    ACME_EMAIL="$CADDY_ACME_EMAIL" docker compose -p multi-site -f docker-compose.caddy.yml up -d
+    ACME_EMAIL="$CADDY_ACME_EMAIL" docker compose -p multi-site -f docker-compose.caddy.yml up -d 8<&-
+    exec 8<&-
     wait_for_caddy
     reload_caddy
     log_success "Caddy proxy started"
