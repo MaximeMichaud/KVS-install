@@ -4576,7 +4576,7 @@ publish_endpoint_is_listening() {
     local endpoint="$1"
     local protocol="${2:-tcp}"
     local local_address
-    local listener_address listeners publish_key listener_key
+    local listener_address listeners publish_key listener_key listener_v6only listener_device
     local -a ss_args=(-H -ltn)
 
     parse_publish_endpoint "$endpoint" || return 2
@@ -4592,26 +4592,47 @@ publish_endpoint_is_listening() {
     while read -r _ _ _ local_address _; do
         [ -n "$local_address" ] || continue
         listener_address=${local_address%:*}
+        # ss adds "%device" to the address of a socket bound to a device,
+        # the wildcards included. Docker binds none, so such a socket is
+        # never one the stop releases.
+        listener_device=false
+        if [[ $listener_address == *%* ]]; then
+            listener_device=true
+            listener_address=${listener_address%%\%*}
+        fi
+        # ss prints "*" for an IPv6 wildcard socket that also accepts IPv4
+        # and "[::]" only when it knows the socket is IPv6-only; an older ss
+        # prints a bare "::" for both, which stays a conflict for IPv4. The
+        # distinction needs an iproute2 that prints both forms (from about
+        # 4.15); an older ss is handled as before.
+        listener_v6only=false
+        if [ "$listener_address" = '[::]' ]; then listener_v6only=true; fi
         listener_address=${listener_address#[}
         listener_address=${listener_address%]}
 
         # During preflight, ignore only this exact socket if Docker publishes it
         # for a container the approved stop or pending retirement will release.
-        case "$listener_address" in
-            '*') [[ "${3:-}" == *$'\n'"0.0.0.0:$PUBLISH_PORT/$protocol"$'\n'* ||
-                    "${3:-}" == *$'\n'"[::]:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
-            *:*) [[ "${3:-}" == *$'\n'"[$listener_address]:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
-            *) [[ "${3:-}" == *$'\n'"$listener_address:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
-        esac
+        if [ "$listener_device" = false ]; then
+            case "$listener_address" in
+                '*') [[ "${3:-}" == *$'\n'"0.0.0.0:$PUBLISH_PORT/$protocol"$'\n'* ||
+                        "${3:-}" == *$'\n'"[::]:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
+                *:*) [[ "${3:-}" == *$'\n'"[$listener_address]:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
+                *) [[ "${3:-}" == *$'\n'"$listener_address:$PUBLISH_PORT/$protocol"$'\n'* ]] && continue ;;
+            esac
+        fi
         if [[ $publish_key = any || $publish_key = *:any || $listener_address = '*' ]]; then
             return 0
         fi
-        # ss may include an interface suffix on a numeric address.
-        listener_address=${listener_address%%\%*}
-        listener_key=$(publish_address_key "${listener_address%]}") || return 2
-        if [[ $listener_key = "$publish_key" || $listener_key = *:any ]]; then
-            return 0
-        fi
+        listener_key=$(publish_address_key "$listener_address") || return 2
+        # Docker binds a numeric address in its own family, so a wildcard
+        # listener of the other family does not hold it. A wildcard request
+        # stays a conflict with every listener (above): which families the
+        # daemon binds for it depends on its version and port driver.
+        case "$listener_key" in
+            "$publish_key") return 0 ;;
+            4:any) if [[ $publish_key = 4:* ]]; then return 0; fi ;;
+            6:any) if [[ $listener_v6only = false || $publish_key = 6:* ]]; then return 0; fi ;;
+        esac
     done <<< "$listeners"
 
     return 1

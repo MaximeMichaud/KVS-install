@@ -693,7 +693,51 @@ publish_endpoint_is_listening 127.0.0.2:80 tcp ||
 MOCK_SS_OUTPUT=$'LISTEN 0 4096 0.0.0.0:80 0.0.0.0:*\n'
 publish_endpoint_is_listening 127.0.0.4:80 tcp ||
     fail "an endpoint-specific check missed a wildcard listener"
-unset -f ss
+# A numeric address is bound in its own family: the IPv4 wildcard does not
+# hold an IPv6 address, and an IPv6-only wildcard, which ss prints as "[::]",
+# does not hold an IPv4 one. The dual-stack "*" and the bare "::" of an older
+# ss hold both, and a wildcard request conflicts with every listener.
+expect_listening() {
+    local want=$1 listener=$2 endpoint=$3 status=0
+    MOCK_SS_OUTPUT="LISTEN 0 4096 $listener 0.0.0.0:*"$'\n'
+    publish_endpoint_is_listening "$endpoint" tcp || status=$?
+    [ "$status" = "$want" ] ||
+        fail "listener $listener against $endpoint: want status $want, got $status"
+}
+expect_listening 1 '0.0.0.0:80' '[2001:db8::1]:80'
+expect_listening 0 '0.0.0.0:80' '[::ffff:127.0.0.4]:80'
+expect_listening 0 '0.0.0.0:80' '[::]:80'
+expect_listening 1 '[::]:80' 127.0.0.4:80
+expect_listening 0 '[::]:80' '[2001:db8::1]:80'
+expect_listening 0 '[::]:80' 0.0.0.0:80
+expect_listening 0 '[::]:80' 80
+expect_listening 0 '*:80' 127.0.0.4:80
+expect_listening 0 '*:80' '[2001:db8::1]:80'
+expect_listening 0 ':::80' 127.0.0.4:80
+expect_listening 0 ':::80' '[2001:db8::1]:80'
+expect_listening 1 '[2001:db8::1]:80' 127.0.0.4:80
+expect_listening 1 '127.0.0.4:80' '[0:0:0:0:0:0:0:1]:80'
+expect_listening 0 '[::1]:80' '[0:0:0:0:0:0:0:1]:80'
+# A socket bound to a device carries "%device": the wildcards keep their
+# meaning, and such a socket is never one a Docker stop releases.
+expect_listening 0 '*%eth0:80' 127.0.0.4:80
+expect_listening 0 '*%eth0:80' '[2001:db8::1]:80'
+expect_listening 1 '[::]%eth0:80' 127.0.0.4:80
+expect_listening 0 '[::]%eth0:80' '[2001:db8::1]:80'
+expect_listening 0 '0.0.0.0%eth0:80' 127.0.0.4:80
+expect_listening 1 '0.0.0.0%eth0:80' '[2001:db8::1]:80'
+expect_listening 0 '[2001:db8::1]%eth0:80' '[2001:db8::1]:80'
+MOCK_SS_OUTPUT=$'LISTEN 0 4096 *:80 0.0.0.0:*\n'
+if publish_endpoint_is_listening 127.0.0.4:80 tcp $'\n0.0.0.0:80/tcp\n'; then
+    fail "a wildcard socket the stop releases was reported as a conflict"
+fi
+MOCK_SS_OUTPUT=$'LISTEN 0 4096 *%eth0:80 0.0.0.0:*\n'
+publish_endpoint_is_listening 127.0.0.4:80 tcp $'\n0.0.0.0:80/tcp\n' ||
+    fail "a device-bound wildcard socket was taken for one the stop releases"
+MOCK_SS_OUTPUT=$'LISTEN 0 4096 127.0.0.4%eth0:80 0.0.0.0:*\n'
+publish_endpoint_is_listening 127.0.0.4:80 tcp $'\n127.0.0.4:80/tcp\n' ||
+    fail "a device-bound socket was taken for one the stop releases"
+unset -f ss expect_listening
 
 docker() {
     if [ "${1:-}" = ps ]; then
