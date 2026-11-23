@@ -48,6 +48,19 @@ pass() {
     echo "ok $TESTS_RUN - $1"
 }
 
+# archive_lists <archive> <grep options and pattern>: grep over the whole
+# listing of the archive. Piped straight from tar, a grep -q that leaves at
+# its first match closes the pipe tar still writes to, and under pipefail
+# the status 141 of tar fails a check for a name that is there and passes
+# a check for a name that must not be.
+archive_lists() {
+    local archive="$1" listing
+
+    shift
+    listing=$(tar -tf "$archive") || fail "the archive $archive cannot be listed"
+    grep "$@" <<< "$listing"
+}
+
 #################################################################
 # Fixtures
 #################################################################
@@ -1337,15 +1350,15 @@ test_excluded_and_included_paths_change_what_travels() {
     # themselves travel empty.
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" --exclude backup archive "$site" ||
         fail "the archive with exclusions must be written: $(cat "$err")"
-    tar -tf "$archive" | grep -Fxq "www/tmp/" || fail "tmp travels as an empty directory: $(tar -tf "$archive")"
-    tar -tf "$archive" | grep -Fq "www/tmp/upload.part" && fail "temporary files must not travel"
-    tar -tf "$archive" | grep -Fq "www/admin/smarty/template-c/x.php" && fail "compiled templates must not travel"
-    tar -tf "$archive" | grep -Fq "www/admin/logs/debug_sql_post.txt" && fail "the query log must not travel"
-    tar -tf "$archive" | grep -Fxq "www/admin/logs/cron.txt" || fail "the other logs travel"
-    tar -tf "$archive" | grep -Fq "www/backup" && fail "an excluded directory must not travel"
-    tar -tf "$archive" | grep -Fq "www/.well-known" && fail "a hidden directory must not travel"
-    tar -tf "$archive" | grep -Fxq "www/contents/videos_sources/0/1/s.mp4" || fail "the sources travel when not excluded"
-    tar -tf "$archive" | grep -Fxq "www/lib/a.php" || fail "an unknown directory travels"
+    archive_lists "$archive" -Fxq "www/tmp/" || fail "tmp travels as an empty directory: $(tar -tf "$archive")"
+    archive_lists "$archive" -Fq "www/tmp/upload.part" && fail "temporary files must not travel"
+    archive_lists "$archive" -Fq "www/admin/smarty/template-c/x.php" && fail "compiled templates must not travel"
+    archive_lists "$archive" -Fq "www/admin/logs/debug_sql_post.txt" && fail "the query log must not travel"
+    archive_lists "$archive" -Fxq "www/admin/logs/cron.txt" || fail "the other logs travel"
+    archive_lists "$archive" -Fq "www/backup" && fail "an excluded directory must not travel"
+    archive_lists "$archive" -Fq "www/.well-known" && fail "a hidden directory must not travel"
+    archive_lists "$archive" -Fxq "www/contents/videos_sources/0/1/s.mp4" || fail "the sources travel when not excluded"
+    archive_lists "$archive" -Fxq "www/lib/a.php" || fail "an unknown directory travels"
     grep -q "backup .*excluded" "$err" || fail "the summary lists what stays behind: $(cat "$err")"
     grep -q "Entries, largest first" "$err" || fail "the summary has the entry table"
 
@@ -1386,7 +1399,7 @@ test_named_paths_are_normalised_and_a_missing_one_is_reported() {
 
         run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" --exclude "$form" archive "$site" ||
             fail "the archive with '$form' must be written: $(cat "$err")"
-        tar -tf "$archive" | grep -Fq "www/contents/videos_sources/" &&
+        archive_lists "$archive" -Fq "www/contents/videos_sources/" &&
             fail "'$form' must leave the directory out of the archive, found: $(tar -tf "$archive" | grep videos_sources)"
         rm -f "$archive"
     done
@@ -1404,7 +1417,7 @@ test_named_paths_are_normalised_and_a_missing_one_is_reported() {
             fail "--include '$form' must take the hidden entry along, got: $value"
         run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" --include "$form" archive "$site" ||
             fail "the archive with --include '$form' must be written: $(cat "$err")"
-        tar -tf "$archive" | grep -Fxq "www/.well-known/acme/t" ||
+        archive_lists "$archive" -Fxq "www/.well-known/acme/t" ||
             fail "--include '$form' must put the hidden entry in the archive: $(tar -tf "$archive")"
         rm -f "$archive"
     done
@@ -1996,7 +2009,7 @@ test_the_archive_follows_links_out_only_when_told() {
     # The standard layout needs no option.
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size -o "$archive" archive "$site" ||
         fail "the archive of a contents directory on another disk must be written: $(cat "$err")"
-    tar -tf "$archive" | grep -Fxq "www/contents/videos_sources/0/s.mp4" || fail "the sources must travel: $(tar -tf "$archive")"
+    archive_lists "$archive" -Fxq "www/contents/videos_sources/0/s.mp4" || fail "the sources must travel: $(tar -tf "$archive")"
     grep -q "Following 1 link(s) of a contents directory on another disk" "$err" || fail "the followed link must be said: $(cat "$err")"
     rm -f "$archive"
 
@@ -2018,12 +2031,12 @@ test_the_archive_follows_links_out_only_when_told() {
     # Left behind, or followed once checked.
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --exclude contents/videos/leak.txt -o "$archive" archive "$site" ||
         fail "an excluded link must not stop the archive: $(cat "$err")"
-    tar -tf "$archive" | grep -Fq "www/contents/videos/leak.txt" && fail "the excluded link must stay behind"
+    archive_lists "$archive" -Fq "www/contents/videos/leak.txt" && fail "the excluded link must stay behind"
     rm -f "$archive"
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --follow-external-links -o "$archive" archive "$site" ||
         fail "--follow-external-links must let the archive go on: $(cat "$err")"
     grep -q "^WARNING: following 1 symbolic link(s) leading out of the site" "$err" || fail "following them must be said: $(cat "$err")"
-    tar -tf "$archive" | grep -Fxq "www/contents/videos/leak.txt" || fail "the followed link must travel: $(tar -tf "$archive")"
+    archive_lists "$archive" -Fxq "www/contents/videos/leak.txt" || fail "the followed link must travel: $(tar -tf "$archive")"
     rm -f "$archive"
 
     # A search that could not run (no room for its list) stops it too,
@@ -3006,11 +3019,33 @@ test_the_archive_holds_the_site_the_dump_and_the_manifest() {
     [[ $(detect_value "$manifest" created) =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
         fail "the manifest must record a UTC creation time"
 
-    tar -xOf "$archive" database.sql.gz | gzip -dc | grep -Fq 'CREATE TABLE `ktvs_options`' ||
+    tar -xOf "$archive" database.sql.gz | gzip -dc | grep -F 'CREATE TABLE `ktvs_options`' > /dev/null ||
         fail "the archived dump must hold the tables"
     grep -q "Archive written: $archive" "$err" || fail "the archive path must be reported: $(cat "$err")"
     grep -q "IMPORT_ARCHIVE=" "$err" || fail "the next step must be explained"
     pass "the archive holds the site, the dump and the manifest"
+}
+
+# A listing longer than a pipe holds, with the name looked for at its
+# start: the case where tar is still writing when grep -q has its answer.
+test_archive_listing_checks_read_the_whole_listing() {
+    local dir="$TMP_ROOT/listing" archive="$TMP_ROOT/listing.tar" name
+
+    printf -v name '%0100d' 0
+    mkdir -p "$dir/www"
+    (cd "$dir/www" && touch first "$name"{1..3000})
+    tar -cf "$archive" -C "$dir" www/first www
+    [ "$(tar -tf "$archive" | wc -c)" -gt 262144 ] || fail "the listing must exceed what a pipe holds"
+    archive_lists "$archive" -Fxq "www/first" || fail "a name at the start of a long listing must be found"
+    archive_lists "$archive" -Fq "www/first" || fail "a name that must not travel was not seen at the start of a long listing"
+    archive_lists "$archive" -q "^www/first" || fail "a pattern must be matched at the start of a long listing"
+    archive_lists "$archive" -Fxq "www/absent" && fail "a name the archive does not hold was found"
+    # An archive tar cannot list stops the test, whichever way it is asked.
+    local said
+    said=$( (archive_lists "$TMP_ROOT/listing-missing.tar" -Fxq "www/first" || echo went-on) 2>&1) || true
+    [[ $said == *"not ok - the archive $TMP_ROOT/listing-missing.tar cannot be listed" ]] ||
+        fail "a missing archive must stop the test: $said"
+    pass "archive listing checks read the whole listing"
 }
 
 test_the_archive_can_be_written_on_stdout() {
@@ -3041,7 +3076,7 @@ test_a_file_changing_under_the_site_is_a_warning_not_a_failure() {
         run_export "$TAR_BIN:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" archive "$site" ||
         fail "a file changing under the site must not fail the export: $(cat "$err")"
     [ -s "$archive" ] || fail "the archive must still be published"
-    tar -tf "$archive" | grep -Fxq "www/admin/include/setup.php" ||
+    archive_lists "$archive" -Fxq "www/admin/include/setup.php" ||
         fail "the published archive must hold the site"
     grep -q "^WARNING: files changed, were removed, or shrank" "$err" ||
         fail "the change must be reported as a warning: $(cat "$err")"
@@ -3106,7 +3141,7 @@ test_a_symlink_to_nothing_stops_the_archive() {
     # to stop.
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --exclude contents -o "$archive" archive "$site" ||
         fail "an excluded symlink to nothing must not stop the archive: $(cat "$err")"
-    tar -tf "$archive" | grep -q "^www/contents" && fail "the excluded link must stay behind"
+    archive_lists "$archive" -q "^www/contents" && fail "the excluded link must stay behind"
     rm -f "$archive"
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --no-size --dump-only -o "$TMP_ROOT/dangling.sql.gz" "$site" ||
         fail "a dump alone must not look at the site files: $(cat "$err")"
@@ -3202,7 +3237,7 @@ test_the_dump_is_staged_next_to_the_archive_and_outside_the_site() {
     grep -Eq "^zstd stdout: \[$work/\.kvs-export\.[^/]+/database\.sql\.zst\]$" "$STUB_LOG" ||
         fail "the dump must be staged next to the archive: $(grep 'stdout:' "$STUB_LOG")"
     find "$work" -maxdepth 1 -name '.kvs-export.*' | grep -q . && fail "the staging directory must be removed: $(ls -A "$work")"
-    tar -tf "$work/export.tar" | grep -Fxq "database.sql.zst" || fail "the archive must hold the dump"
+    archive_lists "$work/export.tar" -Fxq "database.sql.zst" || fail "the archive must hold the dump"
 
     # Two existing directories differ only by the last byte. Check the
     # actual staging file's grandparent and the directory passed to sync.
@@ -3398,7 +3433,7 @@ EOF
                     if [ "$kind" = dump ]; then
                         gzip -dc "$output" | grep -Fq -- '-- Dump completed' || fail 'replacement dump is incomplete'
                     else
-                        tar -xOf "$output" database.sql.gz | gzip -dc | grep -Fq -- '-- Dump completed' ||
+                        tar -xOf "$output" database.sql.gz | gzip -dc | grep -F -- '-- Dump completed' > /dev/null ||
                             fail 'replacement archive is incomplete'
                     fi
                     if [ "$present" = yes ]; then
@@ -3945,7 +3980,7 @@ test_an_unattended_run_asks_nothing() {
     # go ahead instead of waiting for an answer nobody can give.
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -o "$archive" archive "$site" ||
         fail "an unattended archive must not stop for a confirmation: $(cat "$err")"
-    tar -tf "$archive" | grep -Fxq "kvs-export.manifest" || fail "the archive must be complete"
+    archive_lists "$archive" -Fxq "kvs-export.manifest" || fail "the archive must be complete"
     grep -q "Installation detected on" "$err" || fail "the summary must be printed on stderr"
     grep -q "password it\*\*\*\*\*\*\*\*" "$err" || fail "the summary must mask the password: $(cat "$err")"
     grep -Fq "$REAL_PASSWORD" "$err" && fail "the summary must never print the password"
@@ -4032,6 +4067,7 @@ test_views_are_dumped_apart_when_the_tables_are_locked
 test_versioned_tables_are_refused_before_any_export_is_written
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent
 test_the_archive_holds_the_site_the_dump_and_the_manifest
+test_archive_listing_checks_read_the_whole_listing
 test_the_archive_can_be_written_on_stdout
 test_a_file_changing_under_the_site_is_a_warning_not_a_failure
 test_a_symlink_to_nothing_stops_the_archive
