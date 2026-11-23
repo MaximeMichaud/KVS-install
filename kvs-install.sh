@@ -3684,6 +3684,9 @@ function updatephpMyAdmin() {
     local install_gid
     local status
     local old_moved=false
+    local config="$install_dir/config.inc.php"
+    local keep_config=false
+    local install_root link_path link_target link_hops=0
 
     install_parent=$(dirname "$install_dir") || return $?
     mkdir -p "$install_parent" || return $?
@@ -3694,6 +3697,32 @@ function updatephpMyAdmin() {
       fi
       install_metadata=$(stat -Lc '%a %u %g' "$install_dir") || return $?
       read -r install_mode install_uid install_gid <<< "$install_metadata"
+      # Nonempty local settings are kept, as the installation keeps them. An
+      # empty regular file is generated again; anything else is not a
+      # configuration this update can carry over.
+      if [[ -f "$config" && -s "$config" ]]; then
+        keep_config=true
+        # A link that passes through the tree about to be replaced would
+        # dangle afterwards: follow it hop by hop before any download.
+        install_root=$(realpath -e -- "$install_dir") || return $?
+        link_path="$install_root/config.inc.php"
+        while [[ -L "$link_path" ]]; do
+          link_target=$(readlink -- "$link_path") || return $?
+          [[ "$link_target" == /* ]] || link_target="${link_path%/*}/$link_target"
+          link_path=$(realpath -ms -- "$link_target") || return $?
+          if ((++link_hops > 40)) || [[ "$link_path" == "$install_root"/* ]]; then
+            link_path="$install_root/inside"
+            break
+          fi
+        done
+        if [[ "$link_path" == "$install_root/inside" || ( -L "$config" && "$(realpath -e -- "$config")" == "$install_root"/* ) ]]; then
+          echo "phpMyAdmin update failed: $config is a link into the installation itself. Replace it with a regular file holding your settings, then retry." >&2
+          return 1
+        fi
+      elif [[ -L "$config" || ( -e "$config" && ! -f "$config" ) ]]; then
+        echo "phpMyAdmin update failed: check the configuration at $config" >&2
+        return 1
+      fi
     else
       install_metadata=$(stat -Lc '%u %g' "$install_parent") || return $?
       read -r install_uid install_gid <<< "$install_metadata"
@@ -3761,9 +3790,15 @@ function updatephpMyAdmin() {
       rm -rf "$work_dir"
       return "$status"
     }
-    write_phpmyadmin_config "$new_dir"
+    if [[ "$keep_config" == true ]]; then
+      # The entry itself, a link included, with its owner and mode.
+      cp -a -- "$config" "$new_dir/config.inc.php"
+    else
+      write_phpmyadmin_config "$new_dir"
+    fi
     status=$?
     if ((status != 0)); then
+      echo "phpMyAdmin update failed: cannot prepare config.inc.php" >&2
       rm -rf "$work_dir"
       return "$status"
     fi
@@ -3800,6 +3835,18 @@ function updatephpMyAdmin() {
       fi
       rm -rf "$work_dir"
       return "$status"
+    fi
+
+    # Backstop for a link the walk above cannot see, one that crosses the
+    # replaced tree through a directory link outside it: put the old tree back.
+    if [[ "$keep_config" == true && ( ! -f "$config" || ! -s "$config" ) ]]; then
+      if mv "$install_dir" "$new_dir" && mv "$old_dir" "$install_dir"; then
+        rm -rf "$work_dir"
+        echo "phpMyAdmin update failed: $config no longer reaches your settings once the installation is replaced; the previous installation was put back. Replace the link with a regular file holding your settings, then retry." >&2
+      else
+        echo "phpMyAdmin rollback failed; previous files remain in $old_dir" >&2
+      fi
+      return 1
     fi
 
     rm -rf "$work_dir"

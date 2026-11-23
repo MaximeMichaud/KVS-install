@@ -1551,6 +1551,114 @@ EOF
     fail "phpMyAdmin staging directory did not receive the preserved owner and group" || return 1
 }
 
+# The separate "Update phpMyAdmin" menu option generated config.inc.php again
+# on every update: local settings and the cookie secret were lost.
+test_phpmyadmin_update_keeps_settings() {
+  local temp_dir install_dir config layout status settings tree_inode previous_umask
+  previous_umask=$(umask)
+  umask 077
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  install_dir="$temp_dir/php my admin"
+  config="$install_dir/config.inc.php"
+  mkdir -p "$temp_dir/fixture/phpMyAdmin-test"
+  printf 'new-version\n' >"$temp_dir/fixture/phpMyAdmin-test/index.php"
+  printf "<?php\n\$cfg['blowfish_secret'] = '';\n" >"$temp_dir/fixture/phpMyAdmin-test/config.sample.inc.php"
+  tar czf "$temp_dir/archive.tar.gz" -C "$temp_dir/fixture" phpMyAdmin-test
+  export TEST_PMA_ARCHIVE="$temp_dir/archive.tar.gz" TEST_PMA_CALLS="$temp_dir/calls"
+  curl() {
+    echo curl >>"$TEST_PMA_CALLS"
+    if [[ $* == *"downloads.test"* ]]; then
+      printf '<a href="https://files.phpmyadmin.net/phpMyAdmin/test/phpMyAdmin-test-all-languages.tar.gz">download</a>\n'
+    else
+      cp "$TEST_PMA_ARCHIVE" "${!#}"
+    fi
+  }
+  chown() { :; }
+  openssl() { echo openssl >>"$TEST_PMA_CALLS"; printf 'generated-secret\n'; }
+  settings="<?php \$cfg['blowfish_secret'] = 'kept-secret'; \$cfg['Servers'][1]['host'] = 'db.example.test';" # pragma: allowlist secret
+
+  for layout in file external relative internal chained through crossing dotdot dangling empty directory; do
+    rm -rf "$install_dir" "$temp_dir/settings" "$TEST_PMA_CALLS"
+    mkdir -p "$install_dir/conf" "$temp_dir/settings"
+    chmod 750 "$install_dir"
+    printf 'working-version\n' >"$install_dir/index.php"
+    printf 'old\n' >"$install_dir/old-sentinel"
+    printf '%s\n' "$settings" >"$temp_dir/settings/config.inc.php"
+    chmod 640 "$temp_dir/settings/config.inc.php"
+    case "$layout" in
+      file) cp -p "$temp_dir/settings/config.inc.php" "$config" ;;
+      external) ln -s "$temp_dir/settings/config.inc.php" "$config" ;;
+      relative) ln -s "../settings/config.inc.php" "$config" ;;
+      internal)
+        cp -p "$temp_dir/settings/config.inc.php" "$install_dir/conf/local.php"
+        ln -s "conf/local.php" "$config" ;;
+      chained)
+        ln -s "$temp_dir/settings/config.inc.php" "$install_dir/conf/local.php"
+        ln -s "conf/local.php" "$config" ;;
+      through)
+        cp -p "$temp_dir/settings/config.inc.php" "$install_dir/conf/local.php"
+        ln -s "$install_dir/conf" "$temp_dir/settings/back"
+        ln -s "$temp_dir/settings/back/local.php" "$config" ;;
+      crossing)
+        # Out through a directory link, back in, then out again by a link.
+        ln -s "$install_dir/conf" "$temp_dir/settings/back"
+        ln -s "$temp_dir/settings/config.inc.php" "$install_dir/conf/ext.php"
+        ln -s "$temp_dir/settings/back/ext.php" "$config" ;;
+      dotdot)
+        ln -s "$install_dir/conf" "$temp_dir/settings/back"
+        ln -s "$temp_dir/settings/back/../../settings/config.inc.php" "$config" ;;
+      dangling) ln -s "$temp_dir/settings/missing.php" "$config" ;;
+      empty) : >"$config" ;;
+      directory) mkdir "$config" ;;
+    esac
+    tree_inode=$(stat -c %i "$install_dir")
+    status=0
+    updatephpMyAdmin "$install_dir" "https://downloads.test/" >"$temp_dir/out" 2>&1 || status=$?
+    [[ -z "$(find "$temp_dir" -maxdepth 1 -name '*.update.*')" ]] || fail "staging directory left for $layout" || return 1
+    case "$layout" in
+      file|external|relative)
+        assert_equal 0 "$status" "update with a $layout configuration: $(<"$temp_dir/out")" || return 1
+        assert_file_contains "$install_dir/index.php" "new-version" "the application was not updated ($layout)" || return 1
+        [[ ! -e "$install_dir/old-sentinel" ]] || fail "old files were kept ($layout)" || return 1
+        assert_equal "$settings" "$(<"$config")" "settings after an update ($layout)" || return 1
+        assert_equal "640 750" "$(stat -Lc %a "$config") $(stat -c %a "$install_dir")" "modes after an update ($layout)" || return 1
+        ! grep -q openssl "$TEST_PMA_CALLS" || fail "a new secret was generated ($layout)" || return 1
+        case "$layout" in
+          file) [[ ! -L "$config" ]] || fail "the regular configuration became a link" || return 1 ;;
+          external) assert_equal "$temp_dir/settings/config.inc.php" "$(readlink "$config")" "external link" || return 1 ;;
+          relative) assert_equal "../settings/config.inc.php" "$(readlink "$config")" "relative link" || return 1 ;;
+        esac ;;
+      internal|chained|through)
+        # The link passes through the tree being replaced: refused untouched.
+        assert_equal 1 "$status" "update over a configuration link into the installation ($layout)" || return 1
+        [[ ! -e "$TEST_PMA_CALLS" ]] || fail "downloaded before refusing ($layout)" || return 1
+        assert_equal "$tree_inode" "$(stat -c %i "$install_dir")" "the installation was swapped ($layout)" || return 1
+        grep -Fq "$config" "$temp_dir/out" || fail "the link was not named ($layout): $(<"$temp_dir/out")" || return 1
+        assert_file_contains "$install_dir/index.php" "working-version" "the old application was not put back ($layout)" || return 1
+        [[ -e "$install_dir/old-sentinel" && "$(<"$config")" == "$settings" && $(readlink "$config") == *local.php ]] ||
+          fail "the old tree was not put back whole ($layout)" || return 1 ;;
+      crossing|dotdot)
+        # Seen only once the tree is replaced: the old tree comes back whole.
+        assert_equal 1 "$status" "update over a link crossing the installation ($layout)" || return 1
+        grep -Fq "$config" "$temp_dir/out" && grep -Fq "put back" "$temp_dir/out" ||
+          fail "the rollback was not reported ($layout): $(<"$temp_dir/out")" || return 1
+        assert_file_contains "$install_dir/index.php" "working-version" "the old application was not put back ($layout)" || return 1
+        [[ -e "$install_dir/old-sentinel" && "$(<"$config")" == "$settings" ]] ||
+          fail "the old tree was not put back whole ($layout)" || return 1 ;;
+      dangling|directory)
+        assert_equal 1 "$status" "update over an unusable configuration ($layout)" || return 1
+        [[ ! -e "$TEST_PMA_CALLS" ]] || fail "downloaded before refusing ($layout)" || return 1
+        grep -Fq "$config" "$temp_dir/out" || fail "the configuration was not named ($layout)" || return 1
+        assert_file_contains "$install_dir/index.php" "working-version" "the installation changed ($layout)" || return 1 ;;
+      empty)
+        assert_equal 0 "$status" "update with an empty configuration" || return 1
+        assert_file_contains "$config" "generated-secret" "an empty configuration was not generated again" || return 1 ;;
+    esac
+  done
+  umask "$previous_umask"
+}
+
 # whatisdomain no longer leaves the shell in /root, so the phpMyAdmin install
 # must not depend on the current directory: started from a directory root
 # cannot write to, the archive was saved there, the download and extraction
@@ -2720,6 +2828,7 @@ run_test "the backup stays until the new copy is in place" test_restore_preserve
 run_test "backup survives failed clone" test_failed_clone_keeps_user_backup || failures=$((failures + 1))
 run_test "phpMyAdmin failure is non-destructive" test_phpmyadmin_failure_preserves_installation || failures=$((failures + 1))
 run_test "phpMyAdmin staged update succeeds" test_phpmyadmin_success_swaps_staged_installation || failures=$((failures + 1))
+run_test "phpMyAdmin update keeps local settings" test_phpmyadmin_update_keeps_settings || failures=$((failures + 1))
 run_test "phpMyAdmin install downloads outside the current directory" test_phpmyadmin_install_downloads_outside_the_current_directory || failures=$((failures + 1))
 run_test "NGINX cleanup is scoped" test_nginx_cleanup_uses_scoped_paths || failures=$((failures + 1))
 run_test "runtime input stays quiet without a terminal" test_runtime_input_stays_quiet_without_a_terminal || failures=$((failures + 1))
