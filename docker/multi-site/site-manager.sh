@@ -1339,9 +1339,16 @@ EOF
 # A start that ends between the cron stop and the "up -d" that starts the
 # site again leaves cron stopped, and restart: unless-stopped keeps it
 # stopped after a reboot too: the exit says so. Run from the EXIT trap.
+# A cron that ran before the stop is started again, as the rest of the site
+# still runs; start leaves the shell in the site's directory.
 STOPPED_CRON_SITE=""
+STOPPED_CRON_WAS_RUNNING=false
 stopped_cron_notice() {
     [ -n "$STOPPED_CRON_SITE" ] || return 0
+    if [ "$STOPPED_CRON_WAS_RUNNING" = true ] && docker compose start cron; then
+        log_warn "cron of ${STOPPED_CRON_SITE} ran before this start and has been started again"
+        return 0
+    fi
     log_warn "cron of ${STOPPED_CRON_SITE} is stopped: docker compose start cron in ${SITES_DIR}/${STOPPED_CRON_SITE}, or re-run ./site-manager.sh start ${STOPPED_CRON_SITE}"
 }
 
@@ -1467,6 +1474,9 @@ start_site() {
     # (40-configure-database.sh): a cron.php still running on a started
     # site must not see that. The "up -d" below starts cron again.
     log_info "Stopping cron for the initialization..."
+    if [ -n "$(docker compose ps --status running --quiet cron 2>/dev/null)" ]; then
+        STOPPED_CRON_WAS_RUNNING=true
+    fi
     docker compose stop cron
     STOPPED_CRON_SITE=$domain
     trap stopped_cron_notice EXIT
