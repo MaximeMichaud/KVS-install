@@ -12,7 +12,8 @@
 # An update that changes a digest and keeps the version means a tag was
 # moved: renovate.json never merges it by itself. No checkout leaves its
 # token in .git/config, as no job pushes with git, and every workflow sets
-# the permissions of its token instead of the repository default.
+# the permissions of its token instead of the repository default: read
+# access, except the two release jobs that publish.
 #
 # The workflows are read as YAML for the jobs and steps, and as text for the
 # version comments, which YAML drops.
@@ -148,6 +149,22 @@ def words_images(words):
         yield command, words[j] if j is not None and j < len(words) else None
 
 
+# The jobs whose token may write, and to what: the images job pushes the
+# release images to GHCR and the publish job creates the GitHub release.
+TOKEN_WRITES = {
+    ("release.yml", "images"): {"packages"},
+    ("release.yml", "publish"): {"contents"},
+}
+
+
+def token_writes(permissions):
+    """The scopes a permissions block gives more than read access to."""
+    if isinstance(permissions, dict):
+        return sorted(scope for scope, level in permissions.items() if level not in ("read", "none"))
+    # The only short form that gives no write access.
+    return [] if permissions == "read-all" else [f"every scope ({permissions})"]
+
+
 for path in workflows:
     name = path.relative_to(root)
     text = path.read_text(encoding="utf-8")
@@ -158,6 +175,28 @@ for path in workflows:
     if "permissions" not in workflow and not all("permissions" in job for job in jobs.values()):
         problems.append(f"{name}: no permissions block at the top or on every job, "
                         "so its jobs get the default token of the repository")
+    # A block that is there can still give write access. The top one is
+    # what a job added later gets, so it gives none; a job's own block
+    # replaces the top one whole, and gives none either outside
+    # TOKEN_WRITES, which holds no entry that is not used.
+    if "permissions" in workflow:
+        scopes = token_writes(workflow["permissions"])
+        if scopes:
+            problems.append(f"{name}: the permissions at the top give write access to {', '.join(scopes)}; "
+                            "give it to the job that needs it")
+    allowed_here = {job_name: allowed for (file, job_name), allowed in TOKEN_WRITES.items() if file == path.name}
+    for job_name in allowed_here.keys() - jobs.keys():
+        problems.append(f"{name}: TOKEN_WRITES of this test names the job {job_name}, which is not there")
+    for job_name, job in jobs.items():
+        # Without a block of its own, a job gets the top one.
+        scopes = set(token_writes(job["permissions"])) if "permissions" in job else set()
+        allowed = allowed_here.get(job_name, set())
+        if scopes - allowed:
+            problems.append(f"{name} job {job_name}: its token gets write access to {', '.join(sorted(scopes - allowed))}, "
+                            "which TOKEN_WRITES of this test does not allow")
+        if allowed - scopes:
+            problems.append(f"{name} job {job_name}: TOKEN_WRITES of this test allows write access to "
+                            f"{', '.join(sorted(allowed - scopes))}, which the job no longer has")
     found = []
     for job_name, job in jobs.items():
         if "uses" in job:
@@ -311,6 +350,7 @@ if problems:
     sys.exit(1)
 print(f"PASS: {uses_count} action references, every external one pinned to a commit with its full version, "
       f"{checkouts} checkouts without a kept token, every workflow with its own permissions, "
+      f"write access for {len(TOKEN_WRITES)} release jobs only, "
       f"{len(images)} images pinned by tag and digest and updated by Renovate, ShellCheck {hook_rev} "
       "as in the pre-commit hook, and a moved tag never merged by itself")
 PY
@@ -383,3 +423,79 @@ grep -Fq 'fixture.yml job fixture: a docker run whose image cannot be read' "$fi
 check_step "echo \"it's fine\"" ||
     fail "a quoted line without docker that cannot be split was refused: $(cat "$fixture_root/out")"
 echo "PASS: a docker run or create of an image pinned by tag only is found after a ;, in \$(...) or backquotes, quoted or not, in sh -c, behind global flags and short flag clusters"
+
+# The token of a job is read-only: a permissions block that gives write
+# access, at the top or on a job, in the mapping or the short form, is
+# refused and named. The fixture job is called publish, as the release job
+# that may write is: the allowance belongs to release.yml.
+check_permissions() {
+    printf 'name: fixture\non: push\n%sjobs:\n  publish:\n    runs-on: ubuntu-latest\n%s    steps:\n      - run: "true"\n' \
+        "$1" "$2" > "$fixture_root/.github/workflows/fixture.yml"
+    check_workflows "$fixture_root" > "$fixture_root/out" 2>&1
+}
+top_read=$'permissions:\n  contents: read\n'
+refused=(
+    $'permissions:\n  contents: write\n||: the permissions at the top give write access to contents'
+    $'permissions: write-all\n||: the permissions at the top give write access to every scope (write-all)'
+    $'permissions:\n  contents: read\n  id-token: write\n||: the permissions at the top give write access to id-token'
+    "${top_read}|"$'    permissions:\n      contents: write\n| job publish: its token gets write access to contents,'
+    "${top_read}|"$'    permissions:\n      contents: read\n      packages: write\n| job publish: its token gets write access to packages,'
+    "${top_read}|"$'    permissions: write-all\n| job publish: its token gets write access to every scope (write-all),'
+    $'|    permissions:\n      contents: write\n| job publish: its token gets write access to contents,'
+    $'permissions:\n  contents: write\n|    permissions:\n      contents: read\n|: the permissions at the top give write access to contents'
+)
+for case in "${refused[@]}"; do
+    IFS='|' read -r -d '' top job message < <(printf '%s\0' "$case") || true
+    if check_permissions "$top" "$job"; then
+        fail "a workflow with these permissions passed: ${top}${job}"
+    fi
+    grep -Fq ".github/workflows/fixture.yml${message}" "$fixture_root/out" ||
+        fail "these permissions must be reported as '${message}': $(cat "$fixture_root/out")"
+done
+accepted=(
+    "${top_read}|"
+    $'permissions: read-all\n|'
+    $'permissions: {}\n|'
+    "${top_read}|"$'    permissions:\n      contents: none\n      packages: read\n'
+    $'|    permissions:\n      contents: read\n'
+    $'|    permissions: {}\n'
+)
+for case in "${accepted[@]}"; do
+    IFS='|' read -r -d '' top job < <(printf '%s\0' "$case") || true
+    check_permissions "$top" "$job" ||
+        fail "a workflow with read-only permissions was refused: ${top}${job}: $(cat "$fixture_root/out")"
+done
+rm "$fixture_root/.github/workflows/fixture.yml"
+# The same on the repository's own workflows: write access added to one of
+# them is refused, and so is an allowance the release job no longer uses.
+mutate_workflow() {
+    local file=$1 from=$2 to=$3 message=$4
+    cp "$ROOT_DIR/.github/workflows/$file" "$fixture_root/.github/workflows/$file"
+    python3 - "$fixture_root/.github/workflows/$file" "$from" "$to" <<'PY'
+import pathlib
+import sys
+
+path, old, new = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+text = path.read_text(encoding="utf-8")
+if text.count(old) != 1:
+    sys.exit(f"FAIL: {old!r} is not there once in {path.name}")
+path.write_text(text.replace(old, new), encoding="utf-8")
+PY
+    if check_workflows "$fixture_root" > "$fixture_root/out" 2>&1; then
+        fail "$file passed with '$to'"
+    fi
+    grep -Fq "$message" "$fixture_root/out" ||
+        fail "$file with '$to' must be reported as '$message': $(cat "$fixture_root/out")"
+    cp "$ROOT_DIR/.github/workflows/$file" "$fixture_root/.github/workflows/$file"
+}
+mutate_workflow tests.yml $'\npermissions:\n  contents: read\n' $'\npermissions:\n  contents: write\n' \
+    '.github/workflows/tests.yml: the permissions at the top give write access to contents'
+mutate_workflow release.yml $'      contents: read\n      packages: write\n' $'      contents: write\n      packages: write\n' \
+    '.github/workflows/release.yml job images: its token gets write access to contents,'
+mutate_workflow release.yml $'      contents: write\n      packages: read\n' $'      contents: read\n      packages: read\n' \
+    '.github/workflows/release.yml job publish: TOKEN_WRITES of this test allows write access to contents, which the job no longer has'
+mutate_workflow release.yml $'  publish:\n    name: publish\n' $'  publishing:\n    name: publish\n' \
+    '.github/workflows/release.yml: TOKEN_WRITES of this test names the job publish, which is not there'
+check_workflows "$fixture_root" > "$fixture_root/out" 2>&1 ||
+    fail "the copy of the repository's workflows no longer passes: $(cat "$fixture_root/out")"
+echo "PASS: a token with write access is refused at the top of a workflow and on a job, in the mapping and the short form, outside the two release jobs that publish"
