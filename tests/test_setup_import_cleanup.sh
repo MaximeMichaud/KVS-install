@@ -238,6 +238,36 @@ unset -f stat
     DOMAIN=mode.test import_fetch_remote
 ) > mode.log 2>&1 && fail "recorded a received file with mode 0640"
 grep -Fq '0600' mode.log || fail "missing mode warning"
+( # Another regular 0600 file takes the dump's name during reception: the
+    # mode and link checks pass, only the same-file comparison can tell.
+    # shellcheck disable=SC2329  # Called by the sourced receiver.
+    import_remote_dump() {
+        echo received > "$3"
+        echo replacement > "$IMPORT_STAGING/.swap"
+        chmod 600 -- "$IMPORT_STAGING/.swap"
+        mv -fT -- "$IMPORT_STAGING/.swap" "$IMPORT_STAGING/path.test.sql.gz"
+    }
+    DOMAIN=path.test import_fetch_remote
+) > path.log 2>&1 && fail "recorded a dump whose pathname names another file"
+grep -Fq "WARNING: keeping $IMPORT_STAGING/path.test.sql.gz" path.log || fail "missing changed-file warning"
+! grep -Fq 'Dump received' path.log || fail "announced a dump that is not the received file"
+grep -Fxq replacement "$IMPORT_STAGING/path.test.sql.gz" || fail "the file that took the dump's name was not kept"
+[ "$(stat -c %a -- "$IMPORT_STAGING/path.test.sql.gz")" = 600 ] && [ ! -L "$IMPORT_STAGING/path.test.sql.gz" ] ||
+    fail "the fixture must pass the mode and link checks"
+rm -f -- "$IMPORT_STAGING/path.test.sql.gz"
+( # A link to the received file is the same file, yet not the private path.
+    # shellcheck disable=SC2329  # Called by the sourced receiver.
+    import_remote_dump() {
+        echo received > "$3"
+        ln -- "$IMPORT_STAGING/link.test.sql.gz" "$IMPORT_STAGING/.kept"
+        ln -s .kept "$IMPORT_STAGING/.swap"
+        mv -fT -- "$IMPORT_STAGING/.swap" "$IMPORT_STAGING/link.test.sql.gz"
+    }
+    DOMAIN=link.test import_fetch_remote
+) > link.log 2>&1 && fail "recorded a dump path replaced by a symbolic link"
+grep -Fq "WARNING: keeping $IMPORT_STAGING/link.test.sql.gz" link.log || fail "missing link warning"
+[ "$IMPORT_STAGING/link.test.sql.gz" -ef "$IMPORT_STAGING/.kept" ] || fail "the link fixture must name the received file"
+rm -f -- "$IMPORT_STAGING/link.test.sql.gz" "$IMPORT_STAGING/.kept"
 import_record_transfers
 IMPORT_MODE=false
 unset IMPORT_DB_DUMP
