@@ -125,7 +125,9 @@ exercise() (
         *) cmp -s original "$TARGET" || fail "$kind lost the previous file" ;;
     esac
 )
-for kind in set remove export reconfigure; do
+# Keep reconfigure's set_env_value local to its cases.
+run_kind() (
+    local kind=$1 fault
     if [ "$kind" = reconfigure ]; then
         # shellcheck source=/dev/null
         source <(sed -n '/^set_env_value() {/,/^}/p' "$root/docker/reconfigure.sh")
@@ -138,5 +140,13 @@ for kind in set remove export reconfigure; do
                 exercise "$kind" ignore "$fault" ;;
         esac
     done
+)
+read -ra kinds <<< "${DURABLE_PUBLISH_KINDS:-set remove export reconfigure}"
+[[ -n ${kinds[0]:-} ]] || fail "no publication kinds selected"
+for kind in "${kinds[@]}"; do
+    case $kind in
+        set|remove|export|reconfigure) run_kind "$kind" ;;
+        *) fail "unknown publication kind: $kind" ;;
+    esac
 done
 echo 'Durable publication ordering and failure handling passed.'

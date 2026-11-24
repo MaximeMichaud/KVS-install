@@ -78,8 +78,11 @@ jobs:
 
       # CentOS 7 ships Bash 4.2, the oldest the exporter supports. As uid
       # 1000, like the suites above.
-      - name: exporter suite on Bash 4.2
-        run: docker run --rm --network none --user 1000:1000 -v "$PWD:/src:ro" -w /src centos:7.9.2009@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4 bash tests/test_kvs_export.sh
+      - name: exporter suites on Bash 4.2
+        run: >-
+          docker run --rm --network none --user 1000:1000 -v "$PWD:/src:ro" -w /src
+          centos:7.9.2009@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
+          bash -c 'bash tests/test_kvs_export.sh && DURABLE_PUBLISH_KINDS=export bash tests/test_durable_publish.sh'
 
   # The integration suites, on real containers: nginx, Caddy, MariaDB,
   # Manticore and PHP-FPM on internal networks, with synthetic sites. They
