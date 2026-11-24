@@ -745,6 +745,10 @@ EOF
         fail "the certificate monitor is defined but never started"
 }
 
+native_post_regex=$KVS_INTERNAL_POST_REGEX
+docker_include_regex='^/admin/include/(?!(uploader|get_upload_status)\.php$)'
+docker_plugins_regex='^/admin/plugins/(?!.*\.(?i:css(?:\.map)?|js(?:\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv|svgz?|ttf|ttc|otf|eot|woff2?)$)'
+KVS_INTERNAL_POST_RULE="location ~ $docker_include_regex {"
 assert_protected_locations_precede_php \
     "${ROOT_DIR}/conf/nginx/templates/kvs.conf.tpl"
 assert_protected_locations_precede_php \
@@ -766,6 +770,14 @@ do
         fi
         assert_location_body "${ROOT_DIR}/${site_config}" "location ~* /${directory}/.*\.php\$ {" 'internal;'
     done
+    if [ "$site_config" = conf/nginx/conf.d/domain.conf ]; then
+        KVS_INTERNAL_POST_REGEX=$native_post_regex
+        KVS_INTERNAL_POST_RULE="location ~ $native_post_regex {"
+    else
+        KVS_INTERNAL_POST_REGEX="(?:$docker_include_regex|$docker_plugins_regex)"
+        KVS_INTERNAL_POST_RULE="location ~ $docker_include_regex {"
+        assert_location_body "${ROOT_DIR}/${site_config}" "location ~ $docker_plugins_regex {" 'deny all;'
+    fi
     assert_kvs_internal_directories_denied_before_php "${ROOT_DIR}/${site_config}"
     assert_internal_dirs_denied_before_assets "${ROOT_DIR}/${site_config}"
     assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_INTERNAL_PRE_RULE" 'deny all;'

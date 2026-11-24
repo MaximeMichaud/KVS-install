@@ -43,9 +43,6 @@ server {
     # index.php
     index index.php;
 
-    # KVS URL rewrites (from KVS archive _INSTALL/nginx_config.txt)
-    include /etc/nginx/includes/kvs-rewrites.conf;
-
     # Fallback to index.php
     location / {
         try_files $uri $uri/ /index.php?$query_string;
@@ -75,6 +72,27 @@ server {
         deny all;
     }
 
+    # KVS internal locations
+    location ~* /blocks/.*\.php$ { internal; }
+    location ~* /langs/.*\.php$ { internal; }
+    location ~* /template/.*\.php$ { internal; }
+    location ~* /tmp/.*\.php$ { internal; }
+    # Uploads land under contents/, where no PHP runs under any name: a .phar,
+    # or up.phar/x.php, which PHP-FPM would run as up.phar.
+    location ~* ^/contents/.*\.(?:php|phar)(?:/|$) { deny all; }
+
+    # The admin panel calls two upload scripts. Plugin assets use the
+    # public asset handlers below, including any imported cache policy.
+    location ~ ^/admin/include/(?!(uploader|get_upload_status)\.php$) {
+        deny all;
+    }
+    location ~ ^/admin/plugins/(?!.*\.(?i:css(?:\.map)?|js(?:\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv|svgz?|ttf|ttc|otf|eot|woff2?)$) {
+        deny all;
+    }
+
+    # KVS URL rewrites (from KVS archive _INSTALL/nginx_config.txt)
+    include /etc/nginx/includes/kvs-rewrites.conf;
+
     # Assets, media
     location ~* \.(?:css(\.map)?|js(\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv)$ {
         expires 180d;
@@ -90,15 +108,6 @@ server {
         expires 180d;
         access_log off;
     }
-
-    # KVS internal locations
-    location ~* /blocks/.*\.php$ { internal; }
-    location ~* /langs/.*\.php$ { internal; }
-    location ~* /template/.*\.php$ { internal; }
-    location ~* /tmp/.*\.php$ { internal; }
-    # Uploads land under contents/, where no PHP runs under any name: a .phar,
-    # or up.phar/x.php, which PHP-FPM would run as up.phar.
-    location ~* ^/contents/.*\.(?:php|phar)(?:/|$) { deny all; }
 
     # Protect videos from direct access
     location ^~ /contents/videos/ {
@@ -144,15 +153,6 @@ server {
             fastcgi_param HTTP_X_FORWARDED_FOR $http_x_forwarded_for;
             fastcgi_param HTTP_X_FORWARDED_PROTO $http_x_forwarded_proto;
         }
-    }
-
-    # admin/include holds the server side code, except the two scripts the
-    # admin panel uploads through (file_upload_form_url and
-    # file_upload_status_url in admin/js/config.php), which the PHP handler
-    # must still serve. admin/plugins is denied here, after the asset regexes
-    # above: a plugin's admin page loads its JS and CSS from it.
-    location ~ ^/admin/(include(?!/(uploader|get_upload_status)\.php$)|plugins)/ {
-        deny all;
     }
 
     # Handle PHP after all protected regular expression locations

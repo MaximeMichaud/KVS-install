@@ -23,6 +23,7 @@ ROOT_DIR=$(dirname "$TEST_DIR")
 
 suites=(
     integration_origin_security.sh
+    integration_docker_rewrite_order.sh
     integration_nginx_healthcheck.sh
     integration_internal_site_url.sh
     integration_nginx_import.sh
