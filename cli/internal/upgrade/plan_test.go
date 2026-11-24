@@ -1594,3 +1594,28 @@ func TestLayerDir(t *testing.T) {
 		t.Error("mounts that cannot be read must say so")
 	}
 }
+
+func TestComposeMinimumWithDistributionVersions(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0"})
+	target := s.release("1.1.0")
+	target.Requires.ComposeMin = "2.24.0"
+	for version, blocked := range map[string]bool{
+		"2.20.0+ds1-0ubuntu1~22.04.1": true, "2.20.2-desktop.1": true,
+		"2.20.0-1": true, "2.24.0-rc1": true, "2.24.0-1": false,
+		"2.30.1+ds1": false, "unknown": true,
+		"2.24.0-rc.1": true, "2.24.0~rc1": true, "2.24.0-preview.1": true,
+		"2.24.0-desktop.1": false, "2.24.0+ds1-0ubuntu1~22.04.1": false,
+		"2.25.0~rc1": false,
+	} {
+		s.f.with(func(f *fakeDocker) {
+			f.hook = func(_ *fakeDocker, req cliRequest) (cliResponse, bool) {
+				return cliResponse{Stdout: version + "\n"}, slices.Equal(req.Args, []string{"compose", "version", "--short"})
+			}
+		})
+		plan := &Plan{Target: target}
+		s.runner().planCompose(context.Background(), plan)
+		if (len(plan.Blockers) > 0) != blocked || plan.ComposeVersion != version {
+			t.Errorf("%s: blockers %v, displayed %q", version, plan.Blockers, plan.ComposeVersion)
+		}
+	}
+}

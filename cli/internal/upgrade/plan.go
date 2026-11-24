@@ -136,15 +136,15 @@ func (r *Runner) Plan(ctx context.Context, state *instance.State) (*Plan, error)
 	return plan, nil
 }
 
-// setup.sh reads the leading three decimal components of a site version.
+// A site version or packaged Compose version may have a distribution suffix.
 // Capture the significant digits of each, including a single zero for zero.
-var kvsPrefix = regexp.MustCompile(`^0*([0-9]+)\.0*([0-9]+)\.0*([0-9]+)`)
+var versionPrefix = regexp.MustCompile(`^0*([0-9]+)\.0*([0-9]+)\.0*([0-9]+)`)
 
 func kvsForMinimum(kvs string) (semver.Version, bool) {
 	if v, ok := SiteKVS(kvs); ok {
 		return v, true
 	}
-	parts := kvsPrefix.FindStringSubmatch(kvs)
+	parts := versionPrefix.FindStringSubmatch(kvs)
 	if parts == nil {
 		return semver.Version{}, false
 	}
@@ -554,10 +554,36 @@ func (r *Runner) planDatabase(plan *Plan) {
 	plan.Blockers = append(plan.Blockers, fmt.Sprintf("--skip-backup cannot be used here: %s, so the backup is the only way back; run the upgrade without --skip-backup", reason))
 }
 
+// Packaged builds can keep the upstream release number at the minimum.
+// Other suffixes may be prereleases, including Debian's tilde versions.
+var composeBuildSuffix = regexp.MustCompile(`^(?:\+[A-Za-z0-9.-]+(?:~[0-9][0-9.]*)?|-desktop\.[0-9]+|-[0-9]+)$`)
+
+func composeMeetsMinimum(version, minimum string) bool {
+	if _, err := semver.Parse(version); err == nil {
+		return !semver.Less(version, minimum)
+	}
+	core := versionPrefix.FindString(version)
+	installed, err := semver.Parse(core)
+	if err != nil {
+		return false
+	}
+	required, err := semver.Parse(minimum)
+	if err != nil {
+		return false
+	}
+	required.Pre = ""
+	switch semver.Compare(installed, required) {
+	case 1:
+		return true
+	case 0:
+		return composeBuildSuffix.MatchString(version[len(core):])
+	}
+	return false
+}
+
 // planCompose checks the compose plugin against the minimum the release
 // names: its override uses "build: !reset null", which an older compose
-// reads as a build to run. A version that does not parse is shown, not
-// held against the machine.
+// reads as a build to run. For a distribution suffix, compare the numeric core.
 func (r *Runner) planCompose(ctx context.Context, plan *Plan) {
 	min := plan.Target.Requires.ComposeMin
 	if min == "" {
@@ -569,7 +595,7 @@ func (r *Runner) planCompose(ctx context.Context, plan *Plan) {
 		return
 	}
 	plan.ComposeVersion = v
-	if _, perr := semver.Parse(v); perr == nil && semver.Less(v, min) {
+	if !composeMeetsMinimum(v, min) {
 		plan.Blockers = append(plan.Blockers, fmt.Sprintf("%s needs Docker Compose %s or newer, this machine has %s: upgrade the Docker Compose plugin first", plan.Target.Version, min, v))
 	}
 }
