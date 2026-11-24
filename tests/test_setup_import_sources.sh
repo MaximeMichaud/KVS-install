@@ -1239,7 +1239,7 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         import_remote_files "$site" "$destination" no || exit 19
         [ -f "$destination/admin/include/setup.php" ] || exit 20
         grep -q '^command sh -s$' "$bin/ssh.log" || exit 21
-        grep -q "^script exec tar -C '$site' -chf - .\$" "$bin/ssh.log" || exit 21
+        grep -Fq "tar -C '$site' -chf - ." "$bin/ssh.log" || exit 21
         [ -f "$destination/contents/store/big.mp4" ] && [ ! -L "$destination/contents/store" ] || exit 36
 
         # What the exporter reports as staying behind stays behind: the
@@ -1261,8 +1261,8 @@ test_remote_detect_dump_and_files_go_through_one_ssh() {
         [ ! -e "$destination/backup" ] && [ ! -e "$destination/.well-known" ] && [ ! -e "$destination/contents/videos_sources" ] || exit 55
         [ -f "$destination/contents/videos/1.mp4" ] || exit 56
         # GNU tar keeps the command line it always had; another tar gets the escaped names.
-        grep -Fq "*'GNU tar'*) exec tar -C '$site' --wildcards '--exclude=./tmp/*' --no-wildcards '--exclude=./backup' --no-wildcards '--exclude=./.well-known' --no-wildcards '--exclude=./contents/videos_sources' -chf - . ;;" "$bin/ssh.log" || exit 57
-        grep -Fq "*) exec tar -C '$site' '--exclude=./tmp/*' '--exclude=./backup' '--exclude=./.well-known' '--exclude=./contents/videos_sources' -chf - . ;; esac" "$bin/ssh.log" || exit 59
+        grep -Fq "tar -C '$site' --wildcards '--exclude=./tmp/*' --no-wildcards '--exclude=./backup' --no-wildcards '--exclude=./.well-known' --no-wildcards '--exclude=./contents/videos_sources' -chf - ." "$bin/ssh.log" || exit 57
+        grep -Fq "tar -C '$site' '--exclude=./tmp/*' '--exclude=./backup' '--exclude=./.well-known' '--exclude=./contents/videos_sources' -chf - ." "$bin/ssh.log" || exit 59
         import_remote_files "$site" "$destination" no 'backup' 2>/dev/null && exit 58
         rm -rf "$site/tmp" "$site/backup" "$site/.well-known" "$site/contents/videos_sources"
 
@@ -1355,7 +1355,7 @@ EOF
         rm -rf "$destination"
         import_remote_files "$site" "$destination" no || exit 13
         grep -q '^command sudo -n sh -s$' "$bin/ssh.log" || exit 14
-        grep -q "^script exec tar -C '$site' -chf - .\$" "$bin/ssh.log" || exit 14
+        grep -Fq "tar -C '$site' -chf - ." "$bin/ssh.log" || exit 14
         [ -f "$destination/contents/videos/1.mp4" ] || exit 15
 
         FAKE_UID=1000 FAKE_SUDO_FAIL=1 import_remote_privileges || exit 16

@@ -4009,19 +4009,11 @@ import_remote_files() (
         return "$status"
     fi
     import_check_estimated_transfer_space "$destination" "$reserve" "$saved_bytes" "${du_excludes[@]}" || return 1
-    # The pipeline answers for the local tar alone; the status of the tar
-    # on the old server is read from the pipeline itself, since the setup
-    # runs without pipefail. 1 is what a live site does (files changed or
-    # removed while they were read), anything else is a file it could not
-    # read or a connection that broke.
-    # The login shell of the SSH user reads only "sh -s": the command, with
-    # the site path and the excludes quoted for sh (import_shquote), is the
-    # script on its standard input.
+    # The login shell gets only "sh -s". The remote sh interprets status 1
+    # while it still knows which tar produced the stream.
     local -a pipe_status=()
-    # With exclusions, the same sh on the old server asks its tar what it
-    # is and runs the command line written for it.
-    local remote_tar remote_glob_tar
-    remote_tar="exec tar -C $(import_shquote "$dir")"
+    local remote_tar remote_glob_tar probe=""
+    remote_tar="tar -C $(import_shquote "$dir")"
     remote_glob_tar=$remote_tar
     for pattern in ${tar_excludes[@]+"${tar_excludes[@]}"}; do
         remote_tar+=" $pattern"
@@ -4029,22 +4021,43 @@ import_remote_files() (
     for pattern in ${tar_glob_excludes[@]+"${tar_glob_excludes[@]}"}; do
         remote_glob_tar+=" $pattern"
     done
-    remote_tar+=" -chf - ."
     if [ "${#tar_excludes[@]}" -gt 0 ]; then
-        remote_tar="case \$(tar --version 2>/dev/null </dev/null) in *'GNU tar'*) $remote_tar ;; *) $remote_glob_tar -chf - . ;; esac"
+        # shellcheck disable=SC2016  # The old server's sh expands the probe.
+        probe='probe=$(mktemp -d) || exit 2
+            tar -chf - --exclude=./tmp -C "$probe" . >/dev/null 2>&1
+            status=$?
+            rmdir "$probe" || exit 2
+            if [ "$status" != 0 ]; then
+                echo "ERROR: the old server tar cannot use --exclude; install GNU tar and retry" >&2
+                exit 2
+            fi'
     fi
+    remote_tar="version=\$(tar --version 2>&1 </dev/null)
+    case \"\$version\" in
+        *'GNU tar'*)
+            $remote_tar -chf - .
+            status=\$?
+            [ \"\$status\" != 1 ] || exit 42 ;;
+        *)
+            $probe
+            $remote_glob_tar -chf - .
+            status=\$?
+            case \"\$version:\$status\" in
+                *BusyBox*:1|*busybox*:1)
+                    echo 'BusyBox tar also returns 1 for files removed while it read them; run the command again, or install rsync on the old server.' >&2 ;;
+            esac ;;
+    esac
+    # Only the GNU warning can use the reserved status on this channel.
+    [ \"\$status\" != 42 ] || exit 2
+    exit \"\$status\""
     import_ssh "${IMPORT_REMOTE_PREFIX[@]}" sh -s <<< "$remote_tar" | tar -xf - --no-same-owner --anchored --no-recursion --exclude=. -C "$destination"
     pipe_status=("${PIPESTATUS[@]}")
-    case "${pipe_status[0]}" in
-        0) ;;
-        1)
-            echo "  Some files changed or vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
-            ;;
-        *)
-            echo "ERROR: the tar stream from $IMPORT_SSH_TARGET ended with status ${pipe_status[0]} (see the messages above): files unreadable by $IMPORT_SSH_TARGET, or the connection broke; fix them on the old server and run the same command again" >&2
-            return 1
-            ;;
-    esac
+    if [ "${pipe_status[0]}" -eq 42 ]; then
+        echo "  Some files changed or vanished on the old server during the transfer, as a live site does; the next pass carries what is left." >&2
+    elif [ "${pipe_status[0]}" -ne 0 ]; then
+        echo "ERROR: the tar stream from $IMPORT_SSH_TARGET ended with status ${pipe_status[0]} (see the messages above): files unreadable by $IMPORT_SSH_TARGET, or the connection broke; fix them on the old server and run the same command again" >&2
+        return 1
+    fi
     if [ "${pipe_status[1]}" -ne 0 ]; then
         echo "ERROR: the tar stream from $IMPORT_SSH_TARGET could not be unpacked into $destination (see the messages above)" >&2
         return "${pipe_status[1]}"

@@ -99,6 +99,50 @@ done
 exec "$real_tar" "\$@"
 STUB
 chmod +x "$TEST_DIR/plain-tar/tar"
+mkdir -p "$TEST_DIR/status-tar"
+cat > "$TEST_DIR/status-tar/tar" <<STUB
+#!/bin/sh
+case "\$1" in --version) echo "\${TEST_TAR_VERSION:-BusyBox tar}"; exit 0 ;; esac
+for word do
+    case "\$word" in
+        "$site") touch "$TEST_DIR/site-opened" ;;
+        --exclude=*) [ "\${TEST_NO_EXCLUDE:-no}" = no ] || exit 1 ;;
+    esac
+done
+"$real_tar" "\$@" || exit
+exit "\${TEST_TAR_STATUS:-0}"
+STUB
+chmod +x "$TEST_DIR/status-tar/tar"
+remote_bin="$TEST_DIR/status-tar"
+if TEST_TAR_STATUS=1 import_remote_files "$site" "$TEST_DIR/status-dest" no > "$TEST_DIR/out" 2>&1; then
+    fail "status 1 of BusyBox tar accepted on a readable stream"
+fi
+grep -q 'ended with status 1' "$TEST_DIR/out" || fail "remote tar status missing"
+grep -q 'BusyBox tar also returns 1.*install rsync on the old server' "$TEST_DIR/out" || fail "missing BusyBox retry advice"
+TEST_TAR_VERSION='GNU tar' TEST_TAR_STATUS=1 import_remote_files "$site" "$TEST_DIR/status-dest" no > "$TEST_DIR/out" 2>&1 ||
+    fail "status 1 of GNU tar refused"
+grep -q 'changed or vanished' "$TEST_DIR/out" || fail "missing live-site notice"
+if TEST_TAR_STATUS=42 import_remote_files "$site" "$TEST_DIR/status-dest" no > "$TEST_DIR/out" 2>&1; then
+    fail "ordinary tar error used the reserved GNU status"
+fi
+(
+    import_ssh() { return 255; }
+    if import_remote_files "$site" "$TEST_DIR/status-dest" no > "$TEST_DIR/out" 2>&1; then fail "SSH failure accepted"; fi
+    grep -q 'status 255' "$TEST_DIR/out" || fail "missing SSH failure diagnostic"
+)
+(
+    tar() { cat >/dev/null; return 23; }
+    rc=0
+    TEST_TAR_VERSION='GNU tar' TEST_TAR_STATUS=1 import_remote_files "$site" "$TEST_DIR/status-dest" no > "$TEST_DIR/out" 2>&1 || rc=$?
+    [ "$rc" = 23 ] || fail "GNU warning masked the local extractor status"
+)
+rm -f "$TEST_DIR/site-opened"
+if TEST_NO_EXCLUDE=yes run_fallback "$TEST_DIR/status-dest" /tmp; then
+    fail "tar without --exclude accepted"
+fi
+grep -q 'cannot.*--exclude' "$TEST_DIR/out" || fail "missing exclude diagnostic"
+[ ! -e "$TEST_DIR/site-opened" ] || fail "tar opened the site before checking its options"
+
 # GNU tar, with the words it was run with: it must keep the command line it
 # always had, with the name as it is under --no-wildcards.
 mkdir -p "$TEST_DIR/gnu-tar"
