@@ -1144,9 +1144,12 @@ lock_caddy_route_state() {
         return 1
     fi
     if ! flock -n 9; then
-        echo -e "${RED}ERROR: Another site-manager.sh command is working on ${DOMAIN}. Retry after it exits.${NC}"
-        exec 9<&-
-        return 1
+        echo -e "${CYAN}Waiting for another site-manager.sh command on ${DOMAIN} to finish...${NC}"
+        if ! flock -w 30 9; then
+            echo -e "${RED}ERROR: Another site-manager.sh command is working on ${DOMAIN}. Retry after it exits.${NC}"
+            exec 9<&-
+            return 1
+        fi
     fi
     if ! exec 8<"$locks/.routes"; then
         echo -e "${RED}ERROR: Could not lock the Caddy routes${NC}"

@@ -141,6 +141,14 @@ case "$1" in
             echo "A foreign descriptor 9 stood in for the domain lock"; exit 1
         fi
         grep -Fq 'Could not lock' "$work/edit"
+        # Exercise a timeout on the real lock without adding 30 seconds to the suite.
+        flock() {
+            case "$*" in
+                '-w 30 9') touch "$work/bounded"; command flock -w 0.1 9 ;;
+                '-w '*|'-x 9') return 1 ;;
+                *) command flock "$@" ;;
+            esac
+        }
         status=0
         configure_multi_route > "$work/out" 2>&1 || status=$?
         printf 'other command\n' > "$route"
@@ -148,6 +156,8 @@ case "$1" in
         echo done > "$work/hold"
         wait "$holder"
         [[ $status == 1 ]] || { cat "$work/out"; echo "The transaction started on a locked domain"; exit 1; }
+        [[ -e $work/bounded ]] || { echo 'The primary domain wait must be bounded at 30 seconds'; exit 1; }
+        grep -Fq 'Waiting for another site-manager.sh command on media.example to finish' "$work/out"
         grep -Fq 'Another site-manager.sh command is working on media.example' "$work/out"
         [[ $(grep -c ERROR "$work/out") == 1 ]] || { cat "$work/out"; echo "A busy domain was reported twice"; exit 1; }
         [[ ! -e $work/ps-unlocked ]]
@@ -210,12 +220,18 @@ case "$1" in
                 restore_caddy_route_state >> "$work/out" 2>&1 ;;
             *) configure_multi_route > "$work/out" 2>&1 ;;
         esac ;;
-    waits)
+    waits|waits-domain)
         # Another route operation holds the route lock for a moment: the
         # transaction says that it waits, then runs.
         bash "$manager" primary-config media.example primary internal false > /dev/null
+        lock=$locks/.routes
+        notice='Waiting for another route operation to finish'
+        if [[ $1 == waits-domain ]]; then
+            lock=$locks/media.example
+            notice='Waiting for another site-manager.sh command on media.example to finish'
+        fi
         (
-            exec 4<"$locks/.routes"
+            exec 4<"$lock"
             flock -n 4
             touch "$work/ready"
             sleep 1
@@ -228,7 +244,7 @@ case "$1" in
         [[ -e $work/ready ]]
         configure_multi_route > "$work/out" 2>&1 || { cat "$work/out"; exit 1; }
         wait "$holder"
-        [[ $(grep -c 'Waiting for another route operation to finish' "$work/out") == 1 ]] ||
+        [[ $(grep -Fc "$notice" "$work/out") == 1 ]] ||
             { cat "$work/out"; echo "The wait for the route lock was silent"; exit 1; }
         [[ $MULTI_TRANSACTION_COMMITTED == true ]]
         locks_free ;;
@@ -247,7 +263,7 @@ esac
 DRIVER
 export work
 for scenario in rejected fresh busy foreign-routes caddy-stopped caddy-unknown \
-    no-backup-mktemp no-backup-route no-backup-reservation waits committed \
+    no-backup-mktemp no-backup-route no-backup-reservation waits waits-domain committed \
     killed-ps killed-validate killed-reload killed-restore-validate killed-restore-reload; do
     if [[ -e $work/child ]]; then kill "$(cat "$work/child")" 2>/dev/null || true; fi
     rm -rf "$work/child" "$work/ps-unlocked" "$work/edit-rollback" \
