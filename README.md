@@ -198,6 +198,9 @@ For an existing installation managed by `kvsctl`, `setup.sh` preserves the curre
 An additional site added with `docker/multi-site/site-manager.sh add <domain>` follows the same rules, from the archive the site's init installs: the PHP series of its release, `IONCUBE` from its files, `KVS_PHP_VERSION` as an override, and a refusal of KVS 6.2.0 and older. A webroot that an earlier `remove` kept decides first, since the site's init runs the KVS it holds: its `admin/include/version.php` gives the PHP series and its `admin/include/functions_base.php` gives `IONCUBE`. With one regular `KVS_*.zip` in `docker/kvs-archive/`, its name may differ from the domain. With several, the Docker installer, setup and add select the unique filename ending in `[domain].zip`, ignoring domain case. Each new site records the resolved file in its `archive.zip` symlink, including when add uses `KVS_ARCHIVE_DIR`. Its init mounts only that file, read-only, as `/kvs-archive/KVS_site.zip`. A symbolic link named `KVS_*.zip` in the shared directory must be replaced with the regular archive. If the host archive moves, repair the site link. Before stopping cron, start inspects the effective Compose bind with jq. An older site with a directory bind and several archives is refused with the expected file and the steps to change only that volume. Set these variables on the add command line only, as in `KVS_PHP_VERSION=8.3 IONCUBE=NO ./site-manager.sh add example.com`: add writes them to the site's `.env`, which `start` uses, and the other commands ignore an exported `IONCUBE`.
 
 Before publishing a route, the multi-site manager checks for hostnames already served by generated site blocks and by supported top-level file and snippet imports in `docker/multi-site/caddy/sites/`, including positional arguments. When adding custom routes, check the main Caddyfile, addresses built from environment placeholders, variadic or block import arguments, and absolute imports outside `/etc/caddy/sites/` separately. These forms are outside the collision check.
+Hand-written routes for localhost, IP literals or a nested `tls { issuer internal }` block still need a usable contact unless they use a recognized exemption such as `tls internal`.
+
+Mutating manager commands hold `kvsctl/lock` shared. Commands that change the proxy also hold `docker/.kvs-scripts.lock` exclusively, even on different domains. A second proxy change is refused immediately. A long `site-manager.sh start` holds both installation locks while it runs, so setup, reconfiguration and mutating kvsctl commands must wait until it finishes and then retry.
 
 #### Media processing security
 
@@ -533,6 +536,12 @@ for as long as they run, and one started while another holds it stops
 before it changes anything: both rewrite `.env` from what they read when
 they started, so two at once would lose each other's changes. The status
 options of `reconfigure.sh` take no such lock.
+
+The mutating commands of `docker/multi-site/site-manager.sh` follow the
+same rules: they refuse during a kvsctl run, after an unfinished one and
+while `kvsctl/` is set aside, hold `kvsctl/lock` shared, and all but
+`stop` hold `docker/.kvs-scripts.lock` too. `list`, `status`,
+`caddy-acme-check` and `caddy-live-check` take no lock.
 
 ## Compatibility
 

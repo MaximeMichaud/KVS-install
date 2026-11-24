@@ -9,6 +9,8 @@ multi=${manager%/*}
 export work multi KVS_WEBROOT_BASE=$work/www
 mkdir -p "$multi/.locks/.routes" "$multi/caddy/sites"
 cp "$root/docker/multi-site/site-manager.sh" "$manager"
+# shellcheck source=tests/fixtures/manager-scripts-lock.sh
+source "$root/tests/fixtures/manager-scripts-lock.sh" "$work/docker"
 wait_file() {
     local n
     for ((n=0; n<100; n++)); do

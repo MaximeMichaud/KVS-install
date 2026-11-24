@@ -502,8 +502,8 @@ refused() {
 running_reason="kvsctl is running on this installation (it holds $TEST_DIR/kvsctl-run/%s/kvsctl/lock): wait until it is done; 'kvsctl status' shows what it does."
 interrupted_reason="an interrupted kvsctl run left $TEST_DIR/kvsctl-run/%s/kvsctl/journal.json: run 'kvsctl recover' first. Where recover says to finish by hand and that takes setup.sh, remove that file, then run setup.sh again."
 unknown_reason="could not tell whether kvsctl is running: flock $TEST_DIR/kvsctl-run/%s/kvsctl/lock failed with status 66."
-scripts_reason="another setup.sh or reconfigure.sh run is changing this installation (it holds $TEST_DIR/kvsctl-run/%s/docker/.kvs-scripts.lock): wait until it is done."
-scripts_unknown_reason="could not tell whether setup.sh or reconfigure.sh runs: flock $TEST_DIR/kvsctl-run/%s/docker/.kvs-scripts.lock failed with status 66."
+scripts_reason="another setup.sh, reconfigure.sh or site-manager.sh run is changing this installation (it holds $TEST_DIR/kvsctl-run/%s/docker/.kvs-scripts.lock): wait until it is done."
+scripts_unknown_reason="could not tell whether setup.sh, reconfigure.sh or site-manager.sh runs: flock $TEST_DIR/kvsctl-run/%s/docker/.kvs-scripts.lock failed with status 66."
 # shellcheck disable=SC2059  # The reasons are the formats.
 for args in '' '--dev' '--resume-import'; do
     name=${args:-plain}

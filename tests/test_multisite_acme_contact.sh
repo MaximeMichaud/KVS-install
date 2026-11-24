@@ -2,8 +2,10 @@
 # Exercise the manager's route and live-proxy checks without starting a stack.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+install=$(mktemp -d)
+trap 'rm -rf "$install"' EXIT
+work=$install/docker
+mkdir "$work"
 (cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/host-validation.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
     multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work")
 manager=$work/multi-site/site-manager.sh

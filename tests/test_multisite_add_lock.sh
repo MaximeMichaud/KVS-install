@@ -7,6 +7,8 @@ trap 'rm -rf "$work"' EXIT
 mkdir "$work/docker"
 (cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/host-validation.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
     multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work/docker")
+# shellcheck source=tests/fixtures/manager-scripts-lock.sh
+source "$root/tests/fixtures/manager-scripts-lock.sh" "$work/docker"
 manager="$work/docker/multi-site/site-manager.sh"
 domain=media.example
 site="$work/docker/multi-site/sites/$domain"
@@ -55,14 +57,14 @@ chown() {
     if [[ "$2" != "$KVS_WEBROOT_BASE/$domain" || -e "$work/nested" ]]; then return 0; fi
     touch "$work/nested"
     for action in remove add start stop proxy-config; do
-        if bash "$manager" "$action" "$domain" </dev/null > "$work/$action" 2>&1; then return 1; fi
+        if bash "$manager" "$action" "$domain" 8<&- 9<&- </dev/null > "$work/$action" 2>&1; then return 1; fi
         grep -q 'Could not lock' "$work/$action" || return 1
     done
     rmdir "$site" || return 1
-    if bash "$manager" add "$domain" > "$work/removed" 2>&1; then return 1; fi
+    if bash "$manager" add "$domain" 8<&- 9<&- > "$work/removed" 2>&1; then return 1; fi
     grep -q 'Could not lock' "$work/removed" || return 1
     mkdir "$site" || return 1
-    bash "$manager" add other.example > "$work/other" || return 1
+    bash "$manager" add other.example 8<&- 9<&- > "$work/other" || return 1
     kill -TERM "$BASHPID"
 }
 export -f chown

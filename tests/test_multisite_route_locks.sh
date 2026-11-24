@@ -8,6 +8,8 @@ mkdir "$work/docker"
 (cd "$root/docker" && cp --parents .gitignore images.lock bin/resolve-bases.sh lib/host-validation.sh lib/kvs-php.sh \
     init/lib/kvs-archive.sh multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work/docker")
 multi="$work/docker/multi-site"
+# shellcheck source=tests/fixtures/manager-scripts-lock.sh
+source "$root/tests/fixtures/manager-scripts-lock.sh" "$work/docker"
 manager="$multi/site-manager.sh"
 locks="$multi/.locks"
 export ACME_EMAIL=ops@sub.example.com work multi locks KVS_WEBROOT_BASE="$work/www"

@@ -30,13 +30,15 @@ docker() {
             if [[ $(cat "$work/cron") == running ]]; then echo 0123456789ab; fi ;;
         'compose stop cron')
             if [[ -e $work/fail-signal ]]; then
-                # Signal the manager while it waits for an external Compose process.
+                # Signal the manager while it waits for an external Compose
+                # process. $$ is the manager even when it runs Docker from a
+                # subshell that closes its lock descriptors.
                 bash -c '
-                    kill -s "$(cat "$work/fail-signal")" "$PPID"
+                    kill -s "$(cat "$work/fail-signal")" "$1"
                     sleep 0.2
                     echo stopped > "$work/cron"
                     touch "$work/stop-finished"
-                '
+                ' _ "$$"
             else
                 echo stopped > "$work/cron"
             fi

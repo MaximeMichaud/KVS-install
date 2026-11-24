@@ -393,15 +393,15 @@ hold_scripts_lock() {
     local status=0
 
     if ! (umask 077 && : >> "$lock") || ! exec {KVS_SCRIPTS_LOCK_FD}< "$lock"; then
-        echo "ERROR: could not open ${lock}, the lock setup.sh and reconfigure.sh share. Nothing was changed." >&2
+        echo "ERROR: could not open ${lock}, the lock setup.sh, reconfigure.sh and site-manager.sh share. Nothing was changed." >&2
         return 1
     fi
     flock --exclusive --nonblock "$KVS_SCRIPTS_LOCK_FD" || status=$?
     if [ "$status" -eq 1 ]; then
-        echo "ERROR: another setup.sh or reconfigure.sh run is changing this installation (it holds ${lock}): wait until it is done. Nothing was changed." >&2
+        echo "ERROR: another setup.sh, reconfigure.sh or site-manager.sh run is changing this installation (it holds ${lock}): wait until it is done. Nothing was changed." >&2
         return 1
     elif [ "$status" -ne 0 ]; then
-        echo "ERROR: could not tell whether setup.sh or reconfigure.sh runs: flock ${lock} failed with status ${status}. Nothing was changed." >&2
+        echo "ERROR: could not tell whether setup.sh, reconfigure.sh or site-manager.sh runs: flock ${lock} failed with status ${status}. Nothing was changed." >&2
         return 1
     fi
 }
@@ -5884,7 +5884,7 @@ select_mode() {
             fi
 
             if [ "$MODE" = "multi" ]; then
-                if ! ./multi-site/site-manager.sh primary-remove \
+                if ! KVS_SITE_LOCKS_INHERITED=1 ./multi-site/site-manager.sh primary-remove \
                     "$DOMAIN" "$SITE_PREFIX"; then
                     echo -e "${RED}ERROR: Failed to remove the primary Caddy route${NC}"
                     return 1
@@ -6052,9 +6052,9 @@ prepare_multi_site_proxy() {
         tls_mode="internal"
     fi
 
-    ./multi-site/site-manager.sh primary-config \
+    KVS_SITE_LOCKS_INHERITED=1 ./multi-site/site-manager.sh primary-config \
         "$DOMAIN" "$SITE_PREFIX" "$tls_mode" "$USE_WWW" || return 1
-    ./multi-site/site-manager.sh proxy-network
+    KVS_SITE_LOCKS_INHERITED=1 ./multi-site/site-manager.sh proxy-network
 }
 
 # GeoIP database selection
@@ -7724,7 +7724,7 @@ if [ "$MODE" = "multi" ]; then
         echo -e "${YELLOW}WARNING: Caddy was not started or recreated: a public route has no usable ACME contact. The setup goes on and ends with an error.${NC}"
     else
         run_step "Starting Caddy reverse proxy" \
-            env ACME_EMAIL="${EMAIL:-}" \
+            env KVS_SITE_LOCKS_INHERITED=1 ACME_EMAIL="${EMAIL:-}" \
             ./multi-site/site-manager.sh caddy-start
     fi
 fi

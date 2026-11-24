@@ -2684,7 +2684,7 @@ for action in apply disable; do
     fi
     assert_failure "a second reconfigure.sh ($action) ran beside the first"
     assert_contains "$LAST_DIR/output.log" \
-        "ERROR: another setup.sh or reconfigure.sh run is changing this installation (it holds $scripts_lock): wait until it is done. Nothing was changed." \
+        "ERROR: another setup.sh, reconfigure.sh or site-manager.sh run is changing this installation (it holds $scripts_lock): wait until it is done. Nothing was changed." \
         "the second reconfigure.sh ($action) does not say why it stops: $(cat "$LAST_DIR/output.log")"
     assert_eq '' "$(cat "$LAST_DIR/docker.calls")" "the second reconfigure.sh ($action) ran docker beside the first"
     assert_not_contains "$LAST_DIR/output.log" 'manticore_manage' \
@@ -2735,7 +2735,7 @@ chmod +x "$LAST_DIR/bin/flock"
 kvsctl_reconfigure scripts-lock-unknown idle
 assert_failure "reconfigure.sh went on when flock failed on .kvs-scripts.lock"
 assert_contains "$LAST_DIR/output.log" \
-    "ERROR: could not tell whether setup.sh or reconfigure.sh runs: flock $LAST_DIR/.kvs-scripts.lock failed with status 66. Nothing was changed." \
+    "ERROR: could not tell whether setup.sh, reconfigure.sh or site-manager.sh runs: flock $LAST_DIR/.kvs-scripts.lock failed with status 66. Nothing was changed." \
     "reconfigure.sh does not say it could not tell: $(cat "$LAST_DIR/output.log")"
 assert_eq '' "$(cat "$LAST_DIR/docker.calls")" "reconfigure.sh ran docker when flock failed"
 

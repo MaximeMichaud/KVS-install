@@ -2,6 +2,25 @@
 # Exercise the generated configurations with real, isolated Nginx and Caddy.
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kvs-origin-http.XXXXXX")
+trap 'rm -rf "$TEST_DIR"' EXIT
+multi="$TEST_DIR/docker/multi-site"
+mkdir -p "$multi/caddy/sites"
+# Use the installer's real CLI in a temporary directory, with an internal CA.
+cp "$ROOT_DIR/docker/multi-site/site-manager.sh" "$multi/site-manager.sh"
+CADDY_SITES_DIR="$multi/caddy/sites"
+bash "$multi/site-manager.sh" proxy-config example.test internal false true > "$TEST_DIR/caddy-generation.log"
+sed -i 's/health_interval 30s/health_interval 1s/' "$CADDY_SITES_DIR/example.test.caddy"
+cp "$ROOT_DIR/docker/multi-site/caddy/Caddyfile" "$multi/caddy/Caddyfile"
+grep -Fxq 'example.test {' "$CADDY_SITES_DIR/example.test.caddy"
+grep -Fxq 'www.example.test {' "$CADDY_SITES_DIR/example.test.caddy"
+grep -Fxq '    tls internal' "$CADDY_SITES_DIR/example.test.caddy"
+[[ -f $TEST_DIR/kvsctl/lock && -f $TEST_DIR/docker/.kvs-scripts.lock ]]
+if [[ ${KVS_TEST_ORIGIN_ROUTE_ONLY:-0} == 1 ]]; then
+    echo 'PASS: generated the internal Caddy route and installation locks in the fixture.'
+    echo 'SKIP: live origin HTTP and TLS checks (route-only mode).'
+    exit 0
+fi
 # The nginx docker/images.lock pins, and the Caddy the multi-site front end
 # runs. tests/run-integration.sh pulls both; this suite never pulls.
 NGINX_TEST_IMAGE=${NGINX_TEST_IMAGE:-$("$ROOT_DIR/docker/bin/resolve-bases.sh" --get nginx)}
@@ -9,7 +28,6 @@ CADDY_TEST_IMAGE=${CADDY_TEST_IMAGE:-$(sed -n 's/^ *image: *//p' "$ROOT_DIR/dock
 endpoint=${DOCKER_HOST:-$(docker context inspect "${DOCKER_CONTEXT:-$(docker context show)}" --format '{{.Endpoints.docker.Host}}')}
 case "$endpoint" in unix://*) ;; *) echo 'ERROR: local Docker socket required' >&2; exit 1 ;; esac
 docker image inspect "$NGINX_TEST_IMAGE" "$CADDY_TEST_IMAGE" >/dev/null
-TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kvs-origin-http.XXXXXX")
 network="kvs-origin-$$-$RANDOM"
 containers=()
 cleanup() {
@@ -341,18 +359,11 @@ env DOMAIN=example.test SITE_PREFIX=origin-test MARIADB_ROOT_PASSWORD=test-root 
 mapfile -t health_command < <(jq -r '.services.nginx.healthcheck.test[1:][]' "$TEST_DIR/additional-site.json")
 docker exec "$nginx_container" "${health_command[@]}" > "$TEST_DIR/container-health.log"
 
-mkdir -p "$TEST_DIR/caddy/sites"
-# Use the installer's real CLI in a temporary directory, with an internal CA.
-cp "$ROOT_DIR/docker/multi-site/site-manager.sh" "$TEST_DIR/site-manager.sh"
-CADDY_SITES_DIR="$TEST_DIR/caddy/sites"
-bash "$TEST_DIR/site-manager.sh" proxy-config example.test internal false true > "$TEST_DIR/caddy-generation.log"
-sed -i 's/health_interval 30s/health_interval 1s/' "$CADDY_SITES_DIR/example.test.caddy"
-cp "$ROOT_DIR/docker/multi-site/caddy/Caddyfile" "$TEST_DIR/caddy/Caddyfile"
 caddy_container="$network-caddy"
 containers+=("$caddy_container")
 docker run -d --pull never --name "$caddy_container" --network "$network" \
     --memory 192m --pids-limit 64 -p 127.0.0.1::80 -p 127.0.0.1::443 \
-    -v "$TEST_DIR/caddy:/etc/caddy:ro" --tmpfs /data --tmpfs /config \
+    -v "$multi/caddy:/etc/caddy:ro" --tmpfs /data --tmpfs /config \
     "$CADDY_TEST_IMAGE" >/dev/null
 caddy_http=$(docker port "$caddy_container" 80/tcp | sed -n 's/^127\.0\.0\.1://p')
 caddy_https=$(docker port "$caddy_container" 443/tcp | sed -n 's/^127\.0\.0\.1://p')

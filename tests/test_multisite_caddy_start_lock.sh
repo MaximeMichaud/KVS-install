@@ -10,6 +10,8 @@ mkdir "$work/docker"
     init/lib/kvs-archive.sh multi-site/site-manager.sh multi-site/docker-compose.caddy.yml \
     multi-site/docker-compose.site.yml.template "$work/docker")
 multi="$work/docker/multi-site"
+# shellcheck source=tests/fixtures/manager-scripts-lock.sh
+source "$root/tests/fixtures/manager-scripts-lock.sh" "$work/docker"
 manager="$multi/site-manager.sh"
 routes="$multi/caddy/sites"
 locks="$multi/.locks"

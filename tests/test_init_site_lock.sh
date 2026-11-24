@@ -117,11 +117,13 @@ grep -Fxq 'plugin failed' "$work/plugin-error.log" || fail "missing plugin error
 if grep -Fq 'Retry after' "$work/plugin-error.log"; then fail "plugin failure reported as contention"; fi
 
 # A start must own the site before inspecting its admin or stopping cron.
-mkdir -p "$work/manager/sites/site.test" "$work/bin"
-cp "$root/docker/multi-site/site-manager.sh" "$work/manager/"
-site=$work/manager/sites/site.test
-mkdir -p "$work/manager/caddy/sites"
-echo route > "$work/manager/caddy/sites/site.test.caddy"
+mkdir -p "$work/docker/manager/sites/site.test" "$work/bin"
+cp "$root/docker/multi-site/site-manager.sh" "$work/docker/manager/"
+# shellcheck source=tests/fixtures/manager-scripts-lock.sh
+source "$root/tests/fixtures/manager-scripts-lock.sh" "$work/docker"
+site=$work/docker/manager/sites/site.test
+mkdir -p "$work/docker/manager/caddy/sites"
+echo route > "$work/docker/manager/caddy/sites/site.test.caddy"
 echo 'COMPOSE_PROJECT_NAME=kvs-site-test' > "$site/.env"
 echo 'services: {}' > "$site/docker-compose.yml"
 cat > "$work/bin/docker" <<'SH'
@@ -137,20 +139,20 @@ SH
 chmod +x "$work/bin/docker"
 export PATH="$work/bin:$PATH"
 rm "$work/entered" "$work/release"
-PAUSE=yes bash "$work/manager/site-manager.sh" start site.test > "$work/manager.log" 2>&1 &
+PAUSE=yes bash "$work/docker/manager/site-manager.sh" start site.test > "$work/manager.log" 2>&1 &
 first=$!
 await_marker "$work/entered"
 # Even a malformed primary reservation must not mask contention on add.
-touch "$work/manager/sites/.primary.env"
+touch "$work/docker/manager/sites/.primary.env"
 for action in add start stop remove proxy-config; do
-    refused bash "$work/manager/site-manager.sh" "$action" site.test < /dev/null
+    refused bash "$work/docker/manager/site-manager.sh" "$action" site.test < /dev/null
 done
-rm "$work/manager/sites/.primary.env"
+rm "$work/docker/manager/sites/.primary.env"
 [ ! -e "$work/second-docker" ] || fail "second manager command reached Docker"
 touch "$work/release"
 wait "$first" && fail "the fixture has no running Caddy"
 first=
-bash "$work/manager/site-manager.sh" stop site.test >/dev/null 2>&1 || true
+bash "$work/docker/manager/site-manager.sh" stop site.test >/dev/null 2>&1 || true
 [ -e "$work/second-docker" ] || fail "failed start retained the site lock"
 # Hold remove at its webroot prompt, after its project directory is gone.
 # remove runs its last Docker check from the directory it just unlinked.
@@ -164,7 +166,7 @@ export KVS_WEBROOT_BASE=$work/webroots
 mkdir -p "$KVS_WEBROOT_BASE/site.test"
 mkfifo "$work/answer"
 exec 7<>"$work/answer"
-bash "$work/manager/site-manager.sh" remove site.test 7>&- < "$work/answer" > "$work/remove.log" &
+bash "$work/docker/manager/site-manager.sh" remove site.test 7>&- < "$work/answer" > "$work/remove.log" &
 first=$!
 trap 'printf "n\n" >&7; cleanup' EXIT
 printf 'yes\n' >&7
@@ -175,15 +177,15 @@ done
 [ ! -d "$site" ] || fail "remove did not remove its project directory"
 kill -0 "$first" || fail "remove did not reach its last prompt"
 for action in add start stop remove proxy-config; do
-    refused bash "$work/manager/site-manager.sh" "$action" site.test < /dev/null
+    refused bash "$work/docker/manager/site-manager.sh" "$action" site.test < /dev/null
 done
-bash "$work/manager/site-manager.sh" list | grep -Fq 'No sites configured yet' || fail "lock directory listed as a site"
-bash "$work/manager/site-manager.sh" proxy-config other.test >/dev/null
+bash "$work/docker/manager/site-manager.sh" list | grep -Fq 'No sites configured yet' || fail "lock directory listed as a site"
+bash "$work/docker/manager/site-manager.sh" proxy-config other.test >/dev/null
 printf 'y\n' >&7
 wait "$first"
 first=
 trap cleanup EXIT
 exec 7>&-
 [ ! -e "$KVS_WEBROOT_BASE/site.test" ] || fail "confirmed webroot deletion did not finish"
-bash "$work/manager/site-manager.sh" proxy-config site.test >/dev/null
+bash "$work/docker/manager/site-manager.sh" proxy-config site.test >/dev/null
 echo "PASS: competing initializers and site operations refuse the occupied site"

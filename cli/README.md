@@ -479,11 +479,12 @@ state. A second one exits 6 and says which run holds it:
 lock is a `flock`, which a run that dies, whatever the way, never leaves
 behind; the docker commands a run started hold it too, until they end, so a
 run killed while `docker compose` works leaves the lock to that command,
-and no second compose starts beside it. `kvs-install.sh`, `docker/setup.sh`
-and `docker/reconfigure.sh` change nothing while a run holds the lock, and
-hold it shared for as long as they run: a run started meanwhile exits 6
-with `a setup.sh, reconfigure.sh or kvs-install.sh run is changing this
-installation and holds its lock`. `kvsctl status`, `kvsctl check` and
+and no second compose starts beside it. `kvs-install.sh`, `docker/setup.sh`,
+`docker/reconfigure.sh` and mutating `site-manager.sh` commands refuse
+to change the installation while kvsctl holds the lock. They hold it
+shared while they run. A kvsctl writer started meanwhile exits 6 with
+`a setup.sh, reconfigure.sh, site-manager.sh or kvs-install.sh run is
+changing this installation and holds its lock`. `kvsctl status`, `kvsctl check` and
 `kvsctl doctor` only read the lock: they still answer beside them, and do
 not see them either (doctor reports no operation running).
 
@@ -497,7 +498,7 @@ not see them either (doctor reports no operation running).
 | 3 | the upgrade is blocked and nothing was touched (`kvsctl check` says why) |
 | 4 | the upgrade failed and the previous version is back and healthy |
 | 5 | a rollback failed (the automatic one, or a manual one part way), or a restore stopped part way: the stack is in an unknown state, read the log |
-| 6 | another `kvsctl`, or a run of `setup.sh`, `reconfigure.sh` or `kvs-install.sh`, holds the lock of the installation |
+| 6 | another `kvsctl`, or a run of `setup.sh`, `reconfigure.sh`, `site-manager.sh` or `kvs-install.sh`, holds the lock of the installation |
 | 7 | the latest stable release is below the installed stable version or the highest seen at this URL, or the stable list predates one seen there |
 | 8 | the change succeeded but could not be recorded: run `kvsctl recover` |
 
@@ -925,8 +926,8 @@ An upgrade, a rollback or a restore that cannot finish, after a power cut, a
 `kvsctl/journal.json`: what the run had done, phase by phase. While it is
 there, every command but `status`, `version`, `history`, `logs`, `releases`
 and `recover` refuses, with the run, its log and what to do, and so do
-`kvs-install.sh`, `docker/setup.sh` and `docker/reconfigure.sh`, whose
-status options still run:
+`kvs-install.sh`, `docker/setup.sh`, `docker/reconfigure.sh` and mutating
+`site-manager.sh` commands. Read-only status commands still run:
 
 ```text
 an upgrade from 26.10.0 to 26.11.0 was interrupted during restart on 2026-11-02 14:05 UTC: run 'kvsctl recover' (its log: /opt/kvs/kvsctl/logs/20261102-140130-upgrade.log)
@@ -1112,7 +1113,7 @@ keeps `backups/` and `kvsctl/` in its new copy.
   `kvsctl recover` when `kvsctl status` shows an interrupted run. When
   `fuser` names nothing, that command has ended since: run the command
   again.
-- `a setup.sh, reconfigure.sh or kvs-install.sh run is changing this installation and holds its lock`
+- `a setup.sh, reconfigure.sh, site-manager.sh or kvs-install.sh run is changing this installation and holds its lock`
   (exit 6): one of the scripts runs on the installation, or a process it
   started does (`fuser -v /opt/kvs/kvsctl/lock` names it). Wait until it is
   done, then run the command again.

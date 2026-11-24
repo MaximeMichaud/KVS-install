@@ -31,12 +31,15 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Script directory
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit 1
+manager_path=$(realpath -e -- "${BASH_SOURCE[0]}") || exit 1
+SCRIPT_DIR=${manager_path%/*}
+DOCKER_DIR=${SCRIPT_DIR%/*}
+INSTALL_ROOT=$(dirname -- "$DOCKER_DIR")
 SITES_DIR="${SCRIPT_DIR}/sites"
 CADDY_SITES_DIR="${SCRIPT_DIR}/caddy/sites"
 PRIMARY_SITE_FILE="${SITES_DIR}/.primary.env"
 # The .env setup.sh writes for the installation, beside multi-site/.
-INSTALLATION_ENV_FILE="$(dirname -- "$SCRIPT_DIR")/.env"
+INSTALLATION_ENV_FILE="$DOCKER_DIR/.env"
 KVS_ARCHIVE_DIR="${KVS_ARCHIVE_DIR:-${SCRIPT_DIR}/../kvs-archive}"
 WEBROOT_BASE="${KVS_WEBROOT_BASE:-/var/www}"
 MAX_DOMAIN_LENGTH=64
@@ -55,6 +58,19 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 clear_site_compose_environment() {
     unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
 }
+
+# Docker or Compose may outlive a killed manager. Close the installation
+# locks in the child, including copies inherited from an installer parent.
+manager_docker() (
+    local file fd
+    for file in /dev/fd/*; do
+        if [[ $file -ef $INSTALL_ROOT/kvsctl/lock || $file -ef $DOCKER_DIR/.kvs-scripts.lock ]]; then
+            fd=${file##*/}
+            exec {fd}<&-
+        fi
+    done
+    docker "$@"
+)
 
 validate_domain() {
     local LC_ALL=C
@@ -244,7 +260,7 @@ configured_compose_project() (
     clear_site_compose_environment
     set -o pipefail
     local LC_ALL=C name
-    if ! name=$(docker compose config | sed -n 's/^name: //p'); then
+    if ! name=$(manager_docker compose config | sed -n 's/^name: //p'); then
         log_error "Could not render the Compose configuration in $PWD" >&2
         return 1
     fi
@@ -307,12 +323,13 @@ single_mode_primary_prefix() {
 # volumes by reusing its project name. Return 1 if free, 2 on a query error.
 compose_project_exists() {
     local project="$1" listing
-    if ! listing=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}'); then
+    [ -n "$project" ] || return 1
+    if ! listing=$(manager_docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}'); then
         log_error "Could not list containers of project ${project}" >&2
         return 2
     fi
     [ -z "$listing" ] || return 0
-    if ! listing=$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}'); then
+    if ! listing=$(manager_docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}'); then
         log_error "Could not list volumes of project ${project}" >&2
         return 2
     fi
@@ -325,7 +342,7 @@ compose_project_exists() {
 compose_project_working_dirs() (
     set -o pipefail
     local project="$1"
-    docker ps -a --filter "label=com.docker.compose.project=${project}" \
+    manager_docker ps -a --filter "label=com.docker.compose.project=${project}" \
         --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null |
         sort -u
 )
@@ -338,7 +355,7 @@ dir_compose_projects() {
     local dir_real listing project wd wd_real
 
     dir_real=$(cd "$1" && pwd -P) || return 1
-    listing=$(docker ps -a --format \
+    listing=$(manager_docker ps -a --format \
         '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}') ||
         return 1
     while IFS=$'\t' read -r project wd; do
@@ -393,7 +410,7 @@ site_project_without_name() {
     [ "$site_prefix" != "$default" ] || site_prefix=""
     for candidate in "$site_prefix" "$default"; do
         [ -n "$candidate" ] || continue
-        if ! volumes=$(docker volume ls --filter "label=com.docker.compose.project=${candidate}" \
+        if ! volumes=$(manager_docker volume ls --filter "label=com.docker.compose.project=${candidate}" \
             --format '{{.Name}}'); then
             log_error "Could not list the volumes of ${candidate}" >&2
             return 1
@@ -468,7 +485,7 @@ ensure_new_site_project_free() {
 }
 
 check_caddy_running() {
-    if ! docker ps --format '{{.Names}}' | grep -Fxq "kvs-caddy"; then
+    if ! manager_docker ps --format '{{.Names}}' | grep -Fxq "kvs-caddy"; then
         log_error "Caddy is not running. Start it first:"
         echo "  cd ${SCRIPT_DIR} && ./site-manager.sh caddy-start"
         exit 1
@@ -483,7 +500,7 @@ reload_caddy_locked() {
     # unchanged reload would otherwise keep an upstream marked unhealthy until
     # the next active-health interval.
     # Docker does not inherit the lock: see start_caddy.
-    if ! docker exec kvs-caddy caddy reload --force \
+    if ! manager_docker exec kvs-caddy caddy reload --force \
         --config /etc/caddy/Caddyfile 8<&-; then
         log_error "Failed to reload Caddy configuration"
         return 1
@@ -494,7 +511,7 @@ reload_caddy_locked() {
 reload_caddy_if_running() (
     local names
     lock_routes || return 1
-    if ! names=$(docker ps --format '{{.Names}}' 8<&-); then
+    if ! names=$(manager_docker ps --format '{{.Names}}' 8<&-); then
         log_error "Could not query the running containers to reload Caddy after route removal."
         return 1
     fi
@@ -507,7 +524,7 @@ wait_for_caddy() {
     local attempt
 
     for ((attempt = 1; attempt <= 30; attempt++)); do
-        if docker exec kvs-caddy \
+        if manager_docker exec kvs-caddy \
             wget -T 2 -qO- http://127.0.0.1:2019/config/ >/dev/null 2>&1; then
             return 0
         fi
@@ -519,18 +536,18 @@ wait_for_caddy() {
 }
 
 ensure_proxy_network() {
-    if docker network inspect kvs-proxy >/dev/null 2>&1; then
+    if manager_docker network inspect kvs-proxy >/dev/null 2>&1; then
         return 0
     fi
 
     log_info "Creating shared proxy network..."
     local error status
-    if error=$(docker network create kvs-proxy 2>&1); then
+    if error=$(manager_docker network create kvs-proxy 2>&1); then
         log_success "Created network: kvs-proxy"
     else
         status=$?
         # A concurrent first run may have created it after our inspection.
-        docker network inspect kvs-proxy >/dev/null 2>&1 && return 0
+        manager_docker network inspect kvs-proxy >/dev/null 2>&1 && return 0
         log_error "Could not create kvs-proxy: ${error}" >&2
         return "$status"
     fi
@@ -1038,7 +1055,7 @@ remove_primary_site() {
     lock_site_directory "$SITES_DIR/$domain" || return 1
     lock_routes || return 1
 
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "kvs-caddy"; then
+    if manager_docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "kvs-caddy"; then
         log_error "Stop Caddy before removing the primary route"
         return 1
     fi
@@ -1450,7 +1467,7 @@ STOPPED_CRON_WAS_RUNNING=false
 stopped_cron_notice() {
     [ -n "$STOPPED_CRON_SITE" ] || return 0
     if [ "$STOPPED_CRON_WAS_RUNNING" = true ]; then
-        if docker compose start cron; then
+        if manager_docker compose start cron; then
             log_warn "cron of ${STOPPED_CRON_SITE} ran before this start and has been started again"
             return 0
         fi
@@ -1459,8 +1476,84 @@ stopped_cron_notice() {
     log_warn "cron of ${STOPPED_CRON_SITE} is stopped: docker compose start cron in ${SITES_DIR}/${STOPPED_CRON_SITE}, or re-run ./site-manager.sh start ${STOPPED_CRON_SITE}"
 }
 
-# Acquire the domain lock first, when the command has a domain. Hold this
-# second lock while checking, publishing, removing or reloading routes.
+refuse_during_kvsctl_run() {
+    local root="$1"
+    local lock="$1/kvsctl/lock"
+    local status=0
+    local holding move logical_root
+    local -a holdings
+
+    if [ ! -L "$root/kvsctl" ] && { [ ! -e "$root/kvsctl" ] || (shopt -s nullglob dotglob; set -- "$root/kvsctl"/*; [ -d "$root/kvsctl" ] && [ "$#" -eq 0 ]); }; then
+        # kvs-install.sh sets the directory aside beside the install path
+        # it was given, which can be a symlink to the physical installation.
+        logical_root=$(cd -L -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -L) || return 1
+        holdings=("$root".kvsctl.??????)
+        if [[ $logical_root != "$root" && $logical_root -ef $root ]]; then
+            holdings+=("$logical_root".kvsctl.??????)
+        fi
+        for holding in "${holdings[@]}"; do
+            [ -d "$holding" ] && [ ! -L "$holding" ] || continue
+            [ -e "$holding/kvsctl" ] || [ -L "$holding/kvsctl" ] || continue
+            printf -v move 'mv -T -- %q %q' "$holding/kvsctl" "$root/kvsctl"
+            echo "ERROR: ${holding}/kvsctl holds the files of kvsctl that kvs-install.sh set aside for an update and has not moved back to ${root}/kvsctl: the update still runs, was stopped before it could, or could not move them, and the lock this manager makes there would keep them out. Once no update runs, run kvs-install.sh again, which moves them back first, or move them back yourself: ${move}. Then run site-manager.sh again. Nothing was changed." >&2
+            return 1
+        done
+    fi
+    if [ ! -e "$lock" ]; then
+        # shellcheck disable=SC2174  # Only the kvsctl directory is missing.
+        if ! mkdir -p -m 0750 -- "$root/kvsctl" || ! (umask 077 && : >> "$lock"); then
+            echo "ERROR: could not create ${lock}, the lock kvsctl and this manager share. Nothing was changed." >&2
+            return 1
+        fi
+    fi
+    if ! exec {KVSCTL_LOCK_FD}< "$lock"; then
+        echo "ERROR: could not open ${lock}, the lock kvsctl and this manager share. Nothing was changed." >&2
+        return 1
+    fi
+    # A shared lock is refused exactly while a kvsctl run holds its own.
+    flock --shared --nonblock "$KVSCTL_LOCK_FD" || status=$?
+    if [ "$status" -eq 1 ]; then
+        echo "ERROR: kvsctl is running on this installation (it holds ${lock}): wait until it is done; 'kvsctl status' shows what it does. Nothing was changed." >&2
+        return 1
+    elif [ "$status" -ne 0 ]; then
+        echo "ERROR: could not tell whether kvsctl is running: flock ${lock} failed with status ${status}. Nothing was changed." >&2
+        return 1
+    fi
+    if [ -e "$root/kvsctl/journal.json" ]; then
+        echo "ERROR: an interrupted kvsctl run left ${root}/kvsctl/journal.json: run 'kvsctl recover' first. Where recover says to finish by hand and that takes site-manager.sh, remove that file, then run site-manager.sh again. Nothing was changed." >&2
+        return 1
+    fi
+}
+
+hold_manager_scripts_lock() {
+    local lock="$DOCKER_DIR/.kvs-scripts.lock" file fd='' status=0
+    if [[ ${KVS_SITE_LOCKS_INHERITED:-} == 1 ]]; then
+        for file in /dev/fd/*; do
+            [[ $file -ef $lock ]] || continue
+            fd=${file##*/}
+            break
+        done
+    fi
+    if [[ -z $fd ]]; then
+        if ! (umask 077 && : >> "$lock") || ! exec {fd}< "$lock"; then
+            log_error "Could not open the installation scripts lock: ${lock}"
+            return 1
+        fi
+    fi
+    flock --exclusive --nonblock "$fd" || status=$?
+    case $status in
+        0)
+            # The domain and route locks reopen descriptors 9 and 8.
+            if [[ $fd == [89] ]]; then exec {fd}<&"$fd" || return 1; fi
+            return 0 ;;
+        1) log_error "Another setup.sh, reconfigure.sh or site-manager.sh run is changing this installation (it holds ${lock}): wait until it is done." ;;
+        *) log_error "Could not lock ${lock}: flock failed with status ${status}." ;;
+    esac
+    return 1
+}
+
+# Lock order: kvsctl (shared), scripts (exclusive for proxy changes),
+# domain, then routes. Keep the route lock across publication and reload.
 lock_routes() {
     local dir="$SCRIPT_DIR/.locks/.routes"
     mkdir -p -- "$dir" || return 1
@@ -1495,7 +1588,7 @@ lock_site_directory() {
 check_site_archive_mount() {
     local domain="$1" mount source webroot path selected count=0
     if ! mount=$(set -o pipefail
-        docker compose --profile setup config --format json kvs-init |
+        manager_docker compose --profile setup config --format json kvs-init |
             jq -er '([.services["kvs-init"].volumes[]? | select(.type == "bind" and .target == "/var/www/kvs")
                 | .source][0] // "") as $webroot
                 | [.services["kvs-init"].volumes[]? | select(.type == "bind" and
@@ -1644,7 +1737,7 @@ start_site() {
     # site must not see that. The "up -d" below starts cron again.
     log_info "Stopping cron for the initialization..."
     local running_cron status
-    running_cron=$(docker compose ps --status running --quiet cron) || {
+    running_cron=$(manager_docker compose ps --status running --quiet cron) || {
         status=$?
         log_error "Could not check whether cron is running. Start aborted before stopping it."
         return "$status"
@@ -1658,29 +1751,30 @@ start_site() {
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    docker compose stop cron
+    manager_docker compose stop cron
     trap - HUP INT TERM
     # A cron already stopped needs the manual start notice only if a later step fails.
     STOPPED_CRON_SITE=$domain
 
     # Run init containers first
     log_info "Running initialization..."
-    docker compose up -d mariadb
+    manager_docker compose up -d mariadb
     for ((attempt = 1; attempt <= 60; attempt++)); do
-        if docker compose exec -T mariadb \
+        if manager_docker compose exec -T mariadb \
             healthcheck.sh --connect --innodb_initialized >/dev/null 2>&1; then
             break
         fi
         sleep 2
     done
-    if ! docker compose exec -T mariadb \
+    if ! manager_docker compose exec -T mariadb \
         healthcheck.sh --connect --innodb_initialized >/dev/null 2>&1; then
         log_error "MariaDB did not become healthy before site initialization"
         return 1
     fi
-    docker compose --profile setup run --rm --no-deps phpmyadmin-init
+    manager_docker compose --profile setup run --rm --no-deps phpmyadmin-init
     if [ -z "$admin_password" ]; then
-        if ! admin_table_count=$(docker compose exec -T -e "TABLES_PREFIX=$(site_tables_prefix)" mariadb sh -c '
+        # shellcheck disable=SC2016  # The container expands the variables.
+        if ! admin_table_count=$(manager_docker compose exec -T -e "TABLES_PREFIX=$(site_tables_prefix)" mariadb sh -c '
             MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N -e \
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"$MARIADB_DATABASE\" AND table_name=\"${TABLES_PREFIX}admin_users\";"
         ' 2>/dev/null); then
@@ -1699,7 +1793,8 @@ start_site() {
             # The primary account is user_id 1 whatever its login, the one
             # 35-harden-admin-users.sh refuses to leave on the default; a
             # renamed one keeps its login, which the password goes with.
-            if ! default_admin_login=$(docker compose exec -T -e "TABLES_PREFIX=$(site_tables_prefix)" mariadb sh -c '
+            # shellcheck disable=SC2016  # The container expands the variables.
+            if ! default_admin_login=$(manager_docker compose exec -T -e "TABLES_PREFIX=$(site_tables_prefix)" mariadb sh -c '
                 MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N "$MARIADB_DATABASE" -e \
                     "SELECT login FROM ${TABLES_PREFIX}admin_users WHERE user_id=1 AND pass=MD5(CONCAT(\"pass:\",MD5(\"123\")));"
             ' 2>/dev/null); then
@@ -1727,7 +1822,7 @@ start_site() {
     fi
     local init_status=0
     KVS_ADMIN_PASSWORD="$admin_password" \
-        docker compose --profile setup run --rm --no-deps kvs-init || init_status=$?
+        manager_docker compose --profile setup run --rm --no-deps kvs-init || init_status=$?
     unset admin_password
     if [ "$init_status" -ne 0 ]; then
         if [ "$generated_admin_password" = true ]; then
@@ -1738,7 +1833,7 @@ start_site() {
 
     # Start all services
     log_info "Starting services..."
-    docker compose up -d
+    manager_docker compose up -d
     STOPPED_CRON_SITE=""
 
     # A caddy-start during initialization may have replaced the proxy.
@@ -1774,7 +1869,7 @@ stop_site() {
     check_site_files "$site_dir" stopping || return 1
     log_info "Stopping site: ${domain}"
     cd "$site_dir"
-    docker compose down
+    manager_docker compose down
 
     log_success "Site ${domain} stopped"
 }
@@ -1815,7 +1910,7 @@ remove_incomplete_site() {
     for candidate in "${names[@]}"; do
         [ -n "$candidate" ] && [[ "$seen" != *" ${candidate} "* ]] || continue
         seen="${seen}${candidate} "
-        if ! volumes=$(docker volume ls --filter "label=com.docker.compose.project=${candidate}" \
+        if ! volumes=$(manager_docker volume ls --filter "label=com.docker.compose.project=${candidate}" \
             --format '{{.Name}}'); then
             log_error "Could not list the volumes of ${candidate}"
             return 1
@@ -1955,13 +2050,13 @@ remove_site() {
     # configuration anyway orphaned those volumes.
     cd "$site_dir"
     local down_status=0 left_volumes
-    docker compose -p "$remove_project" down -v --remove-orphans || down_status=$?
+    manager_docker compose -p "$remove_project" down -v --remove-orphans || down_status=$?
     if [ "$down_status" -ne 0 ]; then
         log_error "'docker compose down -v' failed (status ${down_status}); the site directory and its route are kept"
         log_error "Fix the error above and run remove again"
         exit 1
     fi
-    if ! left_volumes=$(docker volume ls --filter "label=com.docker.compose.project=${remove_project}" \
+    if ! left_volumes=$(manager_docker volume ls --filter "label=com.docker.compose.project=${remove_project}" \
         --format '{{.Name}}'); then
         log_error "Could not list the volumes of ${remove_project} after 'docker compose down -v'; the site directory and its route are kept"
         log_error "Fix the error above and run remove again"
@@ -2035,7 +2130,7 @@ list_sites() {
             fi
 
             # Check if running
-            if docker ps --format '{{.Names}}' | grep -Fxq "${site_prefix}-nginx"; then
+            if manager_docker ps --format '{{.Names}}' | grep -Fxq "${site_prefix}-nginx"; then
                 echo -e "  ${GREEN}●${NC} ${domain} (running)"
             else
                 echo -e "  ${RED}○${NC} ${domain} (stopped)"
@@ -2054,7 +2149,7 @@ show_status() {
     echo ""
 
     # Caddy status
-    if docker ps --format '{{.Names}}' | grep -Fxq "kvs-caddy"; then
+    if manager_docker ps --format '{{.Names}}' | grep -Fxq "kvs-caddy"; then
         echo -e "Caddy Proxy: ${GREEN}running${NC}"
     else
         echo -e "Caddy Proxy: ${RED}stopped${NC}"
@@ -2144,7 +2239,7 @@ resolve_caddy_acme_email() {
 check_running_caddy_contact() {
     local contacts setting
     contacts=$(caddy_scan_routes "" contacts) || return 1
-    if ! setting=$(docker inspect --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "ACME_EMAIL"}}{{println .}}{{end}}{{end}}' kvs-caddy 8<&-); then
+    if ! setting=$(manager_docker inspect --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "ACME_EMAIL"}}{{println .}}{{end}}{{end}}' kvs-caddy 8<&-); then
         log_error "Could not inspect the running Caddy ACME contact."
         return 1
     fi
@@ -2169,7 +2264,7 @@ start_caddy() {
     # volumes while still using the externally managed kvs-proxy network.
     # An empty ACME_EMAIL leaves the compose file default, for routes that
     # need no ACME account.
-    ACME_EMAIL="$CADDY_ACME_EMAIL" docker compose -p multi-site -f docker-compose.caddy.yml up -d 8<&-
+    ACME_EMAIL="$CADDY_ACME_EMAIL" manager_docker compose -p multi-site -f docker-compose.caddy.yml up -d 8<&-
     wait_for_caddy 8<&-
     reload_caddy_locked
     log_success "Caddy proxy started"
@@ -2183,7 +2278,7 @@ stop_caddy() {
     lock_routes || return 1
     log_info "Stopping Caddy proxy..."
     cd "$SCRIPT_DIR"
-    docker compose -p multi-site -f docker-compose.caddy.yml down 8<&- || return 1
+    manager_docker compose -p multi-site -f docker-compose.caddy.yml down 8<&- || return 1
     log_success "Caddy proxy stopped"
 }
 
@@ -2234,20 +2329,31 @@ case "${1:-}" in
 esac
 
 case "${1:-}" in
+    add|remove|start|stop|proxy-config|primary-config|primary-remove)
+        [ -n "${2:-}" ] || { log_error "Domain required"; usage; exit 1; } ;;
+esac
+case "${1:-}" in
+    primary-config|primary-remove)
+        [ -n "${3:-}" ] || { log_error "Site prefix required"; usage; exit 1; } ;;
+esac
+
+case "${1:-}" in
+    add|remove|start|stop|proxy-config|primary-config|primary-remove|proxy-network|caddy-start|caddy-stop)
+        refuse_during_kvsctl_run "$INSTALL_ROOT" || exit 1
+        if [[ $1 != stop ]]; then hold_manager_scripts_lock || exit 1; fi ;;
+esac
+
+case "${1:-}" in
     add)
-        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
         add_site "$2"
         ;;
     remove)
-        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
         remove_site "$2"
         ;;
     start)
-        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
         start_site "$2"
         ;;
     stop)
-        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
         stop_site "$2"
         ;;
     list)
@@ -2257,20 +2363,15 @@ case "${1:-}" in
         show_status
         ;;
     proxy-config)
-        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
         validate_domain "$2" || exit 1
         lock_site_directory "$SITES_DIR/$2" || exit 1
         lock_routes || exit 1
         write_caddy_site_config "$2" "${3:-public}" "${4:-false}" "${5:-auto}"
         ;;
     primary-config)
-        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
-        [ -z "${3:-}" ] && { log_error "Site prefix required"; usage; exit 1; }
         configure_primary_site "$2" "$3" "${4:-public}" "${5:-false}"
         ;;
     primary-remove)
-        [ -z "${2:-}" ] && { log_error "Domain required"; usage; exit 1; }
-        [ -z "${3:-}" ] && { log_error "Site prefix required"; usage; exit 1; }
         remove_primary_site "$2" "$3"
         ;;
     proxy-network)
@@ -2285,6 +2386,7 @@ case "${1:-}" in
     caddy-stop)
         stop_caddy
         ;;
+    help|-h|--help) usage ;;
     *)
         usage
         exit 1

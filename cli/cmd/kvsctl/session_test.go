@@ -297,7 +297,7 @@ func TestSessionLockedByAScript(t *testing.T) {
 	g := newGuard("stops", nil)
 	defer g.stop()
 	_, err = openSession("backup", g, sessionOptions{})
-	if exitCode(err) != exitLocked || !strings.Contains(fmt.Sprint(err), "setup.sh, reconfigure.sh or kvs-install.sh") {
+	if exitCode(err) != exitLocked || !strings.Contains(fmt.Sprint(err), "setup.sh, reconfigure.sh, site-manager.sh or kvs-install.sh") {
 		t.Fatalf("a script holding the lock gives %v", err)
 	}
 	if logs, _ := runlog.List(inst.StateDir()); len(logs) != 0 {

@@ -125,7 +125,7 @@ func TestLockOutlivesARunKilledDuringADockerCommand(t *testing.T) {
 // process that lives and holds nothing (a pid used again). A run that
 // lives, which holds the lock exclusive, is named at once. A shared hold
 // that outlasts the wait is a script (setup.sh, reconfigure.sh,
-// kvs-install.sh hold it shared for their whole run), named as such even
+// site-manager.sh and kvs-install.sh hold it shared for their whole run), named as such even
 // though the lock file still names a run that has ended; an exclusive one
 // that outlasts it is what a killed run left.
 func TestLockWaitsForAMomentaryReader(t *testing.T) {
@@ -185,7 +185,7 @@ func TestLockWaitsForAMomentaryReader(t *testing.T) {
 	script.Close()
 	if !errors.As(err, &held) || !held.Script || held.Orphaned || took < orphanWait {
 		t.Errorf("a shared hold that lasts: %v after %s, want a script named after %s", err, took, orphanWait)
-	} else if msg := err.Error(); !strings.Contains(msg, "setup.sh, reconfigure.sh or kvs-install.sh") || !strings.Contains(msg, inst.lockPath()) {
+	} else if msg := err.Error(); !strings.Contains(msg, "setup.sh, reconfigure.sh, site-manager.sh or kvs-install.sh") || !strings.Contains(msg, inst.lockPath()) {
 		t.Errorf("a script's hold is named %q", msg)
 	}
 

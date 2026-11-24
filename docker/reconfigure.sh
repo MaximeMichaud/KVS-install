@@ -190,15 +190,15 @@ hold_scripts_lock() {
     local status=0
 
     if ! (umask 077 && : >> "$lock") || ! exec {KVS_SCRIPTS_LOCK_FD}< "$lock"; then
-        echo "ERROR: could not open ${lock}, the lock setup.sh and reconfigure.sh share. Nothing was changed." >&2
+        echo "ERROR: could not open ${lock}, the lock setup.sh, reconfigure.sh and site-manager.sh share. Nothing was changed." >&2
         return 1
     fi
     flock --exclusive --nonblock "$KVS_SCRIPTS_LOCK_FD" || status=$?
     if [ "$status" -eq 1 ]; then
-        echo "ERROR: another setup.sh or reconfigure.sh run is changing this installation (it holds ${lock}): wait until it is done. Nothing was changed." >&2
+        echo "ERROR: another setup.sh, reconfigure.sh or site-manager.sh run is changing this installation (it holds ${lock}): wait until it is done. Nothing was changed." >&2
         return 1
     elif [ "$status" -ne 0 ]; then
-        echo "ERROR: could not tell whether setup.sh or reconfigure.sh runs: flock ${lock} failed with status ${status}. Nothing was changed." >&2
+        echo "ERROR: could not tell whether setup.sh, reconfigure.sh or site-manager.sh runs: flock ${lock} failed with status ${status}. Nothing was changed." >&2
         return 1
     fi
 }

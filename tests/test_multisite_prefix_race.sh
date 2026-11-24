@@ -9,6 +9,8 @@ mkdir "$work/docker"
 (cd "$root/docker" && command cp --parents images.lock bin/resolve-bases.sh lib/host-validation.sh lib/kvs-php.sh \
     init/lib/kvs-archive.sh multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work/docker")
 multi="$work/docker/multi-site"
+# shellcheck source=tests/fixtures/manager-scripts-lock.sh
+source "$root/tests/fixtures/manager-scripts-lock.sh" "$work/docker"
 manager="$multi/site-manager.sh"
 sites="$multi/sites"
 routes="$multi/caddy/sites"

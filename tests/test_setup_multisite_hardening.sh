@@ -983,7 +983,7 @@ jq -e '.services.caddy.environment.CADDY_ADMIN == null' "$caddy_json" >/dev/null
 grep -Fq 'admin localhost:2019' "$ROOT_DIR/docker/multi-site/caddy/Caddyfile" ||
     fail "Caddy's admin API is not limited to the container loopback"
 
-fixture="$TEST_DIR/proxy"
+fixture="$TEST_DIR/docker/multi-site"
 mkdir -p "$fixture/caddy/sites"
 cp "$ROOT_DIR/docker/multi-site/site-manager.sh" "$fixture/site-manager.sh"
 mkdir -p "$TEST_DIR/lib"

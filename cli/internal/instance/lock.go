@@ -18,7 +18,7 @@ import (
 // it. Orphaned is a run that has ended, killed, while a
 // docker command it started still runs: that command holds the lock (see
 // Lock), and Path is the lock file it holds open. Script is a lock no kvsctl
-// holds: setup.sh, reconfigure.sh and kvs-install.sh hold it shared for as
+// holds: setup.sh, reconfigure.sh, site-manager.sh and kvs-install.sh hold it shared for as
 // long as they run, and the lock file names no run of theirs.
 type LockedError struct {
 	PID      int
@@ -31,7 +31,7 @@ type LockedError struct {
 
 func (e *LockedError) Error() string {
 	if e.Script {
-		msg := "a setup.sh, reconfigure.sh or kvs-install.sh run is changing this installation and holds its lock; wait until it is done"
+		msg := "a setup.sh, reconfigure.sh, site-manager.sh or kvs-install.sh run is changing this installation and holds its lock; wait until it is done"
 		if e.Path != "" {
 			msg += " ('fuser -v " + e.Path + "' names it)"
 		}
