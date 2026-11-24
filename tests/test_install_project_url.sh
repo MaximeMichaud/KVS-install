@@ -295,6 +295,37 @@ done
 # Writes without an assignment operator next to the key: destructuring and
 # foreach targets, and an override that is an operand of and, or, xor.
 target="\$config['project_url']"
+
+# PHP 8 still tokenizes the PHP 7.4 brace syntax. When a real 7.4 CLI
+# is unavailable, bypass syntax validation only for the main token stream.
+(
+  brace_php=$(command -v php7.4 || command -v php)
+  if "$brace_php" -r 'exit(PHP_VERSION_ID >= 80000 ? 0 : 1);'; then
+    brace_php=''
+    mkdir "$work/brace-bin"
+    cat > "$work/brace-bin/php7.4" <<'SH'
+#!/bin/bash
+script=$(cat)
+parsed='$parsed = token_get_all($source, TOKEN_PARSE);'
+[[ $script == *"$parsed"* ]] || exit 99
+exec php "$@" <<< "${script/"$parsed"/'$parsed = token_get_all($source);'}"
+SH
+    chmod +x "$work/brace-bin/php7.4"
+    export PATH="$work/brace-bin:$PATH"
+  fi
+  statement="${target}{0} = 'x';"
+  printf '%s\n' '<?php' "$main" "$statement" >"$file"
+  if [[ -n $brace_php ]]; then "$brace_php" -l "$file" >/dev/null || fail "brace-offset fixture does not parse"; fi
+  PHP=7.4 refuse computed "$statement"
+  printf '%s\n' '<?php' "$main" "\$read = ${target}{0};" >"$file"
+  PHP=7.4 install_KVS >/dev/null || fail "a brace-offset read was refused"
+)
+for statement in "++$target;" "$target++;" "--$target;" "$target--;" \
+  "${target}[0] = 'x';" "${target}[\$offsets[0]][1] .= 'x';" "${target}[] = 'x';" \
+  "($target)[0] = 'x';" "unset($target);" "unset(\$x, ${target}[0]);" "unset(($target)[0]);"; do
+  printf '%s\n' '<?php' "$main" "$statement" >"$file"
+  refuse computed "$statement"
+done
 for statement in \
   "[$target] = ['second'];" "list($target) = ['second'];" "list('k' => $target) = ['k' => 'second'];" \
   "[\$x, [\$y, [$target]]] = [1, [2, ['second']]];" "[, &$target] = \$pair;" \
@@ -319,6 +350,10 @@ done
 cat >"$file" <<'PHP'
 <?php
 $config['project_url'] = 'https://old.test';
+$initial = $config['project_url'][0];
+$result = strlen($config['project_url'])[0];
+callback($config['project_url'])[0] = 1;
+unset($map[$config['project_url'][0]]);
 $list = [$config['project_url'], 'x'];
 $map = ['k' => $config['project_url'], $config['project_url'] => 1];
 foreach ([$config['project_url']] as $value) { $seen[$config['project_url']] = $value; }

@@ -1638,6 +1638,8 @@ function isWriteTarget($tokens, $from, $to) {
     list($type, $before) = $tokens[$open - 1];
     if ($tokens[$open][1] === '(') {
         if ($type === T_FOREACH) return $as;
+        if ($type === T_UNSET && in_array($tokens[$from-1][1], ['(', ','], true) &&
+                in_array($tokens[$to+1][1], [')', ','], true)) return 'unset';
         if ($type !== T_LIST) return false;
         --$open;
     } elseif ($tokens[$open][1] !== '[' || $before === ']' || in_array($type, [T_VARIABLE, T_STRING], true)) {
@@ -1689,13 +1691,48 @@ foreach ($tokens as $i => $token) {
     $close = $key + 1;
     while (($tokens[$close][1] ?? '') === ')') ++$close;
     if (($tokens[$close][1] ?? '') !== ']') continue;
-    $operator = $tokens[$close+1][1] ?? '';
-    $assigned = $operator === '=' || in_array($tokens[$close+1][0] ?? null, $compound, true);
-    if (!$assigned && !isWriteTarget($tokens, $start, $close)) continue;
+    // An offset of the known field can itself be assigned, unset or updated.
+    // Skip balanced offset expressions without treating their contents as writes.
+    $from = $start;
+    $last = $close;
+    while (true) {
+        $left = $from;
+        $right = $last;
+        while (($tokens[$left-1][1] ?? '') === '(' && ($tokens[$right+1][1] ?? '') === ')') {
+            --$left;
+            ++$right;
+        }
+        // PHP 7.4 also accepts braces around a string offset.
+        if (!in_array($tokens[$right+1][1] ?? '', ['[', '{'], true)) break;
+        // (field)[0] writes the field. f(field)[0] writes the call result.
+        if ($left !== $from && !parses(substr_replace($source, ' $config ', $tokens[$left][2],
+                $tokens[$right][2] + 1 - $tokens[$left][2]))) break;
+        $from = $left;
+        $last = $right;
+        $depth = 0;
+        do {
+            list($kind, $text) = $tokens[++$last];
+            if (($kind === null && in_array($text, ['[', '{'], true)) ||
+                    in_array($kind, [T_CURLY_OPEN, T_DOLLAR_OPEN_CURLY_BRACES], true) ||
+                    (defined('T_ATTRIBUTE') && $kind === T_ATTRIBUTE)) ++$depth;
+            if ($kind === null && in_array($text, [']', '}'], true)) --$depth;
+        } while ($depth);
+    }
+    $operator = $tokens[$last+1][1] ?? '';
+    $kind = $tokens[$last+1][0] ?? null;
+    $assigned = $operator === '=' || in_array($kind, $compound, true);
+    $updated = in_array($kind, [T_INC, T_DEC], true) ||
+        (in_array($tokens[$from-1][0] ?? null, [T_INC, T_DEC], true) &&
+            !in_array($operator, ['->', '?->', '::', '('], true));
+    $targetKind = (!$assigned && !$updated) ? isWriteTarget($tokens, $from, $last) : false;
+    if (!$assigned && !$updated && !$targetKind) continue;
     if ($start !== $i) {
         // Grouping parentheses can be removed. Function-call parentheses cannot.
         if (!parses(substr_replace($source, ' $config ', $tokens[$start][2],
                 $tokens[$end][2] + 1 - $tokens[$start][2]))) continue;
+    }
+    if ($updated || $targetKind === 'unset' || ($assigned && $last !== $close)) {
+        refuse('computed assignment (increment, decrement, offset write or unset)');
     }
     if (!$assigned) refuse('ambiguous destructuring or foreach target');
     if ($operator !== '=') refuse('computed assignment (compound operator ' . $operator . ')');
