@@ -1075,18 +1075,25 @@ EOF
     pass "the rewrite recovery follows the includes of the server block"
 }
 
-# The progress counts whole seconds from the moment its awk starts, and the
-# first record reaches awk some milliseconds later, through tr: a pipe
-# started late in a second shows it at 0:00:01. Started at the top of a
-# second, it shows 0:00:00 unless the record takes most of a second.
-start_of_a_second() {
-    local left=$((1000000 - 10#${EPOCHREALTIME: -6}))
-
-    sleep "$((left / 1000000)).$(printf '%06d' $((left % 1000000)))"
+# Read the first completed progress block. Rates are averages over the
+# elapsed seconds when the first record arrives after the clock ticks.
+first_progress_seconds() {
+    local clock='^  Time:    ([0-9]+):([0-5][0-9]):([0-5][0-9]) elapsed, '
+    local line seconds
+    while IFS= read -r line; do
+        if [[ $line =~ $clock ]]; then
+            seconds=$((10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))
+            # systime() and EPOCHSECONDS read the same clock.
+            ((seconds <= EPOCHSECONDS - progress_started)) || fail "elapsed $seconds s, longer than the run"
+            echo "$seconds"
+            return
+        fi
+    done
+    fail "missing elapsed time in the first progress block"
 }
 
 test_the_transfer_is_counted_first_and_shown_against_the_count() {
-    local stats out status
+    local stats out status seconds rate left progress_started
 
     stats=$'\nNumber of files: 3,012 (reg: 3,008, dir: 4)\nNumber of created files: 3,011 (reg: 3,008, dir: 3)\nNumber of deleted files: 0\nNumber of regular files transferred: 3,008\nTotal file size: 38,000,000 bytes\nTotal transferred file size: 38,000,000 bytes\nLiteral data: 0 bytes\n'
     [ "$(import_rsync_stats_totals <<< "$stats")" = $'3008\t38000000\t3008\t38000000\t3012' ] ||
@@ -1103,34 +1110,57 @@ test_the_transfer_is_counted_first_and_shown_against_the_count() {
     # message in between, shown as a log (no terminal): the first record
     # against the totals with the scan counted, the message as it is, the
     # end summed up.
-    start_of_a_second
+    progress_started=$EPOCHSECONDS
     out=$(printf '\r              0   0%%    0.00kB/s    0:00:00 (xfr#0, ir-chk=1000/3012)\r        4000000  10%%    4.03MB/s    0:00:00 (xfr#1, ir-chk=1007/3012)\rskipping non-regular file "x"\n       32042000  84%%    3.91MB/s    0:00:07 (xfr#2029, ir-chk=979/3012)\r       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' |
         import_rsync_progress 38000000 3008 no)
-    [ "$(head -n 4 <<< "$out")" = "  Copied:  0 B of 36.2 MB (0%), 0 of 3,008 files
+    seconds=$(first_progress_seconds <<< "$(head -n 4 <<< "$out")")
+    rate='?'
+    if (( seconds > 0 )); then rate=$(import_count_text "$((2012 / seconds))"); fi
+    left='time left unknown yet'
+    if (( seconds >= 5 )); then left='time left unknown: nothing copied so far'; fi
+    [ "$(head -n 3 <<< "$out")" = "  Copied:  0 B of 36.2 MB (0%), 0 of 3,008 files
   Checked: 2,012 of 3,012 entries found so far, scan running
-  Rates:   0 B/s, 0 files/s copied, ? entries/s checked
-  Time:    0:00:00 elapsed, time left unknown yet" ] ||
+  Rates:   0 B/s, 0 files/s copied, $rate entries/s checked" ] &&
+        [[ $(sed -n '4p' <<< "$out") == *" elapsed, $left" ]] ||
         fail "the first record is shown against the totals, the scan counted: $out"
     grep -q '^skipping non-regular file "x"$' <<< "$out" || fail "what else rsync prints passes through: $out"
-    grep -q '^  Transferred 3,008 files, 36.2 MB in 0:00:0[0-9]$' <<< "$out" || fail "the end is summed up: $out"
+    grep -Eq '^  Transferred 3,008 files, 36[.]2 MB in [0-9]+:[0-5][0-9]:[0-5][0-9]$' <<< "$out" || fail "the end is summed up: $out"
     grep -q '^  Average .* files/s; 3,012 entries checked$' <<< "$out" || fail "the end counts the checks: $out"
     # Without totals the counts show alone; the scan, once done, is the whole.
+    progress_started=$EPOCHSECONDS
     out=$(printf '       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' | import_rsync_progress 0 0 no)
     grep -q '^  Copied:  36.2 MB, 3,008 files$' <<< "$out" || fail "without totals the counts show alone: $out"
     grep -q '^  Checked: 3,012 of 3,012 entries (100%)$' <<< "$out" || fail "a scan that is done is the whole: $out"
-    grep -q '^  Time:    0:00:0[0-9] elapsed, time left unknown yet$' <<< "$out" || fail "no time left before five seconds: $out"
+    seconds=$(first_progress_seconds <<< "$out")
+    if (( seconds < 5 )); then
+        grep -q ' elapsed, time left unknown yet$' <<< "$out" || fail "no time left before five seconds: $out"
+    else
+        grep -Fq ' elapsed, about 0:00:00 left (pace ' <<< "$out" || fail "no work remains after a complete scan: $out"
+    fi
     # Without a scan figure (a record inside a file) nothing tells what is
     # left.
-    start_of_a_second
+    progress_started=$EPOCHSECONDS
     out=$(printf '       32768   0%%    0.00kB/s    0:00:00  \n' | import_rsync_progress 0 0 no)
-    [ "$(head -n 3 <<< "$out")" = "  Copied:  32 kB, 0 files
-  Rates:   0 B/s, 0 files/s copied
-  Time:    0:00:00 elapsed, left unknown: no complete count of this site yet" ] || fail "a record without a scan figure: $out"
+    seconds=$(first_progress_seconds <<< "$(head -n 3 <<< "$out")")
+    rate='0 B'
+    if (( seconds > 0 )); then
+        rate=$(awk -v s="$seconds" 'BEGIN { b = 32768/s; if (b >= 1024) printf "%.0f kB", b/1024; else printf "%d B", b }')
+    fi
+    [ "$(head -n 2 <<< "$out")" = "  Copied:  32 kB, 0 files
+  Rates:   $rate/s, 0 files/s copied" ] &&
+        [[ $(sed -n '3p' <<< "$out") == *" elapsed, left unknown: no complete count of this site yet" ]] ||
+        fail "a record without a scan figure: $out"
     # On a terminal the lines are rewritten in place (cursor up one line a
     # line, the rest of the screen cleared) and the end replaces them with
     # its summary.
+    progress_started=$EPOCHSECONDS
     out=$(printf '       38000000 100%%    3.90MB/s    0:00:09 (xfr#3008, to-chk=0/3012)\n' | import_rsync_progress 38000000 3008 yes | tr '\r\033' '|^')
-    [[ "$out" == "  Copied:  36.2 MB of 36.2 MB (100%), 3,008 of 3,008 files^[K"$'\n'"  Checked: 3,012 of 3,012 entries (100%)^[K"$'\n'"  Rates:   "*"^[K"$'\n'"  Time:    0:00:0"?" elapsed, time left unknown yet^[J|^[3A^[J  Transferred 3,008 files"*$'\n'"  Average "*"; 3,012 entries checked" ]] ||
+    seconds=$(first_progress_seconds <<< "$out")
+    left='time left unknown yet'
+    if (( seconds >= 5 )); then
+        if (( seconds < 300 )); then left='about 0:00:00 left (pace so far)'; else left='about 0:00:00 left (pace of the last 5 min)'; fi
+    fi
+    [[ "$out" == "  Copied:  36.2 MB of 36.2 MB (100%), 3,008 of 3,008 files^[K"$'\n'"  Checked: 3,012 of 3,012 entries (100%)^[K"$'\n'"  Rates:   "*"^[K"$'\n'"  Time:    "*" elapsed, $left^[J|^[3A^[J  Transferred 3,008 files"*$'\n'"  Average "*"; 3,012 entries checked" ]] ||
         fail "on a terminal the lines are rewritten in place: $out"
     # The count of the transfer has a time budget: past it, no totals and
     # status 124 from timeout (which runs rsync by name, so the stub is a

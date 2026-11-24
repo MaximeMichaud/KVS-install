@@ -565,7 +565,7 @@ test_interrupted_swap_moves_the_kvsctl_data_back() {
 # closed terminal or a kill ends the tee, and the report of the removal the
 # signal stopped then meets a closed pipe: the files still come back. Job
 # control gives the run a process group of its own, as a terminal does, and
-# the removal of the old copy waits five seconds for the signal.
+# the removal of the old copy stays blocked until the signal arrives.
 test_a_signal_to_the_whole_run_moves_the_kvsctl_data_back() {
   local temp_dir
   local status
@@ -582,7 +582,9 @@ test_a_signal_to_the_whole_run_moves_the_kvsctl_data_back() {
   rm() {
     if [[ ${*: -1} == "$KVS_INSTALL_DIR" ]]; then
       : >"$KVS_INSTALL_DIR/../removing"
-      sleep 5
+      # Hold an external child in the foreground, as during an actual removal.
+      command sleep 60
+      return 1
     fi
     command rm "$@"
   }
@@ -603,10 +605,16 @@ test_a_signal_to_the_whole_run_moves_the_kvsctl_data_back() {
     ) >"$temp_dir/out" 2>&1 &
     run=$!
     set +m
-    for ((attempt = 0; attempt < 100; attempt++)); do
-      [[ ! -e "$temp_dir/$signal/removing" ]] || break
+    for ((attempt = 0; attempt < 600; attempt++)); do
+      if [[ -e "$temp_dir/$signal/removing" ]] || ! kill -0 "$run" 2>/dev/null; then break; fi
       sleep 0.05
     done
+    if [[ ! -e "$temp_dir/$signal/removing" ]]; then
+      kill -TERM -- "-$run" 2>/dev/null || true
+      wait "$run" 2>/dev/null || true
+      fail "$signal: the installer never reached removal"
+      return 1
+    fi
     kill -s "$signal" -- "-$run"
     status=0
     wait "$run" 2>/dev/null || status=$?
