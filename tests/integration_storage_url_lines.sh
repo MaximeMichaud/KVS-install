@@ -29,7 +29,7 @@ export container
 mariadb() { docker exec -i "$container" mariadb -uroot "$@"; }
 export -f mariadb
 mariadb fixture <<'SQL'
-CREATE TABLE ktvs_admin_servers (urls TEXT, expected TEXT, path TEXT, streaming_skip_ssl_check INT);
+CREATE TABLE ktvs_admin_servers (server_id INT PRIMARY KEY AUTO_INCREMENT, urls TEXT, expected TEXT, path TEXT, streaming_skip_ssl_check INT);
 CREATE TABLE ktvs_admin_conversion_servers (path TEXT);
 SQL
 cat > "$work/common" <<'SH'
@@ -85,6 +85,26 @@ SQL
     grep -Fq 'do not match' "$work/$installer.log"
     mariadb fixture -e 'DROP TRIGGER keep_urls'
 done
+# The verification flag applies to the whole row, including later endpoints.
+mariadb fixture <<'SQL'
+TRUNCATE ktvs_admin_servers;
+SET @local = 'https://site.test/contents/a', @cdn = 'https://cdn.test/contents/b';
+INSERT INTO ktvs_admin_servers (urls, streaming_skip_ssl_check) VALUES
+    (CONCAT(@local, CHAR(13,10), @cdn), 1), (CONCAT(@cdn, CHAR(10), @local), 1),
+    (CONCAT(@local, CHAR(13,10), @local, CHAR(10)), 0), (@cdn, 1), (@cdn, 0);
+SQL
+MODE=multi SSL_PROVIDER=selfsigned run_installer docker > "$work/policy.log"
+flags=$(mariadb fixture -N -e 'SELECT GROUP_CONCAT(streaming_skip_ssl_check ORDER BY server_id) FROM ktvs_admin_servers')
+[ "$flags" = '0,0,1,1,0' ] || { echo "FAIL: storage TLS flags $flags"; exit 1; }
+for id in 1 2; do grep -Fq "Storage server $id mixes" "$work/policy.log"; done
+mariadb fixture <<'SQL'
+DELETE FROM ktvs_admin_servers;
+INSERT INTO ktvs_admin_servers (urls) VALUES ('https://cdn.test/b'),
+    (CONCAT('https://cdn.test/b', CHAR(10), 'https://site.test/other'));
+SQL
+run_installer docker > "$work/count.log"
+grep -Fq 'external hosts (1)' "$work/count.log"
+
 # Execute the reconfiguration update and its verification on the same database.
 # A remote first line exercises the WHERE and the matching counter separately
 # from a canonical first line that could hide a stale second URL.

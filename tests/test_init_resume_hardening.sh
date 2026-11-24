@@ -125,10 +125,10 @@ db_exec() {
         # The one server of this mock: the update names the servers this
         # stack serves, an external one keeps its flag.
         if [[ "$query" == *'WHERE urls REGEXP'* ]]; then
-            pattern=$(query_pattern "$query")
+            pattern=$(query_pattern "${query#* WHERE }")
             [[ "$(<"$CONFIG_STATE/url")" =~ $pattern ]] || return 0
         fi
-        if [[ "$query" == *'streaming_skip_ssl_check = 1'* ]]; then
+        if [[ "$query" == *', 0, 1) WHERE '* ]]; then
             printf '1\n' > "$CONFIG_STATE/ssl-skip"
         else
             printf '0\n' > "$CONFIG_STATE/ssl-skip"
@@ -162,6 +162,15 @@ db_query() {
         fi
         return 0
     fi
+    if [[ "$query" == 'SELECT server_id FROM '* ]]; then return 0; fi
+    if [[ "$query" == *'COALESCE(streaming_skip_ssl_check'* ]]; then
+        pattern=$(query_pattern "${query#* WHERE }")
+        if [[ ! "$current_url" =~ $pattern ]]; then echo 0; return; fi
+        expected=${query##*, 0, }
+        expected=${expected%%)*}
+        if [ "$current_skip" = "$expected" ]; then echo 0; else echo 1; fi
+        return 0
+    fi
     if [[ "$query" == *'urls NOT REGEXP '* ]]; then
         pattern=$(query_pattern "$query")
         if [[ "$current_url" =~ $pattern ]]; then
@@ -177,23 +186,6 @@ db_query() {
             printf '1\n'
         else
             printf '0\n'
-        fi
-        return 0
-    fi
-    if [[ "$query" == *'COALESCE(streaming_skip_ssl_check'* ]]; then
-        if [[ "$query" == *'urls REGEXP'* ]]; then
-            pattern=$(query_pattern "$query")
-            if [[ ! "$current_url" =~ $pattern ]]; then
-                printf '0\n'
-                return 0
-            fi
-        fi
-        expected=${query##*<>}
-        expected=${expected%%;*}
-        if [ "$current_skip" = "$expected" ]; then
-            printf '0\n'
-        else
-            printf '1\n'
         fi
         return 0
     fi

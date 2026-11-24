@@ -70,7 +70,7 @@ fi
 # separate storage server): those URLs stay as they are.
 if [ "$MATCHING_URL_COUNT" -lt 1 ]; then
     if ! EXTERNAL_URL_COUNT=$(db_query \
-        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls NOT REGEXP '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/';") ||
+        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls NOT REGEXP '(?m)^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/';") ||
         [[ ! "$EXTERNAL_URL_COUNT" =~ ^[0-9]+$ ]] || [ "$EXTERNAL_URL_COUNT" -lt 1 ]; then
         log_error "Persisted server URLs do not match $PROJECT_URL"
         exit 1
@@ -88,21 +88,33 @@ if [ "$SSL_PROVIDER" = "selfsigned" ] && [ "${MODE:-single}" = multi ]; then
 fi
 # The servers this stack serves only: a storage server on another host
 # keeps the verification its own certificate needs, as its owner set it.
-LOCAL_SERVER_CONDITION="urls REGEXP '^https?://(www[.])?${HOST_PATTERN}(:[0-9]+)?/'"
+# After the rewrite, only the current domain belongs to this installation.
+LOCAL_ENDPOINT="https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/"
+LOCAL_SERVER_CONDITION="urls REGEXP '(?m)^${LOCAL_ENDPOINT}'"
+OTHER_ENDPOINT="urls REGEXP '(?m)^(?!${LOCAL_ENDPOINT})[[:blank:]]*[^[:space:]]'"
+if ! mixed_servers=$(db_query "SELECT server_id FROM ${TABLES_PREFIX}admin_servers WHERE ${LOCAL_SERVER_CONDITION} AND ${OTHER_ENDPOINT};"); then
+    log_error "Could not inspect mixed storage endpoints"
+    exit 1
+fi
+while IFS= read -r server; do
+    [ -n "$server" ] || continue
+    log_warn "Storage server $server mixes local and external endpoints. TLS verification is required. Separate the endpoints or configure trust for both."
+done <<< "$mixed_servers"
+expected_skip="IF(${OTHER_ENDPOINT}, 0, ${SSL_SKIP_VALUE})"
 if ! db_exec \
-    "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = ${SSL_SKIP_VALUE} WHERE ${LOCAL_SERVER_CONDITION};"; then
+    "UPDATE ${TABLES_PREFIX}admin_servers SET streaming_skip_ssl_check = ${expected_skip} WHERE ${LOCAL_SERVER_CONDITION};"; then
     log_error "Could not synchronize server TLS verification"
     exit 1
 fi
 if ! SSL_MISMATCH_COUNT=$(db_query \
-    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE ${LOCAL_SERVER_CONDITION} AND COALESCE(streaming_skip_ssl_check,-1)<>${SSL_SKIP_VALUE};") ||
+    "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE ${LOCAL_SERVER_CONDITION} AND COALESCE(streaming_skip_ssl_check,-1)<>${expected_skip};") ||
     [[ ! "$SSL_MISMATCH_COUNT" =~ ^[0-9]+$ ]] ||
     [ "$SSL_MISMATCH_COUNT" -ne 0 ]; then
     log_error "Server TLS verification does not match the selected certificate mode"
     exit 1
 fi
 if [ "$SSL_SKIP_VALUE" -eq 1 ]; then
-    log_info "SSL verification disabled for self-signed certificate"
+    log_info "SSL verification disabled for local-only servers using the self-signed certificate"
 else
     log_info "SSL verification enabled for public or internally trusted certificate"
 fi
