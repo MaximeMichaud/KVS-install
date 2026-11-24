@@ -2060,8 +2060,10 @@ installation_email() {
 # checks it; the .env.example placeholder is well formed, but Let's Encrypt
 # refuses example.com.
 usable_acme_email() {
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/../lib/host-validation.sh" || return 1
     [ "$1" != "admin@example.com" ] &&
-        [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.([a-zA-Z]{2,}|xn--[a-zA-Z0-9-]+)$ ]]
+        valid_contact_address "$1"
 }
 
 # caddy_routes_use_acme: whether a route in caddy/sites gets its certificate

@@ -7,7 +7,7 @@ TEST_DIR=$work/docker
 fail() { echo "FAIL: $*" >&2; exit 1; }
 mkdir -p "$TEST_DIR/lib" "$TEST_DIR/bin" "$TEST_DIR/site/admin/data/plugins/external_search" "$TEST_DIR/api"
 cp "$ROOT_DIR/docker/reconfigure.sh" "$TEST_DIR/"
-cp "$ROOT_DIR/docker/lib/"{database,manticore}.sh "$TEST_DIR/lib/"
+cp "$ROOT_DIR/docker/lib/"{database,manticore,host-validation}.sh "$TEST_DIR/lib/"
 touch "$TEST_DIR/docker-compose.yml"
 cat > "$TEST_DIR/.env" <<'ENV'
 DOMAIN=example.com

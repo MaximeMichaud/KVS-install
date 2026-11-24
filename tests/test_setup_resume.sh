@@ -31,6 +31,8 @@ assert source.rindex('\nimport_finish\n') > source.index('run_step "Reloading Ng
 assert 'DELETE FROM' not in re.search(r'^import_verify_database\(\) \{\n.*?^\}', source, re.M | re.S).group()
 PY
 # shellcheck source=/dev/null
+source "$root/docker/lib/host-validation.sh"
+# shellcheck source=/dev/null
 source "$fixture/setup-functions.sh"
 # shellcheck source=/dev/null
 source "$root/docker/lib/database.sh"

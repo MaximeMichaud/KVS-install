@@ -13,6 +13,8 @@ SETUP="$ROOT_DIR/docker/setup.sh"
 TEST_DIR=$(mktemp -d /tmp/kvs-later-passes.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT
 # shellcheck source=/dev/null
+source "$ROOT_DIR/docker/lib/host-validation.sh"
+# shellcheck source=/dev/null
 source "$ROOT_DIR/docker/lib/import.sh"
 # shellcheck source=/dev/null
 source "$ROOT_DIR/docker/lib/native-import.sh"

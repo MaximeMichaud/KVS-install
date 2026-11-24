@@ -67,6 +67,8 @@ run_case() {
         -e "s|/opt/kvs/logs|${CASE_DIR}/logs|g" \
         -e 's/if \[ "$EUID" -ne 0 \]; then/if false; then/' \
         "$REPO_ROOT/docker/setup.sh" > "$CASE_DIR/setup.sh"
+    mkdir -p "$CASE_DIR/lib"
+    cp "$REPO_ROOT/docker/lib/host-validation.sh" "$CASE_DIR/lib/"
     chmod +x "$CASE_DIR/setup.sh"
     cat > "$CASE_DIR/bin/docker" <<'EOF'
 #!/bin/bash

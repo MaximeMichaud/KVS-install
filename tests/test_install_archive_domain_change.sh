@@ -143,6 +143,8 @@ EOF
         -e "s|/opt/kvs/logs|${CASE_DIR}/logs|g" \
         -e 's/if \[ "$EUID" -ne 0 \]; then/if false; then/' \
         "$REPO_ROOT/docker/setup.sh" > "$WORK_DIR/setup.sh"
+    mkdir -p "$WORK_DIR/lib"
+    cp "$REPO_ROOT/docker/lib/host-validation.sh" "$WORK_DIR/lib/"
     cp "$REPO_ROOT/docker/bin/resolve-bases.sh" "$WORK_DIR/bin/"
     cp "$REPO_ROOT/docker/images.lock" "$WORK_DIR/"
     cat > "$CASE_DIR/stubs/docker" << 'EOF'

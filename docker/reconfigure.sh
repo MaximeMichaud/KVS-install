@@ -351,23 +351,16 @@ remove_compose_profile() {
     export COMPOSE_PROFILES
 }
 
-validate_domain() {
-    local LC_ALL=C
-    local domain="$1"
-    local label
-    local -a labels
+# shellcheck source=/dev/null
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/host-validation.sh" || exit 1
 
-    [ -n "$domain" ] && [ "${#domain}" -le 64 ] || return 1
-    [[ "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.([a-z]{2,}|xn--[a-z0-9-]+)$ ]] ||
-        return 1
-    IFS='.' read -r -a labels <<< "$domain"
-    for label in "${labels[@]}"; do
-        [ "${#label}" -le 63 ] || return 1
-    done
+validate_domain() {
+    local LC_ALL=C domain=$1
+    [ "${#domain}" -le 64 ] && [[ $domain != *[A-Z]* ]] && valid_public_hostname "$domain"
 }
 
 validate_email() {
-    [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.([a-zA-Z]{2,}|xn--[a-zA-Z0-9-]+)$ ]]
+    valid_contact_address "$1"
 }
 
 parse_publish_endpoint_port() {

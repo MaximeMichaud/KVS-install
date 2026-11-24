@@ -163,6 +163,8 @@ echo 'PASS: the setup counts the removed cgroups before the init and looks once 
 # reconfigure.sh looks again at any time, from the docker directory.
 mkdir -p "$TEST_DIR/docker/lib"
 cp "$ROOT_DIR/docker/reconfigure.sh" "$TEST_DIR/docker/"
+mkdir -p "$TEST_DIR/docker/lib"
+cp "$ROOT_DIR/docker/lib/host-validation.sh" "$TEST_DIR/docker/lib/"
 cp "$ROOT_DIR/docker/lib/import.sh" "$TEST_DIR/docker/lib/"
 touch "$TEST_DIR/docker/docker-compose.yml"
 printf 'DOMAIN=example.com\nMARIADB_PASSWORD=test-only\n' > "$TEST_DIR/docker/.env"

@@ -9,6 +9,8 @@ export RED='' NC=''
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # Run the setup block that saves the canonical port and the URL shown on exit.
+# shellcheck source=/dev/null
+source "$root/docker/lib/host-validation.sh"
 setup_port() (
     export GREEN='' CYAN='' YELLOW=''
     export HEADLESS=${HEADLESS-y} DOMAIN=site.test USE_WWW=false EMAIL=${EMAIL-ops@site.test}
@@ -496,6 +498,8 @@ grep -Fxq 'PROJECT_HTTPS_PORT=443' .env || fail "interactive proxy port was lost
 rm -rf multi-site
 mkdir -p multi-site/caddy/sites
 cp "$root/docker/multi-site/site-manager.sh" multi-site/
+mkdir -p "./lib"
+cp "$root/docker/lib/host-validation.sh" "./lib/"
 # caddy_case <refused|deleted|kept> <EMAIL> <route body> [volume: yes|no]
 caddy_case() {
     local want=$1 email=$2 route=$3 volume=${4:-yes} status=0

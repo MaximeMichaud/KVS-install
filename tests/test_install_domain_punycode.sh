@@ -37,6 +37,9 @@ extract kvs-install.sh validate_kvs_domain email_is_valid archive_domain_from_na
 extract docker/setup.sh validate_domain validate_email > "$WORK/setup.sh"
 extract docker/reconfigure.sh validate_domain validate_email > "$WORK/reconf.sh"
 
+for fixture in "$WORK/setup.sh" "$WORK/reconf.sh"; do
+    cat "$ROOT_DIR/docker/lib/host-validation.sh" >> "$fixture"
+done
 check_domain_file() {
     local src=$1 fn=$2
     # shellcheck disable=SC1090
@@ -80,6 +83,26 @@ bash -c 'source "$1"; email_is_valid "User@Example.XN--P1AI"' _ "$WORK/kvs.sh" |
     fail "docker/reconfigure.sh validate_domain does not accept punycode domains"
 [ "$(check_email_file "$WORK/reconf.sh" validate_email)" = ok ] ||
     fail "docker/reconfigure.sh validate_email does not accept a punycode TLD"
+
+extract docker/multi-site/site-manager.sh usable_acme_email > "$WORK/contact.sh"
+SCRIPT_DIR="$ROOT_DIR/docker/multi-site"
+# shellcheck disable=SC2034  # Used by the extracted site manager function.
+export SCRIPT_DIR
+for script in setup reconf contact; do
+    fn=validate_email
+    [ "$script" != contact ] || fn=usable_acme_email
+    (
+        # shellcheck source=/dev/null
+        source "$WORK/$script.sh"
+        for host in -.example.com x-.example.com example..com example.xn--p1ai-; do
+            if "$fn" "a@$host"; then fail "$script accepted $host"; fi
+        done
+        "$fn" 'User@Example.XN--FIXTURE' || fail "$script refused an uppercase email host"
+        if [ "$script" != contact ] && validate_domain example.xn--p1ai-; then
+            fail "$script accepted a trailing hyphen in a TLD"
+        fi
+    ) || exit 1
+done
 
 # archive_domain_from_name: a bracketed name yields the domain, a renamed
 # archive yields nothing (so a valid install is no longer blocked), and the

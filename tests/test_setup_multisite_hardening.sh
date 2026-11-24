@@ -616,6 +616,8 @@ domain_validation_source="$TEST_DIR/domain-validation.sh"
 : > "$domain_validation_source"
 extract_function validate_domain "$domain_validation_source"
 # shellcheck source=/dev/null
+source "$ROOT_DIR/docker/lib/host-validation.sh"
+# shellcheck source=/dev/null
 source "$domain_validation_source"
 printf -v oversized_label '%*s' 64 ''
 oversized_label=${oversized_label// /a}
@@ -984,6 +986,8 @@ grep -Fq 'admin localhost:2019' "$ROOT_DIR/docker/multi-site/caddy/Caddyfile" ||
 fixture="$TEST_DIR/proxy"
 mkdir -p "$fixture/caddy/sites"
 cp "$ROOT_DIR/docker/multi-site/site-manager.sh" "$fixture/site-manager.sh"
+mkdir -p "$TEST_DIR/lib"
+cp "$ROOT_DIR/docker/lib/host-validation.sh" "$TEST_DIR/lib/"
 cp "$ROOT_DIR/docker/multi-site/caddy/Caddyfile" "$fixture/caddy/Caddyfile"
 bash "$fixture/site-manager.sh" primary-config first.example.com kvs-first internal true >/dev/null
 grep -Fq 'redir https://www.first.example.com{uri} permanent' \

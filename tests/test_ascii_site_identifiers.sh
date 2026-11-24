@@ -28,6 +28,8 @@ extract() { sed -n "/^\(function \)\?$2() {/,/^}/p" "$root/$1"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 log_error() { :; }
 MAX_DOMAIN_LENGTH=64 MAX_SITE_PREFIX_LENGTH=235
+# shellcheck source=/dev/null
+source "$root/docker/lib/host-validation.sh"
 for file in docker/setup.sh docker/reconfigure.sh docker/multi-site/site-manager.sh kvs-install.sh; do
     fn=validate_domain
     if [ "$file" = kvs-install.sh ]; then fn=validate_kvs_domain; fi
@@ -260,6 +262,8 @@ grep -Fq 'invalid destination database name' refusal.log || fail "did not valida
 # Run a real reconfiguration entry point. Stop at the database boundary.
 mkdir -p instance/docker/lib
 cp "$root/docker/reconfigure.sh" instance/docker/
+mkdir -p "instance/docker/lib"
+cp "$root/docker/lib/host-validation.sh" "instance/docker/lib/"
 touch instance/docker/docker-compose.yml
 echo 'database_wait_ready() { echo runtime-reached; echo "runtime-prefix=$TABLES_PREFIX"; }' > instance/docker/lib/database.sh
 for project in kvs-site_1 kvs-é; do

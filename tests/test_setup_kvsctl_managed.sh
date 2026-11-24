@@ -440,7 +440,8 @@ setup_run() {
     local case_root="$TEST_DIR/kvsctl-run/$1" files="$2" path="$TEST_DIR/stub:/usr/bin:/bin"
     shift 2
     rm -rf "$case_root" "$case_root".kvsctl.*
-    mkdir -p "$case_root/docker"
+    mkdir -p "$case_root/docker/lib"
+    cp "$ROOT_DIR/docker/lib/host-validation.sh" "$case_root/docker/lib/"
     # shellcheck disable=SC2016  # The EUID test is matched literally.
     sed -e "s|/opt/kvs/logs|${case_root}/logs|g" -e 's/if \[ "$EUID" -ne 0 \]; then/if false; then/' \
         "$ROOT_DIR/docker/setup.sh" > "$case_root/docker/setup.sh"

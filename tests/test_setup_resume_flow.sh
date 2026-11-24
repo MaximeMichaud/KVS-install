@@ -183,6 +183,8 @@ text = text.replace('/var/www/', sys.argv[3] + '/site/')
 Path(sys.argv[2]).write_text(text)
 PY
     cp "$root/docker/lib/import.sh" "$directory/lib/import.sh"
+    mkdir -p "$directory/lib"
+    cp "$root/docker/lib/host-validation.sh" "$directory/lib/"
     cp "$root/docker/lib/database.sh" "$directory/lib/database.sh"
     cat >> "$directory/lib/database.sh" <<'SH'
 database_wait_ready() {

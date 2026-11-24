@@ -352,6 +352,8 @@ if [ "$(tail -n 1 <<< "$loaded")" != 'check_mariadb_stop_grace_period || exit 1'
 fi
 mkdir -p reconfigure/bin
 cp "$root/docker/reconfigure.sh" reconfigure/
+mkdir -p "reconfigure/lib"
+cp "$root/docker/lib/host-validation.sh" "reconfigure/lib/"
 touch reconfigure/docker-compose.yml
 printf '#!/bin/sh\nexit 97\n' > reconfigure/bin/docker
 chmod +x reconfigure/bin/docker

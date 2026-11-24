@@ -12,7 +12,7 @@ cleanup() {
 trap cleanup EXIT
 export TMPDIR=$work
 mkdir "$work/docker"
-(cd "$root/docker" && cp --parents reconfigure.sh multi-site/site-manager.sh "$work/docker")
+(cd "$root/docker" && cp --parents lib/host-validation.sh reconfigure.sh multi-site/site-manager.sh "$work/docker")
 
 cat > "$work/driver.sh" <<'DRIVER'
 #!/bin/bash

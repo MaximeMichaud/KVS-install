@@ -468,7 +468,8 @@ echo "PASS: DNS check public IP fallback"
 # site; docker logs every call it gets.
 make_site() {
     local case_dir=$1
-    mkdir -p "$case_dir/docker/kvs-archive" "$case_dir/bin" "$case_dir/logs"
+    mkdir -p "$case_dir/docker/kvs-archive" "$case_dir/bin" "$case_dir/logs" "$case_dir/lib"
+    cp "$ROOT_DIR/docker/lib/host-validation.sh" "$case_dir/lib/"
     cp "$ROOT_DIR/docker/.env.example" "$case_dir/docker/.env.example"
     sed -e 's/^DOMAIN=.*/DOMAIN=mysite.test/' -e 's/^SITE_PREFIX=.*/SITE_PREFIX=kvs/' \
         -e 's/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=kvs/' -e 's/^SSL_PROVIDER=.*/SSL_PROVIDER=selfsigned/' \

@@ -281,6 +281,8 @@ sed \
     -e "s|/opt/kvs/logs|${TEST_DIR}/setup-logs|g" \
     -e 's/if \[ "$EUID" -ne 0 \]; then/if false; then/' \
     "$ROOT_DIR/docker/setup.sh" > "$setup_copy"
+mkdir -p "${setup_copy%/*}/lib"
+cp "$ROOT_DIR/docker/lib/host-validation.sh" "${setup_copy%/*}/lib/"
 chmod +x "$setup_copy"
 
 if (cd "$TEST_DIR/docker" && KVS_ADMIN_PASSWORD=short HEADLESS=y bash ./setup.sh) \

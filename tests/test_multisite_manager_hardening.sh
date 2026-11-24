@@ -33,6 +33,8 @@ create_fixture() {
     # add reads the PHP series and the IonCube encoding of the archive.
     mkdir -p "${fixture}/lib"
     cp "${ROOT_DIR}/docker/lib/kvs-php.sh" "${fixture}/lib/"
+    mkdir -p "$fixture/lib"
+    cp "$ROOT_DIR/docker/lib/host-validation.sh" "$fixture/lib/"
     mkdir -p "${fixture}/init/lib"
     cp "${ROOT_DIR}/docker/init/lib/kvs-archive.sh" "${fixture}/init/lib/"
     : > "${fixture}/kvs-archive/KVS_test.zip"

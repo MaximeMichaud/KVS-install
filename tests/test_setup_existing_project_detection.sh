@@ -42,6 +42,8 @@ make_setup_copy() {
         -e 's/if \[ "$EUID" -ne 0 \]; then/if false; then/' \
         "$REPO_ROOT/docker/setup.sh" > "$destination"
     chmod +x "$destination"
+    mkdir -p "${destination%/*}/lib"
+    cp "$REPO_ROOT/docker/lib/host-validation.sh" "${destination%/*}/lib/"
 }
 
 make_mocks() {
@@ -246,7 +248,7 @@ for case in cases:
     d = root / 'docker'
     for directory in ['lib', 'bin', 'kvs-archive', 'docker-config', 'multi-site', 'site', 'oldsite/admin/include']:
         (d / directory).mkdir(parents=True, exist_ok=True)
-    for name in ['lib/import.sh', 'lib/database.sh', 'lib/native-import.sh', 'bin/resolve-bases.sh', 'images.lock', 'docker-compose.yml', 'docker-compose.multi.yml']:
+    for name in ['lib/host-validation.sh', 'lib/import.sh', 'lib/database.sh', 'lib/native-import.sh', 'bin/resolve-bases.sh', 'images.lock', 'docker-compose.yml', 'docker-compose.multi.yml']:
         shutil.copy2(REPO / 'docker' / name, d / name)
     # The checkout's exporter lists the links of a site directory.
     shutil.copy2(REPO / 'kvs-export.sh', root / 'kvs-export.sh')
@@ -408,6 +410,7 @@ awk '
     capture { print }
     capture && /^}$/ { capture = 0 }
 ' "$REPO_ROOT/docker/setup.sh" > "$TMP_ROOT/project-functions.sh"
+cat "$REPO_ROOT/docker/lib/host-validation.sh" >> "$TMP_ROOT/project-functions.sh"
 awk '
     $0 == "# Load environment" { capture = 1 }
     $0 == "# Domain validation" { capture = 0 }

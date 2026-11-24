@@ -47,6 +47,8 @@ make_setup_test_copy() {
         -e 's/if \[ "$EUID" -ne 0 \]; then/if false; then/' \
         "$REPO_ROOT/docker/setup.sh" > "$destination"
     chmod +x "$destination"
+    mkdir -p "${destination%/*}/lib"
+    cp "$REPO_ROOT/docker/lib/host-validation.sh" "${destination%/*}/lib/"
 }
 
 make_preflight_mocks() {

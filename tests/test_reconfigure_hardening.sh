@@ -275,6 +275,8 @@ create_fixture() {
     mkdir -p "$fixture/bin" "$fixture/multi-site/sites" \
         "$fixture/multi-site/caddy/sites"
     cp "$ROOT_DIR/docker/reconfigure.sh" "$fixture/reconfigure.sh"
+    mkdir -p "$fixture/lib"
+    cp "$ROOT_DIR/docker/lib/host-validation.sh" "$fixture/lib/"
     chmod +x "$fixture/reconfigure.sh"
     # The entries a multi rollback passes back, as in the real stack.
     cat > "$fixture/docker-compose.yml" <<'EOF'

@@ -763,25 +763,12 @@ lowercase_domain() {
     DOMAIN=${DOMAIN,,}
 }
 
+# shellcheck source=/dev/null
+source "$SETUP_SCRIPT_DIR/lib/host-validation.sh" || exit 1
+
 validate_domain() {
-    local LC_ALL=C
-    local domain="$1"
-    local label
-    local -a labels
-
-    # The domain is also used directly as the MariaDB database identifier.
-    if [ -z "$domain" ] || [ "${#domain}" -gt 64 ]; then
-        return 1
-    fi
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.([a-zA-Z]{2,}|xn--[a-zA-Z0-9-]+)$ ]]; then
-        return 1
-    fi
-
-    IFS='.' read -r -a labels <<< "$domain"
-    for label in "${labels[@]}"; do
-        [ "${#label}" -le 63 ] || return 1
-    done
-    return 0
+    local LC_ALL=C domain=$1
+    [ "${#domain}" -le 64 ] && valid_public_hostname "$domain"
 }
 
 # MARIADB_STOP_GRACE_PERIOD, when set, as Compose reads stop_grace_period:
@@ -4591,11 +4578,7 @@ validate_site_prefix() {
 
 # Email validation
 validate_email() {
-    local email="$1"
-    if [[ ! "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.([a-zA-Z]{2,}|xn--[a-zA-Z0-9-]+)$ ]]; then
-        return 1
-    fi
-    return 0
+    valid_contact_address "$1"
 }
 
 
