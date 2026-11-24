@@ -664,11 +664,14 @@ test_the_self_update_keeps_the_log_and_the_arguments() {
   {
     awk -v guard="$guard" '$0 == guard { exit } { print }' "$script"
     cat <<'EOF'
+# An older copy could have opened this log with the default umask.
+chmod 644 "$LOG_FILE" || exit 1
 printf -v second_run_arguments '[%s]' "$@"
 echo "second run arguments: $second_run_arguments"
 initialCheck() {
   local i
   echo "second run setup arguments: ${SETUP_ARGS[*]}"
+  echo "second run log: $RUNTIME_LOG_FILE"
   echo "second run marker: ${KVS_INSTALL_LOG_PID-none}"
   for ((i = 1; i <= 300; i++)); do echo "second run line $i"; done
   exit 0
@@ -720,6 +723,9 @@ EOF
   # The first run comes before the second in the log.
   [[ $(grep -anx 'first run line 300' "$log" | cut -d: -f1) -lt $(grep -anx 'second run line 1' "$log" | cut -d: -f1) ]] ||
     fail "the log must keep the runs in order" || return 1
+  grep -Fxq "second run log: $log" "$log" ||
+    fail "the updated copy lost the installer log path" || return 1
+  assert_equal 600 "$(stat -c %a "$log")" "the updated copy must tighten an existing log" || return 1
   # The mark is for the new copy alone: what it runs does not inherit it.
   grep -qxF "second run marker: none" "$log" ||
     fail "the new copy must not pass the mark on: $(grep -a 'second run marker' "$log")" || return 1
