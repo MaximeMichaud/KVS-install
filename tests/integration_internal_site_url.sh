@@ -355,7 +355,12 @@ gateway=$(docker run --rm --name "$probe_name" --pull never --network none \
     --add-host "gateway.test:host-gateway" --entrypoint awk "$PHP_IMAGE" \
     '$2 == "gateway.test" && $1 ~ /^[0-9.]+$/ { print $1; exit }' /etc/hosts) ||
     fail "Docker cannot resolve host-gateway"
-[[ "$gateway" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || fail "host-gateway is no IPv4 address: '$gateway'"
+# Docker can override host-gateway. Only publish on a canonical IPv4
+# address in RFC 1918 space or on loopback.
+octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)'
+private_prefix='(10|127|172[.](1[6-9]|2[0-9]|3[01])|192[.]168)'
+[[ $gateway =~ ^$octet([.]$octet){3}$ && $gateway =~ ^${private_prefix}[.] ]] ||
+    fail "refusing to publish the multi-site listener on host-gateway '$gateway' (expected RFC 1918 or loopback)"
 
 site_network="${NAME_PREFIX}-$layout"
 proxy_network="${NAME_PREFIX}-proxy"
