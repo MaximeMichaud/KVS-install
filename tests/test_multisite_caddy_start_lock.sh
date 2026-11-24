@@ -90,15 +90,15 @@ rm() {
     fi
     command rm "$@"
 }
-# The ACME check reads each route with grep.
+# The ACME check reads each route with awk.
 # shellcheck disable=SC2329  # Used by child managers.
-grep() {
+awk() {
     if [[ ${actor:-} == start && ${*: -1} == "$routes/seed.example.caddy" ]] && ! route_lock_held; then
         touch "$work/unlocked-check"
     fi
-    command grep "$@"
+    command awk "$@"
 }
-export -f docker chown rm grep await_file route_lock_held lock_not_inherited
+export -f docker chown rm awk await_file route_lock_held lock_not_inherited
 bash "$manager" proxy-config seed.example internal false false > "$work/out" 2>&1 || fail 'proxy-config failed'
 if command grep -Fq 'Waiting for another route operation' "$work/out"; then
     fail 'a command that found the route lock free said it waited'
@@ -109,7 +109,7 @@ fi
 phase=email
 actor=start timeout 30 bash "$manager" caddy-start > "$work/start" 2>&1 & starter=$!
 await_file "$work/email-checked" 100 || fail "caddy-start did not reach Compose: $(cat "$work/start")"
-timeout 30 bash "$manager" add public.example > "$work/add" 2>&1 || fail "add failed: $(cat "$work/add")"
+ACME_EMAIL=ops@sub.example.com timeout 30 bash "$manager" add public.example > "$work/add" 2>&1 || fail "add failed: $(cat "$work/add")"
 touch "$work/add-done"
 command grep -Fq 'Waiting for another route operation to finish' "$work/add" ||
     fail 'add waited for caddy-start without saying so'
@@ -122,7 +122,7 @@ wait "$starter" || fail "caddy-start failed: $(cat "$work/start")"
 # of starting between its check and the deletion of the route.
 command rm "$work/running"
 phase=primary
-export ACME_EMAIL=ops@example.com
+export ACME_EMAIL=ops@sub.example.com
 bash "$manager" primary-config primary.example primary internal false > "$work/out" 2>&1 || fail 'primary-config failed'
 timeout 30 bash "$manager" primary-remove primary.example primary > "$work/remove" 2>&1 & remover=$!
 await_file "$work/checked-stopped" 100 || fail "primary-remove did not reach the deletion: $(cat "$work/remove")"

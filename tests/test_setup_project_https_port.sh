@@ -311,7 +311,7 @@ SH
 # shellcheck disable=SC2016  # FAIL_TOOL is read inside the date fixture.
 printf '#!/bin/sh\n[ "$FAIL_TOOL" != date ] || exit 127\nexec "%s" "$@"\n' "$(command -v date)" > bin/date
 chmod +x bin/openssl bin/date
-for failure in none date x509 pkey verify verify-error cert.pem key.pem ca.pem email; do
+for failure in none date x509 pkey verify verify-error cert.pem key.pem ca.pem email dev-email; do
     printf '%s\n' MODE=multi SSL_PROVIDER=letsencrypt HTTP_PORT=8080 HTTPS_PORT=8443 PROJECT_HTTPS_PORT=443 > .env
     rm -f stopped routes
     touch volume
@@ -320,6 +320,7 @@ for failure in none date x509 pkey verify verify-error cert.pem key.pem ca.pem e
         cert.pem|key.pem) mv "$cert_dir/$failure" missing ;;
         ca.pem) mv ca.pem missing ;;
         email) email=admin@example.com ;;
+        dev-email) email=dev@localhost.local ;;
     esac
     status=0
     EMAIL=$email PATH="$PWD/bin:$PATH" FAIL_TOOL=$failure MODE_CHOICE=1 PUBLIC_CERT=no setup_port --dev > out 2>&1 || status=$?
@@ -327,7 +328,7 @@ for failure in none date x509 pkey verify verify-error cert.pem key.pem ca.pem e
         fail "certificate check ($failure) touched the site: $(cat out)"
     case $failure in
         none) expected='requires host TCP port 80' ;;
-        email) expected='A valid EMAIL is required' ;;
+        email|dev-email) expected='A valid EMAIL is required' ;;
         cert.pem|key.pem) expected=$failure; mv missing "$cert_dir/$failure" ;;
         ca.pem) expected=ca.pem; mv missing ca.pem ;;
         date) expected='date notBefore' ;;
@@ -530,8 +531,8 @@ caddy_case() {
 }
 caddy_case refused '' ''
 caddy_case refused admin@example.com ''
-caddy_case deleted ops@site.test ''
-caddy_case deleted '' '    tls internal\n'
+caddy_case deleted ops@sub.example.com ''
+caddy_case deleted '' $'    tls internal\n'
 caddy_case kept '' '' no
 # The import volume counts as well; the resume path and single-site mode
 # never recreate Caddy.

@@ -1,13 +1,14 @@
 #!/bin/bash
 # The installer and init must open the same licensed file as the host.
 set -euo pipefail
+export CADDY_TLS_MODE=internal
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/install/.git" "$work/install/docker/kvs-archive"
 touch "$work/install/kvs-install.sh"
 cd "$work/install/docker"
-(cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
+(cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/host-validation.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
     multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work/install/docker")
 printf 'DOMAIN=a.example\n' > .env
 cp .env .env.example
@@ -103,6 +104,7 @@ export real_docker work
 docker() {
     case "$*" in
         'ps --format {{.Names}}') echo kvs-caddy ;;
+        'inspect --format '*ACME_EMAIL*' kvs-caddy') echo ACME_EMAIL=admin@example.com ;;
         'compose --profile setup config --format json kvs-init') "$real_docker" "$@" ;;
         'compose ps --status running --quiet cron') return 0 ;;
         'compose stop cron') touch "$work/cron"; return 26 ;;

@@ -16,6 +16,7 @@ cleanup() {
     rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
+SETUP_ARGS=(--dev)
 
 fail() {
     echo "FAIL: $1" >&2
@@ -48,8 +49,8 @@ make_installed_env() {
 }
 
 # run_case <name> <prepare function|none> [VAR=value...]
-# Runs a copy of docker/setup.sh with --dev and no DOMAIN or EMAIL unless
-# given. Docker and the network are stubs; the run goes past the domain,
+# Runs a copy of docker/setup.sh with the SETUP_ARGS options (--dev by
+# default) and no DOMAIN or EMAIL unless given. Docker and the network are stubs; the run goes past the domain,
 # email and MariaDB selections, then stops at the first runtime step the
 # fixture does not provide. The timeout guards against a hang.
 run_case() {
@@ -88,7 +89,7 @@ EOF
         -u DOMAIN -u EMAIL -u KVS_EMAIL -u HEADLESS -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
         -u SITE_PREFIX -u SSL_PROVIDER -u SSL_CHOICE -u CACHE_CHOICE -u PREFIX_CHOICE \
         PATH="$CASE_DIR/bin:/usr/bin:/bin" "$@" \
-        "$CASE_DIR/setup.sh" --dev > "$CASE_DIR/output.log" 2>&1
+        "$CASE_DIR/setup.sh" "${SETUP_ARGS[@]}" > "$CASE_DIR/output.log" 2>&1
     STATUS=$?
     set -e
 }
@@ -136,6 +137,20 @@ assert_past_domain_and_email
 assert_env DOMAIN fresh.test
 assert_env EMAIL ops@mysite.test
 echo 'PASS: a first --dev run keeps a legacy KVS_EMAIL instead of the dev address'
+
+# Outside --dev, setup checks the contact for the provider it selected: a
+# public certificate refuses the .local development mailbox at the email
+# step, before the MariaDB selection.
+SETUP_ARGS=()
+run_case public-local-email none DOMAIN=fresh.test EMAIL=ops@corp.local HEADLESS=y SSL_CHOICE=1
+SETUP_ARGS=(--dev)
+[ "$STATUS" -ne 0 ] || fail "${CASE}: a Let's Encrypt setup accepted a .local contact"
+grep -Fq 'ERROR: EMAIL is not a usable contact address for letsencrypt certificates: ops@corp.local' "$CASE_DIR/output.log" ||
+    fail "${CASE}: the refusal must name the contact: $(tail -n 5 "$CASE_DIR/output.log")"
+if grep -q 'Selected MariaDB' "$CASE_DIR/output.log"; then
+    fail "${CASE}: setup went past the email step with a .local contact"
+fi
+echo "PASS: a Let's Encrypt setup refuses a .local contact at the email step"
 
 run_case fresh-without-domain none
 [ "$STATUS" -ne 0 ] || fail "${CASE}: a first --dev run without DOMAIN must stop"

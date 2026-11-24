@@ -538,8 +538,9 @@ ensure_proxy_network() {
 # their positional arguments. It does not expand environment placeholders,
 # variadic or block arguments, and reads neither the main Caddyfile nor an
 # absolute import path outside /etc/caddy/sites.
-caddy_hosts_in_use() {
-    local exclude="$1"
+# In contacts mode, emit the global or explicit contact needed by each HTTPS block.
+caddy_scan_routes() {
+    local exclude="$1" output=${2:-hosts}
     local file scan line
     local -a files=()
     # Caddy imports the route files in the byte order of their names, and a
@@ -562,7 +563,7 @@ caddy_hosts_in_use() {
     [ "${#files[@]}" -gt 0 ] || return 0
 
     # The C locale makes awk work on bytes, in every implementation.
-    scan=$(LC_ALL=C CADDY_SCAN_EXCLUDE="$exclude" CADDY_SCAN_SITES="$CADDY_SITES_DIR" awk '
+    scan=$(LC_ALL=C CADDY_SCAN_OUTPUT="$output" CADDY_SCAN_EXCLUDE="$exclude" CADDY_SCAN_SITES="$CADDY_SITES_DIR" awk '
         # Lines "H host" name a served host, lines "F path" a file that
         # could not be read.
         function slurp(path,    line, text, status) {
@@ -675,7 +676,8 @@ caddy_hosts_in_use() {
                 sub(/^[a-z][a-z0-9+.-]*:\/\//, "", host)
                 sub(/\/.*$/, "", host)
                 sub(/:[0-9]+$/, "", host)
-                if (host != "") print "H " host
+                if (host != "" && ENVIRON["CADDY_SCAN_OUTPUT"] == "hosts") print "H " host
+                if (host != "" && parts[k] !~ /^http:\/\// && parts[k] !~ /:80$/) https_block = 1
             }
         }
         function read_file(path, level,    start) {
@@ -719,12 +721,8 @@ caddy_hosts_in_use() {
             start = i
             for (; i < stop; i++) {
                 text = token[i]
-                if (depth) {
-                    if (text == "{") depth++
-                    else if (text == "}") depth--
-                    continue
-                }
-                if (text == "import" && (first[i] || i == start)) {
+                if (text == "import" && (first[i] || i == start) &&
+                    (!depth || (depth == 1 && ENVIRON["CADDY_SCAN_OUTPUT"] == "contacts"))) {
                     name = ""
                     count = -1
                     for (j = i + 1; j < stop && !first[j] && token[j] != "{"; j++) {
@@ -752,6 +750,18 @@ caddy_hosts_in_use() {
                     i = j - 1
                     continue
                 }
+                if (depth) {
+                    if (depth == 1 && first[i] && text == "tls") {
+                        count = 0
+                        for (j = i + 1; j < stop && !first[j] && token[j] != "{"; j++) count++
+                        if (count == 2 || (count == 1 && expand(token[i + 1], level) == "internal")) contact = ""
+                        else if (count == 1) contact = "email " expand(token[i + 1], level)
+                    }
+                    if (text == "{") depth++
+                    else if (text == "}" && --depth == 0 && https_block && contact != "" &&
+                             ENVIRON["CADDY_SCAN_OUTPUT"] == "contacts") print "T " contact
+                    continue
+                }
                 if (text == "{") {
                     if (pending == 1 && address[1] ~ /^&?\(.*\)$/) {
                         # A snippet or a named route: no site of its own.
@@ -768,6 +778,8 @@ caddy_hosts_in_use() {
                         }
                         i = j
                     } else {
+                        https_block = 0
+                        contact = "global"
                         for (j = 1; j <= pending; j++) serve(address[j])
                         depth = 1
                     }
@@ -799,6 +811,7 @@ caddy_hosts_in_use() {
             "H "*)
                 printf '%s\n' "${line#H }"
                 ;;
+            "T "*) printf '%s\n' "${line#T }" ;;
             "F "*)
                 # An independent remove may finish during the optimistic
                 # scan, and Caddy itself refuses a missing import.
@@ -879,7 +892,7 @@ caddy_route_hosts() {
     # every reload then fails and a restart takes all sites down. The www
     # redirect is a claimed host too, so a plain "a.example" (which also
     # serves www.a.example) and a later "www.a.example" collide.
-    in_use=$(caddy_hosts_in_use "${CADDY_SITES_DIR}/${domain}.caddy") || return 1
+    in_use=$(caddy_scan_routes "${CADDY_SITES_DIR}/${domain}.caddy") || return 1
     for host in "$canonical_host" "$alternate_host"; do
         [ -n "$host" ] || continue
         if grep -Fxq "$host" <<< "$in_use"; then
@@ -1260,6 +1273,10 @@ add_site() {
     local canonical_host alternate_host tls_directive
     caddy_route_hosts "$domain" "${CADDY_TLS_MODE:-public}" false auto || return 1
 
+    if [[ -z $tls_directive ]]; then
+        resolve_caddy_acme_email public || return 1
+    fi
+
     # The PHP series, the IonCube setting and the table prefix come from the
     # archive, by the rules setup.sh applies to the primary site, before
     # anything is created; from a webroot an earlier remove kept instead,
@@ -1609,6 +1626,7 @@ start_site() {
         return 1
     fi
     check_caddy_running
+    check_running_caddy_contact || return 1
 
     log_info "Starting site: ${domain}"
     cd "$site_dir"
@@ -1716,8 +1734,8 @@ start_site() {
     docker compose up -d
     STOPPED_CRON_SITE=""
 
-    # Reload Caddy to pick up the new site
-    reload_caddy
+    # A caddy-start during initialization may have replaced the proxy.
+    (lock_routes && check_running_caddy_contact && reload_caddy_locked) || return 1
 
     log_success "Site ${domain} started!"
     if [ "$generated_admin_password" = true ]; then
@@ -2056,54 +2074,77 @@ installation_email() {
     env_file_value "$INSTALLATION_ENV_FILE" EMAIL
 }
 
-# An address an ACME CA takes as the contact of an account, as setup.sh
-# checks it; the .env.example placeholder is well formed, but Let's Encrypt
-# refuses example.com.
+# A public route needs a usable ACME contact. Compare only the domain:
+# subdomains of example.com are distinct from the reserved host itself.
 usable_acme_email() {
+    local LC_ALL=C
+    local address=$1 host=${1##*@} mailbox=${1%@*}
+    host=${host,,}
+    case $host in
+        example.com|example.net|example.org|*.test|*.example|*.invalid|*.localhost|*.local) return 1 ;;
+    esac
+    [[ ${#address} -le 254 && ${#mailbox} -le 64 && $mailbox != .* && $mailbox != *. && $mailbox != *..* ]] &&
+        valid_contact_address "$address"
+}
+
+# Check the effective contact of each TLS block. An explicit address
+# overrides the global one even when the latter is usable.
+check_caddy_contacts() {
+    local global=$1 source=$2 contacts=$3 contact
+    local validator="$SCRIPT_DIR/../lib/host-validation.sh"
     # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/../lib/host-validation.sh" || return 1
-    [ "$1" != "admin@example.com" ] &&
-        valid_contact_address "$1"
+    if [[ ! -r $validator ]] || ! source "$validator"; then
+        log_error "Could not load the contact validator: $validator"
+        return 1
+    fi
+    while IFS= read -r contact; do
+        case $contact in
+            '') continue ;;
+            'email '*)
+                usable_acme_email "${contact#email }" && continue
+                log_error "No ACME email for Caddy: replace the unusable site-level tls contact in ${CADDY_SITES_DIR}."
+                return 1 ;;
+        esac
+        usable_acme_email "$global" && continue
+        if [[ $source == running ]]; then
+            if [[ -z $global || $global == admin@example.com ]]; then
+                log_error "The running Caddy still uses the example contact. Run site-manager.sh caddy-start, then retry."
+            else
+                log_error "The running Caddy has an unusable ACME contact. Set EMAIL, run site-manager.sh caddy-start, then retry."
+            fi
+        else
+            log_error "No ACME email for Caddy: ${source} is missing, reserved or invalid for a public route."
+            echo "  Set a valid EMAIL in ${INSTALLATION_ENV_FILE} or export ACME_EMAIL, then run site-manager.sh caddy-start."
+        fi
+        return 1
+    done <<< "$contacts"
 }
 
-# caddy_routes_use_acme: whether a route in caddy/sites gets its certificate
-# through Caddy's automatic HTTPS, from an ACME CA: a route file with no tls
-# directive. "tls internal" and a certificate of its own need no account.
-caddy_routes_use_acme() {
-    local file
-
-    [ -d "$CADDY_SITES_DIR" ] || return 1
-    for file in "$CADDY_SITES_DIR"/*.caddy; do
-        [ -e "$file" ] || continue
-        grep -Eq '^[[:space:]]*tls[[:space:]]' "$file" || return 0
-    done
-    return 1
-}
-
-# resolve_caddy_acme_email sets CADDY_ACME_EMAIL to the contact caddy-start
-# gives Caddy. setup.sh passes its EMAIL as ACME_EMAIL, empty when it has
-# none. Run by hand, caddy-start had none, and Compose recreated Caddy with
-# admin@example.com, which Let's Encrypt refuses: no new certificate, no
-# renewal. Without ACME_EMAIL, the installation's EMAIL is used. An address
-# from either that is not usable counts as none: CADDY_ACME_EMAIL is then
-# empty (the compose file default) when no route needs an ACME certificate,
-# and the function fails, saying what to set, when one does.
 resolve_caddy_acme_email() {
-    CADDY_ACME_EMAIL="${ACME_EMAIL:-}"
-    if [ -z "$CADDY_ACME_EMAIL" ]; then
-        CADDY_ACME_EMAIL=$(installation_email)
-    fi
-    usable_acme_email "$CADDY_ACME_EMAIL" && return 0
-    CADDY_ACME_EMAIL=""
-    caddy_routes_use_acme || return 0
-    if [ -n "${ACME_EMAIL:-}" ]; then
-        log_error "No ACME email for Caddy: ACME_EMAIL (${ACME_EMAIL}) is the admin@example.com placeholder or invalid, and the routes in ${CADDY_SITES_DIR} need certificates from Let's Encrypt, which refuses that contact"
-        echo "  Set a valid EMAIL in ${INSTALLATION_ENV_FILE} (setup.sh passes it as ACME_EMAIL), or export a valid ACME_EMAIL, then run: cd ${SCRIPT_DIR} && ./site-manager.sh caddy-start"
+    local contacts source="EMAIL in ${INSTALLATION_ENV_FILE}"
+    CADDY_ACME_EMAIL=${ACME_EMAIL:-}
+    if [[ -z $CADDY_ACME_EMAIL ]]; then
+        CADDY_ACME_EMAIL=$(installation_email) || return 1
     else
-        log_error "No ACME email for Caddy: EMAIL in ${INSTALLATION_ENV_FILE} is missing, the admin@example.com placeholder or invalid, and the routes in ${CADDY_SITES_DIR} need certificates from Let's Encrypt, which refuses that contact"
-        echo "  Set EMAIL there (or export ACME_EMAIL), then run: cd ${SCRIPT_DIR} && ./site-manager.sh caddy-start"
+        source="ACME_EMAIL (${ACME_EMAIL})"
     fi
-    return 1
+    if [[ ${1:-} == public ]]; then
+        contacts=global
+    else
+        contacts=$(caddy_scan_routes "" contacts) || return 1
+    fi
+    check_caddy_contacts "$CADDY_ACME_EMAIL" "$source" "$contacts" || return 1
+    [[ -z $CADDY_ACME_EMAIL ]] || usable_acme_email "$CADDY_ACME_EMAIL" || CADDY_ACME_EMAIL=""
+}
+
+check_running_caddy_contact() {
+    local contacts setting
+    contacts=$(caddy_scan_routes "" contacts) || return 1
+    if ! setting=$(docker inspect --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "ACME_EMAIL"}}{{println .}}{{end}}{{end}}' kvs-caddy 8<&-); then
+        log_error "Could not inspect the running Caddy ACME contact."
+        return 1
+    fi
+    check_caddy_contacts "${setting#ACME_EMAIL=}" running "$contacts"
 }
 
 start_caddy() {

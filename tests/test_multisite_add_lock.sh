@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
+export CADDY_TLS_MODE=internal
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/docker"
-(cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
+(cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/host-validation.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
     multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work/docker")
 manager="$work/docker/multi-site/site-manager.sh"
 domain=media.example

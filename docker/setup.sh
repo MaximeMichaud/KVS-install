@@ -4578,7 +4578,10 @@ validate_site_prefix() {
 
 # Email validation
 validate_email() {
-    valid_contact_address "$1"
+    local email="$1" provider=${2:-${SSL_PROVIDER:-}}
+    # The development mailbox is usable with internal TLS only.
+    [[ $provider == selfsigned || ${email,,} != *.local ]] || return 1
+    valid_contact_address "$email"
 }
 
 
@@ -5100,12 +5103,16 @@ else
         EMAIL="$KVS_EMAIL"
     fi
 
-    if ! validate_email "${EMAIL:-}"; then
+    # --dev probes the installed certificate later and validates EMAIL again
+    # if that probe selects a public provider.
+    email_provider=$SSL_PROVIDER
+    [ "${DEV_SSL_INTELLIGENT:-false}" != true ] || email_provider=selfsigned
+    if ! validate_email "${EMAIL:-}" "$email_provider"; then
         if [ "${HEADLESS:-}" = "y" ]; then
             if [ -z "${EMAIL:-}" ]; then
                 echo -e "${RED}ERROR: Set EMAIL to a valid address in headless mode${NC}"
             else
-                echo -e "${RED}ERROR: Invalid email format: $EMAIL${NC}"
+                echo -e "${RED}ERROR: EMAIL is not a usable contact address for ${SSL_PROVIDER} certificates: $EMAIL${NC}"
             fi
             exit 1
         fi
@@ -5113,10 +5120,10 @@ else
         while true; do
             echo -n "Enter your email (required for $SSL_PROVIDER): "
             prompt_read EMAIL
-            if validate_email "$EMAIL"; then
+            if validate_email "$EMAIL" "$email_provider"; then
                 break
             fi
-            echo -e "${RED}Invalid email format. Please try again.${NC}"
+            echo -e "${RED}This address is not usable for ${SSL_PROVIDER} certificates. Please try again.${NC}"
         done
     fi
     set_env_value EMAIL "$EMAIL"

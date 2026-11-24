@@ -1,11 +1,12 @@
 #!/bin/bash
 # A start that fails, or that cannot run its init, must leave the site's cron as it found it.
 set -euo pipefail
+export CADDY_TLS_MODE=internal
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/docker"
-(cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
+(cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/host-validation.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
     multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work/docker")
 cd "$work/docker"
 manager=$PWD/multi-site/site-manager.sh
@@ -21,6 +22,7 @@ docker() {
     printf '%s\n' "$*" >> "$work/calls"
     case "$*" in
         'ps --format {{.Names}}') echo kvs-caddy ;;
+        'inspect --format '*ACME_EMAIL*' kvs-caddy') echo ACME_EMAIL=admin@example.com ;;
         'ps '*|'volume '*) return 0 ;;
         'compose --profile setup config --format json kvs-init') "$real_docker" "$@" ;;
         'compose ps --status running --quiet cron')

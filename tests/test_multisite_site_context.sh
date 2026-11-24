@@ -9,6 +9,8 @@ site=$multi/sites/media.example
 manager=$multi/site-manager.sh
 mkdir -p "$site" "$multi/caddy/sites"
 cp "$root/docker/multi-site/site-manager.sh" "$manager"
+mkdir -p "$work/docker/lib"
+cp "$root/docker/lib/host-validation.sh" "$work/docker/lib/"
 export work
 # shellcheck disable=SC2329  # Used by the manager.
 docker() {

@@ -6,6 +6,7 @@ TEST_DIR=$(mktemp -d)
 REAL_DOCKER=$(type -P docker || true)
 # add reads these from the environment; the cases that need them set them.
 unset IONCUBE KVS_PHP_VERSION
+export ACME_EMAIL=ops@sub.example.com
 
 cleanup() {
     rm -rf "$TEST_DIR"
@@ -33,7 +34,6 @@ create_fixture() {
     # add reads the PHP series and the IonCube encoding of the archive.
     mkdir -p "${fixture}/lib"
     cp "${ROOT_DIR}/docker/lib/kvs-php.sh" "${fixture}/lib/"
-    mkdir -p "$fixture/lib"
     cp "$ROOT_DIR/docker/lib/host-validation.sh" "$fixture/lib/"
     mkdir -p "${fixture}/init/lib"
     cp "${ROOT_DIR}/docker/init/lib/kvs-archive.sh" "${fixture}/init/lib/"
@@ -106,6 +106,7 @@ docker() {
                 printf '%s\n' 'kvs-caddy'
             fi
             ;;
+        inspect) printf '%s\n' ACME_EMAIL=ops@sub.example.com ;;
         volume)
             # volume ls --filter label=com.docker.compose.project=<project>
             # lists the volumes of MOCK_PROJECT_VOLUMES that Compose would have
@@ -1020,7 +1021,7 @@ fi
 )
 
 caddy_start_log="${TEST_DIR}/valid/caddy-start.log"
-ACME_EMAIL=ops@example.com \
+ACME_EMAIL=ops@sub.example.com \
 MOCK_NETWORK_EXISTS=false \
 MOCK_DOCKER_LOG="$caddy_start_log" \
 KVS_WEBROOT_BASE="$valid_webroot" \
@@ -2555,19 +2556,19 @@ r6_rendered_email() {
 }
 # A public route, as add and primary-config write it without tls internal.
 bash "$r6_script" proxy-config tube.example.com >/dev/null
-for r6_env in 'EMAIL=ops@example.com' \
-    $'EMAIL=admin@example.com\nexport EMAIL="ops@example.com"' \
-    $'EMAIL=ops@example.com\r' \
-    "EMAIL='ops@example.com' # the contact" \
-    'EMAIL=ops@example.com   # the contact'; do
+for r6_env in 'EMAIL=ops@sub.example.com' \
+    $'EMAIL=admin@example.com\nexport EMAIL="ops@sub.example.com"' \
+    $'EMAIL=ops@sub.example.com\r' \
+    "EMAIL='ops@sub.example.com' # the contact" \
+    'EMAIL=ops@sub.example.com   # the contact'; do
     printf '%s\n' "$r6_env" > "${TEST_DIR}/r6/docker/.env"
     r6_start 0
-    [ "$(r6_rendered_email)" = ops@example.com ] ||
+    [ "$(r6_rendered_email)" = ops@sub.example.com ] ||
         fail "R6: Caddy got '$(r6_rendered_email)' instead of the EMAIL of docker/.env: $(printf '%q' "$r6_env")"
 done
 # An exported ACME_EMAIL, as setup.sh passes it, wins over docker/.env.
-r6_start 0 ACME_EMAIL=team@example.com
-[ "$(r6_rendered_email)" = team@example.com ] ||
+r6_start 0 ACME_EMAIL=team@sub.example.com
+[ "$(r6_rendered_email)" = team@sub.example.com ] ||
     fail "R6: an explicit ACME_EMAIL was not passed to Caddy: $(r6_rendered_email)"
 # No usable address and a route that needs an ACME certificate: refused.
 for r6_env in 'EMAIL=admin@example.com' 'EMAIL=' 'EMAIL=not-an-address' 'DOMAIN=tube.example.com'; do
@@ -2578,7 +2579,7 @@ rm -f "${TEST_DIR}/r6/docker/.env"
 r6_start 1
 # An explicit ACME_EMAIL is checked the same way: the placeholder or a
 # malformed one is refused, whatever docker/.env holds, and says so.
-printf 'EMAIL=ops@example.com\n' > "${TEST_DIR}/r6/docker/.env"
+printf 'EMAIL=ops@sub.example.com\n' > "${TEST_DIR}/r6/docker/.env"
 for r6_explicit in admin@example.com not-an-address; do
     r6_start 1 ACME_EMAIL="$r6_explicit"
     grep -Fq "ACME_EMAIL (${r6_explicit})" "${TEST_DIR}/r6/out" ||
@@ -2695,13 +2696,13 @@ r6_setup refused false admin@example.com
 # the resume path, which starts Caddy without recreating it, ahead of the
 # one docker/.env holds. With none, setup hands caddy-start none, not the
 # placeholder, and caddy-start takes the one of docker/.env.
-printf 'EMAIL=ops@example.com\n' > "${TEST_DIR}/r6/docker/.env"
+printf 'EMAIL=ops@sub.example.com\n' > "${TEST_DIR}/r6/docker/.env"
 r6_setup started false
-[ "$(r6_rendered_email)" = ops@example.com ] ||
+[ "$(r6_rendered_email)" = ops@sub.example.com ] ||
     fail "R6: setup with no EMAIL gave Caddy '$(r6_rendered_email)' instead of the EMAIL of docker/.env"
 for r6_resume in false true; do
-    r6_setup started "$r6_resume" team@example.com
-    [ "$(r6_rendered_email)" = team@example.com ] ||
+    r6_setup started "$r6_resume" team@sub.example.com
+    [ "$(r6_rendered_email)" = team@sub.example.com ] ||
         fail "R6: setup (RESUME_IMPORT=${r6_resume}) gave Caddy '$(r6_rendered_email)' instead of its EMAIL"
 done
 rm -f "${TEST_DIR}/r6/docker/.env"

@@ -1,11 +1,12 @@
 #!/bin/bash
 # add and primary-config must not both reserve one Compose project.
 set -euo pipefail
+export CADDY_TLS_MODE=internal
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/docker"
-(cd "$root/docker" && command cp --parents images.lock bin/resolve-bases.sh lib/kvs-php.sh \
+(cd "$root/docker" && command cp --parents images.lock bin/resolve-bases.sh lib/host-validation.sh lib/kvs-php.sh \
     init/lib/kvs-archive.sh multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work/docker")
 multi="$work/docker/multi-site"
 manager="$multi/site-manager.sh"

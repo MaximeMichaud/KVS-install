@@ -84,7 +84,7 @@ bash -c 'source "$1"; email_is_valid "User@Example.XN--P1AI"' _ "$WORK/kvs.sh" |
 [ "$(check_email_file "$WORK/reconf.sh" validate_email)" = ok ] ||
     fail "docker/reconfigure.sh validate_email does not accept a punycode TLD"
 
-extract docker/multi-site/site-manager.sh usable_acme_email > "$WORK/contact.sh"
+{ extract docker/multi-site/site-manager.sh usable_acme_email; cat "$ROOT_DIR/docker/lib/host-validation.sh"; } > "$WORK/contact.sh"
 SCRIPT_DIR="$ROOT_DIR/docker/multi-site"
 # shellcheck disable=SC2034  # Used by the extracted site manager function.
 export SCRIPT_DIR

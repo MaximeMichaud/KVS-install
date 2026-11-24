@@ -281,7 +281,7 @@ test_headless_override_validation() {
     ) > "$output" 2>&1; then
         fail "setup accepted an invalid headless email"
     fi
-    assert_file_contains "$output" "ERROR: Invalid email format: invalid-email"
+    assert_file_contains "$output" "ERROR: EMAIL is not a usable contact address for letsencrypt certificates: invalid-email"
     assert_file_not_contains "$output" "Enter your email"
 
     if (

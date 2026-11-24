@@ -10,7 +10,7 @@ mkdir "$work/docker"
 multi="$work/docker/multi-site"
 manager="$multi/site-manager.sh"
 locks="$multi/.locks"
-export work multi locks KVS_WEBROOT_BASE="$work/www"
+export ACME_EMAIL=ops@sub.example.com work multi locks KVS_WEBROOT_BASE="$work/www"
 mkdir -p "$work/docker/kvs-archive"
 touch "$work/docker/kvs-archive/KVS_test.zip"
 # shellcheck disable=SC2329  # Used by child managers.
@@ -161,7 +161,7 @@ cmp "$work/before" "$routes/media.example.caddy"
 rmdir "$routes/operator.caddy"
 cp "$work/operator" "$routes/operator.caddy"
 bash "$manager" proxy-config ignored.example internal false false > "$work/out"
-ACME_EMAIL=ops@example.com bash "$manager" caddy-start > "$work/out"
+ACME_EMAIL=ops@sub.example.com bash "$manager" caddy-start > "$work/out"
 [[ -e "$work/proxy-started" && -e "$work/reloaded" ]]
 # Deletion also holds the publication lock.
 rm() {
