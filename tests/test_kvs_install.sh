@@ -2546,14 +2546,13 @@ STUB
 
   # SSL_PROVIDER=selfsigned skips acme.sh: install_acme.sh records the mode
   # itself, and the TLS step after it leaves the check off instead of
-  # refusing to run. install_acme.sh creates /etc/nginx/ssl/<domain>; the
-  # mkdir stub answers for that path and refuses any other.
+  # refusing to run. Limit directory creation to the test's nginx tree.
   (
     KVS_NGINX_DIR="$temp_dir/nginx"
     command mkdir -p "$KVS_NGINX_DIR/conf.d"
     : >"$KVS_NGINX_DIR/conf.d/example.com.conf.disabled"
     : >"$KVS_NGINX_DIR/conf.d/sslgen.conf"
-    mkdir() { [[ "$*" == "-p /etc/nginx/ssl/example.com" ]] || return 99; }
+    mkdir() { [[ "$*" == "-p $KVS_NGINX_DIR/ssl/example.com" ]] && command mkdir "$@"; }
     nginx() { :; }
     service() { :; }
     mariadb() {

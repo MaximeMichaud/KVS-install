@@ -561,6 +561,205 @@ SH
     fail "an added destination linked to the cache was not refused cleanly: $(<"$work/log")" || return 1
 )
 
+# Start with normal signal dispositions even when the suite itself is a background job.
+test_selfsigned_signals() {
+  env --default-signal=HUP,INT,TERM,PIPE bash -s -- "$INSTALLER" <<'SH'
+set -eu
+source "$1"
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+DOMAIN=site.example.test SSL_PROVIDER=selfsigned KVS_NGINX_DIR="$work/nginx"
+live="$KVS_NGINX_DIR/ssl/$DOMAIN"
+mkdir -p "$live" "$work/bin"
+openssl req -x509 -nodes -days 1 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -subj "/CN=$DOMAIN" -keyout "$work/key" -out "$work/cert" 2>/dev/null
+# Signal the waiting shell before the child publishes the key. A default signal
+# handler can leave this child running even after the shell's EXIT trap finishes.
+cat > "$work/bin/mv" <<'MV'
+#!/bin/bash
+if [[ $3 == */new.key ]]; then
+  kill -s "$sig" "$PPID"
+  sleep 0.2
+  command -p mv "$@" && touch "$done_file"
+else
+  exec /bin/mv "$@"
+fi
+MV
+chmod +x "$work/bin/mv"
+export sig done_file="$work/renamed"
+for sig in HUP INT TERM; do
+  cp "$work/key" "$live/key.pem"
+  cp "$work/cert" "$live/cert.pem"
+  rm -f "$done_file"
+  status=0
+  PATH="$work/bin:$PATH" generate_selfsigned_cert > "$work/log" 2>&1 || status=$?
+  for ((i=0; i<100; ++i)); do [[ ! -f $done_file ]] || break; sleep 0.02; done
+  if [[ ! -f $done_file || $status != $((128 + $(kill -l "$sig"))) ]] ||
+      ! cmp -s "$work/key" "$live/key.pem" || ! cmp -s "$work/cert" "$live/cert.pem" ||
+      ! grep -Fq "Restored the previous key" "$work/log"; then
+    echo "FAIL: $sig during the external key rename" >&2
+    exit 1
+  fi
+done
+
+mv() {
+  command mv "$@" || return $?
+  case $fault:$3 in
+    broken:*/new.key) exec 2> >(exit 0); wait "$!"; kill -TERM "$BASHPID" ;;
+    second:*/new.key|first:*/new.key|both:*/new.crt) kill -TERM "$BASHPID" ;;
+  esac
+}
+ln() {
+  if [[ $fault == second && ${!#} == */restore-key ]]; then kill -HUP "$BASHPID"; fi
+  command ln "$@"
+}
+rm() {
+  command rm "$@" || return $?
+  if [[ $fault == cleanup && ${!#} == */previous-key ]]; then kill -TERM "$BASHPID"; fi
+}
+for fault in broken second first both cleanup; do
+  cp "$work/key" "$live/key.pem"
+  cp "$work/cert" "$live/cert.pem"
+  if [[ $fault == first ]]; then rm "$live/key.pem" "$live/cert.pem"; fi
+  status=0
+  generate_selfsigned_cert > "$work/log" 2>&1 || status=$?
+  if [[ $status != 143 ]]; then echo "FAIL: $fault returned $status" >&2; exit 1; fi
+  case $fault in
+    broken|second)
+      cmp "$work/key" "$live/key.pem" && cmp "$work/cert" "$live/cert.pem" || exit 1 ;;
+    first)
+      [[ ! -e $live/key.pem && ! -e $live/cert.pem ]] || exit 1 ;;
+    both|cleanup)
+      ! cmp -s "$work/key" "$live/key.pem" || exit 1
+      openssl pkey -in "$live/key.pem" -pubout > "$work/pub"
+      openssl x509 -in "$live/cert.pem" -pubkey -noout | cmp - "$work/pub"
+      grep -Fq 'The new matching certificate and key are in place.' "$work/log"
+      backup=$(sed -n 's/^Previous certificate and key saved in //p' "$work/log")
+      cmp "$backup/key.pem" "$work/key"
+      cmp "$backup/cert.pem" "$work/cert" ;;
+  esac
+done
+SH
+}
+
+test_selfsigned_destinations() (
+  # shellcheck source=/dev/null
+  source "$INSTALLER"
+  local work live entry fault status previous stages recovery backup=''
+  work=$(mktemp -d) || return 1
+  trap 'rm -rf "$work"' EXIT
+  DOMAIN=site.example.test
+  KVS_NGINX_DIR="$work/nginx"
+  live="$KVS_NGINX_DIR/ssl/$DOMAIN"
+  mkdir -p "$live" "$work/cache" || return 1
+  command openssl req -x509 -nodes -days 1 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+    -subj "/CN=$DOMAIN" -keyout "$work/cache/key" -out "$work/cache/cert" 2>/dev/null || return 1
+  (cd "$work/cache" && sha256sum key cert) > "$work/cache.sha"
+  enable_site_vhost() { touch "$work/enabled"; }
+  mkdir() { [[ $# == 2 && $1 == -p && $2 == "$live" ]] || exit 97; command mkdir "$@"; }
+  openssl() {
+    if [[ $1 == req ]]; then
+      case $fault in
+        generation) return 43 ;;
+        hostname) set -- "${@:1:$#-1}" /CN=other.example.test ;;
+      esac
+    fi
+    command openssl "$@" || return $?
+    if [[ $1 == req && $fault == mismatch ]]; then
+      while [[ $1 != -keyout ]]; do shift; done
+      cp "$work/cache/key" "$2"
+    fi
+  }
+  mv() {
+    if [[ $fault == publication || $fault == rollback || $fault == rollback_signal ]]; then
+      if [[ ${!#} == "$live/cert.pem" ]]; then return 44; fi
+    fi
+    if [[ $fault == rollback && $3 == */previous-key ]]; then return 45; fi
+    command mv "$@" || return $?
+    if [[ $fault == signal && $3 == */new.key || $fault == rollback_signal && $3 == */previous-key ]]; then
+      kill -TERM "$BASHPID"
+    fi
+  }
+  run_selfsigned() {
+    if [[ $1 == requested ]]; then
+      SSL_PROVIDER=selfsigned install_acme.sh
+    else
+      SSL_PROVIDER=letsencrypt issue_site_certificate false --issue
+    fi
+  }
+  for entry in requested fallback; do
+    rm -f "$live/key.pem" "$live/cert.pem" "$work/enabled"
+    ln -s "../../../cache/key" "$live/key.pem" && ln "$work/cache/cert" "$live/cert.pem" || return 1
+    previous=$(stat -c '%i' "$live/key.pem")
+    stages=$(find "$live" -maxdepth 1 -name '.selfsigned.*' | sort)
+    for fault in generation hostname mismatch publication; do
+      status=0
+      run_selfsigned "$entry" > "$work/log" 2>&1 || status=$?
+      if [[ $status == 0 || ( $fault == generation && $status != 43 ) || -e $work/enabled ||
+            $(stat -c '%i' "$live/key.pem") != "$previous" || ! $live/cert.pem -ef $work/cache/cert ||
+            $(find "$live" -maxdepth 1 -name '.selfsigned.*' | sort) != "$stages" ]] ||
+          ! (cd "$work/cache" && sha256sum -c "$work/cache.sha" >/dev/null); then
+        fail "failed $fault changed the old pair or did not stop ($entry)"
+        return 1
+      fi
+    done
+    fault=signal
+    status=0
+    run_selfsigned "$entry" > "$work/log" 2>&1 || status=$?
+    recovery=$(sed -n 's/^Interrupted while replacing the pair. Certificate staging directory: //p' "$work/log")
+    if [[ $status != 143 || $recovery != "$live/.selfsigned."* ||
+          $(stat -c '%i' "$recovery/previous-key") != "$previous" ||
+          $(stat -c '%i' "$live/key.pem") != "$previous" || ! $live/cert.pem -ef $work/cache/cert ]]; then
+      fail "interrupt did not restore the pair and name the recovery directory ($entry)"
+      return 1
+    fi
+    if [[ $entry == requested ]]; then
+      cmp "$recovery/key.pem" "$work/cache/key" && cmp "$recovery/cert.pem" "$work/cache/cert" || return 1
+    fi
+    rm -r -- "$recovery"
+    fault=rollback_signal
+    status=0
+    run_selfsigned "$entry" > "$work/log" 2>&1 || status=$?
+    recovery=$(sed -n 's/^Interrupted while replacing the pair. Certificate staging directory: //p' "$work/log")
+    if [[ $status != 143 || $recovery != "$live/.selfsigned."* ||
+          $(stat -c '%i' "$live/key.pem") != "$previous" || ! $live/cert.pem -ef $work/cache/cert ]]; then
+      fail "interrupt after rollback deleted the restored pair ($entry)"
+      return 1
+    fi
+    rm -r -- "$recovery"
+    fault=rollback
+    if run_selfsigned "$entry" > "$work/log" 2>&1; then fail "rollback failure succeeded"; return 1; fi
+    recovery=$(sed -n 's/^Could not restore .* Its previous entry is at \(.*\)\.$/\1/p' "$work/log")
+    [[ $recovery == "$live/.selfsigned."*/previous-key && $(stat -c '%i' "$recovery") == "$previous" ]] ||
+      { fail "rollback failure lost the previous entry ($entry)"; return 1; }
+    command mv -fT -- "$recovery" "$live/key.pem" && rm -r -- "${recovery%/*}" || return 1
+    fault=none
+    run_selfsigned "$entry" > "$work/log" 2>&1 || { cat "$work/log"; return 1; }
+    [[ ! -L $live/key.pem && ! $live/cert.pem -ef $work/cache/cert ]] || return 1
+    (cd "$work/cache" && sha256sum -c "$work/cache.sha" >/dev/null) || return 1
+    openssl pkey -in "$live/key.pem" -pubout > "$work/pub" || return 1
+    openssl x509 -in "$live/cert.pem" -pubkey -noout | cmp -s - "$work/pub" || return 1
+    if [[ $entry == requested ]]; then
+      backup=$(sed -n 's/^Previous certificate and key saved in //p' "$work/log")
+      [[ $backup == "$live/"* && $(stat -c %a "$backup") == 700 ]] || return 1
+      cmp "$backup/key.pem" "$work/cache/key" && cmp "$backup/cert.pem" "$work/cache/cert" || return 1
+      run_selfsigned "$entry" > "$work/log" 2>&1 || return 1
+      [[ -d $backup && $(sed -n 's/^Previous certificate and key saved in //p' "$work/log") != "$backup" ]] || return 1
+    else
+      [[ $(find "$live" -maxdepth 1 -name '.selfsigned.*' | sort) == "$stages" ]] ||
+        { fail "unused certificate staging directory after fallback"; return 1; }
+    fi
+  done
+  ln -s "$work" "$work/alias" || return 1
+  KVS_NGINX_DIR="$work/alias/nginx"
+  live="$KVS_NGINX_DIR/ssl/$DOMAIN"
+  if run_selfsigned requested > "$work/log" 2>&1; then fail "accepted a linked parent"; return 1; fi
+  KVS_NGINX_DIR="$work/nginx"
+  live="$KVS_NGINX_DIR/ssl/$DOMAIN"
+  chmod 777 "$live" || return 1
+  if run_selfsigned requested > "$work/log" 2>&1; then fail "accepted a writable parent"; return 1; fi
+)
+
 run_test() {
   local name="$1"
   local function_name="$2"
@@ -574,6 +773,8 @@ run_test() {
 }
 
 failures=0
+run_test "interrupted certificate publication" test_selfsigned_signals || failures=$((failures + 1))
+run_test "self-signed generation protects linked destinations" test_selfsigned_destinations || failures=$((failures + 1))
 run_test "certificate destinations linked to the acme.sh cache are refused" test_linked_certificate_destinations || failures=$((failures + 1))
 run_test "acme.sh settings added by the operator survive a re-run" test_saved_acme_deployment_settings || failures=$((failures + 1))
 run_test "reusing a certificate keeps its renewal authority visible" test_reused_certificate_authority || failures=$((failures + 1))

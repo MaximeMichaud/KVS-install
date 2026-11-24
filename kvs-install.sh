@@ -1995,14 +1995,110 @@ function aptinstall_memcached() {
   echo "Memcached installation and configuration complete."
 }
 
-function generate_selfsigned_cert() {
-    mkdir -p /etc/nginx/ssl/"$DOMAIN"
+function generate_selfsigned_cert() (
+    local nginx_dir="${KVS_NGINX_DIR:-/etc/nginx}" dir ssl_dir stage dest mode owner key_pub cert_pub
+    local saved=false keep=false had_key=false pair_state
+    ssl_dir="$nginx_dir/ssl/$DOMAIN"
+    if [[ $(realpath -ms -- "$ssl_dir") != "$(realpath -m -- "$ssl_dir")" ]]; then
+        echo "Refusing a symbolic link in the certificate directory path: $ssl_dir" >&2
+        return 1
+    fi
+    for dir in "$nginx_dir" "$nginx_dir/ssl" "$ssl_dir"; do
+        if [[ -d $dir ]]; then
+            read -r owner mode < <(stat -c '%u %a' -- "$dir") || return 1
+            if (( (owner != 0 && owner != EUID) || (8#$mode & 022) )); then
+                echo "Refusing unsafe ownership or permissions on $dir" >&2
+                return 1
+            fi
+        fi
+    done
+    umask 077
+    mkdir -p "$ssl_dir" || return $?
+    exec 9<"$ssl_dir" && flock -x 9 || return 1
+    stage=$(mktemp -d "$ssl_dir/.selfsigned.XXXXXX") || return 1
+    trap 'trap "" HUP INT TERM PIPE
+    case $keep in
+        false) rm -rf -- "$stage" ;;
+        pending)
+            pair_state="The previous certificate and key entries are in place."
+            if [[ -e $stage/new.crt && ! -e $stage/new.key ]]; then
+                if [[ -e $stage/previous-key || -L $stage/previous-key ]]; then
+                    if ln -P -- "$stage/previous-key" "$stage/restore-key" &&
+                        mv -fT -- "$stage/restore-key" "$ssl_dir/key.pem"; then
+                        pair_state="Restored the previous key at $ssl_dir/key.pem."
+                    else
+                        pair_state="Could not restore $ssl_dir/key.pem from $stage/previous-key."
+                    fi
+                elif [[ $had_key == false ]]; then
+                    if rm -f -- "$ssl_dir/key.pem"; then
+                        pair_state="Removed the new key; there was no previous key."
+                    else
+                        pair_state="Could not remove the new key at $ssl_dir/key.pem."
+                    fi
+                fi
+            elif [[ ! -e $stage/new.crt ]]; then
+                pair_state="The new matching certificate and key are in place."
+            fi
+            echo "Interrupted while replacing the pair. Certificate staging directory: $stage" >&2 || :
+            echo "$pair_state" >&2 || :
+            if [[ -e $stage/previous-key || -L $stage/previous-key ]]; then
+                echo "Previous key entry: $stage/previous-key" >&2 || :
+            fi
+            if [[ $saved == true ]]; then echo "Previous certificate and key saved in $stage" >&2 || :; fi
+            ;;
+    esac' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    for dest in "$ssl_dir/key.pem" "$ssl_dir/cert.pem"; do
+        if [[ -e $dest && ! -f $dest ]]; then
+            echo "Certificate destination is not a regular file: $dest" >&2
+            return 1
+        fi
+    done
     openssl req -x509 -nodes -days 365 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-        -keyout /etc/nginx/ssl/"$DOMAIN"/key.pem \
-        -out /etc/nginx/ssl/"$DOMAIN"/cert.pem \
-        -subj "/CN=$DOMAIN"
+        -keyout "$stage/new.key" -out "$stage/new.crt" -subj "/CN=$DOMAIN" || return $?
+    if ! key_pub=$(openssl pkey -in "$stage/new.key" -passin pass: -pubout) ||
+        ! cert_pub=$(openssl x509 -in "$stage/new.crt" -pubkey -noout) ||
+        [[ -z $key_pub || $key_pub != "$cert_pub" ]] ||
+        ! openssl verify -CAfile "$stage/new.crt" -verify_hostname "$DOMAIN" "$stage/new.crt" >/dev/null; then
+        echo "Could not verify the new self-signed certificate for $DOMAIN" >&2
+        return 1
+    fi
+    if [[ ${SSL_PROVIDER:-} == selfsigned && -f $ssl_dir/key.pem && -f $ssl_dir/cert.pem ]]; then
+        cp -L -- "$ssl_dir/key.pem" "$stage/key.pem" && cp -L -- "$ssl_dir/cert.pem" "$stage/cert.pem" || return 1
+        saved=true
+    fi
+    if [[ -e $ssl_dir/key.pem || -L $ssl_dir/key.pem ]]; then
+        ln -P -- "$ssl_dir/key.pem" "$stage/previous-key" || return 1
+        had_key=true
+    fi
+    keep=pending
+    if ! mv -fT -- "$stage/new.key" "$ssl_dir/key.pem"; then
+        keep=false
+        return 1
+    fi
+    if ! mv -fT -- "$stage/new.crt" "$ssl_dir/cert.pem"; then
+        if [[ -e $stage/previous-key || -L $stage/previous-key ]]; then
+            if mv -fT -- "$stage/previous-key" "$ssl_dir/key.pem"; then
+                keep=false
+            else
+                keep=true
+                echo "Could not restore $ssl_dir/key.pem. Its previous entry is at $stage/previous-key." >&2
+            fi
+        else
+            rm -f -- "$ssl_dir/key.pem" || return 1
+            keep=false
+        fi
+        return 1
+    fi
+    if [[ $saved == true ]]; then
+        rm -f -- "$stage/previous-key" || return 1
+        echo "Previous certificate and key saved in $stage"
+    fi
+    keep=$saved
     echo "Self-signed certificate generated for $DOMAIN"
-}
+)
 
 # True when the A record of the given name points at this server.
 dns_record_points_here() {
@@ -2192,8 +2288,8 @@ issue_site_certificate() {
         fi
     fi
 
-    CERTIFICATE_MODE=selfsigned
     generate_selfsigned_cert || return $?
+    CERTIFICATE_MODE=selfsigned
     {
       echo "${red}WARNING: no ${SSL_PROVIDER} certificate for ${DOMAIN}: the site now uses a self-signed${normal}"
       echo "${red}certificate, which browsers refuse. The commands below put the real one in place;${normal}"
@@ -2237,15 +2333,15 @@ enable_site_vhost() {
 }
 
 function install_acme.sh() {
-    mkdir -p /etc/nginx/ssl/"$DOMAIN"
-
     # Self-signed: skip acme.sh entirely
     if [[ "$SSL_PROVIDER" == "selfsigned" ]]; then
+        generate_selfsigned_cert || return $?
         CERTIFICATE_MODE=selfsigned
-        generate_selfsigned_cert
         enable_site_vhost
         return
     fi
+
+    mkdir -p "${KVS_NGINX_DIR:-/etc/nginx}/ssl/$DOMAIN" || return $?
 
     # Ensure ports 80 and 443 are open for validation
     if command -v ufw >/dev/null 2>&1; then
