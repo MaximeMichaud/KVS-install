@@ -1306,18 +1306,34 @@ import_archive_tools() {
     esac
 }
 
+# Only for display. Keep the original archive member for file operations.
+import_archive_display_name() {
+    local LC_ALL=C.UTF-8 text=$1 char value output="" i
+    for ((i=0; i<${#text}; i++)); do
+        char=${text:i:1}
+        printf -v value '%d' "'$char"
+        if (( value < 32 || (value >= 127 && value <= 159) )); then
+            char='?'
+        fi
+        output+=$char
+    done
+    printf '%s' "$output"
+}
+
 # import_archive_report_failure <archive> <tool output file>
 # Why an archive tool failed: a password, which the setup never asks for
 # (the archive tools would wait on a prompt nobody sees, so their stdin is
 # closed and 7-Zip gets an empty password), or the tool's own last lines.
 import_archive_report_failure() {
     local file="$1"
-    local output="$2"
+    local output="$2" line
 
     if grep -qiE 'password|encrypted' "$output"; then
         echo "ERROR: $file is password protected; the setup never asks for a password, extract it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP" >&2
     else
-        tail -n 5 "$output" >&2
+        while IFS= read -r line || [ -n "$line" ]; do
+            printf '%s\n' "$(import_archive_display_name "$line")" >&2
+        done < <(tail -n 5 "$output")
     fi
 }
 
@@ -1445,9 +1461,9 @@ import_archive_list() {
 # junk). Refuses members that would escape the destination, more or less
 # than one site and more or less than one dump.
 import_archive_analyze() {
-    local listing="$1"
+    local listing="$1" result
 
-    awk -F'\t' '
+    if ! result=$(LC_ALL=C awk -F'\t' '
         function base(name,    n, parts) { n = split(name, parts, "/"); return parts[n] }
         function ancestor_of(dir, member) { return index(member, dir "/") == 1 }
         {
@@ -1469,15 +1485,15 @@ import_archive_analyze() {
         }
         END {
             if (unsafe) {
-                printf "ERROR: the archive holds %d member(s) with an absolute path or \"..\" (%s)\n", unsafe, unsafe_first > "/dev/stderr"
+                printf "ERROR: the archive holds %d member(s) with an absolute path or \"..\" (%s)\n", unsafe, unsafe_first
                 exit 1
             }
             if (roots == 0) {
-                print "ERROR: the archive holds no KVS site (admin/include/setup.php is missing)" > "/dev/stderr"
+                print "ERROR: the archive holds no KVS site (admin/include/setup.php is missing)"
                 exit 1
             }
             if (roots > 1) {
-                printf "ERROR: the archive holds %d KVS sites; it must hold one\n", roots > "/dev/stderr"
+                printf "ERROR: the archive holds %d KVS sites; it must hold one\n", roots
                 exit 1
             }
             dumps = 0; dump = ""; manifest = ""; extras = 0; extra_list = ""
@@ -1504,16 +1520,22 @@ import_archive_analyze() {
                 if (extras <= 5) extra_list = extra_list (extra_list == "" ? "" : ", ") name
             }
             if (dumps == 0) {
-                print "ERROR: the archive holds no database dump (.sql, compressed SQL or .mariadb.tar.gz/.zst) next to the site" > "/dev/stderr"
+                print "ERROR: the archive holds no database dump (.sql, compressed SQL or .mariadb.tar.gz/.zst) next to the site"
                 exit 1
             }
             if (dumps > 1) {
-                printf "ERROR: the archive holds %d database dumps (%s%s); it must hold one\n", dumps, dump, dump_list > "/dev/stderr"
+                printf "ERROR: the archive holds %d database dumps (%s%s); it must hold one\n", dumps, dump, dump_list
                 exit 1
             }
             if (extras > 5) extra_list = extra_list ", ..."
             printf "%s\t%s\t%s\t%d\t%s\n", root, dump, manifest, (total + 1048575) / 1048576, extra_list
-        }' "$listing"
+        }' "$listing"); then
+        [ -z "$result" ] || printf '%s\n' "$(import_archive_display_name "$result")" >&2
+        return 1
+    fi
+    # Only the final field lists names for display. The preceding fields
+    # are structured lookup keys and must retain their stored bytes.
+    printf '%s\t%s\n' "${result%$'\t'*}" "$(import_archive_display_name "${result##*$'\t'}")"
 }
 
 # import_stage_dir_for <destination>
@@ -1597,13 +1619,13 @@ import_archive_settle() {
     for member in "$dump" "$manifest"; do
         [ -n "$member" ] || continue
         if [ ! -f "$stage/$member" ] || [ -L "$stage/$member" ]; then
-            echo "ERROR: archive member is not a regular file: $member" >&2
+            echo "ERROR: archive member is not a regular file: $(import_archive_display_name "$member")" >&2
             return 1
         fi
     done
     site="$stage/$root"
     if [ ! -f "${site}admin/include/setup.php" ]; then
-        echo "ERROR: the extracted archive has no site in ${root:-its top level}" >&2
+        echo "ERROR: the extracted archive has no site in $(import_archive_display_name "${root:-its top level}")" >&2
         return 1
     fi
     import_private_site_dir "$destination" || return 1
@@ -1623,7 +1645,7 @@ import_archive_settle() {
     while IFS= read -r -d '' entry; do
         name=${entry##*/}
         if [ "$destination/$name" -ef "$stage" ]; then
-            echo "ERROR: archive entry conflicts with its extraction directory: $name" >&2
+            echo "ERROR: archive entry conflicts with its extraction directory: $(import_archive_display_name "$name")" >&2
             return 1
         fi
         rm -rf -- "${destination:?}/$name" || return 1

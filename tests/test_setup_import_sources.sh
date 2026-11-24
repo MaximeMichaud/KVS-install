@@ -234,6 +234,46 @@ test_listings_are_normalized_for_every_archive_kind() {
     pass "listings are normalized for every archive kind"
 }
 
+test_archive_diagnostics_replace_control_bytes() {
+    local listing="$TMP_ROOT/names.list" result name=$'Étage\\label\033\177\233\302\233'
+    printf 'f\t1\t%s\n' "$name/admin/include/setup.php" "$name.sql" "$name.txt" > "$listing"
+    result=$(import_archive_analyze "$listing") || fail "cannot analyze member names"
+    [ "$(import_field "$result" 1)" = "$name/" ] && [ "$(import_field "$result" 2)" = "$name.sql" ] ||
+        fail "changed the names used for extraction"
+    [ "$(import_field "$result" 5)" = 'Étage\label????.txt' ] || fail "ignored name contains control bytes"
+    # shellcheck disable=SC2329  # The extracted function calls these stubs.
+    (
+        setup_function import_inspect_archive
+        # shellcheck disable=SC2034,SC2329  # The archive inspection reads these fixtures.
+        IMPORT_ARCHIVE="$listing" DOMAIN=archive.test RED='' NC=''
+        import_archive_tools() { echo unzip; }
+        import_archive_list() { cat "$listing_source"; }
+        import_archive_peek() { [ "$3" = "$name/" ]; }
+        import_validate_site() { printf '7.0\t/var/www/kvs\tktvs_\n'; }
+        import_read_php_config_value() { echo https://archive.test; }
+        import_free_space_mb_ok() { return 0; }
+        import_destination_ready() { return 0; }
+        listing_source=$listing
+        import_inspect_archive
+    ) > "$TMP_ROOT/summary" || fail "could not inspect the archive"
+    grep -Fq 'Site: Étage\label????/' "$TMP_ROOT/summary" || fail "unsafe site summary"
+    grep -Fq 'Database dump: Étage\label????.sql' "$TMP_ROOT/summary" || fail "unsafe dump summary"
+    printf 'bad member: %s\n' "$name" > "$TMP_ROOT/tool.err"
+    import_archive_report_failure archive.zip "$TMP_ROOT/tool.err" 2> "$TMP_ROOT/name.err"
+    grep -Fxq 'bad member: Étage\label????' "$TMP_ROOT/name.err" || fail "unsafe archive tool output"
+    if import_archive_settle "$TMP_ROOT" '' "$name.sql" '' '' '' 2> "$TMP_ROOT/name.err"; then fail "accepted a missing dump"; fi
+    grep -Fq 'regular file: Étage\label????.sql' "$TMP_ROOT/name.err" || fail "unsafe member diagnostic"
+    if import_archive_settle "$TMP_ROOT" "$name/" '' '' '' '' 2> "$TMP_ROOT/name.err"; then fail "accepted a missing site"; fi
+    grep -Fq 'no site in Étage\label????/' "$TMP_ROOT/name.err" || fail "unsafe site diagnostic"
+    printf 'f\t1\t%s\n' "other$name.sql" >> "$listing"
+    if import_archive_analyze "$listing" 2> "$TMP_ROOT/name.err"; then fail "accepted two dumps"; fi
+    grep -Fq '(Étage\label????.sql, otherÉtage\label????.sql)' "$TMP_ROOT/name.err" || fail "unsafe dump diagnostic"
+    printf 'f\t1\t%s\n' "/$name" >> "$listing"
+    if import_archive_analyze "$listing" 2> "$TMP_ROOT/name.err"; then fail "accepted an absolute path"; fi
+    grep -Fq '(/Étage\label????)' "$TMP_ROOT/name.err" || fail "unsafe path diagnostic"
+    pass "archive diagnostics replace controls and preserve member lookup names"
+}
+
 test_analysis_finds_the_site_root_and_the_dump() {
     local layout archive listing result
 
@@ -640,7 +680,7 @@ test_nested_stage_preserves_site_entries() {
     [ ! -e "$stage" ] || fail 'the private stage must be removed'
 
     # Even a name matching the newly allocated stage must never delete it.
-    stage="$destination/.kvs-import-stage-collision"
+    stage="$destination/.kvs-import-stage-collision"$'\233'
     mkdir -p "$stage/www/${stage##*/}" "$stage/www/admin/include"
     printf '<?php\n' > "$stage/www/admin/include/setup.php"
     printf 'keep staged content\n' > "$stage/www/${stage##*/}/asset.css"
@@ -649,7 +689,7 @@ test_nested_stage_preserves_site_entries() {
         fail 'an exact extraction-stage collision must be refused'
     fi
     [ -f "$stage/www/${stage##*/}/asset.css" ] || fail 'a colliding entry must not delete the stage'
-    grep -q 'extraction directory' "$TMP_ROOT/stage-collision.err" || fail 'the collision diagnostic must explain the conflict'
+    grep -Fq 'extraction directory: .kvs-import-stage-collision?' "$TMP_ROOT/stage-collision.err" || fail 'the collision diagnostic must explain the conflict'
     pass 'a nested extraction stage preserves site entries and refuses an exact collision'
 }
 
@@ -3099,6 +3139,7 @@ EOF
 test_archive_names_map_to_kinds_tools_and_packages
 test_only_the_missing_tool_is_installed
 test_listings_are_normalized_for_every_archive_kind
+test_archive_diagnostics_replace_control_bytes
 test_analysis_finds_the_site_root_and_the_dump
 test_analysis_refuses_what_would_pollute_the_webroot
 test_peek_reads_the_config_before_extraction

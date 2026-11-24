@@ -2917,8 +2917,8 @@ import_inspect_archive() {
     IMPORT_DETECTED_DOMAIN=$(import_url_domain "$(import_read_php_config_value "$peek/admin/include/setup.php" project_url)")
     rm -rf "$peek"
     echo "  Archive: $IMPORT_ARCHIVE (${IMPORT_ARCHIVE_MB} MB uncompressed)"
-    echo "  Site: ${IMPORT_ARCHIVE_ROOT:-at the top of the archive} (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
-    echo "  Database dump: $IMPORT_ARCHIVE_DUMP"
+    echo "  Site: $(import_archive_display_name "${IMPORT_ARCHIVE_ROOT:-at the top of the archive}") (KVS $IMPORT_SITE_VERSION, project path $IMPORT_OLD_PATH)"
+    echo "  Database dump: $(import_archive_display_name "$IMPORT_ARCHIVE_DUMP")"
     if [ -n "$IMPORT_ARCHIVE_IGNORED" ]; then
         echo "  Ignored (not part of the site): $IMPORT_ARCHIVE_IGNORED"
     fi
