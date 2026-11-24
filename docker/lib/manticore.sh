@@ -2,6 +2,8 @@
 # shellcheck disable=SC1091
 # Manage only the search service and its KVS plugin on an installed site.
 
+source "$(dirname "${BASH_SOURCE[0]}")/database.sh" || return 1
+
 # A start that finds the indexes the manticore-data volume kept serves them
 # at once and rebuilds them behind searchd (manticore/docker-entrypoint.sh):
 # right for a restart, not once the database changed under them. This file
@@ -29,7 +31,8 @@ manticore_request_rebuild() {
 # every table on a request still in the volume.
 manticore_requested_build_running() {
     local container
-    container=$(docker compose --profile manticore ps -a -q manticore) && [ -n "$container" ] || return 1
+    container=$(compose_service_container manticore manticore database_docker_query) || return 2
+    [ -n "$container" ] || return 1
     [ "$(docker inspect --format '{{.RestartCount}} {{.State.Status}}' "$container" 2>/dev/null)" = '0 running' ] || return 1
     # The shell of the container expands the arguments.
     # shellcheck disable=SC2016
@@ -76,7 +79,7 @@ manticore_wait_ready() {
             return 1
         fi
         elapsed=$((SECONDS - start))
-        container=$(docker compose --profile manticore ps -a -q manticore)
+        container=$(compose_service_container manticore manticore database_docker_query) || return 1
         state=$(docker inspect --format '{{.RestartCount}} {{.State.Status}}' "$container" 2>/dev/null) || state=missing
         if [ "$state" != '0 running' ] || [ "$elapsed" -ge "$budget" ]; then
             echo "ERROR: Manticore indexes are not ready after ${elapsed}s ($state). KVS search configuration has not been switched." >&2
@@ -182,7 +185,6 @@ manticore_manage() {
             manticore_require_compose enable || return 1
             # Only the search service is started. An interrupted database
             # import must never be restarted by this operation.
-            source "$(dirname "${BASH_SOURCE[0]}")/database.sh"
             database_root_query -h 127.0.0.1 --protocol=tcp -e 'SELECT 1' >/dev/null || {
                 echo "ERROR: MariaDB must already be running and ready before enabling search." >&2
                 return 1
@@ -198,6 +200,7 @@ manticore_manage() {
             if manticore_requested_build_running; then
                 echo "  Manticore is still building every index from the database on an earlier request: waiting for that build."
             else
+                [ "$?" -ne 2 ] || return 1
                 manticore_request_rebuild || return 1
                 docker compose --profile manticore up -d --no-deps manticore || return 1
             fi

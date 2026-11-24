@@ -39,6 +39,7 @@ case "$*" in
             /usr/bin/sleep 4
         fi
         echo 0123456789abcdef ;;
+    'inspect --format {{.Id}} {{index .Config.Labels "com.docker.compose.oneoff"}} 0123456789abcdef') echo '0123456789abcdef False' ;;
     'inspect --format {{index .Config.Labels '*)
         printf 'kvs-resume\trunning 0 false\tvolume:kvs-resume_mariadb-data:/fixture/volume\t2026-09-26T21:10:43Z\n' ;;
     'compose config --services') printf 'mariadb\nphp-fpm\nnginx\ncron\nmemcached\nphpmyadmin-init\nkvs-init\n' ;;

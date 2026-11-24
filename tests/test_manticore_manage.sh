@@ -31,6 +31,7 @@ case "$*" in
     'compose version') echo "Docker Compose version v${TEST_COMPOSE_VERSION}" ;;
     'compose --profile manticore config manticore') exec "$REAL_DOCKER" "$@" ;;
     'compose --profile manticore ps -a -q manticore') echo c0ffee ;;
+    'inspect --format {{.Id}} {{index .Config.Labels "com.docker.compose.oneoff"}} c0ffee') echo 'c0ffee False' ;;
     'inspect --format {{.RestartCount}} {{.State.Status}} c0ffee') echo '0 running' ;;
     # The three tables, and no build of an earlier request still running,
     # no failure recorded.

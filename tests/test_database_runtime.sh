@@ -31,8 +31,9 @@ docker() {
                     print "      - --innodb-log-file-size=" redo
                 }
             ' "$TEST_DIR/compose.yml" ;;
-        'compose ps -a -q mariadb') echo test-container ;;
+        'compose ps -a -q mariadb') printf 'test-container\nutility-container\n' ;;
         'inspect --format {{if .State.Health}}{{.State.Health.Status}}{{end}} test-container') database_health_fixture ;;
+        'inspect --format {{.Id}} {{index .Config.Labels "com.docker.compose.oneoff"}} test-container utility-container') printf 'test-container False\nutility-container True\n' ;;
         inspect*) echo "${CONTAINER_STATE:-0 running}" ;;
         'compose logs --no-color --tail 500 mariadb')
             if [ -n "${DATABASE_LOG_FIXTURE:-}" ]; then
@@ -199,6 +200,43 @@ grep -q 'accepts TCP connections after 720' "$TEST_DIR/unlimited.log" || fail 'l
 grep -q 'database container is left running' "$TEST_DIR/timeout.log" || fail 'timeout recovery diagnostic missing'
 if CONTAINER_STATE='1 running' database_wait_ready 0 yes >/dev/null 2>&1; then fail 'unlimited wait ignored restart'; fi
 database_root_query() { return 0; }
+(
+    database_docker_query() {
+        case "$*" in
+            'compose ps -a -q mariadb')
+                echo 'fixture Compose warning' >&2
+                echo ps >> "$TEST_DIR/lookups"
+                echo test-container
+                if [ "$(wc -l < "$TEST_DIR/lookups")" = 1 ]; then echo utility; fi
+                ;;
+            *'com.docker.compose.oneoff'*)
+                echo 'fixture inspect warning' >&2
+                if [ "$mode" = failure ] || [[ ${!#} = utility && $mode = vanished ]]; then return 1; fi
+                echo 'test-container False'
+                if [ "$mode" = ambiguous ]; then echo 'utility False'; fi
+                ;;
+            *) docker "$@" ;;
+        esac
+    }
+    for mode in vanished ambiguous failure; do
+        : > "$TEST_DIR/lookups"
+        rc=0
+        database_wait_ready 60 > "$TEST_DIR/lookup.log" 2>&1 || rc=$?
+        if grep -q 'fixture .* warning' "$TEST_DIR/lookup.log"; then fail 'readiness repeated a Docker warning'; fi
+        case $mode in
+            vanished) [ "$rc" = 0 ] || fail 'readiness failed after a one-off disappeared' ;;
+            ambiguous)
+                [ "$rc" != 0 ] || fail 'readiness accepted an ambiguous service'
+                grep -q 'expected at most one service container' "$TEST_DIR/lookup.log" ||
+                    fail 'readiness hid an ambiguous service'
+                ;;
+            failure) [ "$rc" != 0 ] || fail 'readiness accepted failed inspections' ;;
+        esac
+        if [ "$mode" != ambiguous ]; then
+            [ "$(wc -l < "$TEST_DIR/lookups")" = 2 ] || fail 'inspection failure must relist exactly once'
+        fi
+    done
+)
 database_wait_ready 60 > "$TEST_DIR/ready.log"
 grep -q 'This alone does not verify an import' "$TEST_DIR/ready.log" || fail 'TCP readiness claims import completion'
 # A replay longer than the retries of the health check leaves MariaDB

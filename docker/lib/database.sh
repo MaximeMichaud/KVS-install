@@ -221,6 +221,39 @@ database_docker_query() {
     timeout -k 1 "$limit" docker "$@"
 }
 
+# The readiness loop reports failures itself, once, after the lookup.
+database_quiet_docker_query() { database_docker_query "$@" 2>/dev/null; }
+
+# Resolve through Compose so its active project, files and profile apply.
+# Empty output means no service container. Missing legacy labels count as
+# service containers; only an explicit True marks a Compose one-off.
+compose_service_container() {
+    local service=$1 profile=$2 attempt listed rows id role selected=''
+    shift 2
+    local -a options=() ids
+    if [ -n "$profile" ]; then options=(--profile "$profile"); fi
+    for attempt in 1 2; do
+        listed=$("$@" compose "${options[@]}" ps -a -q "$service") || return 1
+        [ -n "$listed" ] || return 0
+        mapfile -t ids <<< "$listed"
+        # A one-off may disappear after ps. Relist once with fresh IDs.
+        if rows=$(
+            if [ "$attempt" = 1 ]; then exec 2>/dev/null; fi
+            "$@" inspect --format '{{.Id}} {{index .Config.Labels "com.docker.compose.oneoff"}}' "${ids[@]}"
+        ); then break; fi
+        [ "$attempt" = 1 ] || return 1
+    done
+    while read -r id role; do
+        [ -n "$id" ] && [ "$role" != True ] || continue
+        if [ -n "$selected" ]; then
+            echo "ERROR: expected at most one service container for $service in this Compose project." >&2
+            return 1
+        fi
+        selected=$id
+    done <<< "$rows"
+    printf '%s\n' "$selected"
+}
+
 # Keep the initial import error visible across the following startup messages.
 # The client may echo the failed SQL between separator lines; omit that SQL
 # and password-bearing log lines instead of exposing imported values.
@@ -335,7 +368,7 @@ database_wait_ready() (
             database_wait_timeout "$elapsed" "$budget"
             return 1
         fi
-        if ! container=$(database_docker_query compose ps -a -q mariadb 2>/dev/null); then
+        if ! container=$(compose_service_container mariadb "" database_quiet_docker_query); then
             echo "ERROR: Docker did not return the MariaDB container status; the container is left untouched." >&2
             return 1
         fi

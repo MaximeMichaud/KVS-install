@@ -22,6 +22,7 @@ case "$*" in
     'compose ps -a -q mariadb')
         if [ "$MONITOR_CASE" = docker-hung ]; then sleep 30; fi
         echo fixture-container ;;
+    'inspect --format {{.Id}} {{index .Config.Labels "com.docker.compose.oneoff"}} fixture-container') echo 'fixture-container False' ;;
     'inspect --format '*)
         if [ "$MONITOR_CASE" = logs-hung ]; then echo '1 running'; else echo '0 running'; fi ;;
     'compose logs --no-color --tail 500 mariadb')

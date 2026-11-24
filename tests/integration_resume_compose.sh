@@ -72,13 +72,14 @@ mkdir "$fixture/output" "$fixture/build"
 chmod 777 "$fixture/output"
 # A build attempt fails at Dockerfile parsing, before any image or network use.
 printf 'FROM scratch\nKVS_TEST_MUST_NOT_BUILD\n' > "$fixture/build/Dockerfile"
+# Keep the runtime services alive until cleanup, including on slow hosts.
 cat > "$COMPOSE_FILE" <<'YAML'
 services:
   mariadb:
     image: ${COMPOSE_TEST_IMAGE}
     network_mode: none
     mem_limit: 32m
-    command: [sh, -c, "echo started > /output/database-started; sleep 60"]
+    command: [sh, -c, "echo started > /output/database-started; exec tail -f /dev/null"]
     volumes: ["./output:/output", "./output:/var/lib/mysql"]
   phpmyadmin-init:
     image: ${COMPOSE_TEST_IMAGE}
@@ -102,14 +103,14 @@ services:
     image: ${COMPOSE_TEST_IMAGE}
     network_mode: none
     mem_limit: 32m
-    command: [sleep, "120"]
+    command: [tail, -f, /dev/null]
     depends_on: [mariadb]
   nginx:
     <<: *runtime
     depends_on: [php-fpm]
   cron:
     <<: *runtime
-    command: [sh, -c, "test -f /output/import-complete || exit 98; echo started >> /output/cron-started; exec sleep 120"]
+    command: [sh, -c, "test -f /output/import-complete || exit 98; echo started >> /output/cron-started; exec tail -f /dev/null"]
     volumes: ["./output:/output"]
     depends_on: [php-fpm, mariadb]
 YAML

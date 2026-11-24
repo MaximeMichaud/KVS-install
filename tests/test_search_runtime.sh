@@ -63,11 +63,13 @@ case "$*" in
             if [ -n "$recorded" ]; then printf '%s\n' "$recorded"; else status=1; fi
         done
         exit "$status" ;;
-    'compose --profile manticore ps -a -q manticore') echo fixture ;;
+    'compose --profile manticore ps -a -q manticore') printf '%s\n' fixture utility ;;
+    'inspect --format {{.Id}} {{index .Config.Labels "com.docker.compose.oneoff"}} fixture utility')
+        printf 'fixture False\nutility %s\n' "${TEST_EXTRA_ROLE:-True}" ;;
     # The running site, created for the domain of .env.
     'ps --format {{.Names}}') printf '%s\n' kvs-test-php kvs-test-nginx ;;
     'inspect --format {{range .Config.Env}}{{println .}}{{end}} kvs-test-nginx') echo DOMAIN=example.com ;;
-    inspect*) echo "${TEST_CONTAINER_STATE:-0 exited}" ;;
+    'inspect --format {{.RestartCount}} {{.State.Status}} fixture') echo "${TEST_CONTAINER_STATE:-0 exited}" ;;
     'compose --profile manticore ps -a manticore'|'compose --profile manticore stop manticore') exit 0 ;;
     'compose --profile manticore logs '*) exit 0 ;;
     'compose --profile setup run '*)
@@ -100,6 +102,10 @@ call_line() { awk -v call="$1" 'index($0, call) == 1 { print NR; found = 1; exit
 export TEST_ROOT="$TEST_DIR" PATH="$TEST_DIR/bin:$PATH"
 cd "$TEST_DIR"
 # A fresh process reloads .env and reads the serialized plugin configuration.
+if TEST_EXTRA_ROLE=False bash reconfigure.sh --manticore enable > ambiguous.log 2>&1; then
+    fail 'two service containers accepted'
+fi
+if grep -q 'compose --profile manticore run' "$TEST_ROOT/calls"; then fail 'ambiguous service triggered a rebuild'; fi
 bash reconfigure.sh --manticore enable > enabled.log 2>&1 || { cat enabled.log; fail enable; }
 grep -Fxq 'ENABLE_MANTICORE=true' .env || fail 'enable was not persisted'
 grep -Fxq 'COMPOSE_PROFILES=redis,direct-tls,manticore' .env || fail 'enable lost other profiles'

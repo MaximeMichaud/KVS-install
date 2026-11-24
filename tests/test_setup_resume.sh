@@ -96,7 +96,18 @@ docker() {
             [ -n "${COMPOSE_VERSION-2.32.2}" ] || return 1
             printf 'Docker Compose version v%s\n' "${COMPOSE_VERSION-2.32.2}"
             ;;
-        'compose ps -a -q mariadb') printf '%s\n' "${CONTAINER_ID:-0123456789abcdef}" ;;
+        'compose ps -a -q mariadb')
+            if [ "${EXTRA_FIRST:-no}" = yes ]; then echo aaaaaaaaaaaaaaaa; fi
+            echo "${CONTAINER_ID:-0123456789abcdef}"
+            if [ "${EXTRA_FIRST:-no}" != yes ]; then echo aaaaaaaaaaaaaaaa; fi ;;
+        'inspect --format {{.Id}} {{index .Config.Labels "com.docker.compose.oneoff"}} '*)
+            shift 3
+            for id do
+                case $id in
+                    aaaaaaaaaaaaaaaa) echo "$id ${EXTRA_ROLE:-True}" ;;
+                    *) echo "$id ${PRIMARY_ROLE-False}" ;;
+                esac
+            done ;;
         'compose config --services') printf 'mariadb\nphp-fpm\nnginx\ncron\nmemcached\ncustom-worker\nkvs-init\nphpmyadmin-init\n' ;;
         'inspect --format {{index .Config.Labels '*)
             printf 'kvs-resume\trunning 0 false\tvolume:kvs-resume_mariadb-data:/fixture/volume\t%s\n' \
@@ -131,10 +142,19 @@ fi
 expected=$'discover\nwait:0\nmarker\ntoken\nverify'
 [ "$(cat "$CALLS")" = "$expected" ]
 [ "$(grep -c '^docker compose ps ' "$METADATA_CALLS")" = 3 ]
-[ "$(grep -c '^docker inspect ' "$METADATA_CALLS")" = 3 ]
+[ "$(grep -c '^docker inspect ' "$METADATA_CALLS")" = 6 ]
 grep -Fxq 'Inspecting the saved import configuration and existing MariaDB container...' "$fixture/startup.log"
 setup_start_runtime_services
 grep -Fxq 'runtime:compose up -d --no-deps --no-recreate --no-build --pull missing php-fpm nginx memcached custom-worker' "$CALLS"
+for first in yes no; do
+    if EXTRA_FIRST=$first EXTRA_ROLE=False setup_resume_assert_database 2>/dev/null; then
+        echo 'FAIL: recovery accepted two regular database containers'; exit 1
+    fi
+done
+if PRIMARY_ROLE=True setup_resume_assert_database 2>/dev/null; then
+    echo 'FAIL: recovery accepted only one-off containers'; exit 1
+fi
+PRIMARY_ROLE='' setup_resume_assert_database || { echo 'FAIL: missing legacy label was excluded'; exit 1; }
 if STARTED_AT=changed setup_resume_assert_database 2>/dev/null; then
     echo 'FAIL: a manual MariaDB restart must invalidate recovery'; exit 1
 fi

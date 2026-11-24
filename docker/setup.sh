@@ -1394,7 +1394,7 @@ setup_resume_database_snapshot() {
 setup_resume_assert_database() {
     local container snapshot project mount state started
 
-    container=$(setup_resume_docker_query "Locating the existing MariaDB container..." compose ps -a -q mariadb) || return 1
+    container=$(compose_service_container mariadb "" setup_resume_docker_query "Locating the existing MariaDB container...") || return 1
     if [ "$container" != "$IMPORT_RESUME_CONTAINER" ]; then
         echo "ERROR: the MariaDB container changed during import recovery; stopping finalization." >&2
         return 1
@@ -1872,7 +1872,7 @@ setup_resume_import() {
     USE_WWW=${USE_WWW:-false}
     DISABLE_KVS_SUPPORT_ACCESS=${DISABLE_KVS_SUPPORT_ACCESS:-false}
     resolve_public_port_configuration || return 1
-    IMPORT_RESUME_CONTAINER=$(setup_resume_docker_query "Locating the existing MariaDB container..." compose ps -a -q mariadb) || return 1
+    IMPORT_RESUME_CONTAINER=$(compose_service_container mariadb "" setup_resume_docker_query "Locating the existing MariaDB container...") || return 1
     if [[ ! "$IMPORT_RESUME_CONTAINER" =~ ^[a-f0-9]{12,64}$ ]]; then
         echo "ERROR: recovery requires exactly one existing MariaDB container; it will not create one." >&2
         return 1

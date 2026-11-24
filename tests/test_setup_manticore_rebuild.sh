@@ -37,7 +37,7 @@ extract_function() {
 # between its "if [ "$RESUME_IMPORT" != true ]" and the else that resumes
 # the import do not exist: its harness holds only what a resume has.
 mkdir -p "$TEST_DIR/lib" "$TEST_DIR/bin" "$TEST_DIR/site"
-cp "$ROOT_DIR/docker/lib/manticore.sh" "$TEST_DIR/lib/"
+cp "$ROOT_DIR"/docker/lib/{database,manticore}.sh "$TEST_DIR/lib/"
 request_harness="$TEST_DIR/request.sh"
 {
     grep -E '^SETUP_SCRIPT_DIR=' "$SETUP"
