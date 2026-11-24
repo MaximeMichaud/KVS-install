@@ -110,6 +110,16 @@ jobs:
           PHP_SERIES: ${{ matrix.php }}
           BASE_NAME: ${{ matrix.base }}
         run: .github/scripts/image-build-args.sh
+      - name: image cache inputs
+        id: cache
+        env:
+          SCOPE: ${{ matrix.service }}${{ matrix.php }}${{ matrix.arch }}
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" = 1 ]; then
+            echo "from=type=gha,scope=$SCOPE" >> "$GITHUB_OUTPUT"
+            echo "to=type=gha,mode=max,scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -122,8 +132,8 @@ jobs:
           sbom: false
           build-args: ${{ steps.args.outputs.value }}
           tags: kvs-install/${{ matrix.service }}:ci
-          cache-from: type=gha,scope=${{ matrix.service }}${{ matrix.php }}${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}${{ matrix.php }}${{ matrix.arch }}
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
 
       # On the binaries of the image just built, on its own architecture: the
       # PHP release of its base, the extensions the stack needs and the PHP

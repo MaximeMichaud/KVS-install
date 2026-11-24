@@ -243,6 +243,16 @@ jobs:
           BASE_NAME: ${{ matrix.base }}
         run: .github/scripts/image-build-args.sh
 
+      - name: image cache inputs
+        id: cache
+        env:
+          SCOPE: ${{ matrix.service }}${{ matrix.php }}
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" = 1 ]; then
+            echo "from=type=gha,scope=$SCOPE" >> "$GITHUB_OUTPUT"
+            echo "to=type=gha,mode=max,scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: tags and labels
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -273,8 +283,8 @@ jobs:
           build-args: ${{ steps.args.outputs.value }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.service }}${{ matrix.php }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}${{ matrix.php }}
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
 
       # outputs.digest is the registry digest, the one a pull can be checked
       # against; outputs.imageid is the local config digest and is not

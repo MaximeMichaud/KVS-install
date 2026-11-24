@@ -388,6 +388,28 @@ for event in push pull_request; do
         '.on[$event].paths | index(".github/scripts/image-build-args.sh") != null' --arg event "$event"
 done
 
+# Exercise the inputs passed to Buildx on first and subsequent attempts.
+for job in build images; do
+    json=$release
+    scope='${{ matrix.service }}${{ matrix.php }}'
+    if [ "$job" = build ]; then json=$docker; scope+='${{ matrix.arch }}'; fi
+    holds "$json" "$job must pass the cache outputs to its image build" \
+        '.jobs[$job].steps | any(.[]; .id == "cache" and .env.SCOPE == $scope)
+         and any(.[]; (.uses // "" | startswith("docker/build-push-action@"))
+             and .with["cache-from"] == "${{ steps.cache.outputs.from }}"
+             and .with["cache-to"] == "${{ steps.cache.outputs.to }}")' --arg job "$job" --arg scope "$scope"
+    cache_step=$(jq -er --arg job "$job" '.jobs[$job].steps[] | select(.id == "cache") | .run' <<<"$json")
+    for attempt in 1 2 3; do
+        : > "$notes_dir/cache"
+        SCOPE=php8.3 GITHUB_RUN_ATTEMPT=$attempt GITHUB_OUTPUT="$notes_dir/cache" bash -e -c "$cache_step"
+        if [ "$attempt" = 1 ]; then
+            printf '%s\n' 'from=type=gha,scope=php8.3' 'to=type=gha,mode=max,scope=php8.3' | cmp - "$notes_dir/cache"
+        else
+            [ ! -s "$notes_dir/cache" ] || fail "$job used the cache on attempt $attempt"
+        fi
+    done
+done
+
 # Run each build-argument step without starting a builder.
 (
     cd "$notes_dir"
