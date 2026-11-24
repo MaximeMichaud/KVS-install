@@ -419,6 +419,71 @@ test_a_resumed_import_gives_the_init_the_rules_of_the_interrupted_pass() {
     pass "a resumed import gives the init the rules of the interrupted pass"
 }
 
+test_site_rewrite_destinations() (
+    fresh_workdir
+    local IMPORT_STAGING="$TEST_DIR/link-staging"
+    local site="$TEST_DIR/linked-site" target="$TEST_DIR/disk/_INSTALL/nginx_config.txt"
+    mkdir -p "$TEST_DIR/disk/_INSTALL" "$IMPORT_STAGING"
+    ln -s "$TEST_DIR/disk" "$site"
+    IMPORT_SITE_DIR=$site
+    IMPORT_NGINX_REWRITES="$TEST_DIR/operator.conf"
+    echo 'rewrite ^ /index.php last;' > "$IMPORT_NGINX_REWRITES"
+    import_ensure_nginx_rewrites "$site"
+    [ "$(stat -c %a "$target")" = 644 ] || fail 'the published rules must be readable by init'
+    (
+        # Model an rsync-preserved www-data directory without changing ownership.
+        stat() { command stat "${@//%u/33}"; }
+        import_ensure_nginx_rewrites "$site" && import_resume_nginx_rewrites "$IMPORT_STAGING"
+    ) || fail 'rewrite publication or recovery refused a uid 33 directory'
+    (
+        dd() { return 1; }
+        if import_resume_nginx_rewrites "$IMPORT_STAGING" > "$TEST_DIR/log" 2>&1; then exit 1; fi
+        grep -Fq "could not be put back into $site/_INSTALL/nginx_config.txt; recovery stopped" "$TEST_DIR/log"
+    ) || fail 'missing recovery diagnostic for failed rewrite IO'
+    # Check the filesystem contract before forwarding any operation.
+    dd() {
+        case " $* " in
+            *' if='*) [[ " $* " == *' iflag=nofollow,nonblock '* ]] || return 1 ;;
+            *' of='*) [[ " $* " == *' conv=excl '* ]] || return 1 ;;
+        esac
+        command dd "$@"
+    }
+    mv() {
+        if [ "${!#}" = nginx_config.txt ]; then
+            [ "$PWD" -ef "$TEST_DIR/disk/_INSTALL" ] && [ "$1" = -fT ] || return 1
+        fi
+        command mv "$@"
+    }
+    import_ensure_nginx_rewrites "$site"
+    import_resume_nginx_rewrites "$IMPORT_STAGING"
+    (
+        stat() {
+            if [ "${!#}" = . ]; then echo 'changed'; else command stat "$@"; fi
+        }
+        if import_resume_nginx_rewrites "$IMPORT_STAGING"; then exit 1; fi
+    ) || fail 'recovery used a directory whose identity changed'
+    for phase in import_ensure_nginx_rewrites import_resume_nginx_rewrites; do
+        local argument=$site
+        if [ "$phase" = import_resume_nginx_rewrites ]; then argument=$IMPORT_STAGING; fi
+        for kind in directory-link file-link directory; do
+            rm -rf "$TEST_DIR/disk/_INSTALL"
+            mkdir -p "$TEST_DIR/disk/_INSTALL"
+            case $kind in
+                directory-link)
+                    rmdir "$TEST_DIR/disk/_INSTALL"
+                    ln -s absent "$TEST_DIR/disk/_INSTALL"
+                    ;;
+                file-link) ln -s absent "$target" ;;
+                directory) mkdir "$target" ;;
+            esac
+            cp "$IMPORT_NGINX_REWRITES" "$IMPORT_STAGING/$DOMAIN.nginx_config.vouched"
+            if ("$phase" "$argument") > "$TEST_DIR/log" 2>&1; then fail "$phase accepted $kind"; fi
+            grep -Eiq 'unsafe|refus' "$TEST_DIR/log" || fail "$phase did not explain $kind"
+        done
+    done
+)
+
+test_site_rewrite_destinations
 test_the_archive_is_optional_but_must_match_the_site
 test_the_encoding_of_the_imported_site_decides
 test_unknown_archive_keeps_the_existing_loader_setting
