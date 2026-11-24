@@ -204,6 +204,34 @@ rm "$(import_count_file "$resume")"
         # shellcheck disable=SC2329  # Called by the sourced check.
         (df() { :; }; import_remote_free_space_check "$tmp/absent.report" "$tmp/absent") > "$tmp/out" 2>&1 || fail "$status: unreadable free space must keep warning only"
     done
+    for field in site_required_mb site_size_mb db_size_mb site_fs_used_mb; do
+        printf 'site_size_status=exact\n%s=8796093022208\n' "$field" > "$tmp/large.report"
+        if AVAILABLE=100 import_remote_free_space_check "$tmp/large.report" "$tmp/absent" > "$tmp/out" 2>&1; then
+            fail "$field: accepted an oversized report"
+        fi
+        grep -Fq "$field is too large" "$tmp/out" || fail "$field: missing range diagnostic"
+    done
+    printf 'site_size_status=upper_bound\nsite_required_mb=8796093022208\n' > "$tmp/large.report"
+    if IMPORT_RESUME_SPACE_REPORT="$tmp/large.report" import_check_estimated_transfer_space "$resume" 0 '' > "$tmp/out" 2>&1; then
+        fail "converted an oversized resumed estimate to bytes"
+    fi
+    grep -Fq "site_required_mb is too large" "$tmp/out" || fail "missing range diagnostic on retry"
+    # Decimal megabytes can carry leading zeroes in older or hand-written reports.
+    for field in site_size_mb site_required_mb site_fs_used_mb; do
+        status=exact
+        [ "$field" != site_fs_used_mb ] || status=skipped
+        printf 'site_size_status=%s\n%s=0010\ndb_size_mb=0\n' "$status" "$field" > "$tmp/decimal.report"
+        if AVAILABLE=9 import_remote_free_space_check "$tmp/decimal.report" "$tmp/absent" > "$tmp/out" 2>&1; then
+            [ "$status" = skipped ] || fail "$field: read 0010 as octal"
+            grep -q 'not known exactly' "$tmp/out" || fail "$field: missing filesystem bound warning"
+        else
+            [ "$status" = exact ] || fail "$field: unexpected refusal"
+        fi
+        printf 'site_size_status=%s\n%s=08\ndb_size_mb=0\n' "$status" "$field" > "$tmp/decimal.report"
+        (AVAILABLE=9 import_remote_free_space_check "$tmp/decimal.report" "$tmp/absent") > "$tmp/out" 2>&1 ||
+            fail "$field: rejected decimal 08"
+        [ ! -s "$tmp/out" ] || fail "$field: unexpected diagnostic for 08"
+    done
     # A measured size keeps its verdicts, zero included.
     printf 'site_size_status=exact\nsite_size_mb=0\nsite_fs_used_mb=50\ndb_size_mb=0\n' > "$tmp/absent.report"
     AVAILABLE=3 import_remote_free_space_check "$tmp/absent.report" "$tmp/absent" > "$tmp/out" 2>&1 || fail 'a measured empty site was refused'

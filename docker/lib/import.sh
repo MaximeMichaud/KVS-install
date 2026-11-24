@@ -1061,6 +1061,18 @@ import_mariadb_storage_path() {
     printf '%s\n' "$path"
 }
 
+# Normalize a numeric report field before arithmetic. The largest accepted
+# MiB count still fits in a signed 64-bit byte count, including rounding.
+import_decimal_mb() {
+    local value=$1
+    value=${value#"${value%%[!0]*}"}
+    if (( ${#value} > 13 || (${#value} == 13 && value > 8796093022207) )); then
+        echo "ERROR: $2 is too large to convert to bytes" >&2
+        return 1
+    fi
+    printf '%s\n' "${value:-0}"
+}
+
 # Check database needs on other devices and return only the database
 # reserve sharing free space with the remaining site files.
 import_remote_database_space_mb() {
@@ -1070,7 +1082,9 @@ import_remote_database_space_mb() {
     local -A needs=() probes=()
 
     db=$(import_kv "$report" db_size_mb)
-    if ! [[ "$db" =~ ^[0-9]+$ ]] || (( 10#$db == 0 )); then echo 0; return 0; fi
+    if ! [[ "$db" =~ ^[0-9]+$ ]]; then echo 0; return 0; fi
+    db=$(import_decimal_mb "$db" db_size_mb) || return 1
+    if [ "$db" = 0 ]; then echo 0; return 0; fi
     site_path=$(import_space_parent "$destination")
     paths=("$(import_space_parent mariadb/init)")
     if [ "$stage" != received ] && [ "${IMPORT_REUSE_DUMP:-no}" != yes ]; then
@@ -2577,7 +2591,7 @@ import_count_load() {
 # measures allocated blocks instead, so compare like units on both ends.
 import_check_estimated_transfer_space() {
     local destination="$1" reserve="$2" saved_bytes="$3" report="${IMPORT_RESUME_SPACE_REPORT:-}"
-    local total held remaining size status="" stage=received
+    local total held remaining size field status="" stage=received
     local -a du_args=(-sbl)
     shift 3
     if [ -n "$saved_bytes" ]; then
@@ -2585,11 +2599,16 @@ import_check_estimated_transfer_space() {
     elif [ -n "$report" ]; then
         # The allocation the copy needs; an older exporter reports it as
         # site_size_mb.
-        size=$(import_kv "$report" site_required_mb)
-        [[ "$size" =~ ^[0-9]+$ ]] || size=$(import_kv "$report" site_size_mb)
+        field=site_required_mb
+        size=$(import_kv "$report" "$field")
+        if ! [[ "$size" =~ ^[0-9]+$ ]]; then
+            field=site_size_mb
+            size=$(import_kv "$report" "$field")
+        fi
         status=$(import_kv "$report" site_size_status)
         if [[ "$size" =~ ^[0-9]+$ && ( "$status" = exact || "$status" = upper_bound || -z "$status" ) ]]; then
-            total=$((10#$size * 1048576))
+            size=$(import_decimal_mb "$size" "$field") || return 1
+            total=$((size * 1048576))
             du_args=(-s -B1)
         else
             # Use the first pass's filesystem check and warning for an
@@ -2609,6 +2628,7 @@ import_check_estimated_transfer_space() {
     fi
     remaining=$((total > held ? total - held : 0))
     [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=0
+    reserve=$(import_decimal_mb "$reserve" IMPORT_TRANSFER_RESERVE_MB) || return 1
     if ! import_free_space_mb_ok "$(((remaining + 1048575) / 1048576 + reserve))" "$destination"; then
         # Some filesystems allocate blocks even for an empty directory.
         if [ "$status" = upper_bound ] && [ "$held" -gt 0 ] &&

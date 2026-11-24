@@ -3058,12 +3058,15 @@ import_remote_free_space_check() {
     local report="$1"
     local destination="$2"
     local source="${3:-}"
-    local stage="${4:-pending}" status size db used marker hint required text
+    local stage="${4:-pending}" status size db used marker hint required text field=site_size_mb
 
     status=$(import_kv "$report" site_size_status)
     size=$(import_kv "$report" site_size_mb)
     required=$(import_kv "$report" site_required_mb)
-    [[ "$required" =~ ^[0-9]+$ ]] && size=$required
+    if [[ "$required" =~ ^[0-9]+$ ]]; then
+        size=$required
+        field=site_required_mb
+    fi
     db=$(import_remote_database_space_mb "$report" "$stage" "$destination") || return 1
     used=$(import_kv "$report" site_fs_used_mb)
     if ! [[ "$size" =~ ^[0-9]+$ ]]; then
@@ -3071,6 +3074,11 @@ import_remote_free_space_check() {
         # its status says: the size is unknown.
         case "$status" in exact|""|upper_bound) status=absent ;; esac
         size=0
+    else
+        size=$(import_decimal_mb "$size" "$field") || return 1
+    fi
+    if [[ "$used" =~ ^[0-9]+$ ]]; then
+        used=$(import_decimal_mb "$used" site_fs_used_mb) || return 1
     fi
     if [ "$db" -gt 0 ] && ! import_free_space_mb_ok "$db" "$destination"; then
         echo -e "${RED}ERROR: not enough free space for the dumps and loaded database under $destination${NC}"
