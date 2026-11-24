@@ -20,6 +20,8 @@ case "$*" in
     'compose version') echo 'Docker Compose version v2.40.3' ;;
     # The pre-flight requires the buildx plugin to build the images.
     'buildx version') echo 'github.com/docker/buildx v0.29.1 stub' ;;
+    'compose --profile direct-tls config acme nginx')
+        echo 'services: {}' ;;
     info*|ps*|'volume ls'*|'compose config'|'compose config --quiet'|stop*|rm*) exit 0 ;;
     # A checkout: Compose builds every service the setup names.
     'compose config '*)

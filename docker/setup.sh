@@ -5929,43 +5929,128 @@ select_mode() {
 # Nginx keeps any valid pair, and once the ACME container is gone nothing
 # renews it. That pair is removed before the container goes, so Nginx
 # generates its self-signed one when it is started again. It is told from
-# a pair from anywhere else (an operator's own certificate, a private CA,
-# Cloudflare Origin CA), which stays, by its key: acme.sh keeps the key it
-# installed in its own volume. Read through a container that only borrows
-# the volumes of the ACME container, with no network.
+# a pair from anywhere else by comparing both files to the cached issue.
+# A site switched by an older setup may already have lost its ACME container.
 setup_drop_acme_installed_pair() {
-    local acme_container_names acme_image dropped
+    local acme_container_names container image dropped model project expected volume source mount target options
+    local -a mounts=() parts
 
     [ "$MODE" = single ] && [ "$SSL_PROVIDER" = selfsigned ] || return 0
     if ! acme_container_names=$(docker ps -a --format '{{.Names}}' 2>/dev/null); then
         echo -e "${RED}ERROR: Could not inspect ACME containers${NC}"
         return 1
     fi
-    grep -Fxq "${SITE_PREFIX}-acme" <<< "$acme_container_names" || return 0
-    if ! acme_image=$(docker inspect --format '{{.Image}}' "${SITE_PREFIX}-acme"); then
-        echo -e "${RED}ERROR: Could not inspect ${SITE_PREFIX}-acme${NC}"
-        return 1
+    if grep -Fxq "${SITE_PREFIX}-acme" <<< "$acme_container_names"; then
+        container=${SITE_PREFIX}-acme
+        mounts=(--volumes-from "$container")
+        if ! image=$(docker inspect --format '{{.Image}}' "$container"); then
+            echo -e "${RED}ERROR: Could not inspect ${container}${NC}"
+            return 1
+        fi
+    else
+        # Read the two effective mounts from normalized Compose output.
+        if ! model=$(docker compose --profile direct-tls config acme nginx); then
+            echo "Keeping the TLS files for $DOMAIN: could not read the Compose mounts."
+            return 0
+        fi
+        mapfile -t parts < <(awk '
+            function record() {
+                if ((svc == "nginx" && dest == "/etc/nginx/ssl") ||
+                    (svc == "acme" && dest == "/acme.sh")) {
+                    if (subpath) path[svc] = "unsupported:subpath " subpath " on " dest
+                    else if (ro && svc == "nginx") path[svc] = "unsupported:read-only mount on " dest
+                    else path[svc] = type ":" src
+                }
+                dest = src = type = subpath = ro = ""
+            }
+            /^[^ ]/ { record(); section = $0; svc = ""; mounts = 0 }
+            section == "volumes:" && /^  [^ ]/ { logical = substr($0, 3, length($0)-3) }
+            section == "volumes:" && /^    name: / { names["volume:" logical] = substr($0, 11) }
+            /^name: / { project = substr($0, 7) }
+            section == "services:" && /^  [^ ]/ {
+                record(); svc = substr($0, 3, length($0)-3); mounts = 0
+            }
+            /^    [^ ]/ { record(); mounts = ($0 == "    volumes:") }
+            svc == "nginx" && /^    image: / { image = substr($0, 12) }
+            mounts && /^      - / { record(); type = $3 }
+            mounts && /^        source: / { src = substr($0, 17) }
+            mounts && /^        target: / { dest = substr($0, 17) }
+            mounts && /^        read_only: true$/ { ro = 1 }
+            mounts && /^          subpath: / { subpath = $2 }
+            END {
+                record(); print project; print path["acme"]; print path["nginx"]
+                print (image ? image : project "-nginx"); print names[path["acme"]]; print names[path["nginx"]]
+            }' <<< "$model")
+        project=${parts[0]}
+        for target in /acme.sh /etc/nginx/ssl; do
+            options=''
+            if [ "$target" = /acme.sh ]; then source=${parts[1]}; options=',readonly'; expected=${parts[4]};
+            else source=${parts[2]}; expected=${parts[5]}; fi
+            case "$source" in
+                bind:*)
+                    mount=${source#bind:}
+                    [ -d "$mount" ] || return 0
+                    ;;
+                volume:*)
+                    if ! volume=$(docker volume ls -q --filter "label=com.docker.compose.project=$project" \
+                        --filter "label=com.docker.compose.volume=${source#volume:}"); then
+                        echo "Keeping the TLS files for $DOMAIN: could not list the volumes for $target."
+                        return 0
+                    fi
+                    [ -n "$volume" ] || return 0
+                    if [ "$volume" != "$expected" ]; then
+                        echo "Keeping the TLS files for $DOMAIN: the labelled volumes for $target disagree with Compose ($expected)."
+                        return 0
+                    fi
+                    # Binding the inspected directory cannot create a volume
+                    # even if someone removes it between inspection and use.
+                    mount=$(docker volume inspect --format '{{if and (eq .Driver "local") (not .Options)}}{{.Mountpoint}}{{end}}' "$volume" 2>/dev/null) || mount=''
+                    ;;
+                unsupported:*) echo "Keeping the TLS files for $DOMAIN: ${source#unsupported:}."; return 0 ;;
+                *) echo "Keeping the TLS files for $DOMAIN: unsupported mount for $target."; return 0 ;;
+            esac
+            if [[ "$mount" != /* || "$mount" == *[,$'\n'\"]* ]]; then
+                echo "Keeping the TLS files for $DOMAIN: no supported existing directory for $target."
+                return 0
+            fi
+            mounts+=(--mount "type=bind,source=$mount,target=$target$options")
+        done
+        if ! image=$(docker image inspect --format '{{.Id}}' "${parts[3]}" 2>/dev/null); then
+            echo "Keeping the TLS files for $DOMAIN: the project's Nginx image is unavailable locally."
+            return 0
+        fi
     fi
     # shellcheck disable=SC2016  # Expanded inside the container.
-    if ! dropped=$(docker run --rm --network none --volumes-from "${SITE_PREFIX}-acme" \
-        --entrypoint sh "$acme_image" -c '
+    if ! dropped=$(docker run --rm --pull never --network none "${mounts[@]}" \
+        --entrypoint sh "$image" -c '
             set -eu
             live=$1
-            shift
-            for issued_key in "$@"; do
-                if cmp -s "$live/key.pem" "$issued_key"; then
-                    rm -f "$live/cert.pem" "$live/key.pem"
-                    echo removed
-                fi
-            done
-        ' sh "/etc/nginx/ssl/${DOMAIN}" \
-        "/acme.sh/${DOMAIN}_ecc/${DOMAIN}.key" "/acme.sh/${DOMAIN}/${DOMAIN}.key" </dev/null); then
-        echo -e "${RED}ERROR: Could not check the certificate ${SITE_PREFIX}-acme installed${NC}"
+            domain=$2
+            cache=$3
+            if [ ! -e "$live/key.pem" ] && [ ! -L "$live/key.pem" ] &&
+                [ ! -e "$live/cert.pem" ] && [ ! -L "$live/cert.pem" ]; then exit 0; fi
+            if [ ! -L "$live" ] && [ -f "$live/key.pem" ] && [ -s "$live/key.pem" ] && [ -f "$live/cert.pem" ] && [ -s "$live/cert.pem" ]; then
+                kept=false
+                for issued in "$cache/${domain}_ecc" "$cache/$domain"; do
+                    if [ -f "$issued/$domain.key" ] && cmp -s "$live/key.pem" "$issued/$domain.key"; then
+                        kept=true
+                        [ -f "$issued/fullchain.cer" ] && cmp -s "$live/cert.pem" "$issued/fullchain.cer" || continue
+                        rm -f "$live/cert.pem" "$live/key.pem"
+                        echo removed
+                        exit 0
+                    fi
+                done
+                [ "$kept" = true ] || exit 0
+            fi
+            echo kept
+        ' sh "/etc/nginx/ssl/${DOMAIN}" "$DOMAIN" /acme.sh </dev/null); then
+        echo -e "${RED}ERROR: Could not check the certificate installed for ${DOMAIN}${NC}"
         return 1
     fi
-    if [ "$dropped" = removed ]; then
-        echo -e "${YELLOW}The certificate acme.sh installed for ${DOMAIN} is removed with the ACME container, which renewed it: Nginx generates a self-signed one when it starts.${NC}"
-    fi
+    case "$dropped" in
+        removed) echo "The certificate acme.sh installed for ${DOMAIN} was removed. Nginx generates a self-signed one when it starts." ;;
+        kept) echo "Keeping the TLS files for $DOMAIN: both files could not be matched to one cached ACME issue." ;;
+    esac
 }
 
 configure_direct_tls_profile() {

@@ -38,6 +38,9 @@ if args[:2] == ['compose', 'config'] and args[2:] in [['--quiet'], ['--format', 
     if os.environ.get('COMPOSE_STUB_ONLY') == 'yes':
         sys.exit(0)
     sys.exit(subprocess.run([os.environ['DOCKER_BIN']] + args, timeout=20).returncode)
+if args == ['compose', '--profile', 'direct-tls', 'config', 'acme', 'nginx']:
+    print('services: {}')
+    sys.exit(0)
 if args == ['compose', 'version']:
     print('Docker Compose version v' + os.environ.get('COMPOSE_VERSION', '2.35.0'))
     sys.exit(0)

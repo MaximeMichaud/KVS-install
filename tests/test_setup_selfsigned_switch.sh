@@ -6,7 +6,7 @@
 # pair, and its monitor only renews a self-signed one. Nothing renewed the
 # certificate, which expired within 90 days, while the setup said a
 # self-signed certificate was in use. configure_mode now removes the pair
-# acme.sh installed, recognised by the key acme.sh keeps, before the ACME
+# acme.sh installed, matched against both files acme.sh keeps, before the ACME
 # container goes; Nginx generates its self-signed pair when it starts. Any
 # other pair stays.
 set -euo pipefail
@@ -52,7 +52,23 @@ docker() {
             if [ "${2:-}" = -a ] && [ -e "$CASE/acme-container" ]; then
                 echo "${SITE_PREFIX}-acme"
             fi
+
             ;;
+        image)
+            [ "$*" = 'image inspect --format {{.Id}} origin:test' ] || return 1
+            echo sha256:origin-image ;;
+        volume)
+            if [ "$2" = ls ]; then
+                [ "$*" = 'volume ls -q --filter label=com.docker.compose.project=kvs --filter label=com.docker.compose.volume=cache' ] || return 91
+                if [ -e "$CASE/legacy" ] && [ -d "$CASE/acme-data" ]; then
+                    printf '%s\n' "${LABELLED_VOLUME:-override-cache}"
+                fi
+                return 0
+            fi
+            [ -e "$CASE/legacy" ] || return 1
+            [ "$*" = 'volume inspect --format {{if and (eq .Driver "local") (not .Options)}}{{.Mountpoint}}{{end}} override-cache' ] || return 91
+            [ -d "$CASE/acme-data" ] || return 1
+            echo "$CASE/acme-data" ;;
         inspect)
             [ -e "$CASE/acme-container" ] && [ "${DOCKER_INSPECT_FAILS:-false}" = false ] || return 1
             echo sha256:acme-image
@@ -60,7 +76,11 @@ docker() {
         run)
             [ "${DOCKER_RUN_FAILS:-false}" = false ] || return 125
             [[ " $* " == *" --network none "* ]] || { echo "docker run without --network none" >&2; return 99; }
-            [[ " $* " == *" --volumes-from ${SITE_PREFIX}-acme "* ]] || { echo "docker run without the ACME volumes" >&2; return 99; }
+            if [ -e "$CASE/legacy" ]; then
+                [[ " $* " == *" --mount type=bind,source=$CASE/acme-certs,target=/etc/nginx/ssl "* && " $* " == *" --mount type=bind,source=$CASE/acme-data,target=/acme.sh,readonly "* && " $* " == *' sha256:origin-image '* ]] || return 99
+            else
+                [[ " $* " == *" --volumes-from ${SITE_PREFIX}-acme "* ]] || return 99
+            fi
             [[ " $* " == *" --rm "* ]] || { echo "docker run without --rm" >&2; return 99; }
             while [ "$#" -gt 0 ] && [ "$1" != -c ]; do shift; done
             shift
@@ -73,7 +93,32 @@ docker() {
             ;;
         stop) ;;
         rm) rm -f "$CASE/acme-container" ;;
-        compose) [ "${2:-}" = version ] && echo "Docker Compose version v2.35.0" ;;
+        compose)
+            case "$*" in
+                'compose version') echo "Docker Compose version v2.35.0" ;;
+                'compose --profile direct-tls config acme nginx')
+                    cat <<MODEL
+name: kvs
+services:
+  nginx:
+    image: origin:test
+    volumes:
+      - type: bind
+        source: $CASE/acme-certs
+        target: /etc/nginx/ssl
+${LIVE_MOUNT_EXTRA:-}
+  acme:
+    volumes:
+      - type: ${CACHE_TYPE:-volume}
+        source: ${CACHE_SOURCE:-cache}
+        target: /acme.sh
+volumes:
+  cache:
+    name: override-cache
+MODEL
+                    ;;
+                *) return 64 ;;
+            esac ;;
         *) return 64 ;;
     esac
 }
@@ -120,14 +165,81 @@ rm_line=$(grep -n '^rm kvs-acme$' "$WORK/switch/docker.log" | cut -d: -f1)
     fail "the pair must be checked before the ACME container goes: $(cat "$WORK/switch/docker.log")"
 pass "the pair acme.sh installed goes with the ACME container"
 
-# acme.sh renewed the certificate and keeps the key: the installed pair is
-# recognised by its key, whatever the certificate it holds.
+# A certificate replaced independently of the cached chain may reuse its key.
 new_case renewed letsencrypt
-printf 'renewed fullchain\n' > "$WORK/renewed/acme-data/site.example.com_ecc/fullchain.cer"
+printf 'different fullchain\n' > "$(live renewed)/cert.pem"
 out=$(run_configure renewed selfsigned)
-grep -qx 'rc=0' <<< "$out" || fail "the switch after a renewal must succeed: $out"
-[ ! -e "$(live renewed)/key.pem" ] || fail "the pair acme.sh installed before a renewal must be removed"
-pass "the pair is recognised by the key acme.sh keeps"
+grep -qx 'rc=0' <<< "$out" || fail "$out"
+grep -q 'Keeping the TLS files' <<< "$out" || fail "no ambiguity reported: $out"
+grep -qx 'different fullchain' "$(live renewed)/cert.pem" || fail "operator certificate lost"
+[ -s "$(live renewed)/key.pem" ] || fail "operator key lost"
+
+new_case legacy selfsigned
+rm "$WORK/legacy/acme-container"
+touch "$WORK/legacy/legacy"
+out=$(run_configure legacy selfsigned)
+grep -qx 'rc=0' <<< "$out" || fail "$out"
+[ ! -e "$(live legacy)/cert.pem" ] && [ ! -e "$(live legacy)/key.pem" ] || fail "old ACME pair retained"
+out=$(run_configure legacy selfsigned)
+grep -qx 'rc=0' <<< "$out" || fail "$out"
+
+# A pair of dangling links is ambiguous and must be reported.
+new_case dangling selfsigned
+for file in cert.pem key.pem; do
+    rm "$(live dangling)/$file"
+    ln -s "unavailable-$file" "$(live dangling)/$file"
+done
+out=$(run_configure dangling selfsigned)
+grep -qx 'rc=0' <<< "$out" || fail "$out"
+grep -q 'Keeping the TLS files' <<< "$out" || fail "unreported dangling pair: $out"
+for file in key.pem cert.pem; do
+    [ -L "$(live dangling)/$file" ] || fail "dangling TLS link changed: $file"
+done
+
+new_case absent selfsigned
+rm "$WORK/absent/acme-container"
+touch "$WORK/absent/legacy"
+mv "$WORK/absent/acme-data" "$WORK/absent/elsewhere"
+out=$(run_configure absent selfsigned)
+grep -qx 'rc=0' <<< "$out" || fail "$out"
+[ ! -e "$WORK/absent/acme-data" ] && [ -e "$(live absent)/key.pem" ] || fail "missing cache or live key changed"
+! grep -q 'Keeping the TLS' <<< "$out" || fail "no cache should be silent: $out"
+! grep -q '^run ' "$WORK/absent/docker.log" || fail "a missing cache was mounted"
+
+for source in acme-data acme-certs; do
+    name=missing-bind-$source
+    new_case "$name" selfsigned
+    dir=$WORK/$name
+    rm "$dir/acme-container"
+    touch "$dir/legacy"
+    mv "$dir/$source" "$dir/removed-bind"
+    out=$(CACHE_TYPE=bind CACHE_SOURCE="$dir/acme-data" run_configure "$name" selfsigned)
+    grep -qx 'rc=0' <<< "$out" || fail "missing $source bind blocked setup: $out"
+    ! grep -q '^run ' "$dir/docker.log" || fail "attempted to mount the missing $source bind"
+    [ ! -e "$dir/$source" ] || fail "recreated the missing $source bind"
+done
+pass "missing cache and live bind directories skip the legacy comparison"
+
+new_case wrong-label selfsigned
+rm "$WORK/wrong-label/acme-container"
+touch "$WORK/wrong-label/legacy"
+out=$(LABELLED_VOLUME=another-cache run_configure wrong-label selfsigned)
+grep -qx 'rc=0' <<< "$out" || fail "$out"
+grep -Fq 'labelled volumes for /acme.sh disagree with Compose (override-cache)' <<< "$out" || fail "$out"
+! grep -Eq '^volume inspect |^run ' "$WORK/wrong-label/docker.log" || fail "used a different labelled volume"
+for file in cert.pem key.pem; do [ -s "$(live wrong-label)/$file" ] || fail "removed $file"; done
+pass "a mismatched labelled volume is reported before inspection and both live files stay"
+
+for detail in '        read_only: true' $'        volume:\n          subpath: old'; do
+    new_case overridden selfsigned
+    rm "$WORK/overridden/acme-container"
+    touch "$WORK/overridden/legacy"
+    out=$(LIVE_MOUNT_EXTRA="$detail" run_configure overridden selfsigned)
+    case "$detail" in *read_only*) reason=read-only ;; *) reason='subpath old' ;; esac
+    grep -Fq "$reason" <<< "$out" || fail "missing mount reason: $out"
+    grep -Fq '/etc/nginx/ssl' <<< "$out" || fail "missing mount path: $out"
+    [ -s "$(live overridden)/cert.pem" ] || fail "changed an unsupported mount"
+done
 
 # An RSA certificate of an older run sits in a directory without _ecc.
 new_case rsa zerossl
@@ -147,7 +259,7 @@ grep -qx 'rc=0' <<< "$out" || fail "the switch with an operator pair must succee
 if ! grep -qx 'operator key' "$(live operator)/key.pem" || ! grep -qx 'operator cert' "$(live operator)/cert.pem"; then
     fail "a pair acme.sh did not install must be kept"
 fi
-grep -q 'Nginx generates' <<< "$out" && fail "nothing must be reported for a kept pair: $out"
+grep -Eq 'Keeping the TLS|Nginx generates' <<< "$out" && fail "nothing must be reported for a kept pair: $out"
 [ ! -e "$WORK/operator/acme-container" ] || fail "the ACME container must be removed"
 pass "a pair acme.sh did not install is kept"
 
@@ -192,7 +304,7 @@ pass "multi mode is left alone"
 new_case failed letsencrypt
 out=$(DOCKER_RUN_FAILS=true run_configure failed selfsigned)
 grep -qx 'rc=0' <<< "$out" && fail "a failed check must fail configure_mode: $out"
-grep -q 'Could not check the certificate kvs-acme installed' <<< "$out" || fail "a failed check must be reported: $out"
+grep -q 'Could not check the certificate installed for site.example.com' <<< "$out" || fail "a failed check must be reported: $out"
 [ -e "$WORK/failed/acme-container" ] || fail "a failed check must keep the ACME container for the re-run"
 [ -e "$(live failed)/key.pem" ] || fail "a failed check must not remove the pair"
 new_case uninspectable letsencrypt

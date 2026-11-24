@@ -32,6 +32,8 @@ case "$*" in
     # The MariaDB volume of the earlier run, and the version it holds,
     # which is the series the run selects (DB_CHOICE=1).
     'compose config') printf 'volumes:\n  mariadb-data:\n    name: kvs-rerun_mariadb-data\n' ;;
+    'compose --profile direct-tls config acme nginx')
+        echo 'services: {}' ;;
     'volume ls -q') echo kvs-rerun_mariadb-data ;;
     'run --rm -v kvs-rerun_mariadb-data:/data:ro '*) echo 12.3.3-MariaDB ;;
     info*|ps*|'volume ls'*|'compose config --quiet'|stop*|rm*) exit 0 ;;
