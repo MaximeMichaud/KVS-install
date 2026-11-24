@@ -1966,11 +1966,8 @@ function install_KVS() {
     fi
     find -H "$KVS_PATH" ! -type l "${keep_setup[@]}" -exec chmod 755 {} + || return $?
 
-    # The _INSTALL directory only exists right after the extraction.
-    if [ -f "$KVS_PATH"/_INSTALL/install_permissions.sh ]; then
-        sed -i '/xargs chmod 666/d' "$KVS_PATH"/_INSTALL/install_permissions.sh
-        "$KVS_PATH"/_INSTALL/install_permissions.sh
-    fi
+    # The stock _INSTALL/install_permissions.sh is not run: the ownership and
+    # the modes set above are the ones a native site runs with.
     install_kvs_rewrites "$KVS_PATH" "$archive_dir" || return $?
     if [[ -n "$fresh_archive" ]]; then rm -- "$fresh_archive" || return 1; fi
     # An installed site keeps the password KVS already connects with.

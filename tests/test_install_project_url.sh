@@ -68,10 +68,28 @@ rm -f "$work/provisioned"
 sed -i "s#https://$URL#http://archive.example.test#" "$file"
 mkdir "$site/_INSTALL"
 printf '# Stock rewrites\n' >"$site/_INSTALL/nginx_config.txt"
-(cd "$site" && zip -q "$KVS_ARCHIVE_DIR/KVS_fixture.zip" admin/include/setup{,_db}.php _INSTALL/nginx_config.txt)
+# The stock permission script is left alone: it is neither run nor edited.
+# This one would record its run from any working directory, then fail.
+printf '%s\n' '#!/bin/sh' "touch '$work/permissions-ran'" 'exit 3' \
+  '# Stock directive: xargs chmod 666' >"$site/_INSTALL/install_permissions.sh"
+chmod +x "$site/_INSTALL/install_permissions.sh"
+cp "$site/_INSTALL/install_permissions.sh" "$work/permissions.stock"
+(cd "$site" && zip -q "$KVS_ARCHIVE_DIR/KVS_fixture.zip" admin/include/setup{,_db}.php _INSTALL/nginx_config.txt \
+  _INSTALL/install_permissions.sh)
 rm -r "$site"
 install_KVS >/dev/null || fail 'fresh archive failed'
 cmp "$work/expected" "$file" && [[ -f "$work/provisioned" ]] || fail 'fresh archive was not provisioned intact'
+[[ ! -e $work/permissions-ran ]] || fail 'the stock install_permissions.sh was run'
+cmp -s "$work/permissions.stock" "$site/_INSTALL/install_permissions.sh" || fail 'the stock install_permissions.sh was edited or not extracted'
+
+[[ $(stat -c %a "$site/_INSTALL") == 755 && $(stat -c %a "$site/admin/include/setup_db.php") == 600 ]] ||
+  fail 'the installer did not apply its native modes'
+
+chmod 640 "$file"
+setup_metadata=$(stat -Lc '%u:%g:%a' "$file")
+(cd "$work" && install_KVS >/dev/null) || fail 'existing installation failed'
+[[ $(stat -Lc '%u:%g:%a' "$file") == "$setup_metadata" && $(stat -c %a "$site/admin/include/setup_db.php") == 600 &&
+   ! -e "$work/permissions-ran" ]] || fail 'the re-run changed setup ownership, modes or ran the stock hook'
 
 # GNU sed must edit the target of the symlink with its existing access rights.
 mv "$file" "$work/site config.php"
