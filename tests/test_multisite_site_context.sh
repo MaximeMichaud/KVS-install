@@ -24,6 +24,7 @@ docker() {
                 command docker compose config | grep -Fxq "name: site" || return 95
                 echo "$*" >> "$work/rendered"
             fi
+            if [[ "$*" == 'compose config' ]]; then command docker "$@"; fi
             if [[ $* == *' config --format json kvs-init' ]]; then echo '{"services":{"kvs-init":{}}}'; fi ;;
         ps)
             if [[ "$*" == *'{{.Names}}'* ]]; then echo kvs-caddy; fi

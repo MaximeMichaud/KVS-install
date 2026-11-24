@@ -96,11 +96,33 @@ validate_site_prefix() {
     fi
 }
 
-primary_site_value() {
-    local key="$1"
+# Read the last single-line setting without executing the file.
+env_file_value() {
+    local file="$1" key="$2" value
 
-    [ -f "$PRIMARY_SITE_FILE" ] || return 0
-    sed -n "s/^${key}=//p" "$PRIMARY_SITE_FILE" | head -n 1
+    [ -f "$file" ] || return 0
+    value=$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=[[:blank:]]*//p" "$file" | tail -n 1)
+    # A quoted value ends at its closing quote; an unquoted one at an inline
+    # comment, without the trailing blanks (a CRLF line's carriage return).
+    case "$value" in
+        \"*)
+            value=${value#\"}
+            value=${value%%\"*}
+            ;;
+        \'*)
+            value=${value#\'}
+            value=${value%%\'*}
+            ;;
+        *)
+            value=${value%%[[:space:]]#*}
+            value=${value%"${value##*[![:space:]]}"}
+            ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+primary_site_value() {
+    env_file_value "$PRIMARY_SITE_FILE" "$1"
 }
 
 validate_primary_site_file() {
@@ -123,8 +145,8 @@ validate_primary_site_file() {
     fi
 
     line_count=$(awk 'END { print NR + 0 }' "$PRIMARY_SITE_FILE")
-    domain_count=$(grep -c '^DOMAIN=' "$PRIMARY_SITE_FILE" || true)
-    prefix_count=$(grep -c '^SITE_PREFIX=' "$PRIMARY_SITE_FILE" || true)
+    domain_count=$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?DOMAIN[[:space:]]*=' "$PRIMARY_SITE_FILE" || true)
+    prefix_count=$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?SITE_PREFIX[[:space:]]*=' "$PRIMARY_SITE_FILE" || true)
     if [ "$line_count" -ne 2 ] || [ "$domain_count" -ne 1 ] ||
         [ "$prefix_count" -ne 1 ] ||
         [ "$(tail -c 1 "$PRIMARY_SITE_FILE" | od -An -t x1 | tr -d '[:space:]')" != 0a ]; then
@@ -132,8 +154,8 @@ validate_primary_site_file() {
         return 1
     fi
 
-    reserved_domain=$(sed -n 's/^DOMAIN=//p' "$PRIMARY_SITE_FILE")
-    reserved_prefix=$(sed -n 's/^SITE_PREFIX=//p' "$PRIMARY_SITE_FILE")
+    reserved_domain=$(primary_site_value DOMAIN)
+    reserved_prefix=$(primary_site_value SITE_PREFIX)
     validate_domain "$reserved_domain" || return 1
     validate_site_prefix "$reserved_prefix" || return 1
 }
@@ -153,7 +175,7 @@ domain_to_safe() {
 site_tables_prefix() {
     local prefix
 
-    prefix=$(sed -n 's/^TABLES_PREFIX=//p' .env 2>/dev/null | head -n 1)
+    prefix=$(env_file_value .env TABLES_PREFIX)
     if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
         if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
             echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
@@ -215,6 +237,53 @@ kept_site_tables_prefix() {
     printf '%s\n' "$prefix"
 }
 
+# Render the real model so local overrides, top-level name and interpolation
+# select the same project as a site command. Only its name leaves the pipe.
+configured_compose_project() (
+    cd -- "$1" || exit 1
+    clear_site_compose_environment
+    set -o pipefail
+    local LC_ALL=C name
+    if ! name=$(docker compose config | sed -n 's/^name: //p'); then
+        log_error "Could not render the Compose configuration in $PWD" >&2
+        return 1
+    fi
+    # Compose quotes names such as "true" or "123" to keep them YAML strings.
+    case "$name" in
+        \"*\"|\'*\') name=${name:1:${#name}-2} ;;
+    esac
+    if [[ ! $name =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+        log_error "No valid top-level project name in the rendered Compose configuration for $PWD" >&2
+        return 1
+    fi
+    printf '%s\n' "$name"
+)
+
+# Without the site's Compose file there is no model to resolve an identity
+# against. Only trust literal project names in a single-line dotenv file.
+check_recovery_env() {
+    if ! LC_ALL=C awk '
+        { sub(/\r$/, ""); sub(/^[[:blank:]]+/, "") }
+        /^($|#)/ { next }
+        { sub(/^export[[:blank:]]+/, "") }
+        !/^[A-Za-z_][A-Za-z0-9_]*[[:blank:]]*=/ { exit 1 }
+        {
+            key=$0; sub(/[[:blank:]]*=.*/, "", key)
+            sub(/^[^=]*=[[:blank:]]*/, "")
+            if ((key == "COMPOSE_FILE" || key == "COMPOSE_ENV_FILES") && length($0)) exit 1
+            if (key == "SITE_PREFIX" || key == "COMPOSE_PROJECT_NAME") {
+                sub(/[[:blank:]]+#.*/, ""); sub(/[[:blank:]]+$/, "")
+                if (/^".*"$/ || /^\047.*\047$/) $0=substr($0, 2, length($0)-2)
+                if (length($0) && !/^[a-z0-9][a-z0-9_-]*$/) exit 1
+            } else if (/^"/ && !/^"[^"\\]*"([[:blank:]]+#.*)?[[:blank:]]*$/ ||
+                       /^\047/ && !/^\047[^\047\\]*\047([[:blank:]]+#.*)?[[:blank:]]*$/) exit 1
+        }
+    ' "$1"; then
+        log_error "Cannot verify project names in $1 without the site's Compose file. Restore the file before retrying." >&2
+        return 1
+    fi
+}
+
 # The single-mode primary records its identity in docker/.env, next to the
 # multi-site directory, not in the .primary.env reservation (which exists only
 # once multi mode is set up). Read its Compose project name so a new site
@@ -222,8 +291,13 @@ kept_site_tables_prefix() {
 single_mode_primary_prefix() {
     local env_file="${SCRIPT_DIR}/../.env" prefix=""
     [ -f "$env_file" ] || return 0
-    prefix=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$env_file" | head -n 1)
-    [ -n "$prefix" ] || prefix=$(sed -n 's/^SITE_PREFIX=//p' "$env_file" | head -n 1)
+    if [ -f "${SCRIPT_DIR}/../docker-compose.yml" ]; then
+        configured_compose_project "${SCRIPT_DIR}/.." || return 1
+        return 0
+    fi
+    check_recovery_env "$env_file" || return 1
+    prefix=$(env_file_value "$env_file" COMPOSE_PROJECT_NAME)
+    [ -n "$prefix" ] || prefix=$(env_file_value "$env_file" SITE_PREFIX)
     printf '%s\n' "$prefix"
 }
 
@@ -356,7 +430,7 @@ ensure_site_prefix_available() {
 
     for env_file in "$SITES_DIR"/*/.env; do
         [ -f "$env_file" ] || continue
-        existing_prefix=$(sed -n 's/^SITE_PREFIX=//p' "$env_file" | head -n 1)
+        existing_prefix=$(env_file_value "$env_file" SITE_PREFIX)
         [ "$existing_prefix" = "$requested_prefix" ] || continue
 
         existing_domain=$(basename "$(dirname "$env_file")")
@@ -378,7 +452,7 @@ ensure_new_site_project_free() {
 
     # A single-mode primary has no .primary.env, only docker/.env. Its project
     # can equal a new site's kvs-<domain>, and remove would then down -v it.
-    single_primary=$(single_mode_primary_prefix)
+    single_primary=$(single_mode_primary_prefix) || return 1
     if [ -n "$single_primary" ] && [ "$single_primary" = "$requested_prefix" ]; then
         log_error "Site prefix ${requested_prefix} is used by the primary site recorded in docker/.env"
         return 1
@@ -1651,9 +1725,14 @@ remove_incomplete_site() {
         return 1
     fi
     [ -z "$projects" ] || held="containers of ${projects//$'\n'/, }"
-    if [ -f "${site_dir}/.env" ]; then
-        names+=("$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "${site_dir}/.env" | head -n 1)")
-        names+=("$(sed -n 's/^SITE_PREFIX=//p' "${site_dir}/.env" | head -n 1)")
+    if [ -e "$site_dir/.env" ] || [ -L "$site_dir/.env" ]; then
+        if [ ! -f "$site_dir/.env" ]; then
+            log_error "Cannot verify project names: $site_dir/.env is not a regular file."
+            return 1
+        fi
+        check_recovery_env "${site_dir}/.env" || return 1
+        names+=("$(env_file_value "${site_dir}/.env" COMPOSE_PROJECT_NAME)")
+        names+=("$(env_file_value "${site_dir}/.env" SITE_PREFIX)")
     fi
     names+=("$(compose_default_project "$domain")")
     for candidate in "${names[@]}"; do
@@ -1727,13 +1806,17 @@ remove_site() {
     # from another directory, comparing resolved paths because Compose records
     # the path it was started from, symlinks included.
     local remove_project site_prefix working_dirs primary_prefix site_real wd wd_real foreign_dir=""
-    remove_project=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$site_dir/.env" | head -n 1)
+    if ! remove_project=$(configured_compose_project "$site_dir"); then
+        log_error "Cannot determine the Compose project of $site_dir. Repair its configuration before removing the site."
+        return 1
+    fi
     # A site added before add wrote COMPOSE_PROJECT_NAME runs under the
     # project Compose derives from its directory, not under its SITE_PREFIX:
     # down -v on SITE_PREFIX found nothing, and the site's containers and
     # volumes stayed with no configuration left.
-    if [ -z "$remove_project" ]; then
-        site_prefix=$(sed -n 's/^SITE_PREFIX=//p' "$site_dir/.env" | head -n 1)
+    if [ "$remove_project" = "$(compose_default_project "$domain")" ] &&
+        [ -z "$(env_file_value "$site_dir/.env" COMPOSE_PROJECT_NAME)" ]; then
+        site_prefix=$(env_file_value "$site_dir/.env" SITE_PREFIX)
         if ! remove_project=$(site_project_without_name "$domain" "$site_dir" "$site_prefix"); then
             exit 1
         fi
@@ -1751,7 +1834,9 @@ remove_site() {
             fi
         done <<< "$projects"
     fi
-    for primary_prefix in "$(single_mode_primary_prefix)" "$(primary_site_value SITE_PREFIX)"; do
+    local single_primary
+    single_primary=$(single_mode_primary_prefix) || return 1
+    for primary_prefix in "$single_primary" "$(primary_site_value SITE_PREFIX)"; do
         if [ -n "$primary_prefix" ] && [ "$primary_prefix" = "$remove_project" ]; then
             log_error "Refusing 'docker compose down -v' for project ${remove_project}: the primary site uses that project name"
             log_error "Remove aborted to protect the primary's containers and volumes"
@@ -1867,7 +1952,7 @@ list_sites() {
 
             if [ -f "${site_dir}/.env" ]; then
                 local configured_prefix
-                configured_prefix=$(sed -n 's/^SITE_PREFIX=//p' "${site_dir}/.env" | head -n 1)
+                configured_prefix=$(env_file_value "${site_dir}/.env" SITE_PREFIX)
                 [ -n "$configured_prefix" ] && site_prefix="$configured_prefix"
             fi
 
@@ -1911,32 +1996,8 @@ show_status() {
 # Start Caddy
 # =============================================================================
 
-# installation_email prints the EMAIL of the installation's docker/.env, the
-# one setup.sh saves: the last EMAIL line, as Compose and the shell take it,
-# with an optional "export " prefix, quotes, an inline comment or a CRLF line
-# ending. Nothing when the file or the line is missing.
 installation_email() {
-    local value
-
-    [ -f "$INSTALLATION_ENV_FILE" ] || return 0
-    value=$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?EMAIL=//p' "$INSTALLATION_ENV_FILE" | tail -n 1)
-    # A quoted value ends at its closing quote; an unquoted one at an inline
-    # comment, without the trailing blanks (a CRLF line's carriage return).
-    case "$value" in
-        \"*)
-            value=${value#\"}
-            value=${value%%\"*}
-            ;;
-        \'*)
-            value=${value#\'}
-            value=${value%%\'*}
-            ;;
-        *)
-            value=${value%%[[:space:]]#*}
-            value=${value%"${value##*[![:space:]]}"}
-            ;;
-    esac
-    printf '%s\n' "$value"
+    env_file_value "$INSTALLATION_ENV_FILE" EMAIL
 }
 
 # An address an ACME CA takes as the contact of an account, as setup.sh

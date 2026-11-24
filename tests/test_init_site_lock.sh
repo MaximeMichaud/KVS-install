@@ -155,7 +155,10 @@ bash "$work/manager/site-manager.sh" stop site.test >/dev/null 2>&1 || true
 # Hold remove at its webroot prompt, after its project directory is gone.
 # remove runs its last Docker check from the directory it just unlinked.
 # shellcheck disable=SC2329  # Exported to the manager subprocess.
-docker() { return 0; }
+docker() {
+    if [[ "$*" == 'compose config' ]]; then echo 'name: kvs-site-test'; fi
+    return 0
+}
 export -f docker
 export KVS_WEBROOT_BASE=$work/webroots
 mkdir -p "$KVS_WEBROOT_BASE/site.test"

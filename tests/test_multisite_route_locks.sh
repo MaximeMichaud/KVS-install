@@ -23,6 +23,7 @@ docker() {
         'exec kvs-caddy caddy reload '*)
             if flock -n "$locks/.routes" true; then return 23; fi
             touch "$work/reloaded" ;;
+        'compose config') command docker "$@" ;;
         'ps '*|'volume '*|'network '*|'exec kvs-caddy wget '*|*' down -v --remove-orphans') return 0 ;;
         *) return 1 ;;
     esac

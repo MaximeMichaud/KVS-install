@@ -128,7 +128,7 @@ done
     done
 )
 # shellcheck source=/dev/null
-source <(extract docker/multi-site/site-manager.sh site_tables_prefix; extract docker/multi-site/site-manager.sh archive_tables_prefix)
+source <(extract docker/multi-site/site-manager.sh env_file_value; extract docker/multi-site/site-manager.sh site_tables_prefix; extract docker/multi-site/site-manager.sh archive_tables_prefix)
 echo 'TABLES_PREFIX=café_' > .env
 for lang in "${locales[@]}"; do
     [ "$(LC_ALL=$lang site_tables_prefix 2> warning)" = café_ ] && legacy_warning warning || fail "multi-site lost its prefix under $lang"

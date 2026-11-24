@@ -166,7 +166,7 @@ docker() {
                 esac
                 mock_index=$((mock_index + 1))
             done
-            if [[ " $* " == *' config --format json kvs-init '* ]]; then
+            if [[ "$*" == 'compose config' || " $* " == *' config --format json kvs-init '* ]]; then
                 "$REAL_DOCKER" "$@"
                 return
             fi
@@ -268,6 +268,29 @@ docker() {
 export -f openssl chown docker
 # The mock's MOCK_COMPOSE_RENDER runs the real Compose.
 export REAL_DOCKER
+
+# Project ownership is checked even on a host without jq.
+create_fixture no-jq
+(
+    fixture="$TEST_DIR/no-jq/docker"
+    manager="$fixture/multi-site/site-manager.sh"
+    bin="$TEST_DIR/no-jq/bin"
+    mkdir "$bin"
+    for tool in awk basename bash cat chmod cp dirname flock grep head ln mkdir mktemp mv realpath rm rmdir sed sort stat tail tr wc; do
+        ln -s "$(type -P "$tool")" "$bin/$tool"
+    done
+    export KVS_WEBROOT_BASE="$TEST_DIR/no-jq/webroots"
+    PATH="$bin" bash -c 'command -v jq' >/dev/null && fail "the test PATH contains jq"
+    # shellcheck disable=SC2016  # Compose reads the primary's own .env.
+    printf 'name: ${PRIMARY_NAME:?missing primary setting}\nservices: {}\n' > "$fixture/docker-compose.yml"
+    printf 'PRIMARY_NAME=primary\n' > "$fixture/.env"
+    printf 'COMPOSE_PROJECT_NAME=wrong\n' > "$fixture/foreign.env"
+    PATH="$bin" COMPOSE_ENV_FILES="$fixture/foreign.env" COMPOSE_DISABLE_ENV_FILE=1 \
+        bash "$manager" add media.example > "$fixture/add.log" || { cat "$fixture/add.log"; exit 1; }
+    PATH="$bin" MOCK_DOCKER_LOG="$fixture/docker.log" bash "$manager" remove media.example <<< yes > "$fixture/remove.log"
+    grep -Fxq 'compose -p kvs-media-example down -v --remove-orphans' "$fixture/docker.log"
+    [[ ! -d $fixture/multi-site/sites/media.example ]]
+)
 
 create_fixture invalid
 invalid_script="${TEST_DIR}/invalid/docker/multi-site/site-manager.sh"
@@ -1097,7 +1120,7 @@ r1_remove_site="${TEST_DIR}/r1_remove/docker/multi-site/sites/a.test"
 mkdir -p "$r1_remove_site"
 printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
     > "$r1_remove_site/.env"
-: > "$r1_remove_site/docker-compose.yml"
+printf 'services: {}\n' > "$r1_remove_site/docker-compose.yml"
 r1_remove_log="${TEST_DIR}/r1_remove/docker.log"
 : > "$r1_remove_log"
 set +e
@@ -1125,7 +1148,7 @@ for r1_record in env reservation; do
     mkdir -p "$r1_shared_site"
     printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
         > "$r1_shared_site/.env"
-    : > "$r1_shared_site/docker-compose.yml"
+    printf 'services: {}\n' > "$r1_shared_site/docker-compose.yml"
     if [ "$r1_record" = env ]; then
         printf 'COMPOSE_PROJECT_NAME=kvs-a-test\nSITE_PREFIX=kvs-a-test\n' > "${r1_shared_root}/.env"  # pragma: allowlist secret
     else
@@ -1162,7 +1185,7 @@ mkdir -p "$r1_ok_site"
 ln -s "$r1_ok_site" "${TEST_DIR}/r1_remove_ok/site-link"
 printf 'DOMAIN=a.test\nSITE_PREFIX=kvs-a-test\nCOMPOSE_PROJECT_NAME=kvs-a-test\n' \
     > "$r1_ok_site/.env"
-: > "$r1_ok_site/docker-compose.yml"
+printf 'services: {}\n' > "$r1_ok_site/docker-compose.yml"
 r1_ok_log="${TEST_DIR}/r1_remove_ok/docker.log"
 : > "$r1_ok_log"
 set +e
@@ -1581,7 +1604,7 @@ r5_site_fixture() {
     r5_webroot="${TEST_DIR}/${name}/webroots"
     mkdir -p "$r5_site" "${r5_root}/caddy/sites"
     printf 'DOMAIN=r5.example\nSITE_PREFIX=kvs-r5-example\nCOMPOSE_PROJECT_NAME=kvs-r5-example\n' > "$r5_site/.env"
-    : > "$r5_site/docker-compose.yml"
+    printf 'services: {}\n' > "$r5_site/docker-compose.yml"
     printf 'r5.example {\n    reverse_proxy n.r5.example:80\n}\n' > "$r5_route"
     : > "$r5_log"
 }

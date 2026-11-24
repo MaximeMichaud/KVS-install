@@ -138,10 +138,11 @@ if grep -Fq "<<'EOSQL'" "$ROOT_DIR/kvs-install.sh"; then
 fi
 
 # --- the multi-site manager ------------------------------------------------------
+eval "$(extract_function "$ROOT_DIR/docker/multi-site/site-manager.sh" env_file_value)"
 eval "$(extract_function "$ROOT_DIR/docker/multi-site/site-manager.sh" site_tables_prefix)"
 eval "$(extract_function "$ROOT_DIR/docker/multi-site/site-manager.sh" archive_tables_prefix)"
 mkdir -p "$TEST_DIR/site-a"
-echo "TABLES_PREFIX=multi_" > "$TEST_DIR/site-a/.env"
+printf 'TABLES_PREFIX=old_\n export TABLES_PREFIX = "multi_" # current\r\n' > "$TEST_DIR/site-a/.env"
 [ "$(cd "$TEST_DIR/site-a" && site_tables_prefix)" = multi_ ] || fail "the manager must read a site's .env"
 echo "TABLES_PREFIX=kt vs;" > "$TEST_DIR/site-a/.env"
 [ "$(cd "$TEST_DIR/site-a" && site_tables_prefix)" = ktvs_ ] || fail "an unusable prefix in .env falls back to ktvs_"

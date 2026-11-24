@@ -76,6 +76,7 @@ docker() {
                 touch "$work/reload-failed"
                 return 1
             fi ;;
+        'compose config') command docker "$@" ;;
         'ps '*|'volume '*|*' down -v --remove-orphans') return 0 ;;
         *) echo "Unexpected Docker call: $*" >&2; return 90 ;;
     esac
