@@ -2512,8 +2512,7 @@ STUB
 test_network_lookups_may_fail_without_ending_the_setup() {
     local setup="$REPO_ROOT/docker/setup.sh"
 
-    # shellcheck disable=SC2016  # The patterns are literal lines of the setup.
-    grep -Fq 'MARIADB_DATA=$(curl -s --connect-timeout 5 "https://endoflife.date/api/mariadb.json" 2>/dev/null) || MARIADB_DATA=""' "$setup" ||
+    grep -Fq "mariadb.json\" 2>/dev/null) || response=''" "$setup" ||
         fail "the MariaDB version lookup must fall back to the defaults when it fails"
     # shellcheck disable=SC2016
     grep -Fq 'SERVER_IP=$(public_ipv4) || SERVER_IP=""' "$setup" ||

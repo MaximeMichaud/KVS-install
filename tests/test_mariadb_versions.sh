@@ -345,7 +345,7 @@ echo 'PASS: only the headless default of VOLUME_CHOICE counts as one'
 
 # A selected series must survive a new shell and Compose load without
 # changing neighboring settings, including text that only resembles a key.
-for function_name in prompt_read remove_env_value set_env_value mariadb_choice_is_valid select_mariadb_version choose_mariadb_version; do
+for function_name in prompt_read remove_env_value set_env_value mariadb_choice_is_valid mariadb_series_statuses select_mariadb_version choose_mariadb_version; do
     awk -v name="$function_name" '
         $0 == name "() {" { capture = 1 }
         capture { print }
@@ -358,10 +358,11 @@ cat > "$TEST_DIR/selector-driver.sh" <<'EOF'
 set -e
 RED='' GREEN='' YELLOW='' CYAN='' NC=''
 curl() {
-    [ "$*" = '-s --connect-timeout 5 https://endoflife.date/api/mariadb.json' ] || return 99
+    [ "$*" = '-fsS --connect-timeout 5 --write-out \n%{http_code} https://endoflife.date/api/mariadb.json' ] || return 99
     # CURL_FAIL=yes: endoflife.date does not answer (curl exit 28, a timeout).
     [ "${CURL_FAIL:-}" != yes ] || return 28
     cat "$MARIADB_TEST_ROOT/api.json"
+    printf '\n%s' "${CURL_STATUS:-200}"
 }
 source "$MARIADB_TEST_ROOT/selector-functions.sh"
 source .env
@@ -503,6 +504,62 @@ assert_refused() {
     grep -q 'integer expression expected' "$case_dir/output" && fail "$label: the choice reached a numeric test"
     return 0
 }
+
+cp "$TEST_DIR/api.json" "$TEST_DIR/good.json"
+for invalid in '<html>unavailable</html>' '{"cycle":"11.8"}' '[{"cycle":"11.8","eol":"2030-02-30","support":false}]' \
+    '[{"cycle":"11.8","eol":"2030-2-1","support":false}]'; do
+    printf '%s\n' "$invalid" > "$TEST_DIR/api.json"
+    run_selection invalid-status '' DB_CHOICE=2
+    assert_selected 11.8 'invalid status response'
+    if grep -Eq 'MariaDB [0-9.]+ \[' "$case_dir/output"; then fail 'invalid data produced a status'; fi
+done
+cat > "$TEST_DIR/api.json" <<'JSON'
+[
+    { "cycle": "12.3", "eol": false, "support": false },
+    { "cycle": "11.8", "eol": true, "support": false }
+]
+JSON
+run_selection bool-status '' DB_CHOICE=3
+assert_selected 11.4 'partial status response'
+if ! grep -Fxq '  1) MariaDB 12.3 [Active]' "$case_dir/output" ||
+    ! grep -Fxq '  2) MariaDB 11.8 [EOL]' "$case_dir/output" ||
+    ! grep -Fxq '  3) MariaDB 11.4' "$case_dir/output"; then
+    fail 'wrong per-series boolean or missing status'
+fi
+cat > "$TEST_DIR/api.json" <<'JSON'
+[{"cycle":"12.3","eol":"2999-01-01","support":"2000-01-01"},
+ {"cycle":"11.8","eol":"2000-01-01","support":"1999-01-01"},
+ {"cycle":"11.4","eol":false}]
+JSON
+run_selection date-status '' DB_CHOICE=1
+assert_selected 12.3 'dated status response'
+if ! grep -Fxq '  1) MariaDB 12.3 [Security Only]' "$case_dir/output" ||
+    ! grep -Fxq '  2) MariaDB 11.8 [EOL]' "$case_dir/output" ||
+    ! grep -Fxq '  3) MariaDB 11.4 [Active]' "$case_dir/output"; then
+    fail 'wrong dated or optional support status'
+fi
+cat > "$TEST_DIR/api.json" <<'JSON'
+[
+  {"eol":"2999-06-12", "lts":true, "cycle":"12.3", "extendedSupport":"2999-11-03",
+   "latest":"12.3.1","releaseDate":"2025-01-01","latestReleaseDate":"2025-05-01","link":null},
+  {"cycle":"11.8", "eol":"2000-06-12", "lts":true, "extendedSupport":"2999-11-03"},
+  {"cycle":"11.4", "eol":false, "support":null}
+]
+JSON
+run_selection live-shape '' DB_CHOICE=1
+if ! grep -Fxq '  1) MariaDB 12.3 [Active]' "$case_dir/output" ||
+    ! grep -Fxq '  2) MariaDB 11.8 [EOL]' "$case_dir/output" ||
+    ! grep -Fxq '  3) MariaDB 11.4' "$case_dir/output"; then
+    fail 'wrong status for live release rows'
+fi
+printf '%s\n' '[{"cycle":"12.3","eol":false},{"cycle":"12.3","eol":true}]' > "$TEST_DIR/api.json"
+run_selection ambiguous '' DB_CHOICE=1
+grep -Fxq '  1) MariaDB 12.3' "$case_dir/output" || fail 'duplicate rows produced a badge'
+mv "$TEST_DIR/good.json" "$TEST_DIR/api.json"
+
+run_selection redirect '' CURL_STATUS=302 DB_CHOICE=1
+assert_selected 12.3 'redirect response'
+if grep -Eq 'MariaDB [0-9.]+ \[' "$case_dir/output"; then fail 'redirect body produced a status'; fi
 
 for choice in 1 2 3; do
     case "$choice" in 1) expected=12.3 ;; 2) expected=11.8 ;; 3) expected=11.4 ;; esac

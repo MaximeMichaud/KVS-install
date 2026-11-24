@@ -5147,6 +5147,58 @@ mariadb_choice_is_valid() {
     [[ "$1" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$1))" -ge 1 ] && [ "$((10#$1))" -le "${#MARIADB_LTS_VERSIONS[@]}" ]
 }
 
+# Read the flat release objects returned by the lifecycle API. Consume each
+# field as a token so whitespace or field names inside strings stay literal.
+mariadb_series_statuses() {
+    local data=$1 ws='[[:space:]]*' string='"([^"\\]|\\.)*"' member
+    local key value separator series field day today status
+    local -A row=() statuses=()
+    local start="^$ws\\[$ws\\{" next="^$ws,$ws\\{" end="^$ws\\]$ws$"
+    [[ $data =~ $start ]] || return 0
+    data=${data:${#BASH_REMATCH[0]}}
+    member="^$ws\"([^\"\\\\]*)\"$ws:$ws($string|true|false|null|-?[0-9]+([.][0-9]+)?)$ws([,}])"
+    today=$(date +%F) || return 0
+    while [[ $data =~ $member ]]; do
+        key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]} separator=${BASH_REMATCH[5]}
+        data=${data:${#BASH_REMATCH[0]}}
+        case $key in cycle|eol|support) row[$key]=$value ;; esac
+        [ "$separator" = '}' ] || continue
+
+        for series in "${MARIADB_LTS_VERSIONS[@]}"; do
+            [ "${row[cycle]:-}" = "\"$series\"" ] || continue
+            if [[ ${statuses[$series]+present} ]]; then statuses[$series]=''; continue; fi
+            statuses[$series]=''
+            status=active
+            for field in support eol; do
+                value=${row[$field]:-}
+                if [ "$field" = support ] && [ -z "$value" ]; then continue; fi
+                case $value in
+                    false) continue ;;
+                    true) ;;
+                    *)
+                        [[ $value =~ ^\"([0-9]{4}-[0-9]{2}-[0-9]{2})\"$ ]] || continue 2
+                        day=${BASH_REMATCH[1]}
+                        [ "$(date -d "$day" +%F 2>/dev/null)" = "$day" ] || continue 2
+                        [[ $day < $today ]] || continue
+                        ;;
+                esac
+                if [ "$field" = eol ]; then status=eol; else status=security; fi
+            done
+            statuses[$series]=$status
+        done
+        if [[ $data =~ $end ]]; then
+            for series in "${!statuses[@]}"; do
+                [ -z "${statuses[$series]}" ] || echo "$series ${statuses[$series]}"
+            done
+            return 0
+        fi
+        [[ $data =~ $next ]] || return 0
+        data=${data:${#BASH_REMATCH[0]}}
+        row=()
+    done
+    return 0
+}
+
 # MariaDB version selection with endoflife.date API
 select_mariadb_version() {
     # The series offered are MARIADB_LTS_VERSIONS: endoflife.date only adds
@@ -5159,7 +5211,9 @@ select_mariadb_version() {
     # Fetch data from API. A lookup that times out must not end the setup
     # (set -e would exit on the failed assignment): the list is shown
     # without the support status.
-    MARIADB_DATA=$(curl -s --connect-timeout 5 "https://endoflife.date/api/mariadb.json" 2>/dev/null) || MARIADB_DATA=""
+    local response MARIADB_DATA=''
+    response=$(curl -fsS --connect-timeout 5 --write-out '\n%{http_code}' "https://endoflife.date/api/mariadb.json" 2>/dev/null) || response=''
+    if [[ $response = *$'\n'2[0-9][0-9] ]]; then MARIADB_DATA=${response%$'\n'*}; fi
 
     if [ -z "$MARIADB_DATA" ]; then
         echo -e "${YELLOW}Could not fetch version data; the support status of each series is not shown.${NC}"
@@ -5169,34 +5223,21 @@ select_mariadb_version() {
     echo "Available MariaDB LTS versions:"
     echo ""
 
-    # Parse and display LTS versions with status
-    # The LTS series, newest first.
-    TODAY=$(date +%Y-%m-%d)
+    local -A statuses=()
+    local version status
+    while read -r version status; do
+        statuses[$version]=$status
+    done < <(mariadb_series_statuses "$MARIADB_DATA")
 
     i=1
     declare -a VERSIONS
-
-    # Check each LTS version
     for version in "${MARIADB_LTS_VERSIONS[@]}"; do
-        STATUS=""
-        if [ -n "$MARIADB_DATA" ]; then
-            # Get EOL and support dates for this version
-            EOL=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"eol":"[^"]*"' | cut -d'"' -f4)
-            SUPPORT=$(echo "$MARIADB_DATA" | grep -o "\"cycle\":\"$version\"[^}]*" | grep -o '"support":"[^"]*"' | cut -d'"' -f4)
-
-            # Determine status color
-            if [ -n "$EOL" ] && [ "$EOL" != "false" ]; then
-                if [[ "$TODAY" > "$EOL" ]]; then
-                    STATUS=" ${RED}[EOL]${NC}"
-                elif [ -n "$SUPPORT" ] && [[ "$TODAY" > "$SUPPORT" ]]; then
-                    STATUS=" ${YELLOW}[Security Only]${NC}"
-                else
-                    STATUS=" ${GREEN}[Active]${NC}"
-                fi
-            else
-                STATUS=" ${GREEN}[Active]${NC}"
-            fi
-        fi
+        case ${statuses[$version]:-} in
+            eol) STATUS=" ${RED}[EOL]${NC}" ;;
+            security) STATUS=" ${YELLOW}[Security Only]${NC}" ;;
+            active) STATUS=" ${GREEN}[Active]${NC}" ;;
+            *) STATUS="" ;;
+        esac
 
         echo -e "  $i) MariaDB ${version}${STATUS}"
         VERSIONS+=("$version")
