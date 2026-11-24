@@ -367,9 +367,9 @@ case "$1" in
     mv "$conf.new" "$conf"
     [[ -z "$cert" ]] || cat "$cache/$DOMAIN.cer" > "$cert"
     [[ -z "$ca" ]] || cat "$cache/ca.cer" > "$ca"
-    cat "$cache/$DOMAIN.key" > "$key"
-    cat "$cache/fullchain.cer" > "$chain"
-    [[ -z "$reload" ]] || (set +e; eval "$reload") ;;
+    [[ -z "$key" ]] || cat "$cache/$DOMAIN.key" > "$key"
+    [[ -z "$chain" ]] || cat "$cache/fullchain.cer" > "$chain"
+    [[ -z "$reload" ]] || sh -c "$reload" ;;
   *) exit 64 ;;
 esac
 SH
@@ -449,13 +449,72 @@ SH
   recorded
   assert_equal "0:nginx force-reload"$'\n'"other reload" "$status:$(<"$work/services")" "command naming the nginx reload in a comment" || return 1
   [[ "$saved" == "$own && {"* ]] || fail "a mention of the nginx reload was taken for the reload: $saved" || return 1
-  # A command the join cannot hold is replaced, and shown, not half run.
-  expected="service other reload \\"
-  record --reloadcmd "$expected"
-  run
-  recorded
-  assert_equal "0:$own:nginx force-reload" "$status:$saved:$(<"$work/services")" "saved command ending in a backslash" || return 1
-  grep -Fxq "$expected" "$work/log" || fail "the replaced command was not shown: $(<"$work/log")" || return 1
+  # Syntax errors must leave the saved deployment and live pair alone.
+  sh() { printf '%s\n' "$*" >> "$work/sh-calls"; command sh "$@"; }
+  local invalid name filename dest
+  # Run the native pipeline with its configuration reset against a live fixture.
+  full_rerun() (
+    install_gum() { :; }; installQuestions() { :; }; progress_header() { :; }
+    /root/.acme.sh/acme.sh() { "$SAVED_FIXTURE/acme-client" "$@"; }
+    run_install_step() {
+      case $3 in
+        aptinstall_nginx) reset_nginx_configuration_dirs "$nginx_dir/conf.d" "$nginx_dir/globals" ;;
+        install_acme.sh) issue_site_certificate /root/.acme.sh/acme.sh --issue ;;
+      esac
+    }
+    script
+  )
+  mkdir -p "$nginx_dir/conf.d"
+  echo 'active site' > "$nginx_dir/conf.d/$DOMAIN.conf"
+  local -a invalid_hooks=("service other reload \\" 'service nginx force-reload && (')
+  if ! command sh -n <<< 'items=(a b)' 2>/dev/null; then invalid_hooks+=('items=(a b)'); fi
+  for invalid in "${invalid_hooks[@]}"; do
+    printf "Le_ReloadCmd='__ACME_BASE64__START_%s__ACME_BASE64__END_'\n" "$(printf %s "$invalid" | base64 -w 0)" > "$conf"
+    for name in Key FullChain Cert CACert; do
+      filename="$work/other service/$name.pem"
+      rm -f -- "$filename"
+      if [[ $invalid == "$own"* && ( $name == Key || $name == Cert ) ]]; then continue; fi
+      printf "Le_Real%sPath='__ACME_BASE64__START_%s__ACME_BASE64__END_'\n" "$name" \
+        "$(printf %s "$filename" | base64 -w 0)" >> "$conf"
+    done
+    cp "$conf" "$work/conf.before"
+    : > "$work/services"
+    : > "$work/sh-calls"
+    run
+    [[ $status != 0 && ! -s $work/services ]] && cmp -s "$conf" "$work/conf.before" ||
+      fail "invalid hook replaced settings or ran a reload" || return 1
+    grep -Fxq -- -n "$work/sh-calls" && grep -Fq "$invalid" "$work/log" ||
+      fail "the invalid hook was not checked by sh and diagnosed" || return 1
+    if full_rerun > "$work/log" 2>&1 || ! grep -Fxq 'active site' "$nginx_dir/conf.d/$DOMAIN.conf" ||
+        ! cmp -s "$conf" "$work/conf.before" || [[ -s $work/services ]]; then
+      fail "the full re-run changed the site before refusing an invalid hook"
+      return 1
+    fi
+    if ! grep -Fq "The nginx configuration and saved certificate settings are unchanged." "$work/log" ||
+        ! grep -Fq "Installation step failed: Checking the saved certificate reload hook (exit status 1)" "$work/log"; then
+      fail "the early refusal did not report the failed step and preserved settings"
+      return 1
+    fi
+    sed -n 's/^  \(.* --install-cert \)/\1/p' "$work/log" > "$work/repair.sh"
+    [[ -s $work/repair.sh ]] || { fail "no command to replace the invalid hook"; return 1; }
+    (
+      /root/.acme.sh/acme.sh() { "$SAVED_FIXTURE/acme-client" "$@"; }
+      # shellcheck source=/dev/null
+      source "$work/repair.sh"
+    ) || { fail "could not run the hook repair"; return 1; }
+    recorded
+    assert_equal "$own:nginx force-reload" "$saved:$(<"$work/services")" "repaired reload" || return 1
+    for name in Key FullChain Cert CACert; do
+      dest=$(acme_saved_setting "$conf" "Le_Real${name}Path")
+      if [[ $invalid == "$own"* && ( $name == Key || $name == Cert ) ]]; then
+        [[ -z $dest ]] || { fail "hook repair added a $name destination"; return 1; }
+        continue
+      fi
+      [[ $dest == "$work/other service/$name.pem" && -s $dest ]] ||
+        { fail "hook repair changed the $name destination"; return 1; }
+    done
+  done
+  unset -f sh
 
   # A kept setting that fails is not the site's failure. With the cached
   # pair in place for nginx the run goes on as public; with another pair

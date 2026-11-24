@@ -341,6 +341,10 @@ function checkOS() {
   fi
 }
 
+report_install_step_failure() {
+  echo "${red}Installation step failed: $1 (exit status $2)${normal}" >&2
+}
+
 run_install_step() {
   local title="$1"
   local completed_title="$2"
@@ -351,7 +355,7 @@ run_install_step() {
   "$@"
   status=$?
   if ((status != 0)); then
-    echo "${red}Installation step failed: $title (exit status $status)${normal}" >&2
+    report_install_step_failure "$title" "$status"
     return "$status"
   fi
 
@@ -372,6 +376,16 @@ function script() {
   run_install_step "Updating package lists" "Package lists updated" aptupdate || return $?
   run_install_step "Installing base packages" "Base packages installed" aptinstall || return $?
   run_install_step "Configuring domain" "Domain configured" whatisdomain || return $?
+  # Refuse an unusable renewal hook while the existing nginx vhost is live.
+  local acme=/root/.acme.sh/acme.sh status
+  if [[ ${SSL_PROVIDER:-} != selfsigned ]] && command -v "$acme" >/dev/null; then
+    acme_reload_command "$acme" "$(acme_domain_conf "$acme")" >/dev/null || {
+      status=$?
+      echo "The nginx configuration and saved certificate settings are unchanged." >&2
+      report_install_step_failure "Checking the saved certificate reload hook" "$status"
+      return "$status"
+    }
+  fi
   run_install_step "Checking DNS configuration" "DNS configuration verified" check_dns_configuration || return $?
   run_install_step "Installing yt-dlp" "yt-dlp installed" install_yt-dlp || return $?
   run_install_step "Installing PHP" "PHP installed" aptinstall_php || return $?
@@ -2153,29 +2167,43 @@ acme_saved_setting() {
     fi
 }
 
-# Sets ACME_DEPLOY_ARGS, the destinations and reload command of the site's
-# --install-cert. acme.sh replaces every one it saved for the certificate
-# with what it is given, an absent option included: the certificate and CA
-# destinations and the reload command an operator added are given back.
-ACME_DEPLOY_ARGS=()
-ACME_CACHE_DIR=""
-acme_deploy_settings() {
-    local acme="$1" ssl_dir="$2" reload="service nginx force-reload" conf saved name joined
-    conf=$("$acme" --info -d "$DOMAIN" --ecc 2>/dev/null | sed -n 's/^DOMAIN_CONF=//p')
-    ACME_CACHE_DIR=${conf%/*}
+acme_domain_conf() {
+    "$1" --info -d "$DOMAIN" --ecc 2>/dev/null | sed -n 's/^DOMAIN_CONF=//p'
+}
+
+acme_reload_command() {
+    local acme="$1" conf="$2" reload="service nginx force-reload" saved name dest
+    local -a repair=()
     saved=$(acme_saved_setting "$conf" Le_ReloadCmd)
     if [[ "$saved" == "$reload"* ]]; then
         # The installer's own command, or one it already joined.
         reload=$saved
     elif [[ -n "$saved" ]]; then
-        joined=$reload$' && {\n'"$saved"$'\n}'
-        if bash -n <<< "$joined" 2>/dev/null; then
-            reload=$joined
-        else
-            printf 'The reload command saved in acme.sh cannot run after the nginx reload and is replaced by "%s". It was:\n%s\n' \
-                "$reload" "$saved" >&2
-        fi
+        reload=$reload$' && {\n'"$saved"$'\n}'
     fi
+    if [[ -n $saved ]] && ! sh -n <<< "$reload"; then
+        printf 'Cannot run the saved acme.sh reload command with sh after the nginx reload:\n%s\n' "$saved" >&2
+        for name in Key:--key-file FullChain:--fullchain-file Cert:--cert-file CACert:--ca-file; do
+            dest=$(acme_saved_setting "$conf" "Le_Real${name%%:*}Path")
+            [[ -z $dest ]] || repair+=("${name#*:}" "$dest")
+        done
+        repair+=(--reloadcmd 'service nginx force-reload')
+        echo "To keep the saved destinations and replace the hook with the nginx reload, run:" >&2
+        printf '  %q --install-cert --ecc -d %q%s\n' "$acme" "$DOMAIN" "$(printf ' %q' "${repair[@]}")" >&2
+        return 1
+    fi
+    printf '%s' "$reload"
+}
+
+# acme.sh replaces all saved destinations on --install-cert, including
+# omitted ones. Preserve the operator's certificate and CA destinations.
+ACME_DEPLOY_ARGS=()
+ACME_CACHE_DIR=""
+acme_deploy_settings() {
+    local acme="$1" ssl_dir="$2" reload conf saved name
+    conf=$(acme_domain_conf "$acme")
+    ACME_CACHE_DIR=${conf%/*}
+    reload=$(acme_reload_command "$acme" "$conf") || return $?
     ACME_DEPLOY_ARGS=(--key-file "$ssl_dir/key.pem" --fullchain-file "$ssl_dir/cert.pem" --reloadcmd "$reload")
     for name in Cert:--cert-file CACert:--ca-file; do
         saved=$(acme_saved_setting "$conf" "Le_Real${name%%:*}Path")
@@ -2265,7 +2293,7 @@ issue_site_certificate() {
     local ssl_dir="${KVS_NGINX_DIR:-/etc/nginx}/ssl/$DOMAIN" status=0 kept
     shift
 
-    acme_deploy_settings "$acme" "$ssl_dir"
+    acme_deploy_settings "$acme" "$ssl_dir" || return $?
     "$acme" "$@" || status=$?
     if ((status == 0 || status == 2)); then
         check_acme_certificate "$acme" "$status" "$ssl_dir" || return 1
