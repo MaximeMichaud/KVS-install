@@ -110,6 +110,7 @@ check_volume() (
     cp "$1" images.lock
     : > "$TEST_DIR/calls"
     printf 'MARIADB_VERSION=%s\nEXTRA=neighbor\n' "${CHECK_MARIADB_VERSION:-11.8}" > .env
+    echo "KVS_MARIADB_IMAGE=${CHECK_IMAGE:-}" >> .env
     chmod 600 .env
     export PATH="$TEST_DIR/stub:$PATH" DOCKER_CALLS="$TEST_DIR/calls"
     # shellcheck disable=SC2034  # Read by ask_existing_volume.
@@ -126,7 +127,13 @@ check_volume() (
         }
     fi
     # shellcheck disable=SC2329  # Called by ask_existing_volume.
-    delete_database_volume() { echo "DELETED $1"; }
+    delete_database_volume() {
+        if [ -n "${CHECK_BEFORE_DELETE:-}" ]; then
+            grep -Fxq "MARIADB_VERSION=$CHECK_BEFORE_DELETE" .env || return 1
+        fi
+        [ "${CHECK_DELETE_FAIL:-no}" != yes ] || return 1
+        echo "DELETED $1"
+    }
     # shellcheck disable=SC2034  # Set by the volume chooser and read by the deferred deletion.
     SETUP_VOLUME_TO_DELETE=""
     ask_existing_volume
@@ -176,6 +183,28 @@ series_change() {
     VOLUME_INFO=$1 CHECK_MARIADB_VERSION=$2 CHECK_VOLUME_CHOICE=$3 CHECK_VOLUME_CHOICE_DEFAULT=$4 \
         check_volume "$ROOT_DIR/docker/images.lock"
 }
+
+# Downgrade selection is provisional until replacement succeeds.
+for choice in 2 3; do
+    CHECK_IMAGE='mariadb:12.3.1@sha256:fixture' series_change 12.3.1-MariaDB 11.4 "$choice" false > "$TEST_DIR/out" || fail 'downgrade cancellation failed'
+    saved_series 12.3 || fail 'cancelled downgrade persisted the requested series'
+    grep -Fxq 'KVS_MARIADB_IMAGE=mariadb:12.3.1@sha256:fixture' "$TEST_DIR/docker/.env" || fail 'discarded installed image override'
+done
+grep -Fq 'from that running server' "$TEST_DIR/out" || fail 'missing live backup guidance'
+for selected in 11.8 11.4; do
+    series_change 11.4.9-MariaDB "$selected" 3 false > "$TEST_DIR/out" || fail 'backup exit failed'
+    grep -Fq 'Start the existing MariaDB 11.4 server and make a verified backup' "$TEST_DIR/out" ||
+        fail "backup guidance omitted the installed series for selection $selected"
+done
+if series_change 12.3.1-MariaDB 11.4 '' false </dev/null > "$TEST_DIR/out" 2>&1; then fail 'downgrade accepted EOF'; fi
+saved_series 12.3 || fail 'EOF left an incompatible series'
+if CHECK_DELETE_FAIL=yes series_change 12.3.1-MariaDB 11.4 1 false > "$TEST_DIR/out"; then fail 'ignored deletion failure'; fi
+saved_series 12.3 || fail 'deletion failure left an incompatible series'
+if CHECK_FAIL_WRITE=11.4 series_change 12.3.1-MariaDB 11.4 1 false > "$TEST_DIR/out" 2>&1; then fail 'ignored post-deletion write failure'; fi
+grep -Fq 'the database was deleted' "$TEST_DIR/out" || fail 'missing post-deletion diagnostic'
+saved_series 12.3 || fail 'failed write changed the saved series'
+CHECK_BEFORE_DELETE=12.3 series_change 12.3.1-MariaDB 11.4 1 false > "$TEST_DIR/out" || fail 'downgrade replacement failed'
+saved_series 11.4 || fail 'successful deletion did not commit the requested series'
 
 # refused_change <description> <expected text> <series_change arguments...>:
 # the run stops with the database as it is, and .env names its series again,

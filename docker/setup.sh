@@ -6378,6 +6378,16 @@ ask_existing_volume() {
         fi
         echo ""
 
+        # Keep Compose on the installed series until a replacement succeeds.
+        if [ "$VERSION_MISMATCH" = true ]; then
+            if ! set_env_value MARIADB_VERSION "$VOLUME_MAJOR_MINOR"; then
+                echo -e "${RED}ERROR: could not write MARIADB_VERSION=${VOLUME_MAJOR_MINOR}, the series of the database, back to .env. The site was not stopped.${NC}" >&2
+                exit 1
+            fi
+            echo "Until the database is upgraded or deleted below, .env names its series again"
+            echo "(MARIADB_VERSION=${VOLUME_MAJOR_MINOR}): a docker compose up -d keeps it on MariaDB ${VOLUME_MAJOR_MINOR}."
+        fi
+
         # Downgrade detection
         if [ "$IS_DOWNGRADE" = true ]; then
             echo -e "${RED}╔══════════════════════════════════════════════════════════════════╗${NC}"
@@ -6425,10 +6435,8 @@ ask_existing_volume() {
                     echo ""
                     echo "Exiting. Please backup your database before downgrading."
                     echo ""
-                    echo "Backup example:"
-                    echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql:ro \\"
-                    echo "    -v \$(pwd)/backup:/backup mariadb:${VOLUME_MAJOR_MINOR} \\"
-                    echo "    mariadb-dump --all-databases > /backup/db-backup.sql"
+                    echo "Start the existing MariaDB ${VOLUME_MAJOR_MINOR} server and make a verified backup"
+                    echo "from that running server before selecting database deletion."
                     exit 0
                     ;;
             esac
@@ -6446,12 +6454,6 @@ ask_existing_volume() {
             next_series=$(mariadb_next_series "$VOLUME_MAJOR_MINOR")
             echo -e "${YELLOW}You selected 'Restart installation' but a database already exists.${NC}"
             echo -e "${YELLOW}Note: MariaDB version will change from ${VOLUME_MAJOR_MINOR} → ${SELECTED_MAJOR_MINOR}${NC}"
-            if ! set_env_value MARIADB_VERSION "$VOLUME_MAJOR_MINOR"; then
-                echo -e "${RED}ERROR: could not write MARIADB_VERSION=${VOLUME_MAJOR_MINOR}, the series of the database, back to .env. The site was not stopped.${NC}" >&2
-                exit 1
-            fi
-            echo "Until the database is upgraded or deleted below, .env names its series again"
-            echo "(MARIADB_VERSION=${VOLUME_MAJOR_MINOR}): a docker compose up -d keeps it on MariaDB ${VOLUME_MAJOR_MINOR}."
             echo ""
             if [ "$next_series" != "$SELECTED_MAJOR_MINOR" ]; then
                 echo -e "${RED}MariaDB ${SELECTED_MAJOR_MINOR} cannot upgrade this database in place.${NC}"
@@ -6525,10 +6527,8 @@ ask_existing_volume() {
                     echo ""
                     echo "Exiting. Please backup your database before making version changes."
                     echo ""
-                    echo "Backup example:"
-                    echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql:ro \\"
-                    echo "    -v \$(pwd)/backup:/backup mariadb:${VOLUME_MAJOR_MINOR} \\"
-                    echo "    mariadb-dump --all-databases > /backup/db-backup.sql"
+                    echo "Start the existing MariaDB ${VOLUME_MAJOR_MINOR} server and make a verified backup"
+                    echo "from that running server before proceeding."
                     exit 0
                     ;;
             esac
@@ -6620,10 +6620,8 @@ ask_existing_volume() {
                     echo ""
                     echo "Exiting. Please backup your database before reinstalling."
                     echo ""
-                    echo "Backup example:"
-                    echo "  docker run --rm -v ${VOLUME_NAME}:/var/lib/mysql:ro \\"
-                    echo "    -v \$(pwd)/backup:/backup mariadb:${SELECTED_MAJOR_MINOR} \\"
-                    echo "    mariadb-dump --all-databases > /backup/db-backup.sql"
+                    echo "Start the existing MariaDB ${VOLUME_MAJOR_MINOR} server and make a verified backup"
+                    echo "from that running server before proceeding."
                     exit 0
                     ;;
             esac
