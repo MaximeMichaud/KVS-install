@@ -1112,7 +1112,7 @@ import_remote_database_space_mb() {
     done
     for device in "${!needs[@]}"; do
         [ "$device" != "$site_device" ] || continue
-        if ! import_filesystem_space_mb_ok "${needs[$device]}" "${probes[$device]}"; then
+        if ! import_filesystem_space_mb_ok "${needs[$device]}" "${probes[$device]}" explain >&2; then
             echo "ERROR: not enough free space for the dumps and loaded database on the filesystem holding ${probes[$device]} (about ${needs[$device]} MB plus a tenth of margin)" >&2
             return 1
         fi
@@ -1126,14 +1126,25 @@ import_remote_database_space_mb() {
 import_free_space_mb_ok() {
     local needed="$1"
     local destination="$2"
-    import_filesystem_space_mb_ok "$needed" "$(import_space_parent "$destination")"
+    import_filesystem_space_mb_ok "$needed" "$(import_space_parent "$destination")" "${3:-}"
 }
 
 import_filesystem_space_mb_ok() {
     local needed="$1" path="$2" available
     available=$(df -Pm -- "$path" 2>/dev/null | awk 'NR==2 {print $4}')
-    [ -n "$needed" ] && [ -n "$available" ] || return 1
-    [ "$available" -ge $(( needed + needed / 10 )) ]
+    [ -n "$needed" ] || return 1
+    needed=$((needed + needed / 10))
+    if [[ "$available" =~ ^[0-9]+$ ]] && [ "$available" -ge "$needed" ]; then
+        return 0
+    fi
+    if [ "${3:-}" = explain ]; then
+        if [[ "$available" =~ ^[0-9]+$ ]]; then
+            printf '  %s MB needed including margin, %s MB free on %s.\n' "$needed" "$available" "$path"
+        else
+            printf '  %s MB needed including margin, free space unknown on %s.\n' "$needed" "$path"
+        fi
+    fi
+    return 1
 }
 
 # import_free_space_ok <source> <destination>: room for a copy of the source.
@@ -2636,7 +2647,8 @@ import_check_estimated_transfer_space() {
     remaining=$((total > held ? total - held : 0))
     [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=0
     reserve=$(import_decimal_mb "$reserve" IMPORT_TRANSFER_RESERVE_MB) || return 1
-    if ! import_free_space_mb_ok "$(((remaining + 1048575) / 1048576 + reserve))" "$destination"; then
+    local details
+    if ! details=$(import_free_space_mb_ok "$(((remaining + 1048575) / 1048576 + reserve))" "$destination" explain); then
         # Some filesystems allocate blocks even for an empty directory.
         if [ "$status" = upper_bound ] && [ "$held" -gt 0 ] &&
             [ -n "$(find "$destination/." -mindepth 1 -maxdepth 1 -printf x -quit)" ] &&
@@ -2644,7 +2656,8 @@ import_check_estimated_transfer_space() {
             echo "  WARNING: the unfiltered upper bound is only an estimate on this resumed pass; the database reserve fits. Files renamed on the source can still occupy space here." >&2
             return 0
         fi
-        echo "ERROR: not enough free space under $destination for the estimated $(import_bytes_text "$remaining") left and $(import_mb_text "$reserve") reserved for the database and its dumps, with a tenth of margin" >&2
+        printf '%s\n' "$details" >&2
+        echo "ERROR: cannot confirm space under $destination for the estimated $(import_bytes_text "$remaining") left and $(import_mb_text "$reserve") reserved for the database and its dumps, with a tenth of margin" >&2
         return 1
     fi
 }

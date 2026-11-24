@@ -2939,21 +2939,25 @@ import_inspect_archive() {
 # the site, the bounds shown here.
 import_remote_size_text() {
     local report="$1"
-    local status size used total
+    local status size used total required budget=""
 
     status=$(import_kv "$report" site_size_status)
     size=$(import_kv "$report" site_size_mb)
+    required=$(import_kv "$report" site_required_mb)
+    if [[ "$required" =~ ^[0-9]+$ && "$required" != "$size" ]]; then
+        budget=", $required MB budgeted on destination"
+    fi
     used=$(import_kv "$report" site_fs_used_mb)
     case "$status" in
         exact|"")
             total=$(import_kv "$report" site_total_mb)
             if [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" != "$size" ]; then
-                echo "${size:-?} MB to transfer ($total MB measured on source)"
+                echo "${size:-?} MB to transfer ($total MB measured on source)$budget"
             else
-                echo "${size:-?} MB"
+                echo "${size:-?} MB$budget"
             fi
             ;;
-        upper_bound) echo "at most ${size:-?} MB to transfer (unfiltered root)" ;;
+        upper_bound) echo "at most ${size:-?} MB to transfer (unfiltered root)$budget" ;;
         incomplete)
             echo "${size:-0} MB measured on source ($(import_kv "$report" site_size_entries) of $(import_kv "$report" site_size_entries_total) entries measured in $(import_kv "$report" site_size_seconds) s), filesystem usage ${used:-?} MB"
             ;;
@@ -3080,7 +3084,7 @@ import_remote_free_space_check() {
     if [[ "$used" =~ ^[0-9]+$ ]]; then
         used=$(import_decimal_mb "$used" site_fs_used_mb) || return 1
     fi
-    if [ "$db" -gt 0 ] && ! import_free_space_mb_ok "$db" "$destination"; then
+    if [ "$db" -gt 0 ] && ! import_free_space_mb_ok "$db" "$destination" explain; then
         echo -e "${RED}ERROR: not enough free space for the dumps and loaded database under $destination${NC}"
         return 1
     fi
@@ -3096,13 +3100,13 @@ import_remote_free_space_check() {
     fi
     case "$status" in
         upper_bound)
-            if ! import_free_space_mb_ok "$((size + db))" "$destination"; then
+            if ! import_free_space_mb_ok "$((size + db))" "$destination" explain; then
                 echo -e "${RED}The unfiltered upper bound and dump do not fit under $destination; free more space or obtain a filtered measurement.${NC}"
                 return 1
             fi
             ;;
         exact|"")
-            if ! import_free_space_mb_ok "$((size + db))" "$destination"; then
+            if ! import_free_space_mb_ok "$((size + db))" "$destination" explain; then
                 echo -e "${RED}ERROR: not enough free space for the site, dumps and loaded database under $destination${NC}"
                 return 1
             fi
@@ -3110,7 +3114,7 @@ import_remote_free_space_check() {
         *)
             # Without a size, free space that cannot be read still stops the
             # import, as it does for a measured size.
-            if [ "$status" = absent ] && ! import_free_space_mb_ok "$db" "$destination"; then
+            if [ "$status" = absent ] && ! import_free_space_mb_ok "$db" "$destination" explain; then
                 echo -e "${RED}ERROR: not enough free space for the site, dumps and loaded database under $destination${NC}"
                 return 1
             fi

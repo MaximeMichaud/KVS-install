@@ -45,7 +45,7 @@ copy() { import_remote_files /srv/site "$dest" yes /backup '/cache/*' > "$tmp/ou
 : > "$CALLS"
 if copy; then fail 'the saved remainder and the reserve exceed the available space'; fi
 [ ! -s "$CALLS" ] || fail 'a resumed pass started rsync on a full disk'
-grep -qi 'not enough free space' "$tmp/out" || fail 'missing space diagnostic'
+grep -q 'MB needed including margin' "$tmp/out" || fail 'missing space diagnostic'
 AVAILABLE=18 copy || fail "the remainder fits: $(cat "$tmp/out")"
 [ "$(wc -l < "$CALLS")" = 1 ] || fail 'a resumed pass recounted the remote site'
 # A bind root may be reached through a symlink. Keep the same marker and
@@ -83,7 +83,7 @@ for method in no yes; do
         if COUNT_STATUS=$count_status AVAILABLE=1 IMPORT_TRANSFER_RESERVE_MB=0 import_remote_files "$tmp/source" "$resume" "$method" > "$tmp/out" 2>&1; then
             fail "$method/$count_status copied without room for the saved estimate"
         fi
-        grep -qi 'not enough free space' "$tmp/out" || fail "missing space error: $(cat "$tmp/out")"
+        grep -Eqi 'not enough free space|MB needed including margin' "$tmp/out" || fail "missing space error: $(cat "$tmp/out")"
         if grep -Eq '^tar$|--info=progress2' "$CALLS" || [ -e "$resume/video" ]; then fail 'started transferring the payload'; fi
         [ "$method" = yes ] || break
     done
@@ -145,6 +145,13 @@ rm "$(import_count_file "$resume")"
             fail "resumed tar ignored the database reserve or unreadable free space"
         fi
     done
+    grep -Fq 'free space unknown on' "$tmp/out" || fail "missing unknown free space on retry"
+    if grep -Fiq 'not enough free space' "$tmp/out"; then fail "unknown free space reported as a shortage"; fi
+    if AVAILABLE=1 import_check_estimated_transfer_space "$resume" 2 '' > "$tmp/stdout" 2> "$tmp/out"; then
+        fail "a reserve shortage did not stop the retry"
+    fi
+    [ ! -s "$tmp/stdout" ] || fail "resumed space diagnostic reached stdout"
+    grep -Fq 'MB needed including margin, 1 MB free' "$tmp/out" || fail "missing free figure on retry"
     # With no estimate, keep the ordinary inspection's upper-bound warning.
     printf 'site_size_status=skipped\nsite_fs_used_mb=50\ndb_size_mb=0\n' > "$IMPORT_RESUME_SPACE_REPORT"
     COUNT_STATUS=12 AVAILABLE=1 import_remote_files "$tmp/source" "$resume" no > "$tmp/out" 2>&1 || fail 'unknown size prevented tar'
@@ -203,6 +210,15 @@ rm "$(import_count_file "$resume")"
         fi
         # shellcheck disable=SC2329  # Called by the sourced check.
         (df() { :; }; import_remote_free_space_check "$tmp/absent.report" "$tmp/absent") > "$tmp/out" 2>&1 || fail "$status: unreadable free space must keep warning only"
+    done
+    for status in exact upper_bound; do
+        printf 'site_size_status=%s\nsite_size_mb=5\nsite_required_mb=20\ndb_size_mb=0\n' "$status" > "$tmp/budget.report"
+        if AVAILABLE=21 import_remote_free_space_check "$tmp/budget.report" "$tmp/absent" > "$tmp/out" 2>&1; then
+            fail "$status: insufficient space accepted"
+        fi
+        grep -Fq '22 MB needed including margin, 21 MB free' "$tmp/out" || fail "$status: missing space figures"
+        text=$(import_remote_size_text "$tmp/budget.report")
+        [[ "$text" = *'5 MB'* && "$text" = *'20 MB budgeted on destination'* ]] || fail "$status: missing allocation estimate: $text"
     done
     for field in site_required_mb site_size_mb db_size_mb site_fs_used_mb; do
         printf 'site_size_status=exact\n%s=8796093022208\n' "$field" > "$tmp/large.report"
@@ -310,9 +326,10 @@ for EXISTING in no yes; do
     FREE_1=0 FREE_2=4 FREE_3=4 FREE_4=4
     import_remote_free_space_check "$tmp/report" "$dest" "$source_id" || fail 'database space was charged to the site'
     for disk in 2 3 4; do
-        if (printf -v "FREE_$disk" 3; import_remote_free_space_check "$tmp/report" "$dest" "$source_id"); then
+        if (printf -v "FREE_$disk" 3; import_remote_free_space_check "$tmp/report" "$dest" "$source_id") > "$tmp/out" 2>&1; then
             fail "omitted database requirement on device $disk"
         fi
+        grep -Fq "4 MB needed including margin, 3 MB free on" "$tmp/out" || fail "missing figures on disk $disk"
     done
     if REPLAY_DEVICE=2 FREE_2=7 import_remote_free_space_check "$tmp/report" "$dest" "$source_id"; then
         fail 'the raw and replay copies must fit together'
