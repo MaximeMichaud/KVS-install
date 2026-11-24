@@ -161,6 +161,7 @@ apply or recovery stops and names it: move the entry away, then run
 `kvsctl recover`. For a target-only file with
 unrecognized contents and no recorded creation, it prints the path and
 keeps the file while restoring the previous version.
+Run `kvsctl recover` while nothing else writes into the release paths.
 Both bundle readers reject paths needed as both files and directories before
 extraction starts.
 Extracted files retain their read and execute bits, gain owner read/write,
@@ -939,6 +940,11 @@ the rollback of an upgrade from 26.10.0 to 26.11.0 failed on 2026-11-02 14:31 UT
 ```
 
 `status` shows the run first.
+
+Run `kvsctl recover` while nothing else writes into the release paths.
+Pause editors, deployments and sync jobs until recovery finishes. Recovery
+compares a target-only file before removing it by name. A save between
+those operations can be lost.
 
 `kvsctl recover` (`--yes` to skip its question) finishes that run. An
 upgrade or a rollback that had passed its verification is recorded, as the
