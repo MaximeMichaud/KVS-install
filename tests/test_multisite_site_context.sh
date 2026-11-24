@@ -96,3 +96,15 @@ COMPOSE_PROJECT_NAME=elsewhere COMPOSE_PROFILES=extra COMPOSE_FILE=other.yml \
 COMPOSE_ENV_FILES="$work/other.env" COMPOSE_DISABLE_ENV_FILE=1 \
     bash "$manager" remove media.example <<< yes > "$work/out"
 [[ ! -d $site ]]
+
+# A relative invocation must find the script beside its own sites even when
+# cd can find a directory of the same name through the operator's CDPATH.
+mkdir -p "$site" "$work/decoy/multi-site/sites/wrong.example"
+(
+    cd "$work/docker"
+    for search in "$work/decoy" ".:$work/decoy"; do
+        CDPATH="$search" bash multi-site/site-manager.sh list > "$work/out"
+        grep -Fq 'media.example (stopped)' "$work/out"
+        if grep -Fq wrong.example "$work/out"; then exit 1; fi
+    done
+)

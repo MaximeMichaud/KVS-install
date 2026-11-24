@@ -31,7 +31,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit 1
 SITES_DIR="${SCRIPT_DIR}/sites"
 CADDY_SITES_DIR="${SCRIPT_DIR}/caddy/sites"
 PRIMARY_SITE_FILE="${SITES_DIR}/.primary.env"
