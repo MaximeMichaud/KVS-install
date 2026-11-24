@@ -148,9 +148,40 @@ refused "empty linked webroot"
 rm "$webroot"
 rmdir "$work/disk2"
 mkdir "$webroot"
-# Files the init will not overwrite get its own diagnosis, not this one.
+unmarked_refused() {
+    start running
+    expect "$1" 1 running
+    grep -Fq "The webroot $webroot contains files but has no setup.php or extraction marker" "$work/start"
+    if grep -Fxq -e 'compose stop cron' -e 'compose up -d mariadb' "$work/calls"; then
+        echo "FAIL: $1: a service was touched for an unmarked webroot"; exit 1
+    fi
+    [[ -f $webroot/operator-file ]]
+}
 touch "$webroot/operator-file"
-accepted "unmarked files"
+unmarked_refused "unmarked files without an archive"
+mv "$work/moved.zip" kvs-archive/KVS_media.zip
+unmarked_refused "unmarked files with an archive directory"
+legacy_compose "$webroot:/var/www/kvs" "$PWD/kvs-archive/KVS_media.zip:/kvs-archive/KVS_site.zip:ro"
+unmarked_refused "unmarked files with a file bind"
+# A failed listing must not masquerade as an empty directory.
+(
+    # shellcheck disable=SC2329  # Used by the manager.
+    find() {
+        if [[ $1 == "$work/www/media.example/" ]]; then return 73; fi
+        command find "$@"
+    }
+    export -f find
+    start running
+    expect "unreadable contents" 1 running
+    grep -Fq "Could not inspect the webroot $webroot" "$work/start"
+    if grep -Fxq -e 'compose stop cron' -e 'compose up -d mariadb' "$work/calls"; then exit 1; fi
+)
+touch "$webroot/.kvs-extraction-in-progress"
+accepted "marked partial extraction with a file bind"
+rm "$webroot/.kvs-extraction-in-progress"
+legacy_compose "$webroot:/var/www/kvs"
+unmarked_refused "unmarked files without an archive bind"
+mv kvs-archive/KVS_media.zip "$work/moved.zip"
 rm "$webroot/operator-file"
 # A Compose file that binds no webroot gives nothing to judge by.
 legacy_compose ../../../kvs-archive:/kvs-archive:ro

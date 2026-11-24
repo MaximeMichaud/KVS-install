@@ -1473,9 +1473,9 @@ check_site_archive_mount() {
                 | .source][0] // "") as $webroot
                 | [.services["kvs-init"].volumes[]? | select(.type == "bind" and
                 (.target == "/kvs-archive" or (.target | startswith("/kvs-archive/"))))]
-                | if length == 0 then "none" elif length != 1 then error("multiple archive binds")
-                  else .[0] | (if .target == "/kvs-archive" then "dir" else "file" end) + "\n" + .source
-                    + "\n" + $webroot end'
+                | (if length == 0 then ["none", ""] elif length != 1 then error("multiple archive binds")
+                   else .[0] | [(if .target == "/kvs-archive" then "dir" else "file" end), .source] end)
+                  + [$webroot] | .[]'
     ); then
         log_error "Could not inspect the kvs-init archive mount. Check the Compose configuration and that jq is installed."
         return 1
@@ -1485,9 +1485,25 @@ check_site_archive_mount() {
     webroot=""
     [[ "$source" != *$'\n'* ]] || webroot=${source#*$'\n'}
     source=${source%%$'\n'*}
-    case "$mount" in
+    if [ -n "$webroot" ] && [ -d "$webroot" ] &&
+        [ ! -f "$webroot/admin/include/setup.php" ] &&
+        [ ! -f "$webroot/.kvs-extraction-complete" ] &&
+        [ ! -f "$webroot/.kvs-extraction-in-progress" ]; then
+        local contents
+        if ! contents=$(find "$webroot/" -mindepth 1 -maxdepth 1 \
+            ! -name '.kvs-extraction-complete.tmp.*' \
+            ! -name '.kvs-extraction-in-progress.tmp.*' -printf x -quit); then
+            log_error "Could not inspect the webroot $webroot before starting $domain."
+            return 1
+        fi
+        if [ -n "$contents" ]; then
+            log_error "The webroot $webroot contains files but has no setup.php or extraction marker. Check its contents before starting $domain."
+            return 1
+        fi
+    fi
+    case "${mount%%$'\n'*}" in
         none) return 0 ;;
-        file$'\n'*)
+        file)
             if [ ! -f "$source" ]; then
                 log_error "Repair the archive mount source $source so it points to the site's regular archive, then retry."
                 return 1
@@ -1508,9 +1524,7 @@ check_site_archive_mount() {
     if [ -z "$selected" ] && [ -n "$webroot" ] &&
         [ ! -f "$webroot/.kvs-extraction-complete" ] &&
         { [ -f "$webroot/.kvs-extraction-in-progress" ] ||
-            [ -z "$(find "$webroot/" -mindepth 1 -maxdepth 1 \
-                ! -name '.kvs-extraction-complete.tmp.*' \
-                ! -name '.kvs-extraction-in-progress.tmp.*' -print -quit 2>/dev/null)" ]; }; then
+            [ ! -f "$webroot/admin/include/setup.php" ]; }; then
         log_error "No KVS archive in $source, and $webroot holds no site yet: kvs-init needs the archive to install $domain."
         log_error "Place the site's KVS_*.zip in $source, then retry."
         return 1
