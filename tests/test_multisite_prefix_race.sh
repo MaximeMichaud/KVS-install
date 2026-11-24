@@ -23,6 +23,9 @@ docker() {
         [[ $* == *"label=com.docker.compose.project=kvs-unavailable-example"* ]] || return 95
         return 42
     fi
+    if [[ -e $work/$1 && $* == *"label=com.docker.compose.project=kvs-late-example "* ]]; then
+        echo fixture-owner
+    fi
     [[ "$1" == ps || "$1" == volume ]]
 }
 # The primary site reserves the project of the site being added at the given
@@ -99,4 +102,29 @@ for listing in ps volume; do
     grep -Fq 'Could not list' "$work/add.log"
     grep -Fq 'kvs-unavailable-example' "$work/add.log"
     [[ ! -e $sites/unavailable.example && ! -e $routes/unavailable.example.caddy && ! -e $KVS_WEBROOT_BASE/unavailable.example ]]
+done
+
+# Inject an owner just as the route lock is acquired, after the first check.
+# shellcheck disable=SC2329  # Used by the manager.
+flock() {
+    command flock "$@" || return $?
+    if [[ -n ${LATE_OWNER:-} && $* == '-n 8' ]]; then
+        case "$LATE_OWNER" in
+            primary) echo 'COMPOSE_PROJECT_NAME=kvs-late-example' > "$work/docker/.env" ;;
+            *) touch "$work/$LATE_OWNER" ;;
+        esac
+    fi
+}
+export -f flock
+for owner in primary ps volume; do
+    if LATE_OWNER=$owner bash "$manager" add late.example > "$work/add.log" 2>&1; then
+        echo "add accepted a late $owner"; exit 1
+    fi
+    case "$owner" in
+        primary) grep -Fq 'used by the primary site' "$work/add.log" ;;
+        *) grep -Fq 'project named kvs-late-example already exists' "$work/add.log" ;;
+    esac
+    [[ ! -e $sites/late.example && ! -e $routes/late.example.caddy && ! -e $KVS_WEBROOT_BASE/late.example ]]
+    [[ -z $(find "$routes" -name '.late.example.caddy.*') ]]
+    rm -f "$work/docker/.env" "$work/$owner"
 done

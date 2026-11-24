@@ -1393,6 +1393,7 @@ EOF
     # under this lock and reads the .env linked above, so one of the two
     # commands now sees the other's claim on the Compose project.
     ensure_site_prefix_available "$domain" "$site_prefix" || return 1
+    ensure_new_site_project_free "$domain" "$site_prefix" || return 1
     write_caddy_site_config "$domain" "${CADDY_TLS_MODE:-public}" false auto "$ADD_ROUTE_TEMP"
     exec 8<&-
     rollback_incomplete_add
