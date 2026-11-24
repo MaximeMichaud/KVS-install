@@ -52,6 +52,10 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+clear_site_compose_environment() {
+    unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+}
+
 validate_domain() {
     local LC_ALL=C
     local domain="$1"
@@ -246,12 +250,13 @@ compose_project_exists() {
 # The directories the containers of a Compose project were created from, one
 # per line and de-duplicated. remove reads them to be sure a down -v tears down
 # this site's own stack and not a primary that shares the project name.
-compose_project_working_dirs() {
+compose_project_working_dirs() (
+    set -o pipefail
     local project="$1"
     docker ps -a --filter "label=com.docker.compose.project=${project}" \
         --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null |
         sort -u
-}
+)
 
 # The Compose projects of the containers created from <dir>, one per line and
 # de-duplicated. Compose records the directory it ran in as it was reached,
@@ -304,7 +309,7 @@ site_project_without_name() {
     fi
     if [[ "$projects" == *$'\n'* ]]; then
         log_error "Containers of several Compose projects were created from ${site_dir}: ${projects//$'\n'/, }" >&2
-        log_error "remove cannot tell which one is the site's: write it as COMPOSE_PROJECT_NAME in ${site_dir}/.env, then run remove again" >&2
+        log_error "Resolve the conflicting containers before running remove again" >&2
         return 1
     fi
     if [ -n "$projects" ]; then
@@ -1733,6 +1738,18 @@ remove_site() {
             exit 1
         fi
         log_info "${site_dir}/.env names no COMPOSE_PROJECT_NAME; the site runs as project ${remove_project}"
+    else
+        local projects project
+        if ! projects=$(dir_compose_projects "$site_dir"); then
+            log_error "Could not list the containers created from ${site_dir}"
+            return 1
+        fi
+        while IFS= read -r project; do
+            if [ -n "$project" ] && [ "$project" != "$remove_project" ]; then
+                log_error "Containers of project ${project} were created from ${site_dir}, whose .env names ${remove_project}. Resolve the project mismatch before removing the site."
+                return 1
+            fi
+        done <<< "$projects"
     fi
     for primary_prefix in "$(single_mode_primary_prefix)" "$(primary_site_value SITE_PREFIX)"; do
         if [ -n "$primary_prefix" ] && [ "$primary_prefix" = "$remove_project" ]; then
@@ -1741,7 +1758,10 @@ remove_site() {
             exit 1
         fi
     done
-    working_dirs=$(compose_project_working_dirs "$remove_project")
+    if ! working_dirs=$(compose_project_working_dirs "$remove_project"); then
+        log_error "Could not list working directories of project ${remove_project}"
+        return 1
+    fi
     if [ -n "$working_dirs" ]; then
         site_real=$(cd "$site_dir" && pwd -P)
         while IFS= read -r wd; do
@@ -2044,6 +2064,9 @@ usage() {
 # .env, so an IONCUBE exported for an add would set the loader of every site
 # started or stopped from the same shell: the other commands drop it.
 [ "${1:-}" = add ] || unset IONCUBE
+case "${1:-}" in
+    start|stop|remove) clear_site_compose_environment ;;
+esac
 
 case "${1:-}" in
     add)
