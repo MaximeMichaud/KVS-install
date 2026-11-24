@@ -527,51 +527,125 @@ import_marker_file() {
     fi
 }
 
-# import_take_over_site <previous site directory> <destination> <source>
-# A site imported earlier under another domain (a development subdomain
-# tried before the real one) moves into place instead of travelling again:
-# the directory is renamed, its source marker follows, and the transfer
-# that comes next carries the changes only. The earlier import must come
-# from the same source and the destination must hold nothing yet.
-import_take_over_site() {
-    local previous="${1%/}"
-    local destination="${2%/}"
-    local source="$3"
-    local previous_marker marker resolved_previous resolved_destination recorded
+# Rename only. A cross-mount rename can fail even when stat reports the
+# same device (two bind mounts). Never let mv fall back to copy and remove.
+import_take_over_rename() {
+    if mv --help | grep -F -- '--no-copy' >/dev/null; then
+        mv --no-copy -T -- "$1" "$2"
+    else
+        perl -e 'rename($ARGV[0], $ARGV[1]) or die "rename: $!\n"' -- "$1" "$2"
+    fi
+}
 
-    if [ ! -d "$previous" ]; then
-        echo "ERROR: IMPORT_REUSE_SITE_DIR is not a directory: $previous" >&2
+# Inspect records the identities in memory. Apply compares them again and
+# publishes the intent before renaming over the absent or empty destination.
+# A failed rename leaves the intent for the next inspection.
+import_take_over_site() {
+    local previous="${1%/}" destination="${2%/}" source="$3" operation="${4:-apply}"
+    local previous_marker marker intent held held_marker parent device destination_id=absent
+    local tree_id marker_id plan temporary moved=no completed=no entries
+
+    if [ -L "$previous" ] || [ -L "$destination" ]; then
+        echo "ERROR: IMPORT_REUSE_SITE_DIR needs directory paths without a final symlink" >&2
         return 1
     fi
-    resolved_previous=$(readlink -f -- "$previous") || return 1
-    resolved_destination=$(readlink -f -- "$destination" 2>/dev/null) || resolved_destination=$destination
-    if [ "$resolved_previous" = "$resolved_destination" ]; then
+    previous=$(realpath -m -- "$previous") || return 1
+    destination=$(realpath -m -- "$destination") || return 1
+    previous_marker=$(import_marker_file "$previous")
+    marker=$(import_marker_file "$destination")
+    intent="${IMPORT_MARKER_DIR:-${destination%/*}}/$(basename -- "$destination").source.takeover"
+    parent=$(import_space_parent "$(dirname -- "$destination")")
+    device=$(stat -Lc '%d' -- "$parent") || return 1
+    held=$previous
+    held_marker=$previous_marker
+
+    if [ "$previous" = "$destination" ] || { [ ! -e "$intent" ] &&
+        [ "$operation" != apply ] && [ -d "$destination" ] &&
+        { [ ! -e "$previous" ] || [ "${IMPORT_FILES_ONLY:-no}" = yes ]; } &&
+        [ -f "$marker" ] && [ "$(cat -- "$marker")" = "$source" ]; }; then
+        # Includes completed runs from before the intent was introduced.
+        completed=yes
+        held=$destination
+        held_marker=$marker
+    elif [ ! -e "$previous" ] && [ -f "$intent" ]; then
+        moved=yes
+        held=$destination
+        if [ ! -e "$previous_marker" ]; then held_marker=$marker; fi
+    elif [ ! -e "$previous" ] && [ ! -e "$intent" ] && [ -d "$destination" ] && [ ! -e "$marker" ] &&
+        [ -f "$previous_marker" ] && [ "$(cat -- "$previous_marker")" = "$source" ]; then
+        echo "ERROR: $previous is missing and $destination has no source marker, but $previous_marker still records $source." >&2
+        echo "An older take-over may have stopped between renames. Verify which directory holds the imported site before moving its marker." >&2
+        return 1
+    elif [ -e "$destination" ]; then
+        if [ ! -d "$destination" ] || ! entries=$(find "$destination" -mindepth 1 -maxdepth 1 -printf x -quit) || [ -n "$entries" ]; then
+            echo "ERROR: $destination already holds something; IMPORT_REUSE_SITE_DIR needs an absent or empty destination" >&2
+            return 1
+        fi
+        destination_id=$(stat -c '%d:%i' -- "$destination") || return 1
+    fi
+    if [ ! -d "$held" ] || [ ! -f "$held_marker" ] || [ -L "$held_marker" ] || [ "$(cat -- "$held_marker")" != "$source" ]; then
+        echo "ERROR: $held needs a directory and matching source marker for $source" >&2
+        return 1
+    fi
+    tree_id=$(stat -c '%d:%i' -- "$held") || return 1
+    marker_id=$(stat -c '%d:%i' -- "$held_marker") || return 1
+    if [ "$completed" = no ] && { [ "${tree_id%:*}" != "$device" ] ||
+        { [ "$destination_id" != absent ] && [ "${destination_id%:*}" != "$device" ]; }; }; then
+        echo "ERROR: site directories are on different devices; use a normal copy import without IMPORT_REUSE_SITE_DIR" >&2
+        return 1
+    fi
+    # After the directory rename the original empty destination no longer
+    # exists. Only its recorded identity comes from disk; the held tree and
+    # marker must independently match the recorded device and inode.
+    if [ "$moved" = yes ]; then
+        IFS= read -r destination_id < "$intent" || return 1
+    fi
+    printf -v plan '%s\n%q %q %q %q %q %q' "$destination_id" "$source" "$previous" "$destination" "$tree_id" "$marker_id" "$completed"
+    if { [ -e "$intent" ] && [ "$(cat -- "$intent")" != "$plan" ]; } ||
+        { [ "$operation" != inspect ] && [ -n "${IMPORT_TAKEOVER_PLAN:-}" ] && [ "$IMPORT_TAKEOVER_PLAN" != "$plan" ]; }; then
+        echo "ERROR: the take-over paths, source or identities changed. Refusing to move the site or its marker." >&2
+        if [ -f "$intent" ]; then
+            echo "$intent records the import source, both paths, and the device and inode numbers." >&2
+            echo "Restore the recorded layout to retry. Remove the intent file only after checking both paths and confirming where the site directory is." >&2
+        fi
+        return 1
+    fi
+    if [ "$operation" = inspect ]; then
+        IMPORT_TAKEOVER_PLAN=$plan
+        # shellcheck disable=SC2034  # Read by setup.sh during space checks.
+        IMPORT_TAKEOVER_HELD=$held IMPORT_TAKEOVER_MARKER=$held_marker
         return 0
     fi
-    previous_marker=$(import_marker_file "$previous")
-    if [ ! -f "$previous_marker" ]; then
-        echo "ERROR: $previous was not filled by an import (no source marker); IMPORT_REUSE_SITE_DIR takes over the files of an earlier import only" >&2
+    [ "$completed" = no ] || return 0
+    if [ ! -e "$intent" ]; then
+        mkdir -p -- "$(dirname -- "$destination")" "$(dirname -- "$intent")" || return 1
+        temporary=$(mktemp -- "$intent.XXXXXXXX") || return 1
+        if ! printf '%s\n' "$plan" > "$temporary" || ! ln -T -- "$temporary" "$intent"; then
+            rm -f -- "$temporary"
+            return 1
+        fi
+        rm -f -- "$temporary" || return 1
+    fi
+    if [ "$moved" = no ] && ! import_take_over_rename "$previous" "$destination"; then
+        echo "ERROR: could not rename $previous to $destination; for separate mounts use a normal copy import" >&2
         return 1
     fi
-    recorded=$(cat "$previous_marker")
-    if [ "$recorded" != "$source" ]; then
-        echo "ERROR: $previous was imported from $recorded, not from $source" >&2
+    if [ ! -d "$destination" ] || [ "$(stat -c '%d:%i' -- "$destination")" != "$tree_id" ]; then
+        echo "ERROR: the directory at $destination changed during take-over" >&2
         return 1
     fi
-    if [ -e "$destination" ] && { [ ! -d "$destination" ] || find "$destination" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; }; then
-        echo "ERROR: $destination already holds something; IMPORT_REUSE_SITE_DIR needs an absent or empty destination" >&2
+    if [ -e "$previous_marker" ] && [ "$previous_marker" != "$marker" ]; then
+        if [ "$(stat -c '%d:%i' -- "$previous_marker")" != "$marker_id" ] || [ "$(cat -- "$previous_marker")" != "$source" ]; then
+            echo "ERROR: the source marker changed before its rename" >&2
+            return 1
+        fi
+        import_take_over_rename "$previous_marker" "$marker" || return 1
+    fi
+    if [ "$(stat -c '%d:%i' -- "$marker")" != "$marker_id" ]; then
+        echo "ERROR: the source marker changed during take-over" >&2
         return 1
     fi
-    marker=$(import_marker_file "$destination")
-    if [ -d "$destination" ] && ! rmdir -- "$destination"; then
-        return 1
-    fi
-    mkdir -p "$(dirname -- "$destination")" "$(dirname -- "$marker")" || return 1
-    if ! mv -- "$previous" "$destination"; then
-        echo "ERROR: could not move $previous to $destination (a mount point has to be moved by hand)" >&2
-        return 1
-    fi
-    mv -f -- "$previous_marker" "$marker" || return 1
+    rm -f -- "$intent" || return 1
     echo "Site files of $previous taken over as $destination; the transfer carries the changes only"
 }
 

@@ -145,7 +145,7 @@ inspect() {
         import_remote_load_excludes() { return 0; }
         import_remote_free_space_check() { echo "space ${4:-pending} ${IMPORT_VOLUME_PROJECT:-unselected}" >> "$TEST_DIR/calls"; }
         import_prepare_source_nginx_rewrites() { echo rewrites >> "$TEST_DIR/calls"; }
-        import_take_over_site() { echo take-over >> "$TEST_DIR/calls"; }
+        import_take_over_site() { echo "take-over ${4:-apply}" >> "$TEST_DIR/calls"; }
         import_check_completed() { return 0; }
         import_check_kvs_archive_version() { return 0; }
         refuse_unbuildable_kvs_php() { return 0; }
@@ -883,9 +883,9 @@ rm -f "$marker"
 rm -rf "$TEST_DIR/www/example.test"
 if IMPORT_FILES_ONLY=yes FIXTURE_REUSE="$TEST_DIR/www/dev.example.test" inspect; then fail 'a pass of the files alone took a site over'; fi
 grep -Fq 'IMPORT_FILES_ONLY does not take over' "$TEST_DIR/inspect.out" || fail "missing reason: $(cat "$TEST_DIR/inspect.out")"
-if grep -Fxq take-over "$TEST_DIR/calls"; then fail 'the take-over ran'; fi
-FIXTURE_REUSE="$TEST_DIR/www/dev.example.test" inspect || true
-grep -Fxq take-over "$TEST_DIR/calls" || fail 'a full pass must still take the site over'
+if grep -q '^take-over ' "$TEST_DIR/calls"; then fail 'the take-over ran'; fi
+FIXTURE_REUSE="$TEST_DIR/www/dev.example.test" inspect || fail "take-over inspection failed"
+grep -Fxq 'take-over inspect' "$TEST_DIR/calls" || fail 'a full pass must check take-over eligibility'
 pass 'the inspection of a pass of the files alone takes nothing over, writes no rewrites and needs no database'
 
 # A link leading out of the site on the old server stops a headless pass

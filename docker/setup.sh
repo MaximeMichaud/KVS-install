@@ -256,9 +256,11 @@ ENVIRONMENT VARIABLES:
     IMPORT_REUSE_SITE_DIR=DIR
                           The site directory of an earlier import of the
                           same old server under another domain (a
-                          development subdomain tried first): moved to
-                          /var/www/<domain>, the transfer then carries the
-                          changes only. With IMPORT_REMOTE_HOST only.
+                          development subdomain tried first). Confirmation
+                          and compatibility checks come before the move to
+                          /var/www/<domain> at the start of the transfer.
+                          Both paths must be on the same filesystem.
+                          With IMPORT_REMOTE_HOST only.
     IMPORT_NGINX_REWRITES=FILE|source
                           Explicit server-context nginx fragment, ready for
                           Docker. Takes priority over the site and archive,
@@ -2104,6 +2106,7 @@ fi
 # another domain (a development subdomain tried before the real one):
 # taken over instead of transferred again.
 IMPORT_REUSE_SITE_DIR="${IMPORT_REUSE_SITE_DIR:-}"
+IMPORT_TAKEOVER_PLAN="" IMPORT_TAKEOVER_HELD="" IMPORT_TAKEOVER_MARKER=""
 IMPORT_SIZE_TIMEOUT="${IMPORT_SIZE_TIMEOUT:-300}"
 IMPORT_TRANSFER_JOBS="${IMPORT_TRANSFER_JOBS:-1}"
 IMPORT_TRANSFER_CHUNK="${IMPORT_TRANSFER_CHUNK:-20000}"
@@ -3088,13 +3091,13 @@ import_remote_free_space_check() {
         echo -e "${RED}ERROR: not enough free space for the dumps and loaded database under $destination${NC}"
         return 1
     fi
-    marker=$(import_marker_file "$destination")
+    marker=${IMPORT_TAKEOVER_MARKER:-$(import_marker_file "$destination")}
     if [ -n "$source" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$source" ]; then
         [ "$stage" != before-prefix ] || return 0
         if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
-            echo "  Free space:      an earlier pass from the same source wrote under $destination: the room the dump of the next full pass needs is checked now, the files left to copy once the transfer is planned"
+            echo "  Free space:      an earlier pass from the same source wrote under ${IMPORT_TAKEOVER_HELD:-$destination}: the room the dump of the next full pass needs is checked now, the files left to copy once the transfer is planned"
         else
-            echo "  Free space:      an earlier pass from the same source wrote under $destination: the dump is checked now, the files left to copy once the transfer is planned"
+            echo "  Free space:      an earlier pass from the same source wrote under ${IMPORT_TAKEOVER_HELD:-$destination}: the dump is checked now, the files left to copy once the transfer is planned"
         fi
         return 0
     fi
@@ -3402,23 +3405,20 @@ import_inspect_remote() {
         echo -e "${RED}ERROR: the database of the old server does not answer; fix the access there, or dump it yourself and use IMPORT_SITE_DIR with IMPORT_DB_DUMP${NC}"
         exit 1
     fi
-    # A run that stopped after the take-over is repeated with the same
-    # command: the files are then in place, recorded as imported from this
-    # source, and the directory they came from is gone. A pass of the files
-    # alone leaves the earlier import where it is: the pass that loads the
-    # database under this domain takes it over.
-    if [ -n "$IMPORT_REUSE_SITE_DIR" ] && [ "$(cat "$(import_marker_file "/var/www/$DOMAIN")" 2>/dev/null)" != \
-        "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" ]; then
-        if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then
+    IMPORT_REMOTE_SPACE_SOURCE="ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR"
+    if [ -n "$IMPORT_REUSE_SITE_DIR" ]; then
+        if [ "${IMPORT_FILES_ONLY:-no}" = yes ] && { [ ! -d "/var/www/$DOMAIN" ] ||
+            [ -f "$(import_marker_file "/var/www/$DOMAIN").takeover" ] ||
+            [ "$(cat -- "$(import_marker_file "/var/www/$DOMAIN")" 2>/dev/null)" != "$IMPORT_REMOTE_SPACE_SOURCE" ]; }; then
             echo -e "${RED}ERROR: IMPORT_FILES_ONLY does not take over $IMPORT_REUSE_SITE_DIR; bring those files up to date under their own domain, the pass without IMPORT_FILES_ONLY takes them over${NC}"
             exit 1
         fi
-        import_take_over_site "$IMPORT_REUSE_SITE_DIR" "/var/www/$DOMAIN" "ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR" || exit 1
+        import_take_over_site "$IMPORT_REUSE_SITE_DIR" "/var/www/$DOMAIN" "$IMPORT_REMOTE_SPACE_SOURCE" inspect || exit 1
+    else
+        import_destination_ready "/var/www/$DOMAIN" "$IMPORT_REMOTE_SPACE_SOURCE" || exit 1
     fi
-    IMPORT_REMOTE_SPACE_SOURCE="ssh://$IMPORT_SSH_TARGET:$IMPORT_REMOTE_PORT$IMPORT_REMOTE_DIR"
     if [ "${IMPORT_FILES_ONLY:-no}" = yes ]; then space_stage=pending; fi
     import_remote_free_space_check "$IMPORT_REMOTE_REPORT" "/var/www/$DOMAIN" "$IMPORT_REMOTE_SPACE_SOURCE" "$space_stage" || exit 1
-    import_destination_ready "/var/www/$DOMAIN" "$IMPORT_REMOTE_SPACE_SOURCE" || exit 1
     if [ "$IMPORT_REMOTE_RSYNC" = yes ]; then
         import_ensure_tool rsync || exit 1
     fi
@@ -3740,6 +3740,10 @@ import_fetch_remote() {
     dump="$IMPORT_STAGING/${DOMAIN}.sql.$extension"
     if [ "$IMPORT_REMOTE_DATABASE_FORMAT" = directory ]; then
         dump="$IMPORT_STAGING/${DOMAIN}.mariadb.tar.$extension"
+    fi
+    if [ -n "${IMPORT_TAKEOVER_PLAN:-}" ]; then
+        import_take_over_site "$IMPORT_REUSE_SITE_DIR" "$destination" "$source" transfer || exit 1
+        IMPORT_TAKEOVER_HELD="" IMPORT_TAKEOVER_MARKER=""
     fi
     # The dump first, the files after: whatever the site creates during a
     # long transfer then exists as files the database does not know yet,
