@@ -191,3 +191,43 @@ legacy_compose "$webroot:/var/www/kvs" ../../../kvs-archive:/kvs-archive:ro
 mv "$work/moved.zip" kvs-archive/KVS_media.zip
 accepted "archive present"
 echo "PASS: a failed start restores a cron that was running, and a start that lacks its archive leaves cron alone"
+
+# Exercise the effective webroot for every archive mount layout.
+webroot_failure() {
+    start running
+    expect "$1" 1 running
+    grep -Fq "$2" "$work/start" || { cat "$work/start"; exit 1; }
+    if grep -Fxq -e 'compose stop cron' -e 'compose up -d mariadb' "$work/calls"; then exit 1; fi
+}
+for layout in none file directory; do
+    binds=("$webroot:/var/www/kvs")
+    case "$layout" in
+        file) binds+=("$PWD/kvs-archive/KVS_media.zip:/kvs-archive/KVS_site.zip:ro") ;;
+        directory) binds+=("../../../kvs-archive:/kvs-archive:ro") ;;
+    esac
+    legacy_compose "${binds[@]}"
+    rmdir "$webroot"
+    touch "$webroot"
+    webroot_failure "$layout with a regular file webroot" "Webroot $webroot is not a directory"
+    rm "$webroot"
+    mkdir "$webroot"
+    touch "$webroot/.kvs-extraction-complete"
+    webroot_failure "$layout with a stale completion marker" "Completion marker in $webroot has no setup.php"
+    rm "$webroot/.kvs-extraction-complete"
+    mkdir "$webroot/.kvs-extraction-complete.tmp.fixture"
+    webroot_failure "$layout with an unusable temporary marker" 'temporary marker is a directory'
+    rmdir "$webroot/.kvs-extraction-complete.tmp.fixture"
+    touch "$webroot/.kvs-extraction-complete.tmp.fixture"
+    if [[ $layout == none ]]; then
+        webroot_failure "fresh webroot without a mount" "No KVS archive mount"
+        touch "$webroot/.kvs-extraction-in-progress"
+        webroot_failure "interrupted webroot without a mount" "No KVS archive mount"
+        rm "$webroot/.kvs-extraction-in-progress"
+    else
+        accepted "$layout with a temporary marker file"
+    fi
+    mkdir -p "$webroot/admin/include"
+    touch "$webroot/admin/include/setup.php"
+    accepted "$layout with an installed site"
+    rm -r "$webroot/admin" "$webroot/.kvs-extraction-complete.tmp.fixture"
+done

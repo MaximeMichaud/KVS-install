@@ -1485,9 +1485,28 @@ check_site_archive_mount() {
     webroot=""
     [[ "$source" != *$'\n'* ]] || webroot=${source#*$'\n'}
     source=${source%%$'\n'*}
-    if [ -n "$webroot" ] && [ -d "$webroot" ] &&
-        [ ! -f "$webroot/admin/include/setup.php" ] &&
-        [ ! -f "$webroot/.kvs-extraction-complete" ] &&
+    local needs_archive=false
+    if [ -n "$webroot" ]; then
+        if { [ -e "$webroot" ] || [ -L "$webroot" ]; } && [ ! -d "$webroot" ]; then
+            log_error "Webroot $webroot is not a directory. Repair the bind source before starting $domain."
+            return 1
+        fi
+        for path in "$webroot"/.kvs-extraction-{complete,in-progress}.tmp.*; do
+            if [ -d "$path" ] && [ ! -L "$path" ]; then
+                log_error "The temporary marker is a directory: $path. Check its contents before starting $domain."
+                return 1
+            fi
+        done
+        if [ -f "$webroot/.kvs-extraction-complete" ]; then
+            if [ ! -f "$webroot/admin/include/setup.php" ]; then
+                log_error "Completion marker in $webroot has no setup.php. Repair the site before starting $domain."
+                return 1
+            fi
+        elif [ -f "$webroot/.kvs-extraction-in-progress" ] || [ ! -f "$webroot/admin/include/setup.php" ]; then
+            needs_archive=true
+        fi
+    fi
+    if [ "$needs_archive" = true ] && [ -d "$webroot" ] &&
         [ ! -f "$webroot/.kvs-extraction-in-progress" ]; then
         local contents
         if ! contents=$(find "$webroot/" -mindepth 1 -maxdepth 1 \
@@ -1502,7 +1521,12 @@ check_site_archive_mount() {
         fi
     fi
     case "${mount%%$'\n'*}" in
-        none) return 0 ;;
+        none)
+            if [ "$needs_archive" = true ]; then
+                log_error "No KVS archive mount for $domain. Configure its archive so kvs-init can install or resume $webroot."
+                return 1
+            fi
+            return 0 ;;
         file)
             if [ ! -f "$source" ]; then
                 log_error "Repair the archive mount source $source so it points to the site's regular archive, then retry."
@@ -1521,10 +1545,7 @@ check_site_archive_mount() {
     # own interrupted extraction (init/docker-entrypoint.d/00-extract.sh).
     # The webroot can be a link to another disk: look inside it, as Docker does.
     # Without one it fails after cron is stopped: refuse here instead.
-    if [ -z "$selected" ] && [ -n "$webroot" ] &&
-        [ ! -f "$webroot/.kvs-extraction-complete" ] &&
-        { [ -f "$webroot/.kvs-extraction-in-progress" ] ||
-            [ ! -f "$webroot/admin/include/setup.php" ]; }; then
+    if [ -z "$selected" ] && [ "$needs_archive" = true ]; then
         log_error "No KVS archive in $source, and $webroot holds no site yet: kvs-init needs the archive to install $domain."
         log_error "Place the site's KVS_*.zip in $source, then retry."
         return 1
