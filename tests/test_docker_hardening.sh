@@ -1148,7 +1148,7 @@ test_preflight_names_the_packages_of_missing_commands() {
     local expected
 
     awk '
-        $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" || $0 == "docker_is_the_snap() {" { capture = 1 }
+        $0 == "compose_version_at_least() {" || $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" || $0 == "docker_is_the_snap() {" { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
     ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"
@@ -1199,7 +1199,7 @@ test_preflight_tells_a_small_host_without_swap() {
     local host
 
     awk '
-        $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" || $0 == "docker_is_the_snap() {" { capture = 1 }
+        $0 == "compose_version_at_least() {" || $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" || $0 == "docker_is_the_snap() {" { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
     ' "$REPO_ROOT/docker/setup.sh" > "$functions_file"

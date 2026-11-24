@@ -20,7 +20,7 @@ pass() { echo "PASS: $*"; }
 
 functions="$WORK/functions.sh"
 : > "$functions"
-for name in add_compose_profile remove_compose_profile require_multi_compose_version \
+for name in add_compose_profile remove_compose_profile compose_version_at_least require_multi_compose_version \
     compose_files_for set_compose_file remove_env_value select_mode \
     setup_drop_acme_installed_pair configure_direct_tls_profile configure_mode; do
     awk -v signature="${name}() {" '
@@ -44,7 +44,6 @@ set_env_value() {
         printf '%s=%s\n' "$1" "$2" >> .env
     fi
 }
-version_at_least() { [ "$(printf '%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]; }
 docker() {
     local arg mapped=()
     printf '%s\n' "$*" >> "$CASE/docker.log"

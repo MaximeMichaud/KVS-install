@@ -33,6 +33,7 @@ mode_function="$TEST_DIR/configure-mode.sh"
 : > "$mode_function"
 extract_function add_compose_profile "$mode_function"
 extract_function remove_compose_profile "$mode_function"
+extract_function compose_version_at_least "$mode_function"
 extract_function require_multi_compose_version "$mode_function"
 extract_function compose_files_for "$mode_function"
 extract_function set_compose_file "$mode_function"
@@ -51,10 +52,6 @@ set_env_value() {
     else
         printf '%s=%s\n' "$key" "$value" >> .env
     fi
-}
-
-version_at_least() {
-    [ "$(printf '%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
 }
 
 docker() {
@@ -211,7 +208,12 @@ EOF
     old_compose_status=$?
     set -e
     [ "$old_compose_status" -ne 0 ] || fail "persisted multi mode accepted an unsupported Compose version"
-    MOCK_COMPOSE_VERSION=2.35.0
+    for candidate in 2.24.4~rc1 2.24.4-rc.1; do
+        if MOCK_COMPOSE_VERSION=$candidate require_multi_compose_version >/dev/null; then
+            fail "multi mode accepted prerelease $candidate"
+        fi
+    done
+    MOCK_COMPOSE_VERSION=2.24.4-1
     configure_mode >/dev/null
     [ "$MODE" = multi ] || fail "headless re-run changed a persisted multi mode"
     [ "$PROGRESS_TOTAL" = 13 ] || fail "headless multi re-run used the wrong progress total"

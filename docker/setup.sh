@@ -1755,13 +1755,33 @@ EOF
     ' >/dev/null
 }
 
+# Print the installed version for diagnostics and check it against a stable
+# minimum. At the minimum core, kvsctl's planCompose accepts packaging
+# revisions and Docker Desktop builds but requires a final release.
+compose_version_at_least() {
+    local minimum=$1 version core suffix
+    local build='^(\+[A-Za-z0-9.-]+(~[0-9][0-9.]*)?|-desktop\.[0-9]+|-[0-9]+)$'
+    version=$(docker compose version 2>/dev/null) || return 1
+    version=${version#Docker Compose version }
+    version=${version#v}
+    printf '%s\n' "$version"
+    [[ $version =~ ^([0-9]+\.[0-9]+\.[0-9]+)(.*)$ ]] || return 1
+    core=${BASH_REMATCH[1]}
+    suffix=${BASH_REMATCH[2]}
+    [[ ! $core =~ (^|\.)0[0-9] ]] || return 1
+    if [[ $core == "$minimum" ]]; then
+        [[ -z $suffix || $suffix =~ $build ]]
+    else
+        [[ $(printf '%s\n' "$minimum" "$core" | sort -V | head -n 1) == "$minimum" ]]
+    fi
+}
+
 setup_resume_import() {
     local key site_info snapshot state project marker resume_library wait_budget="${MARIADB_WAIT_SECONDS:-0}" compose_version
     # The initializers run with "docker compose run --pull missing", which
     # Docker Compose has from 2.32.2 on. A resume skips the pre-flight
     # checks, so say it here rather than after the wait for the replay.
-    compose_version=$(docker compose version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -n 1)
-    if [ "$(printf '%s\n' 2.32.2 "${compose_version:-0}" | sort -V | head -n 1)" != 2.32.2 ]; then
+    if ! compose_version=$(compose_version_at_least 2.32.2); then
         echo "ERROR: --resume-import needs Docker Compose 2.32.2 or newer, the first whose docker compose run takes --pull; found ${compose_version:-none}. Nothing was changed: upgrade Docker Compose, then resume again." >&2
         return 1
     fi
@@ -4141,12 +4161,11 @@ preflight_checks() {
     if docker compose version >/dev/null 2>&1; then
         local compose_version compose_minimum=2.10.0
         local compose_reason="this script starts the services with docker compose up --pull missing (Docker Compose 2.8.0 and newer) and passes values to Compose through the environment, which 2.8.0 and 2.9.0 let .env override"
-        compose_version=$(docker compose version | grep -oP '\d+\.\d+\.\d+' | head -1)
         if [ -e docker-compose.release.yml ]; then
             compose_minimum=2.19.0
             compose_reason="kvsctl manages this installation, and its release override needs Docker Compose 2.19.0 or newer"
         fi
-        if [ "$(printf '%s\n' "$compose_minimum" "${compose_version:-0}" | sort -V | head -n 1)" != "$compose_minimum" ]; then
+        if ! compose_version=$(compose_version_at_least "$compose_minimum"); then
             echo -e "${RED}✗${NC} Docker Compose ${compose_version:-unknown} is too old"
             echo "  ${compose_reason}"
             critical_failed=$((critical_failed + 1))
@@ -5703,10 +5722,7 @@ COMPOSE_FILE=$(compose_files_for "$MODE") require_compose_config || exit 1
 
 # Mode selection (single/multi)
 require_multi_compose_version() {
-    local compose_version
-
-    compose_version=$(docker compose version | grep -oP '\d+\.\d+\.\d+' | head -n 1)
-    if [ -z "$compose_version" ] || ! version_at_least "$compose_version" "2.24.4"; then
+    if ! compose_version_at_least 2.24.4 >/dev/null; then
         echo -e "${RED}ERROR: Multi-site mode requires Docker Compose 2.24.4 or newer${NC}"
         return 1
     fi

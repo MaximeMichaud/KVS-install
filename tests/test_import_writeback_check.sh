@@ -197,7 +197,7 @@ echo 'PASS: reconfigure.sh --writeback-status looks again from the docker direct
 # can show its number anywhere in the suffix.
 awk '
     $0 == "preflight_kernel_writeback_status() {" || $0 == "preflight_kernel_writeback_warning() {" ||
-        $0 == "preflight_checks() {" || $0 == "select_import_source() {" { capture = 1 }
+        $0 == "compose_version_at_least() {" || $0 == "preflight_checks() {" || $0 == "select_import_source() {" { capture = 1 }
     capture { print }
     capture && /^}$/ { capture = 0 }
 ' "$ROOT_DIR/docker/setup.sh" > "$TEST_DIR/preflight.sh"

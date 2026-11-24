@@ -15,7 +15,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
 awk '
-    $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" ||
+    $0 == "compose_version_at_least() {" || $0 == "preflight_checks() {" || $0 == "preflight_kernel_writeback_status() {" ||
         $0 == "docker_is_the_snap() {" || $0 == "prompt_read() {" { capture = 1 }
     capture { print }
     capture && /^}$/ { capture = 0 }

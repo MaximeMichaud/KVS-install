@@ -22,7 +22,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 awk '
     /^readonly SUPPORTED_PHP_VERSIONS=/ || /^SETUP_SCRIPT_DIR=/ { print }
-    $0 == "kvsctl_manages_stack() {" || $0 == "preflight_checks() {" ||
+    $0 == "kvsctl_manages_stack() {" || $0 == "compose_version_at_least() {" || $0 == "preflight_checks() {" ||
         $0 == "kvsctl_keep_mariadb_series() {" || $0 == "choose_mariadb_version() {" ||
         $0 == "kvsctl_note_php_change() {" || $0 == "preflight_kernel_writeback_status() {" ||
         $0 == "php_version_is_supported() {" || $0 == "kvs_documented_php_version() {" ||
@@ -131,6 +131,14 @@ accepts adopted 2.10.0
 # 2.19.0 is the first that clears the build section.
 refuses release 2.18.1 "$override_reason"
 accepts release 2.19.0
+for candidate in 2.19.0-rc1 2.19.0-rc.1 2.19.0~rc1 2.19.0+ds1~rc1; do
+    refuses release "$candidate" "$override_reason"
+done
+for build in 2.19.0+ds1 2.19.0-1 2.19.0+ds1-0ubuntu1~22.04.1 2.19.0-desktop.1 2.20.0~rc1; do
+    accepts release "$build"
+done
+refuses release 2.18.1+ds1 "$override_reason"
+refuses release 2.020.0 "$override_reason"
 refuses override 2.18.1 "$override_reason"
 echo 'PASS: Docker Compose 2.10.0 for every installation, 2.19.0 once a release override is there'
 
