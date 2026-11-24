@@ -114,11 +114,32 @@ run_case() {
             printf "KVS_IMPORT_COMPLETED='2026-01-01 00:00:00'\n" >> "$WORK_DIR/.env"
         fi
     fi
-    python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.php", "x\n"); z.close()' \
-        "$WORK_DIR/kvs-archive/KVS_7.0.3_[${archive_domain}].zip"
+    if [ "$name" = switch-import ]; then
+        # Let source inspection finish so setup reaches prefix selection.
+        mkdir -p "$WORK_DIR/lib" "$TMP_ROOT/old-site/admin/include"
+        cp "$REPO_ROOT/docker/lib/"{import,database}.sh "$WORK_DIR/lib/"
+        cp "$REPO_ROOT/kvs-export.sh" "$CASE_DIR/kvs/"
+        cat > "$TMP_ROOT/old-site/admin/include/setup.php" <<'EOF'
+<?php
+$config['tables_prefix'] = "ktvs_";
+$config['project_path'] = "/var/www/kvs";
+EOF
+        echo '<?php' > "$TMP_ROOT/old-site/admin/include/setup_db.php"
+        cat > "$TMP_ROOT/old-site/admin/include/version.php" <<'EOF'
+<?php
+$config['project_version'] = "7.0.3";
+EOF
+        printf 'CREATE TABLE ktvs_options (id INT);\n-- Dump completed\n' > "$TMP_ROOT/old-site.sql"
+        (cd "$TMP_ROOT/old-site" && python3 -m zipfile -c \
+            "$WORK_DIR/kvs-archive/KVS_7.0.3_[${archive_domain}].zip" admin)
+    else
+        python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.php", "x\n"); z.close()' \
+            "$WORK_DIR/kvs-archive/KVS_7.0.3_[${archive_domain}].zip"
+    fi
     # Keep EUID literal while redirecting setup logs into the fixture.
     # shellcheck disable=SC2016
     sed \
+        -e "s|/var/www|$CASE_DIR/www|g" \
         -e "s|/opt/kvs/logs|${CASE_DIR}/logs|g" \
         -e 's/if \[ "$EUID" -ne 0 \]; then/if false; then/' \
         "$REPO_ROOT/docker/setup.sh" > "$WORK_DIR/setup.sh"
@@ -251,6 +272,8 @@ for saved in 'DOMAIN=old.example.com' 'export DOMAIN=old.example.com'; do
     case $saved in export*) label=exported ;; *) label=plain ;; esac
     run_case "switch-$label" "$saved" yes DOMAIN=new.example.com
     assert_domain_saved new.example.com
+    [ "$(env_value "$WORK_DIR/.env" SITE_PREFIX)" = kvs-site ] ||
+        fail "${CASE}: a domain switch without an import must keep the installed prefix"
     grep -Fq 'The domain changes from old.example.com to new.example.com' "$CASE_DIR/output.log" ||
         fail "${CASE}: setup.sh did not see the domain change: $(grep -a -m 3 -i 'domain' "$CASE_DIR/output.log")"
     ! grep -q '^KVS_IMPORT_COMPLETED=' "$WORK_DIR/.env" ||
@@ -258,18 +281,18 @@ for saved in 'DOMAIN=old.example.com' 'export DOMAIN=old.example.com'; do
 done
 echo 'PASS: DOMAIN switches the domain .env saves, and setup.sh sees the change'
 
-# A headless import under the new DOMAIN goes on to the import, which stops
-# in this fixture at the import library it does not provide, instead of the
-# completed import turning it into a re-run.
+# A headless import under the new DOMAIN selects the new domain's prefix.
+# An invalid email stops the fixture after selection and before deployment.
 run_case switch-import 'DOMAIN=old.example.com' yes DOMAIN=new.example.com \
-    IMPORT_SITE_DIR="$TMP_ROOT/old-site" IMPORT_DB_DUMP="$TMP_ROOT/old-site.sql"
+    IMPORT_SITE_DIR="$TMP_ROOT/old-site" IMPORT_DB_DUMP="$TMP_ROOT/old-site.sql" EMAIL=invalid
+assert_domain_saved new.example.com
 grep -Fq 'The domain changes from old.example.com to new.example.com' "$CASE_DIR/output.log" ||
     fail "${CASE}: setup.sh did not see the domain change: $(grep -a -m 3 -i 'domain' "$CASE_DIR/output.log")"
 ! grep -Fq 'the import source is ignored for this run' "$CASE_DIR/output.log" ||
     fail "${CASE}: the import completed under the old domain must not skip the import under the new one"
-grep -Fq 'the import library' "$CASE_DIR/output.log" ||
-    fail "${CASE}: the run must go on to the import: $(tail -n 5 "$CASE_DIR/output.log")"
-echo 'PASS: an import under a new DOMAIN is not skipped as completed'
+[ "$(env_value "$WORK_DIR/.env" SITE_PREFIX)" = kvs-new-example ] ||
+    fail "${CASE}: expected kvs-new-example after the domain switch, got $(env_value "$WORK_DIR/.env" SITE_PREFIX)"
+echo 'PASS: an import under a new DOMAIN selects a new prefix'
 
 # A DOMAIN given but not valid still reaches setup.sh, which refuses it,
 # instead of the archive name being written into .env beside it.
