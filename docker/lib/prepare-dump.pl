@@ -1,5 +1,5 @@
-# Read only dump header statements into memory. INSERT data passes through
-# in chunks, even when an extended INSERT occupies an entire line.
+# Buffer statements and executable comments that need inspection. Ordinary
+# INSERT data passes through in chunks, including single-line extended INSERTs.
 use strict;
 use warnings;
 use re '/aa';
@@ -7,6 +7,9 @@ use re '/aa';
 my $compact = "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(\@\@SESSION.sql_mode, ''), 'ALLOW_INVALID_DATES');\n";
 my $mode_warning = "WARNING: Unrecognized header SQL_MODE assignment. Invalid dates may be stored as zero.\n";
 my $later_mode_warning = "WARNING: An SQL_MODE assignment after the dump header is ambiguous under different SQL modes and stays unchanged. Invalid dates may be stored as zero.\n";
+
+# MariaDB recognizes an uppercase M. A lowercase m starts a plain comment.
+my $exec_prefix = qr{/\*M?!};
 
 # Cursors use absolute byte offsets. Peeking may refill the buffer but never
 # consumes input. Release bytes once the caller has finished with them.
@@ -24,6 +27,7 @@ sub available {
 sub release_before {
     my ($in, $at) = @_;
     if ($at - $in->{base} >= 65536) {
+        --$at;  # Retain the preceding byte to recognize the start of a VIEW line.
         substr($in->{buf}, 0, $at - $in->{base}, '');
         $in->{base} = $at;
     }
@@ -33,6 +37,62 @@ sub peek_bytes {
     my ($in, $at, $n) = @_;
     available($in, $at, $n);
     return substr($in->{buf}, $at - $in->{base}, $n);
+}
+
+# Return the absolute end of a lexical comment, including a terminator
+# that straddles two input chunks.
+sub lexical_end {
+    my ($in, $at, $stop) = @_;
+    my $search = $at - $in->{base};
+    while (1) {
+        my $found = index($in->{buf}, $stop, $search);
+        return $in->{base} + $found + length($stop) if $found >= 0;
+        my $end = $in->{base} + length($in->{buf});
+        return $end unless available($in, $end, 1);
+        $search = $end - $in->{base} - length($stop) + 1;
+    }
+}
+
+sub sql_comment_end {
+    my ($in, $state, $at, $check_modes) = @_;
+    my %body = (%$state, at => $at);
+    while (length(my $next = peek_bytes($in, $body{at}, 2))) {
+        return $body{at} + 2 if !$body{quote} && $next eq '*/';
+        my $quote = $body{quote} || substr($next, 0, 1);
+        if ($check_modes && ($quote eq "'" || $quote eq '"')) {
+            # A long literal can span the budget in every reading. Only
+            # speculate once backslash handling changes a token boundary.
+            my %other = %body;
+            my (undef, $word) = sql_token($in, \%body, 1);
+            next if index($word, '\\') < 0;
+            $other{no_backslash} = !($other{no_backslash} || ($quote eq '"' && $other{ansi}));
+            $other{ansi} = 0;
+            sql_token($in, \%other, 1);
+            return if $other{at} != $body{at} || ($other{quote} // '') ne ($body{quote} // '');
+        } else {
+            sql_token($in, \%body, 1);
+        }
+    }
+    return;
+}
+
+sub executable_end {
+    my ($in, $s, $at) = @_;
+    my $end = sql_comment_end($in, $s, $at, !$s->{known_mode});
+    return $end if defined $end;
+    return $in->{base} + length($in->{buf}) if $s->{known_mode};
+    # An inherited mode can leave a quote open into the following rows.
+    # Try the first lexical terminator, then at most 1 MiB beyond it.
+    # A finite buffer also bounds long tokens and nested comments.
+    my $first = lexical_end($in, $at, '*/');
+    for my $extra (0, 1 << 20) {
+        my $bytes = peek_bytes($in, $at, $first - $at + $extra);
+        my $window = {buf => $bytes, base => $at, eof => 1};
+        my $end = sql_comment_end($window, $s, $at);
+        return $end if defined $end;
+        last if $in->{eof} && $at + length($bytes) == $in->{base} + length($in->{buf});
+    }
+    return $first;
 }
 
 # Return one token and advance the cursor. In a table value a single string
@@ -50,6 +110,7 @@ sub sql_token {
         my $quote = $s->{quote} || $c;
         my $escapes = !$s->{no_backslash} && $quote ne chr(96) && !($quote eq '"' && $s->{ansi});
         ++$end unless $s->{quote};
+        $s->{quote} = $quote;  # An unterminated quote stays open at EOF.
         $kind = 'quoted';
         while (available($in, $in->{base} + $end, 2)) {
             pos($in->{buf}) = $end;
@@ -60,7 +121,6 @@ sub sql_token {
             }
             $end = pos($in->{buf});
             if ($split && $end - $offset >= 65536) {
-                $s->{quote} = $quote;
                 last;
             }
             last unless available($in, $in->{base} + $end, 2);
@@ -76,19 +136,16 @@ sub sql_token {
                 $end += length(substr($in->{buf}, $end, 2));
             }
         }
+    } elsif ($c eq '/' && peek_bytes($in, $start, 4) =~ /\A($exec_prefix)/) {
+        # The client reads executable comment bodies as SQL. Only a
+        # terminator between tokens closes one. Plain comments below
+        # end at their first terminator, even after an unmatched quote.
+        $kind = 'comment';
+        $end = executable_end($in, $s, $start + length($1)) - $in->{base};
     } elsif ($lead =~ m{^/\*} || $lead =~ /^(?:\#|--(?=\s))/) {
         $kind = 'comment';
         my $block = substr($lead, 0, 2) eq '/*';
-        my $stop = $block ? '*/' : "\n";
-        my $search = $offset + ($block ? 2 : 1);
-        while (1) {
-            my $found = index($in->{buf}, $stop, $search);
-            if ($found >= 0) { $end = $found + length($stop); last; }
-            $end = length($in->{buf});
-            last if $in->{eof};
-            $search = $end - length($stop) + 1;
-            available($in, $in->{base} + $end, 1);
-        }
+        $end = lexical_end($in, $start + ($block ? 2 : 1), $block ? '*/' : "\n") - $in->{base};
     } elsif ($c =~ /[\s\w\$\x80-\xff]/) {
         $kind = $c =~ /\s/ ? 'space' : 'word';
         while (1) {
@@ -113,6 +170,7 @@ sub sql_token {
 
 sub set_modes {
     my ($s, $modes) = @_;
+    $s->{known_mode} = 1;
     $s->{no_backslash} = $modes =~ /(?:^|,)\s*NO_BACKSLASH_ESCAPES\s*(?:,|$)/i;
     $s->{ansi} = $modes =~ /(?:^|,)\s*(?:ANSI_QUOTES|ANSI|DB2|MAXDB|MSSQL|ORACLE|POSTGRESQL)\s*(?:,|$)/i;
 }
@@ -143,16 +201,17 @@ sub setting {
                 warn $mode_warning if $header == 1;
                 my $saved = $s->{saved}{lc(join('', @rhs))};
                 $s->{no_backslash} = ($saved && $saved->[0]) // $s->{inherited};
+                $s->{known_mode} = $saved && $saved->[2];
                 $s->{ansi} = ($saved && $saved->[1]) // $s->{guess_ansi};
             }
         }
         if ($lhs =~ /^\@[a-z_0-9]+$/i && join('', @rhs) =~ /^\@\@(?:SESSION\.)?SQL_MODE$/i) {
-            $s->{saved}{lc $lhs} = [@$s{qw(no_backslash ansi)}];
+            $s->{saved}{lc $lhs} = [@$s{qw(no_backslash ansi known_mode)}];
         } elsif ($lhs =~ /^\@[^\@]/) {
             if (@rhs == 1 && $rhs[0] =~ /^'([A-Z0-9_, \t]*)'$/i) {
                 my %value;
                 set_modes(\%value, $1);
-                $s->{saved}{lc $lhs} = [@value{qw(no_backslash ansi)}];
+                $s->{saved}{lc $lhs} = [@value{qw(no_backslash ansi known_mode)}];
             } else {
                 delete $s->{saved}{lc $lhs};
             }
@@ -192,7 +251,7 @@ sub setting {
 
 sub version_setting {
     my ($s, $token, $header) = @_;
-    return unless $token =~ m{\A(/\*M?!([0-9]*)\s*SET(?![\w\$\x80-\xff]))(.*)(\*/)\z}is;
+    return unless $token =~ m{\A($exec_prefix([0-9]*)\s*(?i:SET)(?![\w\$\x80-\xff]))(.*)(\*/)\z}s;
     my ($prefix, $version, $sql, $end) = ($1, $2, $3, $4);
     # The dump tools save and set a routine's creation mode under 50003: it
     # ends the header, and stays as it is in the body.
@@ -204,6 +263,7 @@ sub version_setting {
     return $prefix . $tail . $end;
 }
 
+my ($header_seen, $database_name, $backtick_ident, $ansi_ident, $legacy_ident);
 my $in = {buf => '', base => 0};
 my $state = {at => 0, ansi => 0};
 while (length(my $prefix = peek_bytes($in, $state->{at}, 4))) {
@@ -213,7 +273,19 @@ while (length(my $prefix = peek_bytes($in, $state->{at}, 4))) {
     } elsif ($prefix =~ m{^(?:\s|;|/\*|\#|--(?=\s))}) {
         my $start = $state->{at};
         my (undef, $token) = sql_token($in, $state);
-        if ($token =~ m{^/\*M?!}i && $token !~ m{^/\*M?!\d*\s*\\-}i) {
+        if (!$header_seen && $token =~ /^-- Host: /) {
+            $header_seen = 1;
+            if ($token =~ /    Database: ([^\r\n]+)(\r?)\n?\z/) {
+                $database_name = $1;
+                my $cr = $2;  # The old line filter included a CR in the database name.
+                ($backtick_ident = $database_name) =~ s/`/``/g;
+                ($ansi_ident = $database_name) =~ s/"/""/g;
+                $legacy_ident = "`$backtick_ident$cr`";
+                $backtick_ident = "`$backtick_ident`";
+                $ansi_ident = qq{"$ansi_ident"};
+            }
+        }
+        if ($token =~ /\A$exec_prefix/ && $token !~ m{\A$exec_prefix\d*\s*\\-}) {
             my $rewritten = version_setting($state, $token, 1);
             if (!defined $rewritten) { $state->{at} = $start; last; }
             $token = $rewritten;
@@ -276,7 +348,7 @@ sub option_word {
         return '' if $delimiter && peek_bytes($in, $s->{at}, length($delimiter)) eq $delimiter;
         my ($kind, $word) = sql_token($in, $s, 1, $delimiter);
         return '' unless defined $kind;
-        next if $kind eq 'space' || ($kind eq 'comment' && $word !~ m{^/\*M?!}i);
+        next if $kind eq 'space' || ($kind eq 'comment' && $word !~ /\A$exec_prefix/);
         return $word;
     }
     return '';
@@ -304,6 +376,172 @@ sub option_end {
         return unless $prefix =~ /^WITH(?![\w\$\x80-\xff])/i && parser_option($in, \%probe);
     }
     return $probe{at};
+}
+
+# Dump tools wrap the final VIEW definition in a version comment. Keep
+# literals and trivia in their original spelling while editing identifiers.
+my $view_prefix = qr{$exec_prefix\d*\s+(?i:VIEW)\s+};
+sub warn_view {
+    my ($definition, $offset, $reason) = @_;
+    my $identifier = qr/`(?:``|[^`])*`|"(?:""|[^"])*"|[\w\$\x80-\xff]+/;
+    my ($name) = $definition =~ /\A$view_prefix((?:$identifier)(?:\s*\.\s*(?:$identifier))?)/;
+    $name //= "at byte $offset";
+    my $message = "WARNING: View $name $reason";
+    $message =~ s/([\x00-\x1f\x7f])/sprintf('\\x%02X', ord $1)/ge;
+    warn "$message\n";
+}
+
+# The old filter checked the entire physical line for an alias. Remove
+# matches only in the disputed part of the VIEW, even if another statement
+# shares the line or an alternative reading runs into the following row.
+sub legacy_view_tail {
+    my ($in, $views, $at, $cut) = @_;
+    my $start = $views->[0][0];
+    return if $start && peek_bytes($in, $start - 1, 1) ne "\n";
+    my $marker = '/*!50001 VIEW ';
+    return unless peek_bytes($in, $start, length $marker) eq $marker;
+    my $offset = $start - $in->{base};
+    my $search = $offset;
+    my $eol;
+    while (($eol = index($in->{buf}, "\n", $search)) < 0) {
+        $search = length $in->{buf};
+        unless (available($in, $in->{base} + $search, 1)) {
+            $eol = $search;
+            last;
+        }
+    }
+    my $line = substr($in->{buf}, $offset, $eol - $offset);
+    return if $cut - $start >= length $line;
+    while ($line =~ /\Q$legacy_ident\E/g) {
+        my ($i, $next) = ($-[0], $+[0]);
+        return if $i >= 2 && substr($line, $next, 1) ne '.'
+            && substr($line, $i - 2, 2) =~ /^[`)] $/;
+    }
+
+    # A disputed string may itself contain */ or */;. Use the last
+    # possible statement end on this VIEW line. A cursor that ran on to a
+    # later line must not pull a following statement into the rewrite.
+    my @ends = sort { $b <=> $a } map { $_->[1] - $start } @$views;
+    my $limit = $ends[0] < length($line) ? $ends[0] : length($line);
+    my $delimiter = $views->[0][5];
+    for my $end (@ends) {
+        next if $end > length $line;
+        if (substr($line, $end - 2) =~ m{\A\*/[ \t]*\Q$delimiter\E}) {
+            $limit = $end;
+            last;
+        }
+    }
+    my $result = '';
+    my $copied = $at - $start;
+    while ($line =~ /\Q$legacy_ident\E\./g) {
+        my ($i, $next) = ($-[0], $+[0]);
+        last if $next > $limit;
+        next if $i < $cut - $start || substr($line, $i - 1, 1) =~ /[.`]/;
+        $result .= substr($line, $copied, $i - $copied);
+        $copied = $next;
+    }
+    return if $copied == $at - $start;
+    return ($result, $start + $copied);
+}
+
+sub unqualify_view {
+    my ($in, $views, $all_saw_view) = @_;
+    my $start = $views->[0][0];
+    my ($end) = sort { $b <=> $a } map { $_->[1] } @$views;
+    my $definition = peek_bytes($in, $start, $end - $start);
+    return unless grep { index($definition, $_) >= 0 } ($database_name, $backtick_ident, $ansi_ident);
+    if (!$all_saw_view) {
+        warn_view($definition, $start, 'may be inside a data string under a different SQL mode. Its definition stays unchanged.');
+        return;
+    }
+    my ($prefix) = $definition =~ /\A($view_prefix)/;
+    my %modes = map { $_->[4] => 1 } @$views;
+    my @cursors = map { {at => $start + length($prefix), ansi => $_ & 1, no_backslash => $_ & 2} } sort keys %modes;
+    my $view = {buf => $definition, base => $start, eof => 1};
+    my (@tokens, @significant, @schema, @remove, @kept);
+    my $at = $start + length($prefix);
+    my $cut;
+    # All readings start at the same byte. Stop before the first token whose
+    # boundary or meaning changes, even if the cursors could meet again later.
+    TOKEN: while (length(my $next = peek_bytes($view, $at, 2))) {
+        last if $next eq '*/';
+        my ($kind, $word) = sql_token($view, $cursors[0]);
+        my $quote = $kind eq 'quoted' ? substr($word, 0, 1) : '';
+        for my $other (@cursors[1 .. $#cursors]) {
+            sql_token($view, $other);
+            if ($other->{at} != $cursors[0]{at}
+                || ($quote eq '"' && $other->{ansi} != $cursors[0]{ansi})) {
+                # A double quote can have two meanings from its opening
+                # byte. Otherwise both readings are inside the same string
+                # until the first token boundary seen by only one cursor.
+                $cut = $at;
+                if ($quote && !($quote eq '"' && grep { $_->{ansi} != $cursors[0]{ansi} } @cursors)) {
+                    $cut = $other->{at} < $cursors[0]{at} ? $other->{at} : $cursors[0]{at};
+                }
+                last TOKEN;
+            }
+        }
+        $at = $cursors[0]{at};
+        if ($kind ne 'space' && $kind ne 'comment') {
+            push @significant, scalar @tokens;
+            push @schema, ($kind eq 'word' && $word eq $database_name) || $word eq $backtick_ident
+                || ($quote eq '"' && $cursors[0]{ansi} && $word eq $ansi_ident);
+        }
+        push @tokens, $word;
+    }
+    my @words = @tokens[@significant];
+    my @clause = ('');
+    my @table_start;
+    for my $i (0 .. $#words) {
+        my $word = uc $words[$i];
+        # FROM inside EXTRACT, SUBSTRING or TRIM introduces an expression.
+        # Only a SELECT's FROM introduces a table list at this depth.
+        if ($word eq '(') {
+            $table_start[$i] = $i && $table_start[$i - 1];
+            push @clause, $table_start[$i] ? 'from' : '';
+        }
+        if ($word eq ')' && @clause > 1) { pop @clause; }
+        if ($word eq 'SELECT') { $clause[-1] = 'select'; }
+        if ($word eq 'FROM' && $clause[-1] eq 'select') {
+            $clause[-1] = 'from';
+            $table_start[$i] = 1;
+        }
+        if ($word =~ /^(?:WHERE|GROUP|HAVING|ORDER|LIMIT|UNION|WINDOW|INTO)$/) { $clause[-1] = ''; }
+        $table_start[$i] = 1 if $word =~ /^(?:JOIN|STRAIGHT_JOIN)$/ || ($word eq ',' && $clause[-1] eq 'from');
+        next unless $schema[$i];
+        my $prev = $i ? $words[$i - 1] : '';
+        next if $prev eq '.';
+        next unless ($words[$i + 1] // '') eq '.' && defined $words[$i + 2];
+        # The view name itself, db.table.column, db.function(), or a table
+        # reference names a schema. Else db.column may use a table alias.
+        my $after = $words[$i + 3] // '';
+        # The first argument of a built-in sequence function is a name.
+        my $sequence = $prev eq '(' && $i >= 2 && $words[$i - 2] =~ /\A(?:nextval|lastval|setval)\z/i
+            && ($i < 3 || $words[$i - 3] ne '.');
+        if ($i && !$table_start[$i - 1] && !$sequence && $after ne '.' && $after ne '(') {
+            my $reference = $words[$i] . '.' . ($words[$i + 2] // '');
+            push @kept, $reference unless grep { $_ eq $reference } @kept;
+            next;
+        }
+        push @remove, @significant[$i, $i + 1];
+    }
+    my @reasons;
+    my ($tail, $tail_end);
+    if (defined $cut) {
+        ($tail, $tail_end) = legacy_view_tail($in, $views, $at, $cut);
+        my $effect = defined $tail
+            ? 'was rewritten the old way. A string literal there may have lost the old database name.'
+            : 'was kept as written.';
+        push @reasons, "has ambiguous quoting under different SQL modes. Text after the first quoting disagreement $effect";
+    }
+    if (@kept) {
+        my $why = 'may use the old database name as a table or alias. Kept ' . join(', ', @kept) . '.';
+        push @reasons, @reasons ? "The view $why" : $why;
+    }
+    warn_view($definition, $start, join(' ', @reasons)) if @reasons;
+    return unless @remove || defined $tail;
+    $tokens[$_] = '' for @remove;
+    return [$start, $tail_end // $at, $prefix . join('', @tokens) . ($tail // ''), 'view'];
 }
 
 sub scan_step {
@@ -344,7 +582,11 @@ sub scan_step {
     }
     return if $kind eq 'space';
     if ($kind eq 'comment') {
-        if ($word =~ m{^/\*M?!}i && $s->{phase} eq 'start') {
+        if (defined $database_name && $word =~ /\A$view_prefix/) {
+            my $mode = ($s->{ansi} ? 1 : 0) + ($s->{no_backslash} ? 2 : 0);
+            push @{$s->{edits}}, [$start, $s->{at}, undef, 'view', $mode, $delimiter];
+        }
+        if ($word =~ /\A$exec_prefix/ && $s->{phase} eq 'start') {
             my $rewritten = version_setting($s, $word, 2);
             push @{$s->{edits}}, [$start, $s->{at}, $rewritten, 'mode'] if defined $rewritten && $rewritten ne $word;
             $s->{phase} = 'other';
@@ -379,7 +621,7 @@ sub scan_step {
 # The bundled server's default has neither ANSI_QUOTES nor NO_BACKSLASH_ESCAPES.
 # A compact dump inherits its session's backslash handling. Walk the cursors
 # over the same input buffer. Emit a change only once all cursors agree on
-# the exact byte range and replacement. Storage stays independent of dump size.
+# the exact byte range and replacement. Ordinary INSERT data streams in chunks.
 my @scans;
 for my $backslash (0, 1) {
     # Also cover an expression whose resulting ANSI_QUOTES setting is unknown.
@@ -404,18 +646,35 @@ while (1) {
         my ($edit) = sort { $a->[0] <=> $b->[0] }
             map { @{$_->{edits}} ? $_->{edits}[0] : () } @scans;
         last if !$edit || $edit->[0] >= $safe;
-        my @agree = grep {
-            my $other = $_->{edits}[0];
-            $other && $edit->[0] == $other->[0] && $edit->[1] == $other->[1] && $edit->[2] eq $other->[2]
-        } @scans;
-        shift @{$_->{edits}} for @agree;
-        if (@agree < @scans) {
-            die "ERROR: SQL parser conversion is ambiguous under different SQL modes. Set SQL_MODE explicitly in the dump before importing.\n"
-                unless $edit->[3];
-            # Only some readings of a compact dump see this mode assignment
-            # as a statement: its bytes stay, as before it was looked for.
-            warn $later_mode_warning unless $later_mode_warned++;
-            next;
+        if (($edit->[3] // '') eq 'view') {
+            my @views;
+            for my $scan (@scans) {
+                my $first = $scan->{edits}[0];
+                push @views, shift @{$scan->{edits}}
+                    if $first && $first->[0] == $edit->[0] && ($first->[3] // '') eq 'view';
+            }
+            $edit = unqualify_view($in, \@views, @views == @scans);
+            next unless $edit;
+            # A cursor may have stopped at */ in a disputed string. Catch
+            # it up before releasing the replaced bytes.
+            for my $scan (@scans) {
+                scan_step($in, $scan) while $scan->{at} < $edit->[1];
+                shift @{$scan->{edits}} while @{$scan->{edits}} && $scan->{edits}[0][0] < $edit->[1];
+            }
+            $safe = $edit->[1] if $safe < $edit->[1];
+        } else {
+            my @agree = grep {
+                my $other = $_->{edits}[0];
+                $other && $edit->[0] == $other->[0] && $edit->[1] == $other->[1] && $edit->[2] eq $other->[2]
+            } @scans;
+            shift @{$_->{edits}} for @agree;
+            if (@agree < @scans) {
+                die "ERROR: SQL parser conversion is ambiguous under different SQL modes. Set SQL_MODE explicitly in the dump before importing.\n"
+                    unless $edit->[3];
+                # Only some readings see this mode assignment as a statement.
+                warn $later_mode_warning unless $later_mode_warned++;
+                next;
+            }
         }
         print substr($in->{buf}, $written - $in->{base}, $edit->[0] - $written), $edit->[2];
         $written = $edit->[1];

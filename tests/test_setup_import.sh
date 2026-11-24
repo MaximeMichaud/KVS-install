@@ -907,69 +907,7 @@ test_the_setup_says_when_imported_events_do_not_run() {
 # database named after the domain, so the prepared dump drops that name,
 # read from the header of the dump, and nothing else.
 test_view_bodies_lose_the_old_database_name() {
-    local dump="$TMP_ROOT/qualified-views.sql"
-    local prepared="$TMP_ROOT/qualified-views-prepared.sql"
-    local view
-
-    {
-        echo '-- MariaDB dump 10.19-11.4.13-MariaDB, for debian-linux-gnu (x86_64)'
-        echo '--'
-        echo '-- Host: localhost    Database: oldsite'
-        echo '-- ------------------------------------------------------'
-        echo 'CREATE TABLE `ktvs_options` (`variable` varchar(255) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`variable`));'
-        echo "INSERT INTO \`ktvs_options\` VALUES ('NOTE','select \`oldsite\`.\`ktvs_stats\`.\`hits\`');"
-        echo '/*!50001 CREATE VIEW `ktvs_stats_view` AS SELECT'
-        echo ' 1 AS `video_id` */;'
-        echo '/*!50001 CREATE ALGORITHM=UNDEFINED */'
-        echo '/*!50013 DEFINER=`ghost`@`%` SQL SECURITY DEFINER */'
-        echo '/*!50001 VIEW `ktvs_stats_view` AS select `oldsite`.`ktvs_stats`.`video_id` AS `video_id`,`oldsite`.`ktvs_stats`.`hits` AS `hits` from `oldsite`.`ktvs_stats` */;'
-        echo '/*!50001 VIEW `ktvs_mixed` AS select `oldsite`.`oldsite`.`id` AS `id`,`mysql`.`db`.`User` AS `oldsite`,`x``oldsite`.`y` AS `y` from (`oldsite`.`oldsite` join `mysql`.`db`) */;'
-        echo '/*!50001 VIEW `ktvs_aliased` AS select `oldsite`.`id` AS `id` from `oldsite`.`ktvs_stats` `oldsite` */;'
-        echo '/*!50001 VIEW `ktvs_derived` AS select `oldsite`.`id` AS `id` from (select `oldsite`.`ktvs_stats`.`video_id` AS `id` from `oldsite`.`ktvs_stats`) `oldsite` */;'
-        echo 'CREATE TRIGGER `t` AFTER INSERT ON `ktvs_options` FOR EACH ROW INSERT INTO `oldsite`.`ktvs_log` VALUES (1) ;;'
-        # The second pass of a locked dump repeats the header.
-        echo '-- Host: localhost    Database: oldsite'
-        echo '/*!50001 VIEW `ktvs_late` AS select `oldsite`.`ktvs_stats`.`hits` AS `hits` from `oldsite`.`ktvs_stats` */;'
-    } > "$dump"
-    import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$prepared" token-8 >/dev/null ||
-        fail "a dump with qualified views must be prepared"
-    grep -Fxq '/*!50001 VIEW `ktvs_stats_view` AS select `ktvs_stats`.`video_id` AS `video_id`,`ktvs_stats`.`hits` AS `hits` from `ktvs_stats` */;' "$prepared" ||
-        fail "the old database name must leave the view body: $(grep -F 'VIEW `ktvs_stats_view`' "$prepared")"
-    grep -Fxq '/*!50001 VIEW `ktvs_late` AS select `ktvs_stats`.`hits` AS `hits` from `ktvs_stats` */;' "$prepared" ||
-        fail "every view body loses the name: $(grep -F 'VIEW `ktvs_late`' "$prepared")"
-    # A table named like the database keeps its own name, another database
-    # keeps its qualifier, a longer name ending like the database stays.
-    grep -Fxq '/*!50001 VIEW `ktvs_mixed` AS select `oldsite`.`id` AS `id`,`mysql`.`db`.`User` AS `oldsite`,`x``oldsite`.`y` AS `y` from (`oldsite` join `mysql`.`db`) */;' "$prepared" ||
-        fail "only the database qualifier may go: $(grep -F 'VIEW `ktvs_mixed`' "$prepared")"
-    # The database name as a table alias: the body stays as it is.
-    for view in ktvs_aliased ktvs_derived; do
-        grep -Fxq "$(grep -F "VIEW \`$view\`" "$dump")" "$prepared" ||
-            fail "a body using the database name as an alias must stay whole: $(grep -F "VIEW \`$view\`" "$prepared")"
-    done
-    grep -Fq "('NOTE','select \`oldsite\`.\`ktvs_stats\`.\`hits\`')" "$prepared" || fail "row data must never be rewritten"
-    grep -Fq 'INTO `oldsite`.`ktvs_log`' "$prepared" || fail "only view bodies are rewritten"
-    grep -Fxq ' 1 AS `video_id` */;' "$prepared" || fail "the placeholder view must stay"
-
-    # A name holding a backtick, doubled in the body as in any quoted name.
-    printf '%s\n' '-- Host: db.example.com    Database: old`site' \
-        'CREATE TABLE `ktvs_options` (`variable` varchar(255) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`variable`));' \
-        '/*!50001 VIEW `v` AS select `old``site`.`t`.`c` AS `c` from `old``site`.`t` */;' > "$dump"
-    import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$prepared" token-8 >/dev/null ||
-        fail "a dump of a database with a backtick in its name must be prepared"
-    grep -Fxq '/*!50001 VIEW `v` AS select `t`.`c` AS `c` from `t` */;' "$prepared" ||
-        fail "a name with a backtick must leave the view body: $(grep -F 'VIEW `v`' "$prepared")"
-
-    # Without a database in the header (or without a header), nothing is
-    # known to drop.
-    for header in '-- Host: localhost    Database: ' '-- MariaDB dump'; do
-        printf '%s\n' "$header" \
-            'CREATE TABLE `ktvs_options` (`variable` varchar(255) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`variable`));' \
-            '/*!50001 VIEW `v` AS select `oldsite`.`t`.`c` AS `c` from `oldsite`.`t` */;' > "$dump"
-        import_prepare_dump "$dump" ktvs_ 7.0.2 /var/www/kvs /var/www/kvs "$prepared" token-8 >/dev/null ||
-            fail "a dump whose header names no database must be prepared"
-        grep -Fxq '/*!50001 VIEW `v` AS select `oldsite`.`t`.`c` AS `c` from `oldsite`.`t` */;' "$prepared" ||
-            fail "without a database name the body stays: $(grep -F 'VIEW `v`' "$prepared")"
-    done
+    bash "$REPO_ROOT/tests/test_import_views.sh" --prepare-only || fail "view dump preparation"
     pass "view bodies lose the old database name"
 }
 
@@ -1270,6 +1208,52 @@ SQL
     pass 'client delimiters, SQL modes and compact ambiguity protect stored SQL'
 }
 
+test_executable_comment_bounds() {
+    local dir="$TMP_ROOT/comment-bounds" mode
+    mkdir "$dir"
+    for mode in compact within_limit agreed explicit; do
+        perl - "$mode" > "$dir/input" <<'PERL'
+use strict;
+use warnings;
+my $mode = shift;
+my $ddl = 'CREATE TABLE ft (body TEXT, FULLTEXT (body) WITH PARSER ngram);';
+my $head = $mode eq 'explicit' ? "SET SQL_MODE='';\n" : '';
+# Release an input chunk before the executable comment. Put the star and
+# slash of its first lexical terminator on opposite sides of a later refill.
+$head .= '-- ' . ('p' x 65536) . "\nSELECT 1;\n";
+$head .= "/*!50100 SELECT ";
+# Two escaped quotes split one token in the other mode, then both
+# readings enter the long literal at the same byte.
+$head .= "'a\\'b\\'c', " if $mode eq 'within_limit' || $mode eq 'explicit';
+$head .= $mode eq 'compact' ? "'it\\'s' " : "'";
+my $fill = $mode eq 'compact' ? ' ' : 'x';
+print $head, $fill x (20 * 65536 - 1 - length($head)), '*/';
+if ($mode eq 'compact') {
+    # Only the speculative reading sees the final quote as closing a string.
+    # Its apparent terminator ends one byte beyond the lookahead budget.
+    my $tail = ";\n$ddl\n-- ";
+    print $tail, 'x' x ((1 << 20) + 1 - length($tail) - 4), "' */\n";
+} else {
+    # SQL-looking bytes inside the literal must survive up to the budget,
+    # and past it under an explicit mode or when all readings agree.
+    my $tail = "; $ddl ";
+    my $distance = (1 << 20) + ($mode eq 'within_limit' ? 0 : 65536);
+    print $tail, 'x' x ($distance - length($tail) - 4), "' */;\n$ddl\n";
+}
+PERL
+        perl "$REPO_ROOT/docker/lib/prepare-dump.pl" < "$dir/input" > "$dir/out" 2>"$dir/err" ||
+            fail "executable comment scan failed for $mode"
+        grep -Fxq 'CREATE TABLE ft (body TEXT, FULLTEXT (body));' "$dir/out" ||
+            fail "the real ngram index following the $mode comment was hidden"
+        if [ "$mode" != compact ]; then
+            grep -aF '/*!50100 SELECT' "$dir/input" | cmp - <(grep -aF '/*!50100 SELECT' "$dir/out") ||
+                fail "the $mode executable comment changed inside its literal"
+        fi
+    done
+    pass 'executable comments bound inherited quoting from the first terminator across refills'
+}
+
+test_executable_comment_bounds
 test_ngram_modes_and_client_delimiters
 test_ngram_only_changes_index_options
 test_ngram_indexes_keep_their_columns_and_use_the_default_parser
