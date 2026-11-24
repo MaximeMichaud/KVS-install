@@ -3857,7 +3857,7 @@ function updatephpMyAdmin() {
     local install_uid
     local install_gid
     local status
-    local old_moved=false
+    local old_moved=false backup
     local config="$install_dir/config.inc.php"
     local keep_config=false
     local install_root link_path link_target link_hops=0
@@ -3903,9 +3903,10 @@ function updatephpMyAdmin() {
       install_mode=755
     fi
 
-    work_dir=$(mktemp -d "${install_dir}.update.XXXXXX") || return $?
+    work_dir=$(mktemp -d "${install_dir}.previous.XXXXXX") || return $?
     new_dir="$work_dir/new"
     old_dir="$work_dir/old"
+    backup="$old_dir"
     archive="$work_dir/phpmyadmin.tar.gz"
 
     download_page_content=$(curl -fsSL "$download_page")
@@ -3989,6 +3990,12 @@ function updatephpMyAdmin() {
     }
 
     if [[ -e "$install_dir" || -L "$install_dir" ]]; then
+      if [[ -L $install_dir ]]; then
+        # A relative directory link changes meaning when moved into the backup.
+        # Keep the original entry for rollback and copy the tree it reaches.
+        backup="$work_dir/site"
+        cp -a -- "$install_dir/." "$backup" || { rm -rf "$work_dir"; return 1; }
+      fi
       mv "$install_dir" "$old_dir"
       status=$?
       if ((status != 0)); then
@@ -4023,7 +4030,14 @@ function updatephpMyAdmin() {
       return 1
     fi
 
-    rm -rf "$work_dir"
+    if [[ $old_moved == true ]]; then
+      echo "Previous phpMyAdmin installation kept at $backup"
+      echo "Once the new version works, you can remove the backup directory $work_dir"
+      rm -f -- "$archive" || return $?
+      if [[ $backup != "$old_dir" ]]; then rm -f -- "$old_dir" || return $?; fi
+    else
+      rm -rf -- "$work_dir"
+    fi
 }
 
 main() {

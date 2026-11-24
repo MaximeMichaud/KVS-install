@@ -1582,7 +1582,8 @@ test_phpmyadmin_update_keeps_settings() {
   trap 'rm -rf "$temp_dir"' RETURN
   install_dir="$temp_dir/php my admin"
   config="$install_dir/config.inc.php"
-  mkdir -p "$temp_dir/fixture/phpMyAdmin-test"
+  mkdir -p "$temp_dir/fixture/phpMyAdmin-test/themes/default"
+  touch "$temp_dir/fixture/phpMyAdmin-test/themes/default/icon.png"
   printf 'new-version\n' >"$temp_dir/fixture/phpMyAdmin-test/index.php"
   printf "<?php\n\$cfg['blowfish_secret'] = '';\n" >"$temp_dir/fixture/phpMyAdmin-test/config.sample.inc.php"
   tar czf "$temp_dir/archive.tar.gz" -C "$temp_dir/fixture" phpMyAdmin-test
@@ -1601,7 +1602,8 @@ test_phpmyadmin_update_keeps_settings() {
 
   for layout in file external relative internal chained through crossing dotdot dangling empty directory; do
     rm -rf "$install_dir" "$temp_dir/settings" "$TEST_PMA_CALLS"
-    mkdir -p "$install_dir/conf" "$temp_dir/settings"
+    mkdir -p "$install_dir/conf" "$install_dir/themes/custom" "$temp_dir/settings"
+    touch "$install_dir/obsolete.php" "$install_dir/themes/custom/icon.png"
     chmod 750 "$install_dir"
     printf 'working-version\n' >"$install_dir/index.php"
     printf 'old\n' >"$install_dir/old-sentinel"
@@ -1636,7 +1638,16 @@ test_phpmyadmin_update_keeps_settings() {
     tree_inode=$(stat -c %i "$install_dir")
     status=0
     updatephpMyAdmin "$install_dir" "https://downloads.test/" >"$temp_dir/out" 2>&1 || status=$?
-    [[ -z "$(find "$temp_dir" -maxdepth 1 -name '*.update.*')" ]] || fail "staging directory left for $layout" || return 1
+    if [[ $status == 0 ]]; then
+      local backup
+      backup=$(sed -n 's/^Previous phpMyAdmin installation kept at //p' "$temp_dir/out")
+      grep -Fxq "Once the new version works, you can remove the backup directory ${backup%/*}" "$temp_dir/out" ||
+        { fail "the backup cleanup message did not name the private directory"; return 1; }
+      [[ $backup == "$install_dir.previous."* && $(stat -c %i "$backup") == "$tree_inode" &&
+         $(<"$backup/old-sentinel") == old && $(stat -c %a "${backup%/*}") == 700 &&
+         -f "$backup/themes/custom/icon.png" && -f "$backup/obsolete.php" && -f "$install_dir/themes/default/icon.png" &&
+         ! -e "$install_dir/themes/custom/icon.png" && ! -e "$install_dir/obsolete.php" ]] || { fail "previous installation missing at the reported path ($layout)"; return 1; }
+    fi
     case "$layout" in
       file|external|relative)
         assert_equal 0 "$status" "update with a $layout configuration: $(<"$temp_dir/out")" || return 1
@@ -1677,6 +1688,27 @@ test_phpmyadmin_update_keeps_settings() {
         assert_file_contains "$config" "generated-secret" "an empty configuration was not generated again" || return 1 ;;
     esac
   done
+  rm -r "$config"
+  mv() {
+    if [[ $1 == */new && $2 == "$install_dir" ]]; then return 44; fi
+    command mv "$@"
+  }
+  status=0
+  updatephpMyAdmin "$install_dir" "https://downloads.test/" >"$temp_dir/out" 2>&1 || status=$?
+  [[ $status == 44 && -f "$install_dir/themes/custom/icon.png" ]] || { fail "failed swap lost the old tree"; return 1; }
+  unset -f mv
+  rm -rf "$install_dir"
+  updatephpMyAdmin "$install_dir" "https://downloads.test/" >"$temp_dir/out" 2>&1 || return 1
+  if grep -q 'Previous phpMyAdmin' "$temp_dir/out"; then fail "reported a backup on first install"; return 1; fi
+  command mv "$install_dir" "$temp_dir/original"
+  ln -s original "$install_dir"
+  local first second
+  updatephpMyAdmin "$install_dir" "https://downloads.test/" >"$temp_dir/out" 2>&1 || return 1
+  first=$(sed -n 's/^Previous phpMyAdmin installation kept at //p' "$temp_dir/out")
+  updatephpMyAdmin "$install_dir" "https://downloads.test/" >"$temp_dir/out" 2>&1 || return 1
+  second=$(sed -n 's/^Previous phpMyAdmin installation kept at //p' "$temp_dir/out")
+  [[ $first != "$second" && -s $first/config.inc.php && -s $second/config.inc.php ]] ||
+    { fail "repeated updates did not retain both backups"; return 1; }
   umask "$previous_umask"
 }
 
