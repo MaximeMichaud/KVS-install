@@ -72,3 +72,40 @@ make_run passing test_a.sh=0 test_b.sh=0 integration_cloudflare_realip.sh=0
     fail "a run of passing suites did not say so: $(cat "$CASE_DIR/out" "$CASE_DIR/err")"
 [ "$(wc -l < "$CASE_DIR/ran")" -eq 3 ] || fail "a passing run did not run its three suites"
 echo "PASS: a run of passing suites says so and succeeds"
+
+# Exercise both nginx import modes, the TLS build prerequisite, a missing
+# suite and a later passing suite without using a Docker daemon.
+dir=$TEST_DIR/integration
+mkdir -p "$dir/tests" "$dir/bin"
+ln -s "$ROOT_DIR/docker" "$dir/docker"
+cp "$ROOT_DIR/tests/run-integration.sh" "$dir/tests/"
+cat > "$dir/bin/docker" <<'DOCKER'
+#!/bin/bash
+case "$1 $2" in
+    'info '|'image inspect'|'image rm') exit 0 ;;
+    'build --quiet') exit 8 ;;
+    *) exit 99 ;;
+esac
+DOCKER
+cat > "$dir/tests/integration_nginx_import.sh" <<'IMPORT'
+#!/bin/bash
+echo "import $NGINX_IMPORT_TEST_MODE"
+[[ $NGINX_IMPORT_TEST_MODE != file ]] || exit 3
+IMPORT
+echo 'raise SystemExit(9)' > "$dir/tests/integration_internal_tls.py"
+echo 'print("last suite ran")' > "$dir/tests/last.py"
+chmod +x "$dir/bin/docker" "$dir/tests/integration_nginx_import.sh"
+status=0
+PATH="$dir/bin:$PATH" "$dir/tests/run-integration.sh" integration_nginx_import.sh \
+    integration_internal_tls.py missing.sh last.py > "$dir/out" 2> "$dir/err" || status=$?
+[[ $status == 1 ]] || fail "integration runner returned $status"
+if ! grep -Fxq 'import source' "$dir/out" || ! grep -Fxq 'last suite ran' "$dir/out"; then
+    fail "integration runner skipped later cases"
+fi
+for failure in 'integration_nginx_import.sh (file) (status 3)' 'integration_internal_tls.py (status 8)' 'missing.sh (status 1)'; do
+    grep -Fxq "  $failure" "$dir/err" || fail "missing integration failure: $failure"
+done
+grep -Fxq 'All integration suites passed' "$dir/out" && fail "integration failures reported as success"
+PATH="$dir/bin:$PATH" "$dir/tests/run-integration.sh" last.py > "$dir/out"
+grep -Fxq 'All integration suites passed' "$dir/out" || fail "passing integration run"
+echo 'PASS: integration runner continues after failures and preserves their status'

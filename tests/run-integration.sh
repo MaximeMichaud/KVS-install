@@ -78,29 +78,50 @@ cleanup() {
 }
 trap cleanup EXIT
 
+failed=()
+run_case() {
+    local name=$1 status=0
+    shift
+    "$@" || status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "FAILED: $name (status $status)" >&2
+        failed+=("$name (status $status)")
+    fi
+}
+
+run_tls() {
+    if [ -z "$nginx_image" ]; then
+        local tag="kvs-integration-nginx:$$"
+        docker build --quiet --tag "$tag" "$ROOT_DIR/docker/nginx" >/dev/null || return $?
+        nginx_image=$tag
+    fi
+    KVS_TLS_TEST_NGINX_IMAGE=$nginx_image KVS_TLS_TEST_PHP_IMAGE=$php_fpm \
+        KVS_TLS_TEST_CRON_IMAGE=$php_cli python3 "$1"
+}
+
 for suite in "${suites[@]}"; do
-    [ -f "$TEST_DIR/$suite" ] || { echo "ERROR: no suite tests/$suite" >&2; exit 1; }
     echo "Running $suite"
+    if [ ! -f "$TEST_DIR/$suite" ]; then
+        echo "ERROR: no suite tests/$suite" >&2
+        run_case "$suite" false
+        continue
+    fi
     case "$suite" in
         integration_nginx_import.sh)
-            NGINX_IMPORT_TEST_MODE="file" "$TEST_DIR/$suite"
-            NGINX_IMPORT_TEST_MODE="source" "$TEST_DIR/$suite"
+            for mode in file source; do
+                NGINX_IMPORT_TEST_MODE=$mode run_case "$suite ($mode)" "$TEST_DIR/$suite"
+            done
             ;;
-        integration_internal_tls.py)
-            if [ -z "$nginx_image" ]; then
-                nginx_image="kvs-integration-nginx:$$"
-                docker build --quiet --tag "$nginx_image" "$ROOT_DIR/docker/nginx" >/dev/null
-            fi
-            KVS_TLS_TEST_NGINX_IMAGE=$nginx_image KVS_TLS_TEST_PHP_IMAGE=$php_fpm \
-                KVS_TLS_TEST_CRON_IMAGE=$php_cli python3 "$TEST_DIR/$suite"
-            ;;
-        *.py)
-            python3 "$TEST_DIR/$suite"
-            ;;
-        *)
-            "$TEST_DIR/$suite"
-            ;;
+        integration_internal_tls.py) run_case "$suite" run_tls "$TEST_DIR/$suite" ;;
+        *.py) run_case "$suite" python3 "$TEST_DIR/$suite" ;;
+        *) run_case "$suite" "$TEST_DIR/$suite" ;;
     esac
 done
+
+if [ "${#failed[@]}" -ne 0 ]; then
+    echo "Failed integration cases:" >&2
+    printf '  %s\n' "${failed[@]}" >&2
+    exit 1
+fi
 
 echo "All integration suites passed"
