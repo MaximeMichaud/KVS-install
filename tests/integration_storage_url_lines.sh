@@ -116,7 +116,7 @@ sed -n '/^if ! MATCHING_URL_COUNT=$(run_scalar_query/,/^if ! run_query/{ /^if ! 
 reconfigure_urls() (
     set -e
     # shellcheck disable=SC2034
-    MODE=single TABLES_PREFIX=ktvs_ EXPECTED_SSL_SKIP=0 SERVER_URL=https://site.test:8443
+    MODE=single TABLES_PREFIX=ktvs_ EXPECTED_SSL_SKIP=${1:-0} SERVER_URL=https://site.test:8443
     # shellcheck disable=SC2034
     RED='' NC=''
     # shellcheck disable=SC2329  # Called by the extracted SQL.
@@ -148,6 +148,29 @@ reconfigure_urls > "$work/reconfigure.log"
 grep -Fxq 'matching=2 stale=0' "$work/reconfigure.log"
 [ "$(mariadb fixture -N -e 'SELECT MIN(urls = BINARY expected), COUNT(*) FROM ktvs_admin_servers')" = $'1\t6' ] ||
     { echo "FAIL: reconfiguration did not rewrite exactly the local URL lines" >&2; exit 1; }
+# Reconfiguration uses the same row-wide TLS policy after the URL rewrite.
+mariadb fixture <<'SQL'
+TRUNCATE ktvs_admin_servers;
+SET @local = 'http://www.site.test:81/contents/a', @cdn = 'https://cdn.test/b';
+INSERT INTO ktvs_admin_servers (urls, streaming_skip_ssl_check) VALUES
+    (CONCAT(@local, CHAR(13,10), @cdn), 1), (CONCAT(@cdn, CHAR(10), @local), 1),
+    (CONCAT(@local, CHAR(13,10), @local, CHAR(10)), 0), (@cdn, 1), (@cdn, 0);
+SQL
+reconfigure_urls 1 > "$work/reconfigure.log" || { cat "$work/reconfigure.log"; exit 1; }
+flags=$(mariadb fixture -N -e 'SELECT GROUP_CONCAT(streaming_skip_ssl_check ORDER BY server_id) FROM ktvs_admin_servers')
+[ "$flags" = '0,0,1,1,0' ] || { echo "FAIL: reconfigured storage TLS flags $flags"; exit 1; }
+echo "PASS: reconfigured storage TLS flags $flags"
+mariadb fixture <<'SQL'
+UPDATE ktvs_admin_servers SET streaming_skip_ssl_check = 1 WHERE server_id = 2;
+CREATE TRIGGER keep_flag BEFORE UPDATE ON ktvs_admin_servers FOR EACH ROW
+    SET NEW.streaming_skip_ssl_check = OLD.streaming_skip_ssl_check;
+SQL
+if reconfigure_urls 1 > "$work/reconfigure.log" 2>&1; then
+    echo "FAIL: reconfiguration accepted a mixed row with verification disabled" >&2
+    exit 1
+fi
+grep -Fq 'do not match the requested state' "$work/reconfigure.log"
+mariadb fixture -e 'DROP TRIGGER keep_flag; UPDATE ktvs_admin_servers SET streaming_skip_ssl_check = 0'
 mariadb fixture <<'SQL'
 UPDATE ktvs_admin_servers SET urls = CONCAT('https://site.test:8443/contents/a', CHAR(13,10), 'https://site.test/contents/b');
 CREATE TRIGGER keep_urls BEFORE UPDATE ON ktvs_admin_servers FOR EACH ROW SET NEW.urls = OLD.urls;

@@ -707,7 +707,7 @@ case "${1:-}" in
                     exit 89
                 fi
                 guard_result=${MOCK_APPLICATION_GUARD_RESULT:-1}
-                if [[ "$sql" == *'streaming_skip_ssl_check = 1'* ]]; then
+                if [[ "$sql" == *'streaming_skip_ssl_check = IF(urls REGEXP '* ]]; then
                     record_query_kind tls-skip-1-guarded "$query_bytes"
                     if [ "${MOCK_TLS_DB_STATUS:-0}" -eq 0 ] &&
                         [ "$guard_result" = 1 ]; then
@@ -786,7 +786,7 @@ case "${1:-}" in
                 fi
                 exit "${MOCK_SCALAR_STATUS:-0}"
             fi
-            if [[ "$sql" == *'SELECT COUNT(*) FROM '*' urls REGEXP '* ]]; then
+            if [[ "$sql" == *'SELECT COUNT(*) FROM '*' urls REGEXP '* && "$sql" != *'COALESCE('* ]]; then
                 record_query_kind verify-stale-url "$query_bytes"
                 if [ "${MOCK_EMPTY_STALE_COUNT:-false}" != true ]; then
                     if [ -n "${MOCK_STALE_COUNT+x}" ]; then
@@ -817,7 +817,7 @@ case "${1:-}" in
                 printf '%s\n' "${MOCK_FINAL_QUERY_OUTPUT:-1 https://7.0.2.example.org/contents/ 0}"
                 exit "${MOCK_FINAL_QUERY_STATUS:-0}"
             fi
-            if [[ "$sql" == *'streaming_skip_ssl_check = 1'* ]]; then
+            if [[ "$sql" == *'streaming_skip_ssl_check = IF(urls REGEXP '* ]]; then
                 record_query_kind tls-skip-1 "$query_bytes"
                 if [ "${MOCK_TLS_DB_STATUS:-0}" -eq 0 ]; then
                     set_expected_database_skip

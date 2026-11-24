@@ -2021,8 +2021,6 @@ if [ "$MODE" = "multi" ]; then
         exit 1
     fi
     if [ "$SSL_PROVIDER" = "selfsigned" ]; then
-        run_application_update_query \
-            "streaming_skip_ssl_check = 1" "1=1"
         echo -e "${GREEN}Caddy internal TLS selected${NC}"
     else
         run_application_update_query \
@@ -2129,6 +2127,16 @@ CANONICAL_PREFIX="${SERVER_URL//./[.]}/contents/"
 run_application_update_query \
     "urls = REGEXP_REPLACE(urls, '(?m)^${STORAGE_PREFIX}', '${SERVER_URL}/contents/')" \
     "urls REGEXP '(?m)^${STORAGE_PREFIX}'"
+TLS_ROW_CONDITION='1=1'
+if [ "$EXPECTED_SSL_SKIP" = 1 ]; then
+    # The skip flag applies to every endpoint in the row. Keep external-only
+    # rows as configured and require verification for every mixed row.
+    LOCAL_ENDPOINT="https?://(www[.])?${DOMAIN_PATTERN}(:[0-9]+)?/"
+    TLS_ROW_CONDITION="urls REGEXP '(?m)^${LOCAL_ENDPOINT}'"
+    OTHER_ENDPOINT="urls REGEXP '(?m)^(?!${LOCAL_ENDPOINT})[[:blank:]]*[^[:space:]]'"
+    EXPECTED_SSL_SKIP="IF(${OTHER_ENDPOINT}, 0, 1)"
+    run_application_update_query "streaming_skip_ssl_check = ${EXPECTED_SSL_SKIP}" "$TLS_ROW_CONDITION"
+fi
 
 SETUP_PATH=/var/www/kvs/admin/include/setup.php
 if [ "$MODE" = multi ]; then
@@ -2197,7 +2205,7 @@ if ! MATCHING_URL_COUNT=$(run_scalar_query \
     ! STALE_PROJECT_URL_COUNT=$(run_scalar_query \
         "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE urls REGEXP '(?m)^(?!${CANONICAL_PREFIX})${STORAGE_PREFIX}';") ||
     ! SSL_MISMATCH_COUNT=$(run_scalar_query \
-        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${EXPECTED_SSL_SKIP};"); then
+        "SELECT COUNT(*) FROM ${TABLES_PREFIX}admin_servers WHERE COALESCE(streaming_skip_ssl_check,-1)<>${EXPECTED_SSL_SKIP} AND ${TLS_ROW_CONDITION};"); then
     echo -e "${RED}ERROR: Could not verify the reconfigured database state${NC}"
     exit 1
 fi
