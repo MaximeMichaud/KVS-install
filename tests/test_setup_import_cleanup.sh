@@ -75,9 +75,15 @@ if check; then fail "accepted an invalid saved table prefix"; fi
 # The other options table exists. A missing saved prefix must prevent the
 # query even when the invoking shell exported a valid but unrelated one.
 sed -i '/^TABLES_PREFIX=/d' .env
+awk '/^# Load environment$/ { load = 1 }
+    load { print }
+    load && /^source [.]env$/ { found = 1; exit }
+    load && !/^#|^unset / { exit }
+    END { if (!found) exit 1 }' "$root/docker/setup.sh" > load-env.sh ||
+    fail "setup.sh no longer has the environment block from # Load environment through source .env"
 if (export TABLES_PREFIX=other_
     # shellcheck source=/dev/null
-    source <(sed -n '/^# Load environment$/,/^source .env$/p' "$root/docker/setup.sh")
+    source ./load-env.sh
     import_check_leftover_dump) > output 2>&1; then fail "accepted inherited prefix"; fi
 [ ! -f attempts ] && [ -f token ] && [ -f "$dump" ] || fail "used inherited prefix"
 # shellcheck disable=SC2016  # An operator-supplied .env expression.

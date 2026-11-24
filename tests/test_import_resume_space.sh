@@ -102,6 +102,9 @@ done
 awk '/^import_remote_free_space_check\(\) \{/,/^}/' "$root/docker/setup.sh" > "$tmp/check.sh"
 # shellcheck source=/dev/null
 source "$tmp/check.sh"
+# shellcheck source=/dev/null
+source <(sed -n '/^import_remote_size_text() {/,/^}/p' "$root/docker/setup.sh")
+declare -F import_remote_size_text >/dev/null || fail 'setup.sh no longer defines import_remote_size_text'
 (
     # shellcheck disable=SC2329  # Called by the sourced transfer function.
     du() { return 1; }
@@ -122,8 +125,6 @@ rm "$(import_count_file "$resume")"
     done
     # With no estimate, keep the ordinary inspection's upper-bound warning.
     printf 'site_size_status=skipped\nsite_fs_used_mb=50\ndb_size_mb=0\n' > "$IMPORT_RESUME_SPACE_REPORT"
-    # shellcheck source=/dev/null
-    source <(sed -n '/^import_remote_size_text() {/,/^}/p' "$root/docker/setup.sh")
     COUNT_STATUS=12 AVAILABLE=1 import_remote_files "$tmp/source" "$resume" no > "$tmp/out" 2>&1 || fail 'unknown size prevented tar'
     grep -Fq 'site size is not known exactly' "$tmp/out" || fail 'unknown size skipped the first-pass check'
     ! grep -Fq 'IMPORT_SIZE_TIMEOUT=0' "$tmp/out" || fail 'a resumed pass offered a measure it skips'
@@ -132,8 +133,6 @@ rm "$(import_count_file "$resume")"
 # one: check the filesystem bound and say so when it does not fit.
 (
     RED='' YELLOW='' NC=''
-    # shellcheck source=/dev/null
-    source <(sed -n '/^import_remote_size_text() {/,/^}/p' "$root/docker/setup.sh")
     for fields in none status-only exact exact-text upper-bound; do
         case "$fields" in
             none) : ;;

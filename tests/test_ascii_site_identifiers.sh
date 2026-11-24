@@ -112,7 +112,12 @@ done
 (
     # shellcheck source=/dev/null
     source <(extract kvs-install.sh configure_kvs_system_settings; extract kvs-install.sh configure_kvs_servers; extract kvs-install.sh configure_kvs_servers_tls; extract kvs-install.sh provision_kvs_database)
-    URL=site.test CERTIFICATE_MODE=public
+    # shellcheck source=/dev/null
+    source <(extract kvs-install.sh kvs_storage_port_pattern; extract kvs-install.sh kvs_local_storage_origin)
+    DOMAIN=site.test URL=site.test CERTIFICATE_MODE=public
+    origin=$(kvs_local_storage_origin) || fail "cannot read the local storage origin"
+    [[ https://site.test:8443 =~ ${origin}$ ]] || fail "local storage origin does not match the site and port"
+    [[ ! https://other.test:8443 =~ ${origin}$ ]] || fail "local storage origin matches another site"
     mariadb() { echo called >> queries; return 1; }
     kvs_tables_prefix() { return 1; }
     for operation in configure_kvs_system_settings configure_kvs_servers configure_kvs_servers_tls provision_kvs_database; do
