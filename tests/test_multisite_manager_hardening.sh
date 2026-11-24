@@ -335,6 +335,8 @@ done
 # And stop of a real site does reach 'docker compose down' (remove of a real
 # site is covered by the R1 and R5 cases below).
 mkdir -p "${traversal_root}/multi-site/sites/real.example"
+cp "${traversal_root}/multi-site/docker-compose.site.yml.template" \
+    "${traversal_root}/multi-site/sites/real.example/docker-compose.yml"
 printf 'DOMAIN=real.example\nSITE_PREFIX=kvs-real-example\n' \
     > "${traversal_root}/multi-site/sites/real.example/.env"
 MOCK_DOCKER_LOG="$traversal_log" KVS_WEBROOT_BASE="${TEST_DIR}/traversal/webroots" \

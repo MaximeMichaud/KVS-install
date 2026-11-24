@@ -1455,6 +1455,16 @@ MOUNT
     fi
 }
 
+check_site_files() {
+    local site_dir="$1" action="$2" file
+    for file in docker-compose.yml .env; do
+        if [ ! -f "$site_dir/$file" ] || [ ! -s "$site_dir/$file" ]; then
+            log_error "Incomplete site: restore the missing or empty $site_dir/$file before $action"
+            return 1
+        fi
+    done
+}
+
 start_site() {
     local domain="$1"
     local admin_password="${KVS_ADMIN_PASSWORD:-}"
@@ -1474,13 +1484,8 @@ start_site() {
         exit 1
     fi
 
-    local file route="${CADDY_SITES_DIR}/${domain}.caddy"
-    for file in docker-compose.yml .env; do
-        if [ ! -f "$site_dir/$file" ] || [ ! -s "$site_dir/$file" ]; then
-            log_error "Incomplete site: restore the missing or empty $site_dir/$file before starting"
-            return 1
-        fi
-    done
+    local route="${CADDY_SITES_DIR}/${domain}.caddy"
+    check_site_files "$site_dir" starting || return 1
     if [ ! -f "$route" ] || [ ! -s "$route" ]; then
         log_error "Missing or empty Caddy route: ${route}. Restore it or run ./site-manager.sh proxy-config ${domain} with the site's TLS and www settings"
         return 1
@@ -1610,6 +1615,7 @@ stop_site() {
         exit 1
     fi
 
+    check_site_files "$site_dir" stopping || return 1
     log_info "Stopping site: ${domain}"
     cd "$site_dir"
     docker compose down
