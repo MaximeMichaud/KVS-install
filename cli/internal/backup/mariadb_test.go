@@ -51,9 +51,10 @@ var created struct {
 // The labels of the container: whose tests made it, from which process on
 // which host, so that a later run can tell one whose process is gone.
 const (
-	labelTests = "kvsctltest=backup"
-	labelPID   = "kvsctltest.pid"
-	labelHost  = "kvsctltest.host"
+	labelTests        = "kvsctltest=backup"
+	labelPID          = "kvsctltest.pid"
+	labelHost         = "kvsctltest.host"
+	labelFixtureOwner = "kvsctltest.fixture-owner"
 )
 
 func TestMain(m *testing.M) {
@@ -93,19 +94,31 @@ func sweepLeftovers() {
 	if err != nil {
 		return
 	}
-	out, err := exec.Command("docker", "ps", "--all", "--filter", "label="+labelTests, "--format", "{{.ID}}\t{{.Label \""+labelPID+"\"}}\t{{.Label \""+labelHost+"\"}}").Output()
+	format := "{{.ID}}\t{{.Label \"" + labelPID + "\"}}\t{{.Label \"" + labelHost + "\"}}\t{{.Label \"" + labelFixtureOwner + "\"}}"
+	out, err := exec.Command("docker", "ps", "--all", "--filter", "label="+labelTests, "--format", format).Output()
 	if err != nil {
 		return
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.Split(line, "\t")
-		if len(f) != 3 || f[2] != host {
+	for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 {
 			continue
 		}
-		if pid, err := strconv.Atoi(f[1]); err == nil && pid > 0 && !processAlive(pid) {
-			_ = exec.Command("docker", "rm", "--force", "--volumes", f[0]).Run()
+		if deadLocalProcess(host, fields[2], fields[1]) || deadFixtureOwner(host, fields[3]) {
+			_ = exec.Command("docker", "rm", "--force", "--volumes", fields[0]).Run()
 		}
 	}
+}
+
+// A fixture can simulate another host. Its real owner is recorded separately.
+func deadFixtureOwner(host, owner string) bool {
+	ownerHost, pid, ok := strings.Cut(owner, ":")
+	return ok && deadLocalProcess(host, ownerHost, pid)
+}
+
+func deadLocalProcess(host, ownerHost, process string) bool {
+	pid, err := strconv.Atoi(process)
+	return host == ownerHost && err == nil && pid > 0 && !processAlive(pid)
 }
 
 // processAlive reports whether pid names a process of this host, one of
@@ -971,18 +984,23 @@ func TestSweepRemovesWhatADeadRunLeft(t *testing.T) {
 	}
 	// No process has a number above the largest pid_max Linux allows.
 	gone := 1 << 30
+	myPID := os.Getpid()
 	containers := []struct {
 		suffix, host string
 		pid          int
+		ownerPID     int
 		kept         bool
 	}{
-		{"sweep-gone", host, gone, false},
-		{"sweep-alive", host, os.Getpid(), true},
-		{"sweep-elsewhere", "elsewhere.invalid", gone, true},
+		{"sweep-gone", host, gone, myPID, false},
+		{"sweep-alive", host, myPID, myPID, true},
+		{"sweep-elsewhere", "elsewhere.invalid", gone, myPID, true},
+		{"sweep-orphan", "elsewhere.invalid", gone, gone, false},
 	}
 	for _, c := range containers {
-		name := fmt.Sprintf("kvsctltest-backup-%d-%s", os.Getpid(), c.suffix)
-		create := exec.Command("docker", "create", "--name", name, "--label", labelTests, "--label", fmt.Sprintf("%s=%d", labelPID, c.pid), "--label", labelHost+"="+c.host, mariadb.image)
+		name := fmt.Sprintf("kvsctltest-backup-%d-%s", myPID, c.suffix)
+		create := exec.Command("docker", "create", "--network", "none", "--name", name, "--label", labelTests,
+			"--label", fmt.Sprintf("%s=%d", labelPID, c.pid), "--label", labelHost+"="+c.host,
+			"--label", fmt.Sprintf("%s=%s:%d", labelFixtureOwner, host, c.ownerPID), mariadb.image)
 		if out, err := create.CombinedOutput(); err != nil {
 			t.Fatalf("docker create %s: %v: %s", name, err, out)
 		}
@@ -1002,5 +1020,16 @@ func TestSweepRemovesWhatADeadRunLeft(t *testing.T) {
 	}
 	if err := exec.Command("docker", "container", "inspect", mariadb.name).Run(); err != nil {
 		t.Errorf("the container of this run went: %v", err)
+	}
+}
+
+func TestFixtureOwnerMustBeDeadOnThisHost(t *testing.T) {
+	for owner, dead := range map[string]bool{
+		"here.test:1073741824": true, "here.test:" + strconv.Itoa(os.Getpid()): false,
+		"elsewhere.invalid:1073741824": false, "": false, "here.test:0": false, "here.test:bad": false,
+	} {
+		if deadFixtureOwner("here.test", owner) != dead {
+			t.Errorf("owner %q: want dead %v", owner, dead)
+		}
 	}
 }
