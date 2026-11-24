@@ -44,6 +44,56 @@ seed_installation() {
   printf 'staged\n' >"$install_dir/docker/import/site.tar"
 }
 
+# Enter a second installer while the first clone has files in staging.
+test_concurrent_installers_leave_the_active_clone_alone() {
+  local temp_dir target
+  temp_dir=$(mktemp -d)
+  trap '[[ ! -s "$temp_dir/child" ]] || kill "$(cat "$temp_dir/child")" 2>/dev/null; rm -rf "$temp_dir"' RETURN
+  export KVS_INSTALL_DIR="$temp_dir/install"
+  export KVS_BACKUP_DIR="$temp_dir/backup"
+  ln -s "$KVS_INSTALL_DIR" "$temp_dir/alias"
+  seed_installation "$KVS_INSTALL_DIR"
+  rm -rf "$KVS_INSTALL_DIR/.git"
+
+  # An exclusive POSIX lock, as used by flock on NFS, needs write access.
+  flock() {
+    local fd="${*: -1}"
+    if [[ $1 == --exclusive && $fd =~ ^[0-9]+$ ]]; then
+      python3 -c 'import fcntl, sys; fcntl.lockf(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)' "$fd" || return 65
+    fi
+    command flock "$@"
+  }
+  git() {
+    [[ $1 == clone ]] || return 1
+    target=${*: -1}
+    mkdir "$target" && touch "$target/in-progress" || return 1
+    # Use an independent Bash and bound the wait if the lock regresses.
+    # shellcheck disable=SC2016
+    KVS_INSTALL_DIR="$temp_dir/alias/" timeout 10 bash -c '
+      source "$1"
+      marker=$2
+      recover_kvsctl_data() { touch "$marker"; exit 71; }
+      dockerInstall
+    ' _ "$INSTALLER" "$temp_dir/second-recovery" >"$temp_dir/second" 2>&1
+    [[ $? == 1 && ! -e "$temp_dir/second-recovery" && -e "$target/in-progress" ]] || return 1
+    grep -Fq "it holds $KVS_INSTALL_DIR.kvs-install.lock" "$temp_dir/second" || return 1
+    # A helper started by Git outlives the installer.
+    sleep 60 &
+    echo "$!" >"$temp_dir/child"
+    git_that_clones_only "$@" || return 1
+    cat >"$target/docker/setup.sh" <<'EOF'
+#!/bin/bash
+! flock --shared --nonblock "$KVS_INSTALL_DIR.kvs-install.lock" true
+EOF
+  }
+
+  (dockerInstall) >"$temp_dir/out" 2>&1 ||
+    fail "overlapping install was not refused through setup: $(cat "$temp_dir/out" "$temp_dir/second")" || return 1
+  kill -0 "$(cat "$temp_dir/child")" || fail "the helper exited early" || return 1
+  flock --exclusive --nonblock "$KVS_INSTALL_DIR.kvs-install.lock" true ||
+    fail "installer lock still held after setup" || return 1
+}
+
 test_unreachable_remote_keeps_the_installed_copy() {
   local temp_dir
   local status
@@ -242,7 +292,7 @@ test_reclone_keeps_the_backups_and_logs_of_kvsctl() {
       fail "the new clone lost the .env of the site ($layout)" || return 1
     grep -Fq 'Kept the files of kvsctl in the new copy' "$temp_dir/out" ||
       fail "the installer did not say it kept the files of kvsctl ($layout): $(cat "$temp_dir/out")" || return 1
-    [[ -z "$(find "$temp_dir/$layout" -mindepth 1 -maxdepth 1 -name 'install.*')" ]] ||
+    [[ -z "$(find "$temp_dir/$layout" -mindepth 1 -maxdepth 1 -name 'install.*' ! -name 'install.kvs-install.lock')" ]] ||
       fail "something was left beside the installation ($layout): $(ls -A "$temp_dir/$layout")" || return 1
     [[ -z "$(find "$install_dir" -mindepth 1 -maxdepth 1 -name '.[ck]*')" ]] ||
       fail "something was left inside the installation ($layout): $(ls -A "$install_dir")" || return 1
@@ -329,7 +379,7 @@ test_kvsctl_data_that_cannot_move_back_is_named() {
     grep -q 'setup-ran' "$temp_dir/out" || fail "the Docker setup did not run once kvsctl/ was moved back: $(cat "$temp_dir/out")" || return 1
     [[ "$(stat -c %i "$install_dir/kvsctl/logs/20261007-010000-backup.log" 2>/dev/null)" == "$log_inode" ]] ||
       fail "kvsctl/ is not in the installation once moved back: $(find "$temp_dir/$stuck" -path '*/.git' -prune -o -print)" || return 1
-    [[ -z "$(find "$temp_dir/$stuck" -mindepth 1 -maxdepth 1 -name 'install.*')" ]] ||
+    [[ -z "$(find "$temp_dir/$stuck" -mindepth 1 -maxdepth 1 -name 'install.*' ! -name 'install.kvs-install.lock')" ]] ||
       fail "something was left beside the installation once kvsctl/ was moved back: $(ls -A "$temp_dir/$stuck")" || return 1
   done
 }
@@ -381,7 +431,7 @@ test_kvsctl_data_that_cannot_move_stops_the_reclone() {
       fail "the installed copy was replaced ($kind)" || return 1
     [[ "$(kvsctl_data_identity "$KVS_INSTALL_DIR")" == "$before" ]] ||
       fail "the files of kvsctl are not where they were ($kind): $(find "$temp_dir/$kind")" || return 1
-    [[ -z "$(find "$temp_dir/$kind" -mindepth 1 -maxdepth 1 -name 'install.*')" ]] ||
+    [[ -z "$(find "$temp_dir/$kind" -mindepth 1 -maxdepth 1 -name 'install.*' ! -name 'install.kvs-install.lock')" ]] ||
       fail "something was left beside the installation ($kind): $(ls -A "$temp_dir/$kind")" || return 1
     [[ $kind != mounted ]] || grep -Fq 'another filesystem' "$temp_dir/out" ||
       fail "the refusal does not say why backups/ cannot move: $(cat "$temp_dir/out")" || return 1
@@ -904,7 +954,7 @@ test_a_later_run_moves_back_what_an_update_left_aside() {
     fi
     [[ "$(kvsctl_data_identity "$install_dir")" == "$before" ]] ||
       fail "the files of kvsctl are not back in the installation ($layout): $(find "$temp_dir/$layout" -path '*/.git' -prune -o -print)" || return 1
-    [[ -z "$(find "$temp_dir/$layout" -mindepth 1 -maxdepth 1 -name 'install.*')" ]] ||
+    [[ -z "$(find "$temp_dir/$layout" -mindepth 1 -maxdepth 1 -name 'install.*' ! -name 'install.kvs-install.lock')" ]] ||
       fail "something was left beside the installation ($layout): $(ls -A "$temp_dir/$layout")" || return 1
     if [[ $layout == empty ]]; then
       ! grep -Fq 'Moved the files of kvsctl back' "$temp_dir/out" ||
@@ -1256,6 +1306,7 @@ run_test() {
 }
 
 failures=0
+run_test "concurrent installers leave the active clone alone" test_concurrent_installers_leave_the_active_clone_alone || failures=$((failures + 1))
 run_test "unreachable remote keeps the installed copy" test_unreachable_remote_keeps_the_installed_copy || failures=$((failures + 1))
 run_test "successful re-clone replaces the copy and restores user data" test_successful_reclone_replaces_the_copy_and_restores_user_data || failures=$((failures + 1))
 run_test "rewritten branch keeps the files the setup wrote" test_rewritten_branch_keeps_the_files_the_setup_wrote || failures=$((failures + 1))

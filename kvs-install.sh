@@ -3298,23 +3298,40 @@ import_wanted_instead_of_archive() {
 
 function dockerInstall() {
   local INSTALL_DIR
+  local lock status=0
+
+  echo ""
+  echo "${cyan}=== Docker Installation ===${normal}"
+
+  INSTALL_DIR=$(realpath -m -- "${KVS_INSTALL_DIR:-/opt/kvs}") || return 1
+  refuse_during_kvsctl_run "$INSTALL_DIR" || return $?
+  lock="$INSTALL_DIR.kvs-install.lock"
+  mkdir -p -- "$(dirname -- "$lock")" || return 1
+  (umask 077 && : >>"$lock") || return 1
+  {
+    # The clone replaces INSTALL_DIR, so keep this inode beside it.
+    flock --exclusive --nonblock 8 || status=$?
+    if ((status == 1)); then
+      echo "ERROR: another kvs-install.sh run is changing $INSTALL_DIR (it holds $lock): wait until it is done." >&2
+      return 1
+    elif ((status != 0)); then
+      echo "ERROR: could not lock $INSTALL_DIR.kvs-install.lock (flock status $status)." >&2
+      return 1
+    fi
+    # Bash keeps the lock for the function call and closes it on exec in
+    # its children, including helpers that outlive Git or Docker setup.
+    docker_install_locked "$INSTALL_DIR" 8<&-
+  } 8<>"$lock"
+}
+
+docker_install_locked() {
+  local INSTALL_DIR="$1"
   local BACKUP_DIR
   local clone_status
   local staged_archive="" archive_domain saved_domain
   local kvsctl_aside
   local kvsctl_move
 
-  echo ""
-  echo "${cyan}=== Docker Installation ===${normal}"
-
-  INSTALL_DIR="${KVS_INSTALL_DIR:-/opt/kvs}"
-  # Without its trailing slashes: a new clone, and the files of kvsctl it
-  # keeps, wait beside the installation, never inside the directory it
-  # replaces.
-  while [[ $INSTALL_DIR == ?*/ ]]; do
-    INSTALL_DIR=${INSTALL_DIR%/}
-  done
-  refuse_during_kvsctl_run "$INSTALL_DIR" || return $?
   # What an earlier update set aside and did not move back comes back
   # first, where kvsctl looks for it, whatever this run does next. The
   # journal of a kvsctl run may be among it.
@@ -3517,9 +3534,8 @@ function dockerInstall() {
   KVS_INSTALL_LOG="$RUNTIME_LOG_FILE" ./setup.sh "${SETUP_ARGS[@]}"
 }
 
-# Resolve the installation directory the Docker install uses, honouring
-# KVS_INSTALL_DIR the same way dockerInstall does and dropping any trailing
-# slashes so the path reads cleanly.
+# Keep the configured spelling for menu lookups, without trailing slashes.
+# dockerInstall resolves its physical target before locking or changing it.
 function resolve_install_dir() {
   local install_dir="${KVS_INSTALL_DIR:-/opt/kvs}"
   while [[ $install_dir == ?*/ ]]; do

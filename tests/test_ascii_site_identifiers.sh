@@ -88,7 +88,9 @@ source <(extract kvs-install.sh saved_site_domain)
 touch .env
 green='' yellow='' normal='' archive_domain='' DOMAIN=Kvs.test
 saved_domain=$(saved_site_domain ./.env)
-eval "$(extract kvs-install.sh dockerInstall | sed -n '/^  # An explicit DOMAIN from the environment wins/,/^  # Email,/{/^  # Email,/!p;}')" > wrapper.log
+wrapper_domain=$(extract kvs-install.sh docker_install_locked | sed -n '/^  # An explicit DOMAIN from the environment wins/,/^  # Email,/{/^  # Email,/!p;}')
+[ -n "$wrapper_domain" ] || fail "missing domain selection in the Docker wrapper"
+eval "$wrapper_domain" > wrapper.log
 [ ! -s wrapper.log ] || fail "Docker wrapper accepted a Unicode domain"
 [ "$DOMAIN" = Kvs.test ] || fail "Docker wrapper folded Unicode before validation"
 
