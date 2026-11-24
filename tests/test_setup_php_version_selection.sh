@@ -467,6 +467,7 @@ SH
 
         rm -rf "$work" "$TEST_DIR/www" "$TEST_DIR/applied"
         mkdir -p "$work/kvs/.git" "$work/kvs/docker/kvs-archive" "$work/backup" "$TEST_DIR/www/site.example/admin/include"
+        touch "$work/kvs/kvs-install.sh"
         : > "$TEST_DIR/www/site.example/admin/include/setup.php"
         printf '%s\n' '<?php' "\$config['project_version'] = \"$2\";" > "$TEST_DIR/www/site.example/admin/include/version.php"
         cp "$ROOT_DIR/docker/.env.example" "$work/kvs/docker/.env.example"

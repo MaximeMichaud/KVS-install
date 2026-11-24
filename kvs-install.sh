@@ -3296,14 +3296,72 @@ import_wanted_instead_of_archive() {
   [[ "$answer" =~ ^[Yy]$ ]]
 }
 
+# Check the destination before creating locks or recovering a previous swap.
+validate_install_contents() (
+  local dir="$1" entry
+  local hint="Choose a new or empty directory, or the directory of an existing KVS installation."
+
+  if [[ -d "$dir/.git" || -f "$dir/.git" ]]; then
+    for entry in kvs-install.sh docker/setup.sh; do
+      [[ -f "$dir/$entry" ]] && continue
+      echo "ERROR: $dir contains .git but is missing the KVS installer file $entry. $hint" >&2
+      return 1
+    done
+    return 0
+  fi
+
+  if [[ ! -r $dir || ! -x $dir ]]; then
+    echo "ERROR: cannot inspect the contents of $dir. $hint" >&2
+    return 1
+  fi
+  unset GLOBIGNORE
+  set +f
+  shopt -u nocasematch
+  shopt -s dotglob nullglob
+  for entry in "$dir"/*; do
+    case ${entry##*/} in
+      .github | .gitignore | .hadolint.yaml | .markdownlint.yaml | .pre-commit-config.yaml | .secrets.baseline | \
+        LICENSE | README.md | cli | cliff.toml | conf | docker | docs | kvs-export.sh | kvs-install.sh | renovate.json | tests) ;;
+      backups | kvsctl | logs) ;; # Runtime data at the installation root.
+      *)
+        echo "ERROR: $dir contains an unexpected entry: ${entry##*/}. $hint" >&2
+        return 1
+        ;;
+    esac
+  done
+)
+
 function dockerInstall() {
   local INSTALL_DIR
-  local lock status=0
+  local lock status=0 install_on_mount=no
 
   echo ""
   echo "${cyan}=== Docker Installation ===${normal}"
 
   INSTALL_DIR=$(realpath -m -- "${KVS_INSTALL_DIR:-/opt/kvs}") || return 1
+  if [[ $INSTALL_DIR == / || ( ( -e $INSTALL_DIR || -L $INSTALL_DIR ) && ! -d $INSTALL_DIR ) ]]; then
+    echo "ERROR: $INSTALL_DIR must be a directory below the filesystem root." >&2
+    return 1
+  fi
+  if [[ -d "$INSTALL_DIR" ]]; then
+    validate_install_contents "$INSTALL_DIR" || return 1
+    local mount_status=0
+    mountpoint -q -- "$INSTALL_DIR" || mount_status=$?
+    case $mount_status in
+      0)
+        if [[ ! -e "$INSTALL_DIR/.git" ]]; then
+          echo "ERROR: $INSTALL_DIR is a mount point. Set KVS_INSTALL_DIR to a directory below the mount so the installer can replace it." >&2
+          return 1
+        fi
+        install_on_mount=yes
+        ;;
+      32) ;; # util-linux: the directory is not a mount point.
+      *)
+        echo "ERROR: could not check whether $INSTALL_DIR is a mount point (mountpoint status $mount_status)." >&2
+        return 1
+        ;;
+    esac
+  fi
   refuse_during_kvsctl_run "$INSTALL_DIR" || return $?
   lock="$INSTALL_DIR.kvs-install.lock"
   mkdir -p -- "$(dirname -- "$lock")" || return 1
@@ -3320,12 +3378,12 @@ function dockerInstall() {
     fi
     # Bash keeps the lock for the function call and closes it on exec in
     # its children, including helpers that outlive Git or Docker setup.
-    docker_install_locked "$INSTALL_DIR" 8<&-
+    docker_install_locked "$INSTALL_DIR" "$install_on_mount" 8<&-
   } 8<>"$lock"
 }
 
 docker_install_locked() {
-  local INSTALL_DIR="$1"
+  local INSTALL_DIR="$1" install_on_mount="$2"
   local BACKUP_DIR
   local clone_status
   local staged_archive="" archive_domain saved_domain
@@ -3374,26 +3432,18 @@ docker_install_locked() {
   ensure_docker_prerequisites || return $?
 
   # Clone or update KVS-install repo
-  if [[ -n "${KVS_BACKUP_DIR:-}" ]]; then
-    BACKUP_DIR="$KVS_BACKUP_DIR"
-  else
-    BACKUP_DIR=$(mktemp -d /tmp/kvs-backup.XXXXXX) || return $?
-  fi
-
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
+  if [[ -e "$INSTALL_DIR/.git" ]]; then
     echo "Updating existing installation${KVS_INSTALL_BRANCH:+ (branch $KVS_INSTALL_BRANCH)}..."
     if cd "$INSTALL_DIR" && update_kvs_install; then
       echo "${green}Updated successfully${normal}"
-      if [[ -z "${KVS_BACKUP_DIR:-}" ]]; then
-        rmdir "$BACKUP_DIR" 2>/dev/null || true
-      fi
     elif cd "$INSTALL_DIR" && reset_kvs_install; then
       echo "${green}Updated to the repository version of the branch; the files the setup created are kept${normal}"
-      if [[ -z "${KVS_BACKUP_DIR:-}" ]]; then
-        rmdir "$BACKUP_DIR" 2>/dev/null || true
-      fi
+    elif [[ $install_on_mount == yes ]]; then
+      echo "ERROR: Git could not update $INSTALL_DIR in place, and a new clone cannot replace it because it is a mount point. Repair the checkout there, or set KVS_INSTALL_DIR to a directory below the mount." >&2
+      return 1
     else
       echo "${red}Git pull failed, re-cloning...${normal}"
+      BACKUP_DIR=${KVS_BACKUP_DIR:-$(mktemp -d /tmp/kvs-backup.XXXXXX)} || return $?
       backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
       cd "${INSTALL_DIR%/*}" || return $?
       clone_kvs_install "$INSTALL_DIR" "$BACKUP_DIR"
@@ -3407,6 +3457,7 @@ docker_install_locked() {
     fi
   else
     # Directory doesn't exist or is not a git repo
+    BACKUP_DIR=${KVS_BACKUP_DIR:-$(mktemp -d /tmp/kvs-backup.XXXXXX)} || return $?
     backup_user_data "$INSTALL_DIR" "$BACKUP_DIR" || return $?
     echo "Cloning KVS-install${KVS_INSTALL_BRANCH:+ (branch $KVS_INSTALL_BRANCH)}..."
     clone_kvs_install "$INSTALL_DIR" "$BACKUP_DIR"

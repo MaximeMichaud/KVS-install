@@ -91,6 +91,7 @@ run_case() {
     WORK_DIR="$CASE_DIR/kvs/docker"
     mkdir -p "$CASE_DIR/kvs/.git" "$WORK_DIR/kvs-archive" "$WORK_DIR/bin" \
         "$CASE_DIR/stubs" "$CASE_DIR/logs" "$CASE_DIR/backup"
+    touch "$CASE_DIR/kvs/kvs-install.sh"
     cp "$REPO_ROOT/docker/.env.example" "$WORK_DIR/.env.example"
     if [ "$domain_line" != none ]; then
         cp "$REPO_ROOT/docker/.env.example" "$WORK_DIR/.env"

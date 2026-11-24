@@ -32,7 +32,7 @@ make_host() {
   local tool
 
   mkdir -p "$bin"
-  for tool in dirname flock realpath mkdir mktemp rmdir rm cp mv chmod ls find head sed cat sleep; do
+  for tool in dirname flock mountpoint realpath mkdir mktemp rmdir rm cp mv chmod ls find head sed cat sleep; do
     ln -s "$(command -v "$tool")" "$bin/$tool"
   done
   for tool in docker systemctl; do

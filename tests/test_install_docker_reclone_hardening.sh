@@ -42,6 +42,7 @@ seed_installation() {
   python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.php", "archive\n"); z.close()' \
     "$install_dir/docker/kvs-archive/KVS_7.0.2_[example.com].zip"
   printf 'staged\n' >"$install_dir/docker/import/site.tar"
+  touch "$install_dir/kvs-install.sh" "$install_dir/docker/setup.sh"
 }
 
 # Enter a second installer while the first clone has files in staging.
@@ -92,6 +93,132 @@ EOF
   kill -0 "$(cat "$temp_dir/child")" || fail "the helper exited early" || return 1
   flock --exclusive --nonblock "$KVS_INSTALL_DIR.kvs-install.lock" true ||
     fail "installer lock still held after setup" || return 1
+}
+
+test_install_directory_on_a_mount() {
+  local temp_dir physical dir method status
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  physical="$temp_dir/disk/site"
+  mkdir -p "$physical"
+  ln -s "$physical" "$temp_dir/link"
+  export KVS_BACKUP_DIR="$temp_dir/backup"
+  git() { return 71; }
+  mountpoint() {
+    [[ ${*: -1} == "$physical" ]] && return 0
+    return 32
+  }
+  for dir in "$physical" "$temp_dir/link/"; do
+    export KVS_INSTALL_DIR="$dir"
+    (dockerInstall) >"$temp_dir/out" 2>&1
+    [[ $? == 1 ]] && grep -Fq "$physical is a mount point" "$temp_dir/out" ||
+      fail "installer did not refuse the mounted directory: $(cat "$temp_dir/out")" || return 1
+    [[ -z "$(ls -A "$physical")" && ! -e "$physical.kvs-install.lock" && ! -e "$KVS_BACKUP_DIR" ]] ||
+      fail "mounted directory was refused after the install began" || return 1
+  done
+
+  seed_installation "$physical"
+  printf '#!/bin/bash\necho setup-ran\n' >"$physical/docker/setup.sh"
+  for method in pull reset fallback; do
+    git() {
+      echo "$1" >>"$temp_dir/git-calls"
+      case $1 in
+        pull) [[ $method == pull ]] ;;
+        fetch | checkout | diff) [[ $method == reset ]] ;;
+        *) return 71 ;;
+      esac
+    }
+    : >"$temp_dir/git-calls"
+    (
+      if [[ $method == fallback ]]; then
+        unset KVS_BACKUP_DIR
+        mktemp() { touch "$temp_dir/allocated"; return 71; }
+      fi
+      dockerInstall
+    ) >"$temp_dir/out" 2>&1
+    status=$?
+    if [[ $method == fallback ]]; then
+      [[ $status == 1 && ! -e "$temp_dir/allocated" && ! -e "$KVS_BACKUP_DIR" && ! -e "$physical.clone" ]] &&
+        grep -Fq 'a new clone cannot replace it because it is a mount point' "$temp_dir/out" &&
+        ! grep -Fxq clone "$temp_dir/git-calls" ||
+        fail "mounted checkout reached the re-clone: $(cat "$temp_dir/out")" || return 1
+    else
+      [[ $status == 0 ]] && grep -Fxq setup-ran "$temp_dir/out" ||
+        fail "mounted checkout did not update by $method: $(cat "$temp_dir/out")" || return 1
+    fi
+  done
+
+  mountpoint() { return 1; }
+  (dockerInstall) >"$temp_dir/out" 2>&1
+  [[ $? == 1 ]] && grep -Fq 'could not check whether' "$temp_dir/out" ||
+    fail "installer ignored the mountpoint error: $(cat "$temp_dir/out")" || return 1
+
+  # A link to an ordinary directory can be re-cloned.
+  unset -f mountpoint
+  git() { git_that_clones_only "$@"; }
+  (dockerInstall) >"$temp_dir/out" 2>&1 ||
+    fail "install through a directory link failed: $(cat "$temp_dir/out")" || return 1
+  [[ -L "$temp_dir/link" && -f "$physical.kvs-install.lock" ]] &&
+    grep -Fxq fresh "$physical/docker/docker-compose.yml" ||
+    fail "re-clone through the link did not replace its target" || return 1
+
+  # Catch an unsafe path at the boundary, before any installer operation.
+  refuse_during_kvsctl_run() { return 79; }
+  ln -s / "$temp_dir/root"
+  touch "$temp_dir/file"
+  for dir in "$temp_dir/root" "$temp_dir/file"; do
+    (KVS_INSTALL_DIR="$dir" dockerInstall) >"$temp_dir/out" 2>&1
+    [[ $? == 1 ]] && grep -Fq 'must be a directory below the filesystem root' "$temp_dir/out" ||
+      fail "unsafe install path reached the installer: $(cat "$temp_dir/out")" || return 1
+  done
+}
+
+test_install_directory_contents() {
+  local temp_dir dir layout marker
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  export KVS_BACKUP_DIR="$temp_dir/backup"
+  git() { echo "$*" >>"$temp_dir/git-calls"; return 71; }
+  for layout in plain hidden missing-installer missing-setup; do
+    dir="$temp_dir/$layout"
+    mkdir -p "$dir"
+    case $layout in
+      plain) marker=other-app ;;
+      hidden) marker=.unrelated ;;
+      missing-installer)
+        mkdir -p "$dir/.git" "$dir/docker"
+        touch "$dir/docker/setup.sh"
+        marker=kvs-install.sh
+        ;;
+      missing-setup)
+        mkdir -p "$dir/.git"
+        touch "$dir/kvs-install.sh"
+        marker=docker/setup.sh
+        ;;
+    esac
+    if [[ $layout == plain || $layout == hidden ]]; then
+      printf 'keep\n' >"$dir/$marker"
+    fi
+    printf 'keep\n' >"$dir/README.md"
+    (KVS_INSTALL_DIR="$dir" dockerInstall) >"$temp_dir/out" 2>&1
+    [[ $? == 1 && ! -e "$temp_dir/git-calls" && ! -e "$dir/kvsctl" && ! -e "$dir.kvs-install.lock" &&
+      ! -e "$KVS_BACKUP_DIR" && ! -e "$dir.clone" ]] &&
+      grep -Fq "$marker" "$temp_dir/out" && grep -Fq 'Choose a new or empty directory' "$temp_dir/out" &&
+      grep -Fxq keep "$dir/README.md" ||
+      fail "unexpected install directory was not refused intact ($layout): $(cat "$temp_dir/out")" || return 1
+    if [[ $layout == plain || $layout == hidden ]]; then
+      grep -Fxq keep "$dir/$marker" || fail "unrelated file lost ($layout)" || return 1
+    fi
+  done
+
+  # A release archive has the tracked top-level names and no .git.
+  dir="$temp_dir/release"
+  mkdir -p "$dir"/{backups,kvsctl,logs}
+  command git -C "$REPO_DIR" ls-tree -z --name-only HEAD >"$temp_dir/names" || return 1
+  while IFS= read -r -d '' marker; do
+    touch "$dir/$marker" || return 1
+  done <"$temp_dir/names"
+  validate_install_contents "$dir" || fail "the allowlist omits a shipped or runtime name"
 }
 
 test_unreachable_remote_keeps_the_installed_copy() {
@@ -239,6 +366,7 @@ git_that_clones_only() {
     pull | fetch) return 1 ;;
     clone)
       mkdir -p "$target/.git" "$target/docker"
+      touch "$target/kvs-install.sh"
       printf 'fresh\n' >"$target/docker/docker-compose.yml"
       printf 'DOMAIN=example.com\n' >"$target/docker/.env.example"
       printf '#!/bin/bash\necho setup-ran\n' >"$target/docker/setup.sh"
@@ -973,6 +1101,7 @@ make_upstream() {
   local branch="$2"
 
   mkdir -p "$upstream/docker"
+  touch "$upstream/kvs-install.sh"
   cp "$REPO_DIR/.gitignore" "$upstream/.gitignore"
   cp "$REPO_DIR/docker/.gitignore" "$upstream/docker/.gitignore"
   printf 'services: {}\n' >"$upstream/docker/docker-compose.yml"
@@ -1306,6 +1435,8 @@ run_test() {
 }
 
 failures=0
+run_test "only recognized install directories are accepted" test_install_directory_contents || failures=$((failures + 1))
+run_test "install directory on a mount" test_install_directory_on_a_mount || failures=$((failures + 1))
 run_test "concurrent installers leave the active clone alone" test_concurrent_installers_leave_the_active_clone_alone || failures=$((failures + 1))
 run_test "unreachable remote keeps the installed copy" test_unreachable_remote_keeps_the_installed_copy || failures=$((failures + 1))
 run_test "successful re-clone replaces the copy and restores user data" test_successful_reclone_replaces_the_copy_and_restores_user_data || failures=$((failures + 1))

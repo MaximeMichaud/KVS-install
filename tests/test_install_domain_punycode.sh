@@ -103,6 +103,7 @@ if ! command -v unzip > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1;
     exit 0
 fi
 mkdir -p "$WORK/kvs/.git" "$WORK/kvs/docker/kvs-archive" "$WORK/backup"
+touch "$WORK/kvs/kvs-install.sh"
 printf 'DOMAIN=old.example.com\nKVS_IMPORT_COMPLETED=1\n' > "$WORK/kvs/docker/.env"
 python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.php", "x\n"); z.close()' \
     "$WORK/kvs/docker/kvs-archive/KVS_7.0.3_[new.example.com].zip"

@@ -5,6 +5,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/install/.git" "$work/install/docker/kvs-archive"
+touch "$work/install/kvs-install.sh"
 cd "$work/install/docker"
 (cd "$root/docker" && cp --parents images.lock bin/resolve-bases.sh lib/kvs-php.sh init/lib/kvs-archive.sh \
     multi-site/site-manager.sh multi-site/docker-compose.site.yml.template "$work/install/docker")
