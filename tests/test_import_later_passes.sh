@@ -780,6 +780,10 @@ source "$TEST_DIR/files-only.sh"
     : > "$TEST_DIR/docker-calls"
     FIXTURE_RUNNING=yes import_files_only > "$TEST_DIR/files-only.out" 2>&1 || fail "the pass failed: $(cat "$TEST_DIR/files-only.out")"
     provided "$TEST_DIR/files-only.out"
+    for statement in 'With rsync, files deleted on the old server are removed here.' 'With tar, files deleted or renamed on the old server remain here under their old names.'; do
+        grep -Fq "$statement" "$TEST_DIR/files-only.out" || fail "missing files-only transport notice"
+        grep -Fq "$statement" "$ROOT_DIR/README.md" || fail "missing files-only transport documentation"
+    done
     [ "$(paste -sd' ' "$TEST_DIR/calls")" = 'inspect fetch' ] || fail "the pass must inspect then fetch: $(cat "$TEST_DIR/calls")"
     if grep -v '^docker ps -q --filter label=com.docker.compose.project=kvs-example-test$' "$TEST_DIR/docker-calls"; then
         fail 'the pass of the files alone may only look at the containers'

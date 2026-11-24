@@ -3876,7 +3876,8 @@ import_files_only() {
         completed=${KVS_IMPORT_COMPLETED:-}
     fi
     echo ""
-    echo "The files of $destination become those of the old server (files it no longer has are removed); the database, the dump and the containers stay as they are."
+    echo "The site files are copied to $destination. With rsync, files deleted on the old server are removed here."
+    echo "With tar, files deleted or renamed on the old server remain here under their old names."
     if [ -n "$completed" ]; then
         echo -e "${YELLOW}An import completed here on $completed: its site files, configuration included, become the old server's until the next pass without IMPORT_FILES_ONLY. Never run this once the site is live here.${NC}"
     fi
@@ -3890,7 +3891,7 @@ import_files_only() {
     fi
     import_fetch_remote
     echo ""
-    echo -e "${GREEN}The site files in $destination are those of the old server as of this pass; no dump was received, the database and the containers were left as they were.${NC}"
+    echo -e "${GREEN}The site files were copied to $destination; no dump was received, the database and the containers were left as they were.${NC}"
     echo "Next: once the writes on the old site are frozen, the same command without IMPORT_FILES_ONLY (with VOLUME_CHOICE=1 after a completed import) exports a fresh dump, copies what changed since this pass and loads the database."
     project=${COMPOSE_PROJECT_NAME:-}
     if [ "$env_domain" = "$DOMAIN" ] && [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] &&
