@@ -108,7 +108,9 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Must run from docker directory
-if [ ! -f "docker-compose.yml" ]; then
+script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || exit 1
+script_dir=${script_path%/*}
+if [ ! . -ef "$script_dir" ] || [ ! -f docker-compose.yml ]; then
     echo -e "${RED}ERROR: Run from docker directory${NC}"
     exit 1
 fi
@@ -206,7 +208,7 @@ hold_scripts_lock() {
 case "${RUNTIME_ACTION}:${MANTICORE_ACTION}" in
     import-status:* | writeback-status:* | manticore:status) ;;
     *)
-        refuse_during_kvsctl_run "$(cd .. && pwd)" || exit 1
+        refuse_during_kvsctl_run "${script_dir%/*}" || exit 1
         hold_scripts_lock || exit 1
         ;;
 esac
@@ -352,7 +354,7 @@ remove_compose_profile() {
 }
 
 # shellcheck source=/dev/null
-source "$(dirname -- "${BASH_SOURCE[0]}")/lib/host-validation.sh" || exit 1
+source "$script_dir/lib/host-validation.sh" || exit 1
 
 validate_domain() {
     local LC_ALL=C domain=$1
@@ -536,14 +538,14 @@ if [ -n "$RUNTIME_ACTION" ]; then
     case "$RUNTIME_ACTION" in
         import-status)
             # shellcheck source=/dev/null
-            source "$(dirname "${BASH_SOURCE[0]}")/lib/database.sh"
+            source "$script_dir/lib/database.sh"
             once=yes
             [ "$IMPORT_WATCH" != yes ] || once=no
             database_wait_ready "${MARIADB_WAIT_SECONDS:-0}" "$once"
             ;;
         writeback-status)
             # shellcheck source=/dev/null
-            source "$(dirname "${BASH_SOURCE[0]}")/lib/import.sh"
+            source "$script_dir/lib/import.sh"
             import_writeback_check "" 5 "$PWD"
             ;;
         manticore)
@@ -559,7 +561,7 @@ if [ -n "$RUNTIME_ACTION" ]; then
                 refuse_edited_domain || exit 1
             fi
             # shellcheck source=/dev/null
-            source "$(dirname "${BASH_SOURCE[0]}")/lib/manticore.sh"
+            source "$script_dir/lib/manticore.sh"
             manticore_manage "$MANTICORE_ACTION"
             ;;
     esac

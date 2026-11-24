@@ -2244,6 +2244,9 @@ HTTPS_PORT=443
 COMPOSE_PROFILES=dragonfly
 EOF
     touch "$case_dir/docker-compose.yml" "$case_dir/docker-calls.log"
+    cp "$REPO_ROOT/docker/reconfigure.sh" "$case_dir/reconfigure.sh"
+    mkdir -p "$case_dir/lib"
+    cp "$REPO_ROOT/docker/lib/host-validation.sh" "$case_dir/lib/"
     make_reconfigure_docker_mock "$case_dir/bin/docker"
 
     (
@@ -2253,7 +2256,7 @@ EOF
             TEST_DOCKER_PS_STATUS="${TEST_DOCKER_PS_STATUS:-0}" \
             TEST_DOCKER_DOMAIN="$domain" \
             TEST_MARIADB_PASSWORD=test-password \
-            "$REPO_ROOT/docker/reconfigure.sh"
+            ./reconfigure.sh
     ) > "$case_dir/output.log" 2>&1
 }
 
