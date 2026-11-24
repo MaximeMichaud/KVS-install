@@ -1733,6 +1733,18 @@ function sedPattern($text) {
 $replacement = strtr($expected, ['\\' => '\\\\', '&' => '\\&', '~' => '\\~']);
 echo $line, "{\n", str_repeat("N\n", substr_count($literal, "\n")),
     's~^(', sedPattern($prefix), ')', sedPattern($literal), '~\1', $replacement, "~\n}\n";
+// Only the stock title assignment gets the domain. Token line numbers keep
+// identical text inside comments out of the edit script.
+if (($argv[5] ?? '') !== '') {
+    $lines = explode("\n", $source);
+    foreach ($parsed as $token) {
+        if (!is_array($token) || $token[0] !== T_VARIABLE || $token[1] !== '$config') continue;
+        $line = $token[2];
+        if (preg_match('~^\h*\$config\[([\x22\x27])project_title\1\]\h*=\h*([\x22\x27])KVS\2\h*;\h*(?://[^\r\n]*)?\r?$~D', $lines[$line-1])) {
+            echo $line, 's~KVS~', $argv[5], "~\n";
+        }
+    }
+}
 PHP
 }
 
@@ -1745,12 +1757,11 @@ set_kvs_project_url() (
     fi
     stage=$(mktemp -d) || return $?
     trap 'rm -rf -- "$stage"' EXIT
-    kvs_project_url_literal script "$file" "$target" "$file" >"$stage/edit.sed" || return $?
+    kvs_project_url_literal script "$file" "$target" "$file" "${3:+$DOMAIN}" >"$stage/edit.sed" || return $?
     edits=(-E -f "$stage/edit.sed")
     if [[ -n ${3:-} ]]; then
         edits+=(-e "s|/PATH|$3|" -e 's|/usr/local/bin/|/usr/bin/|'
-            -e "s|/usr/bin/php[0-9.]*|/usr/bin/php$PHP|"
-            -e "/\\\$config\[.project_title.\]=/s/KVS/${DOMAIN}/")
+            -e "s|/usr/bin/php[0-9.]*|/usr/bin/php$PHP|")
     fi
     LC_ALL=C sed "${edits[@]}" -- "$file" >"$stage/setup.php" || return $?
     kvs_project_url_literal verify "$stage/setup.php" "$target" "$file" || return $?

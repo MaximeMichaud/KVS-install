@@ -66,6 +66,8 @@ done
 # Exercise extraction as well as a re-run with the stock mobile branch.
 rm -f "$work/provisioned"
 sed -i "s#https://$URL#http://archive.example.test#" "$file"
+printf '%s\n' "\$config['project_title']=\"KVS at KVS\";" >> "$file"
+printf '%s\n' "\$config['project_title']=\"KVS at KVS\";" >> "$work/expected"
 mkdir "$site/_INSTALL"
 printf '# Stock rewrites\n' >"$site/_INSTALL/nginx_config.txt"
 # The stock permission script is left alone: it is neither run nor edited.
@@ -90,6 +92,19 @@ setup_metadata=$(stat -Lc '%u:%g:%a' "$file")
 (cd "$work" && install_KVS >/dev/null) || fail 'existing installation failed'
 [[ $(stat -Lc '%u:%g:%a' "$file") == "$setup_metadata" && $(stat -c %a "$site/admin/include/setup_db.php") == 600 &&
    ! -e "$work/permissions-ran" ]] || fail 'the re-run changed setup ownership, modes or ran the stock hook'
+
+cmp -s "$work/expected" "$file" || fail 're-run changed the custom archive title'
+
+# A retry initializes the stock title and ignores identical text in a comment.
+cat >> "$file" <<'PHP'
+/*
+$config['project_title']="KVS";
+*/
+PHP
+sed -i 's/KVS at KVS/KVS/' "$file"
+sed '0,/="KVS";/s/="KVS";/="'"$DOMAIN"'";/' "$file" > "$work/with-title"
+install_KVS >/dev/null || fail 'retry failed to configure the stock title'
+cmp "$work/with-title" "$file" || fail 'changed a comment or missed the stock title'
 
 # GNU sed must edit the target of the symlink with its existing access rights.
 mv "$file" "$work/site config.php"
