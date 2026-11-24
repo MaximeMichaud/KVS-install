@@ -1952,7 +1952,11 @@ list_sites() {
 
     local -a site_dirs=("$SITES_DIR"/*/)
     if [ ! -d "${site_dirs[0]:-}" ]; then
-        log_info "No sites configured yet"
+        if [ -f "$PRIMARY_SITE_FILE" ]; then
+            log_info "No additional sites configured"
+        else
+            log_info "No sites configured yet"
+        fi
         echo "Add a site with: ./site-manager.sh add <domain>"
         return
     fi

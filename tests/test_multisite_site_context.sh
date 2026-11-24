@@ -108,3 +108,14 @@ mkdir -p "$site" "$work/decoy/multi-site/sites/wrong.example"
         if grep -Fq wrong.example "$work/out"; then exit 1; fi
     done
 )
+
+rmdir "$site"
+bash "$manager" list > "$work/out"
+grep -Fq 'No sites configured yet' "$work/out"
+printf 'DOMAIN=primary.example\nSITE_PREFIX=primary\n' > "$multi/sites/.primary.env"
+chmod 600 "$multi/sites/.primary.env"
+for action in list status; do
+    bash "$manager" "$action" > "$work/out"
+    grep -Fq 'No additional sites configured' "$work/out"
+    if grep -Fq 'No sites configured yet' "$work/out"; then exit 1; fi
+done
