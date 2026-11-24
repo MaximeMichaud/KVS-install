@@ -2613,8 +2613,7 @@ EOF
 chmod +x "${TEST_DIR}/r6/bin/docker"
 # r6_setup <expected: started|refused> <RESUME_IMPORT> [EMAIL]: that part of
 # setup.sh, run in the installation directory, with EMAIL set only when
-# given. Either way the run must finish the start of the stack; a refused
-# Caddy ends it with status 1 and the command that starts Caddy later.
+# given. An unusable contact must stop a non-resume run at preflight.
 r6_setup() {
     local expected=$1 resume=$2 status steps
     shift 2
@@ -2654,13 +2653,16 @@ r6_setup() {
         export PATH="${TEST_DIR}/r6/bin:${PATH}" MOCK_REAL_DOCKER="$REAL_DOCKER" MOCK_CADDY_CONFIG_LOG="$r6_rendered" \
             MOCK_DOCKER_LOG="$r6_docker_log"
         # shellcheck source=/dev/null
+        source <(sed -n '/^check_setup_caddy_contacts() {/,/^}/p' "${ROOT_DIR}/docker/setup.sh")
+        check_setup_caddy_contacts || exit 1
+        # shellcheck source=/dev/null
         . "${TEST_DIR}/r6/setup-tail.sh"
     ) > "${TEST_DIR}/r6/out" 2>&1
     status=$?
     set -e
-    [ "$(tr '\n' ' ' < "${TEST_DIR}/r6/steps" 2>/dev/null)" = "${steps} " ] ||
-        fail "R6: setup (EMAIL=${1-unset}) did not finish the start of the stack: $(tr '\n' ' ' < "${TEST_DIR}/r6/steps" 2>/dev/null): $(cat "${TEST_DIR}/r6/out")"
     if [ "$expected" = started ]; then
+        [ "$(tr '\n' ' ' < "${TEST_DIR}/r6/steps")" = "${steps} " ] ||
+            fail "R6: setup did not finish the start of the stack: $(cat "${TEST_DIR}/r6/out")"
         [ "$status" -eq 0 ] || fail "R6: setup did not start Caddy (EMAIL=${1-unset}): $(cat "${TEST_DIR}/r6/out")"
         ! grep -Fq 'ERROR: Caddy was not started' "${TEST_DIR}/r6/out" ||
             fail "R6: setup reported a Caddy it started as not started"
@@ -2669,15 +2671,9 @@ r6_setup() {
             fail "R6: setup ended with status ${status} without a usable ACME email (EMAIL=${1-unset}): $(r6_rendered_email)"
         ! grep -Fq 'docker-compose.caddy.yml up' "$r6_docker_log" ||
             fail "R6: setup recreated Caddy without a usable ACME email"
-        local line
-        for line in 'No ACME email for Caddy' 'KVS Docker Setup finished without starting Caddy' \
-            'ERROR: Caddy was not started or recreated' "Set EMAIL to a valid address in ${TEST_DIR}/r6/docker/.env" \
-            "cd ${TEST_DIR}/r6/docker && ./multi-site/site-manager.sh caddy-start"; do
-            grep -Fq "$line" "${TEST_DIR}/r6/out" ||
-                fail "R6: setup without a usable ACME email does not report '${line}': $(cat "${TEST_DIR}/r6/out")"
-        done
-        grep -Fq 'KVS Docker Setup Completed without starting Caddy' "${TEST_DIR}/r6/debug.log" ||
-            fail "R6: the debug log does not record that Caddy was not started"
+        [[ ! -e ${TEST_DIR}/r6/steps ]] || fail 'R6: refused setup started the stack'
+        grep -Fq 'Setup stopped before changing the running stack' "${TEST_DIR}/r6/out" ||
+            fail "R6: expected early refusal: $(cat "${TEST_DIR}/r6/out")"
     fi
 }
 # The self-signed primary saves an empty EMAIL. caddy-start then reads

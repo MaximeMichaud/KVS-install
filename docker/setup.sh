@@ -6838,18 +6838,13 @@ check_configured_ports() {
     STOP_PROJECT_FOR_PORTS=true
 }
 
-# In multi-site mode the Caddy step near the end of the run refuses an
-# unusable EMAIL while a saved route needs a certificate from Let's Encrypt
-# (a self-signed primary needs none, a site added later does). That refusal
-# is already certain here, with the primary route written: a run that is
-# about to delete a database volume stops now, before this project is
-# stopped for it, instead of ending with an error after the deletion.
-# A run that keeps its volumes goes on and reports Caddy at its end, and the
-# resume path does not recreate Caddy.
-caddy_email_before_volume_removal() {
+# The primary route has been written. Check all effective contacts before
+# taking down services, including when setup keeps the existing database.
+# A resumed import keeps its running proxy.
+check_setup_caddy_contacts() {
     local volume="${SETUP_VOLUME_TO_DELETE:-}${IMPORT_VOLUME_TO_DELETE:-}" output
 
-    if [ "$MODE" != multi ] || [ "${RESUME_IMPORT:-false}" = true ] || [ -z "$volume" ]; then
+    if [ "$MODE" != multi ] || [ "${RESUME_IMPORT:-false}" = true ]; then
         return 0
     fi
     # The route manager ends its refusal with the caddy-start command, which
@@ -6859,8 +6854,12 @@ caddy_email_before_volume_removal() {
         return 0
     fi
     printf '%s\n' "$output" | grep -vF 'site-manager.sh caddy-start' >&2 || true
-    echo -e "${RED}ERROR: The setup stopped before deleting the database volume ${volume}, which was kept: Caddy could not be started at the end of this run.${NC}" >&2
-    echo "Set EMAIL to a valid address in $PWD/.env (or pass EMAIL=<address>), then run the setup again." >&2
+    if [ -n "$volume" ]; then
+        echo -e "${RED}ERROR: The setup stopped before deleting the database volume ${volume}, which was kept.${NC}" >&2
+    else
+        echo -e "${RED}ERROR: Setup stopped before changing the running stack.${NC}" >&2
+    fi
+    echo "Set EMAIL to a valid address in $PWD/.env (or pass EMAIL=<address>), or correct the site-level tls contact, then run the setup again." >&2
     return 1
 }
 
@@ -7399,7 +7398,7 @@ check_configured_ports || exit 1
 MODE=$PREVIOUS_MODE
 configure_mode || exit $?
 if [ "$MODE" = multi ]; then prepare_multi_site_proxy || exit 1; fi
-caddy_email_before_volume_removal || exit 1
+check_setup_caddy_contacts || exit 1
 docker stop "${SITE_PREFIX}-$unused_cache" >/dev/null 2>&1 || true
 docker rm "${SITE_PREFIX}-$unused_cache" >/dev/null 2>&1 || true
 if [ "$ENABLE_MANTICORE" != true ]; then
@@ -7711,15 +7710,9 @@ else
     run_step "Starting Nginx" docker compose up -d --force-recreate nginx
 fi
 
-# EMAIL as it is, empty when there is none: caddy-start refuses a missing
-# or unusable address while a route needs an ACME certificate, rather than
-# give Caddy the admin@example.com placeholder Let's Encrypt refuses. A
-# self-signed primary needs no EMAIL, but a site added later gets a public
-# route by default. Stopping there would leave the cache, Manticore and cron
-# of the stack this run stopped down: the run leaves the Caddy that runs as
-# it is, finishes the start, and ends with an error and the command that
-# starts Caddy once EMAIL is set. The resume path does not recreate a
-# running Caddy.
+# Routes can change after the pre-shutdown check. If a new public route
+# has no usable contact, finish bringing the stack back and report how to
+# restart Caddy. A resumed import keeps its running proxy.
 SETUP_CADDY_EMAIL_MISSING=false
 if [ "$MODE" = "multi" ]; then
     progress_bar "Starting Caddy"
@@ -7728,7 +7721,7 @@ if [ "$MODE" = "multi" ]; then
             docker compose -p multi-site -f docker-compose.caddy.yml up -d --no-deps --no-recreate --no-build --pull missing caddy)
     elif ! env ACME_EMAIL="${EMAIL:-}" ./multi-site/site-manager.sh caddy-acme-check; then
         SETUP_CADDY_EMAIL_MISSING=true
-        echo -e "${YELLOW}WARNING: Caddy was not started or recreated: a route needs a certificate from Let's Encrypt and EMAIL has no usable address. The setup goes on and ends with an error.${NC}"
+        echo -e "${YELLOW}WARNING: Caddy was not started or recreated: a public route has no usable ACME contact. The setup goes on and ends with an error.${NC}"
     else
         run_step "Starting Caddy reverse proxy" \
             env ACME_EMAIL="${EMAIL:-}" \
@@ -8156,8 +8149,8 @@ if [ "$SETUP_ACME_FAILED" = true ]; then
 fi
 if [ "$SETUP_CADDY_EMAIL_MISSING" = true ]; then
     echo ""
-    echo -e "${RED}ERROR: Caddy was not started or recreated: a route in multi-site/caddy/sites needs a certificate from Let's Encrypt, and EMAIL is missing, the admin@example.com placeholder or invalid, which Let's Encrypt refuses. A Caddy that was running keeps its configuration.${NC}"
-    echo "Set EMAIL to a valid address in $PWD/.env, then start Caddy with:"
+    echo -e "${RED}ERROR: Caddy was not started or recreated: a public route in multi-site/caddy/sites has no usable ACME contact. A Caddy that was running keeps its configuration.${NC}"
+    echo "Correct the site-level tls contact or set EMAIL to a valid address in $PWD/.env, then start Caddy with:"
     printf '  cd %q && ./multi-site/site-manager.sh caddy-start\n' "$PWD"
     exit 1
 fi
