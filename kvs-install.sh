@@ -2264,6 +2264,20 @@ issue_site_certificate() {
         # failure never replaces the pair nginx serves with a self-signed one.
         if [[ "${ACME_DEPLOY_ARGS[*]}" != "--key-file $ssl_dir/key.pem --fullchain-file $ssl_dir/cert.pem --reloadcmd service nginx force-reload" ]]; then
             kept=$(printf ' %q' "${ACME_DEPLOY_ARGS[@]:4}")
+            local i option dest
+            local -a repair=()
+            for ((i = 0; i < ${#ACME_DEPLOY_ARGS[@]}; i += 2)); do
+                option=${ACME_DEPLOY_ARGS[i]}
+                dest=${ACME_DEPLOY_ARGS[i+1]}
+                if [[ $option == --cert-file || $option == --ca-file ]] && [[ ! -d $(dirname -- "$dest") ]]; then
+                    continue
+                fi
+                repair+=("$option" "$dest")
+            done
+            if ((${#repair[@]} < ${#ACME_DEPLOY_ARGS[@]})); then
+                echo "To remove the destinations whose directories are missing and deploy the certificate, run:" >&2
+                printf '  %q --install-cert --ecc -d %q%s\n' "$acme" "$DOMAIN" "$(printf ' %q' "${repair[@]}")" >&2
+            fi
             if cmp -s -- "$ACME_CACHE_DIR/$DOMAIN.key" "$ssl_dir/key.pem" &&
                cmp -s -- "$ACME_CACHE_DIR/fullchain.cer" "$ssl_dir/cert.pem"; then
                 # acme.sh does not say which part failed: nginx itself must reload.

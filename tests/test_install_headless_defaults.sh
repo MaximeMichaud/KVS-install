@@ -491,19 +491,36 @@ SH
     grep -F WARNING "$work/log" | grep -Fq "$work/removed/cert.pem" && [[ ! -e "$work/selfsigned" ]] ||
       fail "a removed added destination was not reported, or fell back ($ISSUE_STATUS)" || return 1
 
-    for served in key.pem cert.pem; do
+    for served in cached key.pem cert.pem; do
       mkdir -p "$work/removed"
-      record --cert-file "$work/removed/cert.pem"
+      local removed=--cert-file kept=--ca-file
+      if [[ $served == cert.pem ]]; then removed=--ca-file; kept=--cert-file; fi
+      record "$removed" "$work/removed/cert.pem" "$kept" "$work/other service/kept.pem" --reloadcmd "$own && service other reload"
       rm -r "$work/removed"
-      echo "previous $served" > "$live/$served"
+      if [[ $served != cached ]]; then echo "previous $served" > "$live/$served"; fi
       CERTIFICATE_MODE=""
       run
-      assert_equal "1::previous $served" "$status:$CERTIFICATE_MODE:$(<"$live/$served")" \
-        "added destination removed, another $served served ($ISSUE_STATUS)" || return 1
+      if [[ $served == cached ]]; then
+        assert_equal "0:public" "$status:$CERTIFICATE_MODE" "removed destination, cached pair served" || return 1
+      else
+        assert_equal "1::previous $served" "$status:$CERTIFICATE_MODE:$(<"$live/$served")" \
+          "added destination removed, another $served served ($ISSUE_STATUS)" || return 1
+      fi
       grep -Fq "$work/removed/cert.pem" "$work/log" && [[ ! -e "$work/selfsigned" ]] ||
         fail "the failing destination was not named, or fell back ($served, $ISSUE_STATUS)" || return 1
-      cp "$cache/$DOMAIN.key" "$live/key.pem"
-      cp "$cache/fullchain.cer" "$live/cert.pem"
+      sed -n 's/^  \(.* --install-cert \)/\1/p' "$work/log" > "$work/repair.sh"
+      if [[ ! -s $work/repair.sh ]] || ! bash "$work/repair.sh"; then
+        fail "no working repair command for $removed"
+        return 1
+      fi
+      recorded
+      if ! grep -Fq "='$work/other service/kept.pem'" "$conf" ||
+          [[ $saved != "$own && service other reload" || ! -s "$work/other service/kept.pem" ]] ||
+          grep -Fq "$work/removed/cert.pem" "$conf" ||
+          ! cmp -s "$cache/$DOMAIN.key" "$live/key.pem" || ! cmp -s "$cache/fullchain.cer" "$live/cert.pem"; then
+        fail "repair did not deploy the pair and retain the other settings ($removed)"
+        return 1
+      fi
     done
   done
   export ISSUE_STATUS=2
