@@ -192,7 +192,18 @@ try {
       echo 'query-failed:' . (int) $db->errno . ':' . $prefix . $table; exit;
     }
   }
-  $db->close(); echo 'ok';
+  // kvs-init accepts a valid import marker in either options table.
+  $error = null;
+  foreach (array_unique([$prefix . 'options', 'sys_options']) as $table) {
+    $rows = $db->query('SELECT value FROM ' . chr(96) . $table . chr(96) . " WHERE variable='INITIAL_VERSION' LIMIT 1");
+    if ($rows === false) {
+      if ($db->errno !== 1146) { $error ??= 'query-failed:' . (int) $db->errno . ':' . $table; }
+      continue;
+    }
+    $row = $rows->fetch_row();
+    if (preg_match('/^[0-9]+(?:[.][0-9]+)+(?:[._+-][A-Za-z0-9]+)*$/D', $row[0] ?? '')) { echo 'ok'; exit; }
+  }
+  echo $error ?? 'partial-import';
 } catch (Throwable $e) { exit(1); }`
 
 // tableName is what a table named by the database probe may be.
@@ -221,6 +232,9 @@ func (r *runner) database(ctx context.Context) Result {
 	if err == nil {
 		if answer == "ok" {
 			return good("PHP, as www-data, read the KVS tables with the site's database credentials")
+		}
+		if answer == "partial-import" {
+			return failure("The KVS database has no valid INITIAL_VERSION marker and may contain a partial import", "Inspect the import log with "+r.command("logs kvs-init --tail 100")+". Preserve the existing data. If recovery is needed, restore a verified database backup")
 		}
 		if answer == "config-unreadable" {
 			return failure("PHP-FPM's user, www-data, cannot read admin/include/setup_db.php or setup.php", "Check that both files exist and that uid 1000 (www-data) can read them, as kvs-init leaves them")

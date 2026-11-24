@@ -171,6 +171,7 @@ func TestDatabaseProbeFindings(t *testing.T) {
 		details   []string
 	}{
 		{"the KVS tables", "ok", nil, OK, "read the KVS tables", nil},
+		{"missing import marker", "partial-import", nil, Fail, "partial import", nil},
 		{"an empty database", "no-table:ktvs_admin_users", nil, Fail, "no ktvs_admin_users table", nil},
 		{"another prefix", "no-table:kvs7_videos\n", nil, Fail, "no kvs7_videos table", nil},
 		{"setup_db.php only root reads", "config-unreadable", nil, Fail, "www-data, cannot read admin/include/setup_db.php", nil},
@@ -200,6 +201,10 @@ func TestDatabaseProbeFindings(t *testing.T) {
 			}
 			if tc.status == Fail && report.ExitCode == 0 {
 				t.Fatalf("a failing database check left exit code 0: %+v", report)
+			}
+			if tc.out == "partial-import" && (!strings.Contains(result.Next, r.command("logs kvs-init --tail 100")) ||
+				!strings.Contains(result.Next, "restore a verified database backup")) {
+				t.Fatal(result.Next)
 			}
 			if strings.Contains(result.Message+strings.Join(result.Details, ""), "DROP") {
 				t.Fatalf("the probe's output reached the report: %+v", result)

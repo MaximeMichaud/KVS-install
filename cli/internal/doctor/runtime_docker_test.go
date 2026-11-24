@@ -108,6 +108,12 @@ chmod 0600 setup_db.php`)
 	sql("CREATE TABLE ktvs_admin_users (user_id INT)")
 	expect("database", Fail, "no ktvs_videos table")
 	sql("CREATE TABLE ktvs_videos (video_id INT)")
+	expect("database", Fail, "partial import")
+	sql("CREATE TABLE ktvs_options (variable VARCHAR(64), value VARCHAR(64)); INSERT INTO ktvs_options VALUES ('OTHER', '7.0')")
+	expect("database", Fail, "partial import")
+	sql("INSERT INTO ktvs_options VALUES ('INITIAL_VERSION', 'incomplete')")
+	expect("database", Fail, "partial import")
+	sql("UPDATE ktvs_options SET value='7.0' WHERE variable='INITIAL_VERSION'")
 	expect("database", OK, "KVS tables")
 
 	// setup_db.php only root reads: the site cannot run, and root's view
@@ -124,6 +130,8 @@ chmod 0600 setup_db.php`)
 	asRoot(`sed -i 's/"tables_prefix"] = "ktvs_"/"tables_prefix"] = "kvs7_"/' /var/www/kvs/admin/include/setup.php`)
 	expect("database", Fail, "no kvs7_admin_users table")
 	sql("CREATE TABLE kvs7_admin_users (user_id INT); CREATE TABLE kvs7_videos (video_id INT)")
+	expect("database", Fail, "partial import")
+	sql("CREATE TABLE sys_options LIKE ktvs_options; INSERT INTO sys_options SELECT * FROM ktvs_options")
 	expect("database", OK, "KVS tables")
 
 	// A lock held past the probe's 3 s read timeout, as a long write, an
@@ -162,6 +170,10 @@ chmod 0600 setup_db.php`)
 		t.Fatalf("%v: %s", err, out)
 	}
 	expect("database", Fail, "no kvs7_videos table")
+	if out, err := asDBRoot("-e", "GRANT SELECT ON kvs.kvs7_videos TO 'kvs'@'%'").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	expect("database", Fail, "could not query")
 	if out, err := asDBRoot("-e", "GRANT ALL PRIVILEGES ON kvs.* TO 'kvs'@'%'").CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
