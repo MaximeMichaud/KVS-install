@@ -104,6 +104,7 @@ docker() {
     case "$*" in
         'ps --format {{.Names}}') echo kvs-caddy ;;
         'compose --profile setup config --format json kvs-init') "$real_docker" "$@" ;;
+        'compose ps --status running --quiet cron') return 0 ;;
         'compose stop cron') touch "$work/cron"; return 26 ;;
         *) return 99 ;;
     esac

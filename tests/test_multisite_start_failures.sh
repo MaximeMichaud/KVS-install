@@ -26,8 +26,22 @@ docker() {
         'compose ps --status running --quiet cron')
             [[ ! -e $work/fail-ps ]] || return 1
             if [[ $(cat "$work/cron") == running ]]; then echo 0123456789ab; fi ;;
-        'compose stop cron') echo stopped > "$work/cron" ;;
-        'compose up -d mariadb') if [[ -e $work/fail-db ]]; then return 42; fi ;;
+        'compose stop cron')
+            if [[ -e $work/fail-signal ]]; then
+                # Signal the manager while it waits for an external Compose process.
+                bash -c '
+                    kill -s "$(cat "$work/fail-signal")" "$PPID"
+                    sleep 0.2
+                    echo stopped > "$work/cron"
+                    touch "$work/stop-finished"
+                '
+            else
+                echo stopped > "$work/cron"
+            fi
+            if [[ -e $work/fail-stop ]]; then return 45; fi ;;
+        'compose up -d mariadb')
+            if [[ -n $(trap -p HUP INT TERM) ]]; then echo "Signal handlers outlived the cron stop" >&2; return 90; fi
+            if [[ -e $work/fail-db ]]; then return 42; fi ;;
         'compose exec -T mariadb healthcheck.sh --connect --innodb_initialized') return 0 ;;
         'compose --profile setup run --rm --no-deps phpmyadmin-init') return 0 ;;
         'compose --profile setup run --rm --no-deps kvs-init') if [[ -e $work/fail-init ]]; then return 43; fi ;;
@@ -49,9 +63,10 @@ start() {
     shift
     rm -f "$work"/fail-*
     for marker in "$@"; do touch "$work/fail-$marker"; done
+    if [[ -n ${SIGNAL:-} ]]; then echo "$SIGNAL" > "$work/fail-signal"; fi
     : > "$work/calls"
     rc=0
-    bash "$manager" start media.example > "$work/start" 2>&1 || rc=$?
+    env --default-signal=HUP --default-signal=INT --default-signal=TERM bash "$manager" start media.example > "$work/start" 2>&1 || rc=$?
 }
 expect() {
     local label=$1 status=$2 cron=$3
@@ -59,6 +74,41 @@ expect() {
         { cat "$work/start"; echo "FAIL: $label: status $rc, cron $(cat "$work/cron"); expected $status, $cron"; exit 1; }
 }
 restarts() { grep -cFx 'compose start cron' "$work/calls" || true; }
+
+# Stop can change the container and then fail or be interrupted.
+for failure in stop HUP INT TERM; do
+    case "$failure" in
+        stop) status=45 ;;
+        HUP) status=129 ;;
+        INT) status=130 ;;
+        TERM) status=143 ;;
+    esac
+    for initial in running stopped; do
+        if [[ $failure == stop ]]; then
+            start "$initial" stop
+        else
+            rm -f "$work/stop-finished"
+            SIGNAL=$failure start "$initial"
+            # A premature exit can leave the stop running after the manager.
+            for ((i=0; i<200; i++)); do
+                [[ ! -e $work/stop-finished ]] || break
+                sleep 0.01
+            done
+            [[ -e $work/stop-finished ]] || { echo "The stop never finished"; exit 1; }
+        fi
+        expect "$initial before $failure" "$status" "$initial"
+        if [[ $initial == running ]]; then
+            [[ $(restarts) == 1 ]]
+        else
+            [[ $(restarts) == 0 ]]
+        fi
+        if grep -Fxq 'compose up -d mariadb' "$work/calls"; then exit 1; fi
+    done
+done
+start running stop cron-start
+expect "restart failure after a failed stop" 45 stopped
+grep -Fq 'Could not restart the previously running cron' "$work/start"
+grep -Fq 'docker compose start cron' "$work/start"
 
 # A cron that ran before the start runs again after MariaDB or the init fails.
 start running db
@@ -79,11 +129,11 @@ expect "cron stopped before" 43 stopped
 [[ $(restarts) == 0 ]] || { echo "FAIL: started a cron that did not run before"; exit 1; }
 grep -Fq 'cron of media.example is stopped:' "$work/start"
 
-# Unknown state, or a restart that fails: the notice remains.
+# If the state is unknown, leave cron alone.
 start running init ps
-expect "state not readable" 43 stopped
+expect "state not readable" 1 running
 [[ $(restarts) == 0 ]]
-grep -Fq 'cron of media.example is stopped:' "$work/start"
+if grep -Fxq 'compose stop cron' "$work/calls"; then exit 1; fi
 start running init cron-start
 expect "restart failed" 43 stopped
 [[ $(restarts) == 1 ]]

@@ -1425,9 +1425,12 @@ STOPPED_CRON_SITE=""
 STOPPED_CRON_WAS_RUNNING=false
 stopped_cron_notice() {
     [ -n "$STOPPED_CRON_SITE" ] || return 0
-    if [ "$STOPPED_CRON_WAS_RUNNING" = true ] && docker compose start cron; then
-        log_warn "cron of ${STOPPED_CRON_SITE} ran before this start and has been started again"
-        return 0
+    if [ "$STOPPED_CRON_WAS_RUNNING" = true ]; then
+        if docker compose start cron; then
+            log_warn "cron of ${STOPPED_CRON_SITE} ran before this start and has been started again"
+            return 0
+        fi
+        log_warn "Could not restart the previously running cron of ${STOPPED_CRON_SITE}"
     fi
     log_warn "cron of ${STOPPED_CRON_SITE} is stopped: docker compose start cron in ${SITES_DIR}/${STOPPED_CRON_SITE}, or re-run ./site-manager.sh start ${STOPPED_CRON_SITE}"
 }
@@ -1615,12 +1618,25 @@ start_site() {
     # (40-configure-database.sh): a cron.php still running on a started
     # site must not see that. The "up -d" below starts cron again.
     log_info "Stopping cron for the initialization..."
-    if [ -n "$(docker compose ps --status running --quiet cron 2>/dev/null)" ]; then
+    local running_cron status
+    running_cron=$(docker compose ps --status running --quiet cron) || {
+        status=$?
+        log_error "Could not check whether cron is running. Start aborted before stopping it."
+        return "$status"
+    }
+    if [ -n "$running_cron" ]; then
         STOPPED_CRON_WAS_RUNNING=true
+        STOPPED_CRON_SITE=$domain
     fi
-    docker compose stop cron
-    STOPPED_CRON_SITE=$domain
     trap stopped_cron_notice EXIT
+    # Bash defers trapped signals until the foreground stop returns.
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    docker compose stop cron
+    trap - HUP INT TERM
+    # A cron already stopped needs the manual start notice only if a later step fails.
+    STOPPED_CRON_SITE=$domain
 
     # Run init containers first
     log_info "Running initialization..."
