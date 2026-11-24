@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d)
-trap 'rm -rf "$TEST_DIR"' EXIT
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+TEST_DIR=$work/docker
 fail() { echo "FAIL: $*" >&2; exit 1; }
 mkdir -p "$TEST_DIR/lib" "$TEST_DIR/bin" "$TEST_DIR/site/admin/data/plugins/external_search" "$TEST_DIR/api"
 cp "$ROOT_DIR/docker/reconfigure.sh" "$TEST_DIR/"

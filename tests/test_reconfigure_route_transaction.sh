@@ -10,6 +10,7 @@ cleanup() {
     rm -rf "$work"
 }
 trap cleanup EXIT
+export TMPDIR=$work
 mkdir "$work/docker"
 (cd "$root/docker" && cp --parents reconfigure.sh multi-site/site-manager.sh "$work/docker")
 
