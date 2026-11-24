@@ -986,7 +986,7 @@ render_nginx_site_config() {
 
 function whatisdomain() {
   local LC_ALL=C
-  local archive setup kvs_file
+  local archive setup name_pattern='_\[([^][]+)\]\.zip$'
   archive=$(find_kvs_archive "${KVS_ARCHIVE_DIR:-/root}") || return $?
 
   # Read the licence domain straight from the archive's setup.php. unzip -p
@@ -1005,9 +1005,12 @@ function whatisdomain() {
 
   # Fallback: extract domain from the archive name, KVS_X.X.X_[domain.com].zip
   if [[ -z "$DOMAIN" ]]; then
-    kvs_file=${archive##*/}
-    DOMAIN=${kvs_file#*[}
-    DOMAIN=${DOMAIN%]*}
+    if [[ ${archive##*/} =~ $name_pattern ]]; then
+      DOMAIN=${BASH_REMATCH[1]}
+    else
+      echo "No licence domain in setup.php. Rename the archive to KVS_<version>_[<domain>].zip and retry." >&2
+      exit 1
+    fi
   fi
 
   DOMAIN=${DOMAIN,,}
@@ -3776,7 +3779,7 @@ function manageMenu() {
       echo "  $docker_dir/multi-site/site-manager.sh add <domain>"
       exit 1
     fi
-    whatisdomain
+    whatisdomain || return $?
     install_KVS
     ;;
   3)

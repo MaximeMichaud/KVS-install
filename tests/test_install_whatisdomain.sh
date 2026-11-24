@@ -24,6 +24,8 @@ command -v zip > /dev/null 2>&1 ||
 # The function, the archive finder and the host names helper it leans on,
 # as kvs-install.sh defines them (each closes with a column-zero brace).
 awk '
+    /^validate_kvs_domain\(\) \{/,/^}/
+    /^function manageMenu\(\) \{/,/^}/
     /^find_kvs_archive\(\) \{/,/^}/
     /^set_site_hostnames\(\) \{/,/^}/
     /^function whatisdomain\(\) \{/,/^}/
@@ -64,9 +66,8 @@ run_whatisdomain() {
         cd "$cwd" || exit 97
         KVS_ARCHIVE_DIR="$archive_dir" bash -c '
             DOMAIN=""; URL=""; REDIRECT_SERVER_NAME=""; USE_WWW="false"
-            validate_kvs_domain() { return 0; }
             source "$1"
-            whatisdomain
+            whatisdomain || exit $?
             echo "status=$?"
             echo "DOMAIN=$DOMAIN"
         ' _ "$WORK/fn.sh" 2>&1
@@ -89,5 +90,26 @@ out=$(run_whatisdomain "$WORK/b")
 grep -q 'status=0' <<< "$out" || fail "the filename fallback must succeed: $out"
 grep -q '^DOMAIN=filedomain.example.com$' <<< "$out" ||
     fail "the domain must fall back to the archive file name: $out"
+
+for name in 'KVS_7_[example.com.zip' 'KVS_7_example.com].zip' 'KVS_7_[example.com]-copy.zip' 'KVS_7[example.com].zip' 'KVS_7_[example.com] (1).zip'; do
+    mv "$WORK/b/"*.zip "$WORK/b/$name" || fail "could not rename test archive"
+    if out=$(run_whatisdomain "$WORK/b"); then fail "accepted malformed archive name $name: $out"; fi
+    grep -Fq 'Rename the archive to KVS_<version>_[<domain>].zip' <<< "$out" || fail "missing rename guidance: $out"
+done
+mv "$WORK/a/"*.zip "$WORK/a/KVS_7_[example.com.zip"
+out=$(run_whatisdomain "$WORK/a") || fail "refused a valid licence inside a renamed archive"
+grep -Fxq 'DOMAIN=insidedomain.example.com' <<< "$out" ||
+    fail "an incomplete archive name overrode the licence in setup.php"
+
+# Add a site must stop if domain discovery returns before validation.
+# shellcheck disable=SC2329 # manageMenu calls the two fixture functions.
+if (
+    # shellcheck source=/dev/null
+    source "$WORK/fn.sh"
+    docker_install_dir() { return 1; }
+    install_KVS() { touch "$WORK/provisioned"; }
+    KVS_ARCHIVE_DIR="$WORK/absent" MENU_OPTION=2 manageMenu
+); then fail "Add a site accepted a missing archive"; fi
+[[ ! -e "$WORK/provisioned" ]] || fail "Add a site proceeded without a domain"
 
 echo "ok - whatisdomain reads the domain from the archive without unpacking or deleting anything"
