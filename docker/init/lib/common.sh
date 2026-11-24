@@ -109,25 +109,15 @@ get_safe_domain() {
     echo "${DOMAIN//[.-]/_}"
 }
 
-# The table prefix of the site, as KVS wrote it in setup.php: ktvs_ for
-# every archive KVS ships, whatever the old server used for an imported
-# site. The value lands inside SQL, so only identifier characters pass;
-# anything else falls back to ktvs_ with a warning on stderr.
+# Use the same prefix check as the host preflight before issuing SQL.
 get_tables_prefix() {
-    local pattern prefix
-
-    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
-    prefix=$(sed -n -E "$pattern" "$KVS_PATH/admin/include/setup.php" 2>/dev/null | head -n 1)
-    if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
-        if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
-            echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
-        elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
-            printf 'ERROR: cannot use the table prefix in %s. Check the installed tables and .env together.\n' "$KVS_PATH/admin/include/setup.php${DOMAIN:+ (default host path /var/www/$DOMAIN/admin/include/setup.php)}" >&2
-            return 1
-        else
-            printf 'WARNING: No usable tables_prefix in %s, using ktvs_\n' "$KVS_PATH/admin/include/setup.php${DOMAIN:+ (default host path /var/www/$DOMAIN/admin/include/setup.php)}" >&2
-            prefix=ktvs_
-        fi
+    local setup="$KVS_PATH/admin/include/setup.php"
+    local location="$setup${DOMAIN:+ (default host path /var/www/$DOMAIN/admin/include/setup.php)}"
+    # shellcheck source=/dev/null
+    source "${BASH_SOURCE[0]%/*}/kvs-archive.sh" || return 1
+    if [ ! -r "$setup" ]; then
+        printf 'ERROR: cannot read %s\n' "$location" >&2
+        return 1
     fi
-    printf '%s\n' "$prefix"
+    kvs_read_tables_prefix "$setup" "$location"
 }

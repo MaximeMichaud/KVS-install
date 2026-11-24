@@ -246,9 +246,9 @@ for case in cases:
     root = BASE / ('preparation-' + label) / case['name']
     assert not root.exists(), root
     d = root / 'docker'
-    for directory in ['lib', 'bin', 'kvs-archive', 'docker-config', 'multi-site', 'site', 'oldsite/admin/include']:
+    for directory in ['lib', 'bin', 'init/lib', 'kvs-archive', 'docker-config', 'multi-site', 'site', 'oldsite/admin/include']:
         (d / directory).mkdir(parents=True, exist_ok=True)
-    for name in ['lib/host-validation.sh', 'lib/import.sh', 'lib/database.sh', 'lib/native-import.sh', 'bin/resolve-bases.sh', 'images.lock', 'docker-compose.yml', 'docker-compose.multi.yml']:
+    for name in ['lib/host-validation.sh', 'init/lib/kvs-archive.sh', 'lib/import.sh', 'lib/database.sh', 'lib/native-import.sh', 'bin/resolve-bases.sh', 'images.lock', 'docker-compose.yml', 'docker-compose.multi.yml']:
         shutil.copy2(REPO / 'docker' / name, d / name)
     # The checkout's exporter lists the links of a site directory.
     shutil.copy2(REPO / 'kvs-export.sh', root / 'kvs-export.sh')

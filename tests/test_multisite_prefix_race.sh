@@ -17,7 +17,7 @@ routes="$multi/caddy/sites"
 locks="$multi/.locks"
 export work manager sites locks KVS_WEBROOT_BASE="$work/www"
 command mkdir -p "$work/docker/kvs-archive"
-touch "$work/docker/kvs-archive/KVS_test.zip"
+python3 "$root/tests/fixtures/kvs-prefix-archive.py" "$work/docker/kvs-archive/KVS_test.zip"
 # shellcheck disable=SC2329  # Used by child managers.
 chown() { :; }
 # shellcheck disable=SC2329  # Used by child managers.

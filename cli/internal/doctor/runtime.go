@@ -161,9 +161,9 @@ func (r *runner) tools(ctx context.Context) Result {
 	return good("Media tool executables are present", checked...)
 }
 
-// Only setup_db.php is loaded; setup.php is read as text, one line at a time
-// as kvs-init's get_tables_prefix reads it, for its tables prefix. Loading
-// the application's bootstrap would run application code and could write
+// Only setup_db.php is loaded. From the text of setup.php, the probe takes
+// the first matching assignment's leading quoted ASCII identifier, with
+// ktvs_ as its fallback. Running the application bootstrap could write
 // sessions, caches or scheduled jobs. Error text is deliberately not
 // emitted: database errors can contain credentials. What the probe found
 // is a fixed word on stdout with exit status 0, followed for a table by its

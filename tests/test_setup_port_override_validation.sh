@@ -77,7 +77,9 @@ run_with_override() {
     # reads the lock one directory up from itself.
     cp "$REPO_ROOT/docker/bin/resolve-bases.sh" "$case_dir/bin/"
     cp "$REPO_ROOT/docker/images.lock" "$case_dir/"
-    : > "$work_dir/kvs-archive/KVS_7.0.2_mysite.test.zip"
+    mkdir -p "$case_dir/init/lib"
+    cp "$REPO_ROOT/docker/init/lib/kvs-archive.sh" "$case_dir/init/lib/"
+    python3 "$REPO_ROOT/tests/fixtures/kvs-prefix-archive.py" "$work_dir/kvs-archive/KVS_7.0.2_mysite.test.zip"
 
     output_log="$case_dir/output.log"
     env_file="$work_dir/.env"

@@ -13,7 +13,7 @@ manager=$PWD/multi-site/site-manager.sh
 real_docker=$(type -P docker)
 export work real_docker KVS_WEBROOT_BASE="$work/www" KVS_ADMIN_PASSWORD=fixture
 mkdir -p kvs-archive
-printf 'archive\n' | zip -q kvs-archive/KVS_media.zip -
+python3 "$root/tests/fixtures/kvs-prefix-archive.py" kvs-archive/KVS_media.zip
 # shellcheck disable=SC2329  # Used by the manager.
 chown() { :; }
 # Compose renders the site's configuration itself; the engine is this state file.
@@ -188,6 +188,7 @@ touch "$webroot/admin/include/setup.php" "$webroot/.kvs-extraction-in-progress"
 refused "interrupted extraction"
 # An installed site needs no archive, with or without the completion marker.
 rm "$webroot/.kvs-extraction-in-progress"
+printf '%s\n' "\$config['tables_prefix']='ktvs_';" > "$webroot/admin/include/setup.php"
 accepted "site installed before the markers"
 touch "$webroot/.kvs-extraction-complete" "$webroot/.kvs-extraction-in-progress"
 accepted "completed extraction"

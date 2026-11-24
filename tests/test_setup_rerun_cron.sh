@@ -118,6 +118,9 @@ SH
 $config['project_path']="/var/www/kvs";
 $config['tables_prefix']="ktvs_";
 PHP
+    if [ "$1" = computed-prefix ]; then
+        printf '%s\n' "\$config ['tables_prefix'] = 'part_' . 'more';" > "$dir/www/rerun.example.com/admin/include/setup.php"
+    fi
     printf "<?php\n\$config['project_version']='7.0.2';\n" > "$dir/www/rerun.example.com/admin/include/version.php"
     (
         cd "$dir/docker" || exit 1
@@ -168,6 +171,16 @@ for gum in no yes; do
         report "$name" "a run that failed after the cron stop did not end with: $notice (gum: $gum)"
     fi
 done
+
+name=computed-prefix
+run_case "$name" no
+if [ "$(cat "$fixture/$name/status")" != 0 ] && [ -z "$(order "$name")" ] &&
+    grep -Fq "$fixture/$name/www/rerun.example.com/admin/include/setup.php" "$fixture/$name/output.log" &&
+    ! grep -Eq '^docker (stop|rm|compose (stop|down|up)) ' "$fixture/$name/calls"; then
+    echo "PASS: a computed table prefix stops setup before it stops a service or starts MariaDB"
+else
+    report "$name" "prefix refusal must name the host file before stopping anything"
+fi
 
 name=cron-stop-fails
 run_case "$name" no 1

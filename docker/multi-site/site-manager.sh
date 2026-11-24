@@ -186,71 +186,84 @@ domain_to_safe() {
     printf '%s\n' "$safe"
 }
 
-# The table prefix a site runs with, for the scripts outside the container:
-# the value the site's .env carries, ktvs_ until one is written.
+# Resolve the prefix before deciding whether initialization needs an admin
+# password. An installed site and its saved configuration must agree.
 site_tables_prefix() {
-    local prefix
-
-    prefix=$(env_file_value .env TABLES_PREFIX)
+    local webroot="${1:-}" prefix installed="" location literal
+    local -a assignments
+    # A line inside another quoted .env value is data, even if it begins
+    # with TABLES_PREFIX=. Keep the raw assignment to reject interpolation.
+    mapfile -t assignments < <(awk '
+        {
+            value = $0
+            if (!quote) {
+                if (!match(value, /^[[:blank:]]*(export[[:blank:]]+)?[^#[:space:]=:]+[[:blank:]]*[=:][[:blank:]]*/)) next
+                key = substr(value, 1, RLENGTH)
+                value = substr(value, RLENGTH + 1)
+                if (key ~ /(^|[[:blank:]])TABLES_PREFIX[[:blank:]]*[=:]/) print value
+                quote = substr(value, 1, 1)
+                if (quote != "\"" && quote != "\047") { quote = ""; next }
+                value = substr(value, 2)
+            }
+            gsub(/\\./, "", value)
+            if (index(value, quote)) quote = ""
+        }' .env)
+    if [ "$webroot" = unsupported ]; then
+        echo "ERROR: cannot check the installed prefix. Check the kvs-init webroot bind in $PWD/docker-compose.yml before generating an admin password." >&2
+        return 1
+    fi
+    if [ -n "$webroot" ] && [ -f "$webroot/admin/include/setup.php" ] &&
+        { [ -f "$webroot/.kvs-extraction-complete" ] || [ ! -f "$webroot/.kvs-extraction-in-progress" ]; }; then
+        location="$webroot/admin/include/setup.php"
+        installed=$(kept_site_tables_prefix "$webroot") || return 1
+        if [ "${#assignments[@]}" -eq 0 ]; then
+            # Projects created before the manager saved TABLES_PREFIX can
+            # identify an existing database by its installed site.
+            printf '%s\n' "$installed"
+            return 0
+        fi
+    elif [ -n "${2:-}" ]; then
+        location="$2:admin/include/setup.php"
+        installed=$(archive_tables_prefix "$2") || return 1
+    fi
+    literal="^(['\"]?)([^'\"[:space:]#]+)\\1([[:blank:]]+#.*)?[[:space:]]*$"
+    # Compose takes the last assignment of a key, and so does this reader.
+    if [ "${#assignments[@]}" -eq 0 ] || [[ ! ${assignments[-1]} =~ $literal ]]; then
+        echo "ERROR: set TABLES_PREFIX to the actual literal database prefix in $PWD/.env before starting." >&2
+        return 1
+    fi
+    prefix=${BASH_REMATCH[2]}
     if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
         if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
             echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
-        elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
-            echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables, setup.php and .env together." >&2
-            return 1
         else
-            prefix=ktvs_
+            echo "ERROR: set TABLES_PREFIX to the actual literal database prefix in $PWD/.env before starting." >&2
+            return 1
         fi
     fi
-    printf '%s\n' "$prefix"
-}
-
-# The table prefix written in the setup.php of <archive>, the KVS archive a
-# new site starts from, or ktvs_ (the prefix of every archive KVS ships) when
-# there is none to read.
-archive_tables_prefix() {
-    local LC_ALL=C
-    local archive="$1" pattern prefix
-
-    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
-    prefix=""
-    if [ -n "$archive" ] && command -v unzip >/dev/null 2>&1; then
-        prefix=$(unzip -p "$archive" admin/include/setup.php 2>/dev/null | sed -n -E "$pattern" | head -n 1)
-    fi
-    if [[ "$prefix" =~ [^[:print:][:cntrl:]] ]]; then
-        echo "ERROR: a new archive table prefix must contain only ASCII letters, digits and underscores." >&2
+    if [ -n "$installed" ] && [ "$prefix" != "$installed" ]; then
+        echo "ERROR: TABLES_PREFIX in $PWD/.env disagrees with $location. Confirm the database prefix before starting." >&2
         return 1
     fi
-    [[ "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] || prefix=ktvs_
     printf '%s\n' "$prefix"
 }
 
-# The table prefix of the KVS site an earlier remove kept in <webroot>, read
-# and classified as the init's get_tables_prefix does: that init keeps the
-# site and never extracts the archive, so its setup.php decides, a historical
-# non-ASCII prefix included.
-kept_site_tables_prefix() {
-    local setup="$1/admin/include/setup.php" pattern prefix
+archive_tables_prefix() {
+    if [ -z "$1" ]; then printf 'ktvs_\n'; return 0; fi
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/../init/lib/kvs-archive.sh" || return 1
+    kvs_read_archive_prefix "$1"
+}
 
+kept_site_tables_prefix() {
+    local setup="$1/admin/include/setup.php"
     if [ ! -r "$setup" ]; then
         echo "ERROR: cannot read $setup, which holds the table prefix of the kept site." >&2
         return 1
     fi
-    pattern="s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]tables_prefix['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p"
-    prefix=$(sed -n -E "$pattern" "$setup" | head -n 1)
-    if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
-        if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
-            echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
-        elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
-            echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables and setup.php of the kept site together." >&2
-            return 1
-        else
-            # Not log_warn: echo -e would interpret backslashes of the value.
-            printf '%s\n' "WARNING: No usable tables_prefix in ${setup} (got '${prefix}'), using ktvs_" >&2
-            prefix=ktvs_
-        fi
-    fi
-    printf '%s\n' "$prefix"
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/../init/lib/kvs-archive.sh" || return 1
+    kvs_read_tables_prefix "$setup"
 }
 
 # Render the real model so local overrides, top-level name and interpolation
@@ -1586,11 +1599,11 @@ lock_site_directory() {
 # Inspect the effective bind, including local overrides and Compose interpolation.
 # The cached init may still pick the first archive visible in a directory.
 check_site_archive_mount() {
-    local domain="$1" mount source webroot path selected count=0
+    local domain="$1" mount source path selected count=0
     if ! mount=$(set -o pipefail
         manager_docker compose --profile setup config --format json kvs-init |
-            jq -er '([.services["kvs-init"].volumes[]? | select(.type == "bind" and .target == "/var/www/kvs")
-                | .source][0] // "") as $webroot
+            jq -er '([.services["kvs-init"].volumes[]? | select(.target == "/var/www/kvs")
+                | if .type == "bind" then .source else "unsupported" end][0] // "") as $webroot
                 | [.services["kvs-init"].volumes[]? | select(.type == "bind" and
                 (.target == "/kvs-archive" or (.target | startswith("/kvs-archive/"))))]
                 | (if length == 0 then ["none", ""] elif length != 1 then error("multiple archive binds")
@@ -1606,7 +1619,8 @@ check_site_archive_mount() {
     [[ "$source" != *$'\n'* ]] || webroot=${source#*$'\n'}
     source=${source%%$'\n'*}
     local needs_archive=false
-    if [ -n "$webroot" ]; then
+    # A webroot that is not a bind ("unsupported") cannot be inspected here.
+    if [[ $webroot == /* ]]; then
         if { [ -e "$webroot" ] || [ -L "$webroot" ]; } && [ ! -d "$webroot" ]; then
             log_error "Webroot $webroot is not a directory. Repair the bind source before starting $domain."
             return 1
@@ -1652,6 +1666,7 @@ check_site_archive_mount() {
                 log_error "Repair the archive mount source $source so it points to the site's regular archive, then retry."
                 return 1
             fi
+            site_archive=$source
             return 0 ;;
     esac
     if [ ! -d "$source" ]; then
@@ -1661,6 +1676,7 @@ check_site_archive_mount() {
     # shellcheck source=/dev/null
     source "${SCRIPT_DIR}/../init/lib/kvs-archive.sh" || return 1
     selected=$(select_kvs_archive "$source" "$domain") || return 1
+    site_archive=$selected
     # The init extracts an archive into an empty webroot, or to resume its
     # own interrupted extraction (init/docker-entrypoint.d/00-extract.sh).
     # The webroot can be a link to another disk: look inside it, as Docker does.
@@ -1705,7 +1721,7 @@ start_site() {
     local admin_password="${KVS_ADMIN_PASSWORD:-}"
     local generated_admin_password=false
     local attempt
-    local admin_table_count
+    local admin_table_count tables_prefix webroot site_archive=""
     local default_admin_login
     local admin_login=admin
     validate_domain "$domain" || return 1
@@ -1730,7 +1746,11 @@ start_site() {
 
     log_info "Starting site: ${domain}"
     cd "$site_dir"
+    # The archive preflight sets webroot from the effective init bind.
     check_site_archive_mount "$domain" || return 1
+    if [ -z "$admin_password" ]; then
+        tables_prefix=$(site_tables_prefix "$webroot" "$site_archive") || return 1
+    fi
 
     # kvs-init clears KVS's cron locks and its cron registration
     # (40-configure-database.sh): a cron.php still running on a started
@@ -1774,7 +1794,7 @@ start_site() {
     manager_docker compose --profile setup run --rm --no-deps phpmyadmin-init
     if [ -z "$admin_password" ]; then
         # shellcheck disable=SC2016  # The container expands the variables.
-        if ! admin_table_count=$(manager_docker compose exec -T -e "TABLES_PREFIX=$(site_tables_prefix)" mariadb sh -c '
+        if ! admin_table_count=$(manager_docker compose exec -T -e "TABLES_PREFIX=$tables_prefix" mariadb sh -c '
             MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N -e \
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"$MARIADB_DATABASE\" AND table_name=\"${TABLES_PREFIX}admin_users\";"
         ' 2>/dev/null); then
@@ -1794,7 +1814,7 @@ start_site() {
             # 35-harden-admin-users.sh refuses to leave on the default; a
             # renamed one keeps its login, which the password goes with.
             # shellcheck disable=SC2016  # The container expands the variables.
-            if ! default_admin_login=$(manager_docker compose exec -T -e "TABLES_PREFIX=$(site_tables_prefix)" mariadb sh -c '
+            if ! default_admin_login=$(manager_docker compose exec -T -e "TABLES_PREFIX=$tables_prefix" mariadb sh -c '
                 MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N "$MARIADB_DATABASE" -e \
                     "SELECT login FROM ${TABLES_PREFIX}admin_users WHERE user_id=1 AND pass=MD5(CONCAT(\"pass:\",MD5(\"123\")));"
             ' 2>/dev/null); then

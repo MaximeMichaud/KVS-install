@@ -729,9 +729,9 @@ configure_disk_space_limit() {
     echo -e "${CYAN}└──────────────────────────────────────────────────────────────────┘${NC}"
 }
 
-# The installed tree shares its selection rule with kvs-init and add. A
-# standalone copy of setup.sh without the library keeps its single-archive
-# behavior until the rest of the installation tree is available.
+# Setup, kvs-init and add share the archive selector. A standalone copy can
+# locate a single archive during preflight. Reading the table prefix from
+# that archive or an installed site requires init/lib/kvs-archive.sh.
 setup_kvs_archive() {
     local lib="${SETUP_SCRIPT_DIR:-.}/init/lib/kvs-archive.sh" path
     if [ -f "$lib" ]; then
@@ -2253,64 +2253,47 @@ import_check_completed() {
     IMPORT_SOURCE=""
 }
 
-# setup_php_config_value <key>: the value of $config['<key>'] in a KVS PHP
-# configuration file read on stdin, as KVS writes it.
-setup_php_config_value() {
-    local assignment value
-    assignment="^[[:space:]]*\\\$config\\[[[:space:]]*['\"]$1['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*"
-    value="['\"]([^'\"]*)['\"].*"
-    if [ "${2:-}" = literal ]; then
-        # Only a complete literal assignment determines an installed prefix.
-        # Block comments may stand before its semicolon, as PHP allows.
-        value="['\"]([^'\"$\\\\]*)['\"]([[:space:]]|/[*][^*]*[*]+([^/*][^*]*[*]+)*/)*(;|[?]>).*"
-    fi
-    sed -n -E "s#${assignment}${value}#\\1#p" | head -n 1
-}
-
 # The table prefix the site runs with: the imported site's, the one of a
 # site already in place, or the one of the KVS archive (ktvs_ for every
 # archive KVS ships). The init reads setup.php itself inside the
 # container; .env carries the value for the Manticore container and
 # reconfigure.sh. Only identifier characters pass, since it lands in SQL.
 kvs_tables_prefix() {
-    local prefix="" archive="" installed=false saved=${TABLES_PREFIX:-}
-
+    local prefix archive setup="/var/www/$DOMAIN/admin/include/setup.php" saved=${TABLES_PREFIX:-}
     if [ "$IMPORT_MODE" = true ] && [ -n "$IMPORT_TABLES_PREFIX" ]; then
         prefix=$IMPORT_TABLES_PREFIX
-    elif [ -f "/var/www/$DOMAIN/admin/include/setup.php" ]; then
-        installed=true
-        prefix=$(setup_php_config_value tables_prefix literal < "/var/www/$DOMAIN/admin/include/setup.php")
+    elif [ -f "$setup" ]; then
+        # shellcheck source=/dev/null
+        source "${SETUP_SCRIPT_DIR:-.}/init/lib/kvs-archive.sh" || return 1
+        prefix=$(kvs_read_tables_prefix "$setup") || return 1
+        if [ "${PREVIOUS_DOMAIN:-$DOMAIN}" = "$DOMAIN" ] && [ -n "$saved" ] && [ "$saved" != "$prefix" ]; then
+            echo "ERROR: TABLES_PREFIX in $PWD/.env differs from tables_prefix in $setup. Check both against the installed tables before continuing." >&2
+            return 1
+        fi
+        printf '%s\n' "$prefix"
+        return 0
     else
         archive=$(setup_kvs_archive) || return 1
         if [ -n "$archive" ]; then
-            if command -v unzip >/dev/null 2>&1; then
-                prefix=$(unzip -p "$archive" admin/include/setup.php 2>/dev/null | setup_php_config_value tables_prefix)
-            fi
-        elif [ -n "$saved" ] && [ "${PREVIOUS_DOMAIN:-$DOMAIN}" = "$DOMAIN" ] && [ "$IMPORT_MODE" != true ]; then
-            installed=true
+            # shellcheck source=/dev/null
+            source "${SETUP_SCRIPT_DIR:-.}/init/lib/kvs-archive.sh" || return 1
+            kvs_read_archive_prefix "$(realpath -- "$archive")"
+            return
+        fi
+        prefix=ktvs_
+        if [ -n "$saved" ] && [ "${PREVIOUS_DOMAIN:-$DOMAIN}" = "$DOMAIN" ] && [ "$IMPORT_MODE" != true ]; then
             prefix=$saved
+            if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null &&
+                [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
+                echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in $setup and TABLES_PREFIX in .env together." >&2
+                printf '%s\n' "$prefix"
+                return 0
+            fi
         fi
-    fi
-    if [ "$installed" = true ] && [ "${PREVIOUS_DOMAIN:-$DOMAIN}" = "$DOMAIN" ]; then
-        if [ -n "$prefix" ] && [ -n "$saved" ] && [ "$saved" != "$prefix" ]; then
-            echo "ERROR: TABLES_PREFIX in .env differs from tables_prefix in setup.php. Check both against the installed tables before continuing." >&2
-            return 1
-        fi
-        prefix=${prefix:-$saved}
     fi
     if [[ ! "$prefix" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]{1,32}$ ]]; then
-        if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
-            if [ "$installed" != true ]; then
-                echo "ERROR: a new table prefix must contain only ASCII letters, digits and underscores." >&2
-                return 1
-            fi
-            echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
-        elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
-            echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables, setup.php and .env together." >&2
-            return 1
-        else
-            prefix=ktvs_
-        fi
+        echo "ERROR: cannot use the table prefix. Check the imported setup.php or $PWD/.env before continuing." >&2
+        return 1
     fi
     printf '%s\n' "$prefix"
 }
@@ -2912,7 +2895,7 @@ import_inspect_archive() {
         echo -e "${RED}ERROR: could not read admin/include/setup.php, setup_db.php and version.php from the archive${NC}"
         exit 1
     fi
-    site_info=$(import_validate_site "$peek") || { rm -rf "$peek"; exit 1; }
+    site_info=$(import_validate_site "$peek" "" "$IMPORT_ARCHIVE:${IMPORT_ARCHIVE_ROOT:+$IMPORT_ARCHIVE_ROOT/}admin/include/setup.php") || { rm -rf "$peek"; exit 1; }
     IMPORT_SITE_VERSION=$(import_field "$site_info" 1)
     IMPORT_OLD_PATH=$(import_field "$site_info" 2)
     IMPORT_TABLES_PREFIX=$(import_field "$site_info" 3)

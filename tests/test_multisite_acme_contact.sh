@@ -13,7 +13,7 @@ routes=$work/multi-site/caddy/sites
 site=$work/multi-site/sites/site.example
 export work KVS_WEBROOT_BASE=$work/www
 mkdir -p "$routes" "$work/kvs-archive"
-touch "$work/kvs-archive/KVS_test.zip"
+python3 "$root/tests/fixtures/kvs-prefix-archive.py" "$work/kvs-archive/KVS_test.zip"
 unset ACME_EMAIL CADDY_TLS_MODE
 fail() { cat "$work/out" >&2; echo "FAIL: $*" >&2; exit 1; }
 # shellcheck disable=SC2329  # Used by the manager.

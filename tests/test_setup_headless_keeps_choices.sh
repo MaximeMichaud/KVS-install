@@ -100,7 +100,9 @@ run_case() {
     # reads the lock one directory up from itself.
     cp "$REPO_ROOT/docker/bin/resolve-bases.sh" "$CASE_DIR/bin/"
     cp "$REPO_ROOT/docker/images.lock" "$CASE_DIR/"
-    : > "$WORK_DIR/kvs-archive/KVS_7.0.2_mysite.test.zip"
+    mkdir -p "$CASE_DIR/init/lib"
+    cp "$REPO_ROOT/docker/init/lib/kvs-archive.sh" "$CASE_DIR/init/lib/"
+    python3 "$REPO_ROOT/tests/fixtures/kvs-prefix-archive.py" "$WORK_DIR/kvs-archive/KVS_7.0.2_mysite.test.zip"
     local -a headless=()
     if [ "$mode" = headless ]; then
         headless=(HEADLESS=y DOMAIN=mysite.test EMAIL=ops@mysite.test)

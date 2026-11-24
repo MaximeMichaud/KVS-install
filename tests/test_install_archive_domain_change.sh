@@ -116,8 +116,9 @@ run_case() {
     fi
     if [ "$name" = switch-import ]; then
         # Let source inspection finish so setup reaches prefix selection.
-        mkdir -p "$WORK_DIR/lib" "$TMP_ROOT/old-site/admin/include"
+        mkdir -p "$WORK_DIR/lib" "$WORK_DIR/init/lib" "$TMP_ROOT/old-site/admin/include"
         cp "$REPO_ROOT/docker/lib/"{import,database}.sh "$WORK_DIR/lib/"
+        cp "$REPO_ROOT/docker/init/lib/kvs-archive.sh" "$WORK_DIR/init/lib/"
         cp "$REPO_ROOT/kvs-export.sh" "$CASE_DIR/kvs/"
         cat > "$TMP_ROOT/old-site/admin/include/setup.php" <<'EOF'
 <?php

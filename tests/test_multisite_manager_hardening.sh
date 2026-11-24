@@ -37,7 +37,7 @@ create_fixture() {
     cp "$ROOT_DIR/docker/lib/host-validation.sh" "$fixture/lib/"
     mkdir -p "${fixture}/init/lib"
     cp "${ROOT_DIR}/docker/init/lib/kvs-archive.sh" "${fixture}/init/lib/"
-    : > "${fixture}/kvs-archive/KVS_test.zip"
+    python3 "$ROOT_DIR/tests/fixtures/kvs-prefix-archive.py" "${fixture}/kvs-archive/KVS_test.zip"
 }
 
 openssl() {
@@ -279,7 +279,7 @@ create_fixture no-jq
     manager="$fixture/multi-site/site-manager.sh"
     bin="$TEST_DIR/no-jq/bin"
     mkdir "$bin"
-    for tool in awk basename bash cat chmod cp dirname flock grep head ln mkdir mktemp mv realpath rm rmdir sed sort stat tail tr wc; do
+    for tool in awk basename bash cat chmod cp dirname expr flock grep head ln mkdir mktemp mv realpath rm rmdir sed sort stat tail tr unzip wc; do
         ln -s "$(type -P "$tool")" "$bin/$tool"
     done
     export KVS_WEBROOT_BASE="$TEST_DIR/no-jq/webroots"
@@ -1971,6 +1971,8 @@ bodies = {
     "ilexec": "<?php\n// loader call only\nif (function_exists('_il_exec')) { _il_exec(); }\n",
 }
 path, specs = sys.argv[1], sys.argv[2:]
+if not any(spec.startswith("admin/include/setup.php:") for spec in specs):
+    specs.append("admin/include/setup.php:prefix=ktvs_")
 damaged = []
 with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as z:
     for spec in specs:
@@ -2147,7 +2149,7 @@ x4_archive_readers() (
     local SETUP_SCRIPT_DIR="$ROOT_DIR/docker" IMPORT_SITE_VERSION
     local RED GREEN YELLOW CYAN='' NC KVS_ARCHIVE_DIR
     for name in setup_kvs_archive require_single_kvs_archive kvs_documented_php_version detect_ioncube \
-        setup_php_config_value kvs_tables_prefix import_check_kvs_archive_version; do
+        kvs_tables_prefix import_check_kvs_archive_version; do
         eval "$(sed -n "/^${name}() {/,/^}/p" "$ROOT_DIR/docker/setup.sh")"
     done
     # Check both domains: whichever file the filesystem lists first, using
@@ -2252,7 +2254,7 @@ w3_kept() {
     webroot="${TEST_DIR}/$1/webroots/w3.example"
     mkdir -p "${webroot}/admin/include"
     printf '%s' "$2" > "${webroot}/admin/include/functions_base.php"
-    : > "${webroot}/admin/include/setup.php"
+    printf '%s\n' '<?php' "\$config['tables_prefix']='ktvs_';" > "${webroot}/admin/include/setup.php"
     if [ -n "${3:-}" ]; then
         printf "<?php\n\$config['project_version']=\"%s\";\n" "$3" > "${webroot}/admin/include/version.php"
     fi
@@ -2337,20 +2339,13 @@ w3_kept_prefix w3_kept_unread "\$config['tables_prefix']='old_';" café_
 w3_run
 w3_expect 8.1 NO "a kept ASCII site with a non-ASCII archive"
 grep -Fxq 'TABLES_PREFIX=old_' "$w3_env" || fail "W3: an unused archive decided the prefix of a kept site"
-# A setup.php without a usable prefix gives ktvs_, as the init decides.
-w3_kept_prefix w3_kept_none "\$config['tables_prefix']='a-b';" abc_
-w3_run
-w3_expect 8.1 NO "a kept site without a usable prefix"
-grep -Fxq 'TABLES_PREFIX=ktvs_' "$w3_env" || fail "W3: an unusable kept prefix did not fall back to ktvs_"
-grep -Fxq "WARNING: No usable tables_prefix in ${w3_kept_root}/admin/include/setup.php (got 'a-b'), using ktvs_" "$w3_out" ||
-    fail "W3: the ktvs_ fallback of a kept site was not explained: $(cat "$w3_out")"
-# Backslash sequences in the value are printed as written, never interpreted.
-w3_kept_prefix w3_kept_escape "\$config['tables_prefix']='a\\033[31mRED\\cb';" abc_
-w3_run
-w3_expect 8.1 NO "a kept prefix with backslash sequences"
-grep -Fxq 'TABLES_PREFIX=ktvs_' "$w3_env" || fail "W3: a prefix with backslashes did not fall back to ktvs_"
-grep -Fxq "WARNING: No usable tables_prefix in ${w3_kept_root}/admin/include/setup.php (got 'a\\033[31mRED\\cb'), using ktvs_" "$w3_out" ||
-    fail "W3: the fallback notice interpreted or cut the kept value: $(cat -v "$w3_out")"
+for bad in 'a-b' '' 'a\033[31mRED\cb'; do
+    w3_kept_prefix "w3_kept_bad_${#bad}" "\$config ['tables_prefix']='$bad';" abc_
+    w3_run
+    if [ "$w3_status" -eq 0 ] || ! grep -Fq "$w3_kept_root/admin/include/setup.php" "$w3_out"; then
+        fail "W3: an unusable kept prefix must name setup.php and stop add"
+    fi
+done
 # Control characters cannot name tables: nothing is created.
 w3_kept_prefix w3_kept_control "\$config['tables_prefix']='a"$'\x01'"b_';" abc_
 w3_run
@@ -2381,7 +2376,7 @@ grep -Fxq 'TABLES_PREFIX=abc_' "$w3_env" || fail "W3: an interrupted extraction 
 w3_kept_prefix w3_kept_resumed_legacy "\$config['tables_prefix']='old_';" café_
 : > "${w3_kept_root}/.kvs-extraction-in-progress"
 w3_run
-{ [ "$w3_status" -ne 0 ] && grep -Fq 'a new archive table prefix must contain only ASCII' "$w3_out"; } ||
+{ [ "$w3_status" -ne 0 ] && grep -Fq 'must contain only ASCII' "$w3_out"; } ||
     fail "W3: a non-ASCII archive the init would extract was accepted: $(cat "$w3_out")"
 # Both markers: the extraction finished, the site is kept.
 w3_kept_prefix w3_kept_done "\$config['tables_prefix']='old_';" abc_

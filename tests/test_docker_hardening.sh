@@ -1716,7 +1716,9 @@ test_setup_finds_its_files_through_a_relative_path() {
     cp "$REPO_ROOT"/docker/lib/*.sh "$stack/lib/"
     cp "$REPO_ROOT/kvs-export.sh" "$repo/"
     printf '26.99.0\n' > "$stack/RELEASE"
-    : > "$stack/kvs-archive/KVS_7.0.2_mysite.test.zip"
+    mkdir -p "$stack/init/lib"
+    cp "$REPO_ROOT/docker/init/lib/kvs-archive.sh" "$stack/init/lib/"
+    python3 "$REPO_ROOT/tests/fixtures/kvs-prefix-archive.py" "$stack/kvs-archive/KVS_7.0.2_mysite.test.zip"
     printf 'services: {}\n' > "$case_dir/other-project/docker-compose.yml"
 
     for from in repo other-project; do

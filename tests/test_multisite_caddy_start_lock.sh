@@ -18,7 +18,7 @@ locks="$multi/.locks"
 export work routes locks phase=none KVS_WEBROOT_BASE="$work/www"
 unset ACME_EMAIL CADDY_TLS_MODE
 mkdir -p "$work/docker/kvs-archive" "$routes" "$locks/.routes"
-touch "$work/docker/kvs-archive/KVS_test.zip"
+python3 "$root/tests/fixtures/kvs-prefix-archive.py" "$work/docker/kvs-archive/KVS_test.zip"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 # await_file <path> <tenths of a second>: wait for a file another command writes.
 await_file() {

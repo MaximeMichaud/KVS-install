@@ -14,7 +14,7 @@ manager="$multi/site-manager.sh"
 locks="$multi/.locks"
 export ACME_EMAIL=ops@sub.example.com work multi locks KVS_WEBROOT_BASE="$work/www"
 mkdir -p "$work/docker/kvs-archive"
-touch "$work/docker/kvs-archive/KVS_test.zip"
+python3 "$root/tests/fixtures/kvs-prefix-archive.py" "$work/docker/kvs-archive/KVS_test.zip"
 # shellcheck disable=SC2329  # Used by child managers.
 chown() { :; }
 docker() {

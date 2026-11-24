@@ -103,6 +103,7 @@ legacy_warning() {
 # A fresh import is refused. Existing readers must retain the spelling.
 # shellcheck source=/dev/null
 source <(extract docker/setup.sh kvs_tables_prefix)
+SETUP_SCRIPT_DIR="$root/docker" SCRIPT_DIR="$root/docker/multi-site"
 IMPORT_MODE=true IMPORT_TABLES_PREFIX=café_
 if kvs_tables_prefix > value 2> warning; then fail "setup accepted a new Unicode prefix"; fi
 KVS_PATH="$work/site"
@@ -169,7 +170,7 @@ for lang in "${locales[@]}"; do
 done
 KVS_PATH="$work/site"
 # shellcheck source=/dev/null
-source <(extract docker/setup.sh kvs_tables_prefix; extract docker/setup.sh setup_kvs_archive; extract docker/setup.sh setup_php_config_value; extract docker/setup.sh set_env_value; extract docker/setup.sh remove_env_value)
+source <(extract docker/setup.sh kvs_tables_prefix; extract docker/setup.sh setup_kvs_archive; extract docker/setup.sh set_env_value; extract docker/setup.sh remove_env_value)
 touch "$KVS_PATH/admin/include/setup_db.php"
 echo "\$config['project_version']='7.0.2';" > "$KVS_PATH/admin/include/version.php"
 for prefix in café_ Site42_; do
@@ -230,9 +231,9 @@ for prefix in café_ Site42_; do
             done
 
             echo "\$config['tables_prefix']=SITE_TABLE_PREFIX;" > "$KVS_PATH/admin/include/setup.php"
-            [ "$(kvs_tables_prefix)" = other_ ] || fail "treated an unknown PHP expression as a conflicting prefix"
+            if kvs_tables_prefix; then fail "trusted a saved prefix over a computed PHP value"; fi
             echo "\$config['tables_prefix']='other' . '_';" > "$KVS_PATH/admin/include/setup.php"
-            [ "$(kvs_tables_prefix)" = other_ ] || fail "treated part of a PHP expression as its prefix"
+            if kvs_tables_prefix; then fail "accepted the first string in a concatenation"; fi
             DOMAIN=empty.test
             mkdir -p kvs-archive
             touch kvs-archive/KVS_7.0.2_empty.test.zip

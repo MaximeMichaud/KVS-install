@@ -101,9 +101,12 @@ test_site_validation_accepts_a_kvs_site_and_refuses_the_rest() {
     make_site "$TMP_ROOT/site-prefix" /home/old/www "site_"
     output=$(import_validate_site "$TMP_ROOT/site-prefix") || fail "a site with another table prefix must validate"
     [ "$output" = $'7.0.2\t/home/old/www\tsite_\tunknown' ] || fail "the site's own prefix must be returned: got '$output'"
+    printf '%s\n' "\$config ['tables_prefix']='other_' . 'part';" >> "$TMP_ROOT/site-prefix/admin/include/setup.php"
+    if import_validate_site "$TMP_ROOT/site-prefix" > "$TMP_ROOT/invalid" 2>&1; then fail "computed prefix accepted"; fi
+    grep -Fq "$TMP_ROOT/site-prefix/admin/include/setup.php" "$TMP_ROOT/invalid" || fail "missing import path"
     make_site "$TMP_ROOT/site-badprefix" /home/old/www "kt vs;"
     output=$(import_validate_site "$TMP_ROOT/site-badprefix" 2>&1) && fail "a prefix that is not an identifier must be refused"
-    grep -q "table prefix 'kt vs;'" <<< "$output" || fail "the bad prefix must be named: $output"
+    grep -Fq "$TMP_ROOT/site-badprefix/admin/include/setup.php" <<< "$output" || fail "the bad prefix must name its file: $output"
     make_site "$TMP_ROOT/site-clone" /home/old/www "kvs2_"
     echo "\$config['tables_prefix_multi']=\"ktvs_\";" >> "$TMP_ROOT/site-clone/admin/include/setup.php"
     output=$(import_validate_site "$TMP_ROOT/site-clone" 2>&1) && fail "a clone sharing another site's database must be refused"

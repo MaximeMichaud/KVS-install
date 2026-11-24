@@ -185,6 +185,8 @@ text = text.replace('/opt/kvs/logs', sys.argv[3] + '/logs')
 text = text.replace('/var/www/', sys.argv[3] + '/site/')
 Path(sys.argv[2]).write_text(text)
 PY
+    mkdir -p "$directory/init/lib"
+    cp "$root/docker/init/lib/kvs-archive.sh" "$directory/init/lib/"
     cp "$root/docker/lib/import.sh" "$directory/lib/import.sh"
     mkdir -p "$directory/lib"
     cp "$root/docker/lib/host-validation.sh" "$directory/lib/"

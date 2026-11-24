@@ -16,6 +16,12 @@ IMPORT_SQL_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd 
 # stdin, as written by KVS: $config['project_path']="/var/www/kvs";
 import_php_config_value() {
     local key="$1"
+    if [ "$key" = tables_prefix ]; then
+        # shellcheck source=/dev/null
+        source "$IMPORT_SQL_LIB_DIR/../init/lib/kvs-archive.sh" || return 1
+        kvs_read_tables_prefix - "${2:-setup.php}" new "${3:-}"
+        return
+    fi
 
     sed -n -E "s/^[[:space:]]*\\\$config\\[[[:space:]]*['\"]${key}['\"][[:space:]]*\\][[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\\1/p" | head -n 1
 }
@@ -25,7 +31,7 @@ import_read_php_config_value() {
     local file="$1"
     local key="$2"
 
-    import_php_config_value "$key" < "$file"
+    import_php_config_value "$key" "${4:-$file}" "${3:-}" < "$file"
 }
 
 # import_read_kvs_version <site directory>: the version in admin/include/version.php.
@@ -80,11 +86,7 @@ import_validate_site() {
         echo "ERROR: $dir/admin/include/setup_db.php is missing" >&2
         return 1
     fi
-    prefix=$(import_read_php_config_value "$setup" tables_prefix)
-    if [[ ! "$prefix" =~ ^[A-Za-z0-9_]{1,32}$ ]] && { [ -z "${2:-}" ] || [ "$prefix" != "$2" ]; }; then
-        echo "ERROR: the site's table prefix '${prefix:-<empty>}' (tables_prefix in $setup) is not a usable identifier" >&2
-        return 1
-    fi
+    prefix=$(import_read_php_config_value "$setup" tables_prefix "${2:-}" "${3:-$setup}") || return 1
     # A clone shares its database with another site under a second prefix
     # (KVS is_clone_db); the stack hosts one site per database.
     multi=$(import_read_php_config_value "$setup" tables_prefix_multi)

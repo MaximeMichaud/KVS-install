@@ -14,7 +14,7 @@ domain=media.example
 site="$work/docker/multi-site/sites/$domain"
 route="$work/docker/multi-site/caddy/sites/$domain.caddy"
 mkdir -p "$work/docker/kvs-archive"
-touch "$work/docker/kvs-archive/KVS_test.zip"
+python3 "$root/tests/fixtures/kvs-prefix-archive.py" "$work/docker/kvs-archive/KVS_test.zip"
 export work manager domain site route KVS_WEBROOT_BASE="$work/www"
 # shellcheck disable=SC2329  # Child managers use these functions.
 docker() { [[ "$1" == ps || "$1" == volume ]]; }
