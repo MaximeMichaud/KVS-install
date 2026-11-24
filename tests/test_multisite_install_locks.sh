@@ -23,6 +23,7 @@ done
 case "$*" in
     'network inspect kvs-proxy')
         if [[ ${PAUSE:-} == yes ]]; then echo ready > "$work/ready"; read -r _ < "$work/release"; fi ;;
+    'inspect --format '*ACME_EMAIL*' kvs-caddy') echo ACME_EMAIL=admin@example.com ;;
     'compose -p multi-site -f docker-compose.caddy.yml up -d'|'exec kvs-caddy wget '*|'exec kvs-caddy caddy reload --force '*) ;;
     'network create kvs-proxy'|'ps --format {{.Names}}'|'compose down') ;;
     *) echo "unexpected docker command: $*" >&2; exit 99 ;;
@@ -52,8 +53,10 @@ for cmd in "${commands[@]}"; do
 done
 [[ ! -e $multi/.locks && ! -e $scripts && ! -e $multi/sites && ! -e $multi/caddy && ! -e $work/calls ]] ||
     fail 'a refused writer changed manager state'
-for cmd in list status caddy-acme-check help --help -h; do
-    bash "$manager" "$cmd" > "$work/out" || fail "$cmd refused during kvsctl"
+for cmd in list status caddy-acme-check caddy-live-check help --help -h; do
+    args=("$cmd")
+    if [[ $cmd == caddy-live-check ]]; then args+=(site.example internal); fi
+    bash "$manager" "${args[@]}" > "$work/out" || fail "$cmd refused during kvsctl"
 done
 [[ ! -e $multi/.locks && ! -e $scripts ]] || fail 'read-only command created locks'
 exec 5>&-

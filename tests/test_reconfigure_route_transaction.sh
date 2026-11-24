@@ -12,7 +12,8 @@ cleanup() {
 trap cleanup EXIT
 export TMPDIR=$work
 mkdir "$work/docker"
-(cd "$root/docker" && cp --parents lib/host-validation.sh reconfigure.sh multi-site/site-manager.sh "$work/docker")
+printf 'EMAIL=ops@sub.example.com\n' > "$work/docker/.env"
+(cd "$root/docker" && cp --parents reconfigure.sh lib/host-validation.sh multi-site/site-manager.sh "$work/docker")
 
 cat > "$work/driver.sh" <<'DRIVER'
 #!/bin/bash
@@ -35,6 +36,7 @@ done
 # shellcheck disable=SC2329  # Called by the functions under test.
 docker() {
     case "$*" in
+        'inspect --format '*ACME_EMAIL*' kvs-caddy') echo ACME_EMAIL=ops@sub.example.com ;;
         'ps --format {{.Names}}')
             hang_at ps
             # Caddy's state is read under the route lock, which a caddy-start

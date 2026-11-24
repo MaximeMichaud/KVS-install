@@ -2205,7 +2205,9 @@ check_caddy_contacts() {
                 return 1 ;;
         esac
         usable_acme_email "$global" && continue
-        if [[ $source == running ]]; then
+        if [[ $source == saved ]]; then
+            log_error "Set a valid EMAIL in ${INSTALLATION_ENV_FILE} (EMAIL=<your-contact-address>), then retry reconfiguration."
+        elif [[ $source == running ]]; then
             if [[ -z $global || $global == admin@example.com ]]; then
                 log_error "The running Caddy still uses the example contact. Run site-manager.sh caddy-start, then retry."
             else
@@ -2237,8 +2239,26 @@ resolve_caddy_acme_email() {
 }
 
 check_running_caddy_contact() {
-    local contacts setting
-    contacts=$(caddy_scan_routes "" contacts) || return 1
+    local exclude="" contacts setting
+    if [[ $# -gt 0 ]]; then
+        validate_domain "$1" || return 1
+        case $2 in
+            internal|public) ;;
+            *) log_error "Invalid Caddy TLS mode: $2"; return 1 ;;
+        esac
+        exclude="$CADDY_SITES_DIR/$1.caddy"
+    fi
+    contacts=$(caddy_scan_routes "$exclude" contacts) || return 1
+    # primary-config replaces the whole primary block. The generated public
+    # route uses the global contact, even if the old route had its own.
+    if [[ ${2:-} == public ]]; then
+        # With only internal routes on disk, caddy-start can succeed even
+        # with a reserved EMAIL. Check what it would read before suggesting it.
+        local saved
+        saved=$(installation_email) || return 1
+        check_caddy_contacts "$saved" saved global || return 1
+        contacts+=$'\nglobal'
+    fi
     if ! setting=$(manager_docker inspect --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "ACME_EMAIL"}}{{println .}}{{end}}{{end}}' kvs-caddy 8<&-); then
         log_error "Could not inspect the running Caddy ACME contact."
         return 1
@@ -2307,6 +2327,8 @@ usage() {
     echo "  proxy-network      Create the shared proxy network"
     echo "  caddy-start        Start Caddy proxy"
     echo "  caddy-acme-check   Check that Caddy has the ACME email its routes need"
+    echo "  caddy-live-check <domain> <public|internal>"
+    echo "                     Check the running contact for a proposed primary route"
     echo "  caddy-stop         Stop Caddy proxy"
     echo ""
     echo "Examples:"
@@ -2379,6 +2401,10 @@ case "${1:-}" in
         ;;
     caddy-start)
         start_caddy
+        ;;
+    caddy-live-check)
+        [[ $# == 3 ]] || { usage; exit 1; }
+        check_running_caddy_contact "$2" "$3"
         ;;
     caddy-acme-check)
         resolve_caddy_acme_email

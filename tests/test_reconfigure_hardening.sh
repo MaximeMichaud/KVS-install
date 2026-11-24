@@ -315,6 +315,7 @@ printf 'site-manager' >> "${MOCK_CALLS:?}"
 printf ' %q' "$@" >> "$MOCK_CALLS"
 printf '\n' >> "$MOCK_CALLS"
 
+if [[ $1 == caddy-live-check && $# == 3 ]]; then exit 0; fi
 [ "${1:-}" = primary-config ] || exit 64
 mkdir -p multi-site/caddy/sites multi-site/sites
 printf 'domain=%s prefix=%s tls=%s www=%s\n' \
@@ -522,6 +523,15 @@ joined=" $* "
 case "${1:-}" in
     inspect)
         container="${!#}"
+        if [[ $container == kvs-caddy && $joined == *ACME_EMAIL* ]]; then
+            if [[ -e $MOCK_STATE/contact-read && -v MOCK_NEXT_CONTACT ]]; then
+                echo "ACME_EMAIL=$MOCK_NEXT_CONTACT"
+            else
+                echo "ACME_EMAIL=${MOCK_LIVE_CONTACT:-ops@sub.example.com}"
+            fi
+            touch "$MOCK_STATE/contact-read"
+            exit 0
+        fi
         case "$container" in
             kvs-php) service=php-fpm ;;
             kvs-*) service=${container#kvs-} ;;
@@ -1548,6 +1558,67 @@ assert_count 1 "$LAST_DIR/docker.calls" 'caddy-reload force=true' \
     "successful Caddy route activation was not forced"
 assert_not_contains "$LAST_DIR/docker.calls" 'caddy-reload force=false' \
     "successful Caddy route activation used an unforced reload"
+
+# Use the real route manager for the contact checks and the transaction.
+for scenario in stale replacement good internal secondary dev-mailbox reserved-mailbox; do
+    name=caddy-contact-$scenario
+    create_fixture "$name"
+    fixture=$TEST_ROOT/$name
+    set_env_value "$fixture" MODE multi
+    set_env_value "$fixture" EMAIL ops@sub.example.com
+    set_env_value "$fixture" COMPOSE_FILE docker-compose.yml:docker-compose.multi.yml
+    mkdir -p "$fixture/lib"
+    cp "$ROOT_DIR/docker/lib/host-validation.sh" "$fixture/lib/"
+    cp "$ROOT_DIR/docker/multi-site/site-manager.sh" "$fixture/multi-site/"
+    domain=7.0.2.example.org
+    route=$fixture/multi-site/caddy/sites/$domain.caddy
+    live=admin@example.com
+    next=$live
+    case $scenario in
+        good) live=ops@sub.example.com; next=$live ;;
+        replacement) live=ops@sub.example.com ;;
+        dev-mailbox) set_env_value "$fixture" EMAIL dev@localhost.local ;;
+        reserved-mailbox)
+            set_env_value "$fixture" EMAIL ops@example.org
+            live=ops@sub.example.com; next=$live ;;
+        internal|secondary) set_env_value "$fixture" SSL_PROVIDER selfsigned ;;
+    esac
+    if [[ $scenario == internal || $scenario == secondary ]]; then
+        "$fixture/multi-site/site-manager.sh" primary-config "$domain" kvs public false >/dev/null
+    else
+        "$fixture/multi-site/site-manager.sh" primary-config "$domain" kvs internal false >/dev/null
+    fi
+    if [[ $scenario == secondary ]]; then
+        printf 'secondary.example {\n    respond ok\n}\n' > "$fixture/multi-site/caddy/sites/secondary.caddy"
+    fi
+    if [[ $scenario == *-mailbox ]]; then
+        # The current internal route allows caddy-start to keep its example
+        # contact. Telling the operator to run it here would loop on retry.
+        "$fixture/multi-site/site-manager.sh" caddy-acme-check >/dev/null
+    fi
+    contact_snapshot=$(sha256sum "$fixture/.env" "$route" "$fixture/multi-site/sites/.primary.env")
+    run_case "$name" MOCK_RUNNING_NAMES='kvs-php kvs-caddy' MOCK_LIVE_CONTACT="$live" MOCK_NEXT_CONTACT="$next"
+    case $scenario in
+        good|internal)
+            assert_success "$name"
+            assert_contains "$LAST_DIR/docker.calls" 'caddy-reload force=true' "$name reload" ;;
+        *)
+            assert_failure "$name"
+            if [[ $scenario == *-mailbox ]]; then
+                assert_contains "$LAST_DIR/output.log" "Set a valid EMAIL in $fixture/.env" "$name editable contact"
+                assert_not_contains "$LAST_DIR/output.log" 'caddy-start' "$name circular recovery hint"
+            else
+                assert_contains "$LAST_DIR/output.log" \
+                    'The running Caddy still uses the example contact. Run site-manager.sh caddy-start, then retry.' "$name diagnostic"
+            fi
+            assert_not_contains "$LAST_DIR/docker.calls" 'caddy-reload force=true' "$name refused reload"
+            if [[ $scenario != replacement ]]; then
+                assert_eq "$contact_snapshot" "$(sha256sum "$fixture/.env" "$route" "$fixture/multi-site/sites/.primary.env")" "$name preserved files"
+                assert_not_contains "$LAST_DIR/docker.calls" 'compose up ' "$name preserved runtime"
+                assert_not_contains "$LAST_DIR/docker.calls" 'UPDATE ' "$name preserved application"
+            fi ;;
+    esac
+done
 
 # Recreating an upstream can change its Docker IP without changing one byte of
 # Caddy route text. The unchanged route must still receive a forced reload.

@@ -612,7 +612,7 @@ if [ "$MODE" = "multi" ] && [ "$SSL_PROVIDER" = "zerossl" ]; then
     echo -e "${RED}ERROR: Multi-site mode does not support selecting ZeroSSL explicitly${NC}"
     exit 1
 fi
-if [ "$SSL_PROVIDER" != "selfsigned" ] && ! validate_email "${EMAIL:-}"; then
+if [ "$MODE" = single ] && [ "$SSL_PROVIDER" != "selfsigned" ] && ! validate_email "${EMAIL:-}"; then
     echo -e "${RED}ERROR: A valid EMAIL is required for public certificates${NC}"
     exit 1
 fi
@@ -688,6 +688,9 @@ if [ "$MODE" = "multi" ]; then
         echo -e "${RED}ERROR: The current Caddy configuration is invalid${NC}"
         exit 1
     fi
+    primary_tls_mode=public
+    [ "$SSL_PROVIDER" != selfsigned ] || primary_tls_mode=internal
+    ./multi-site/site-manager.sh caddy-live-check "$DOMAIN" "$primary_tls_mode" 8<&- 9<&- || exit 1
     PENDING_MULTI_ROUTE=true
 fi
 
@@ -1537,6 +1540,10 @@ configure_multi_route() {
     if ! grep -Fxq kvs-caddy <<< "$running_container_names"; then
         unlock_caddy_route_state
         echo -e "${RED}ERROR: kvs-caddy must be running for multi-site reconfiguration${NC}"
+        return 1
+    fi
+    if ! ./multi-site/site-manager.sh caddy-live-check "$DOMAIN" "$tls_mode" 8<&- 9<&-; then
+        unlock_caddy_route_state
         return 1
     fi
     if ! CADDY_ROLLBACK_DIR=$(mktemp -d); then
