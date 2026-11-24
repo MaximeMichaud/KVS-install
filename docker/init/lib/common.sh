@@ -122,10 +122,10 @@ get_tables_prefix() {
         if LC_ALL=C.UTF-8 expr + "$prefix" : '[[:alnum:]_]\{1,32\}$' >/dev/null; then
             echo "WARNING: keeping non-ASCII TABLES_PREFIX '$prefix' only because this site already uses it. To migrate, rename the database tables and update tables_prefix in setup.php and TABLES_PREFIX in .env together." >&2
         elif LC_ALL=C grep -aq '[^[:print:]]' <<< "$prefix"; then
-            echo "ERROR: cannot use table prefix '$prefix'. Check the installed tables, setup.php and .env together." >&2
+            printf 'ERROR: cannot use the table prefix in %s. Check the installed tables and .env together.\n' "$KVS_PATH/admin/include/setup.php${DOMAIN:+ (default host path /var/www/$DOMAIN/admin/include/setup.php)}" >&2
             return 1
         else
-            log_warn "No usable tables_prefix in setup.php (got '${prefix}'), using ktvs_" >&2
+            printf 'WARNING: No usable tables_prefix in %s, using ktvs_\n' "$KVS_PATH/admin/include/setup.php${DOMAIN:+ (default host path /var/www/$DOMAIN/admin/include/setup.php)}" >&2
             prefix=ktvs_
         fi
     fi

@@ -64,6 +64,7 @@ eval "$(extract_function "$ROOT_DIR/docker/init/lib/common.sh" get_tables_prefix
 log_warn() {
     echo "[WARN] $*"
 }
+DOMAIN=example.test
 KVS_PATH="$TEST_DIR/init-site"
 write_setup "$KVS_PATH" kvs7_
 [ "$(get_tables_prefix)" = kvs7_ ] || fail "the init must read the site's own prefix"
@@ -71,6 +72,18 @@ write_setup "$KVS_PATH" "kt vs;"
 output=$(get_tables_prefix 2> "$TEST_DIR/warn")
 [ "$output" = ktvs_ ] || fail "an unusable prefix must fall back to ktvs_ (got '$output')"
 grep -q 'No usable tables_prefix' "$TEST_DIR/warn" || fail "the fallback must be announced on stderr"
+for invalid in 'a\033[31mRED\cb' $'a\033b' $'a\rb' 'é-'; do
+    write_setup "$KVS_PATH" "$invalid"
+    status=0
+    output=$(get_tables_prefix 2> "$TEST_DIR/warn") || status=$?
+    case "$invalid" in
+        *$'\033'*|*$'\r'*|é-) [ "$status" != 0 ] && [ -z "$output" ] || fail 'expected refusal' ;;
+        *) [ "$status" = 0 ] && [ "$output" = ktvs_ ] || fail 'expected stock fallback' ;;
+    esac
+    grep -Fq "$KVS_PATH/admin/include/setup.php" "$TEST_DIR/warn" || fail 'missing source path'
+    grep -Fq "/var/www/$DOMAIN/admin/include/setup.php" "$TEST_DIR/warn" || fail 'missing host path'
+    if grep -Fq "$invalid" "$TEST_DIR/warn"; then fail 'diagnostic echoed unusable identifier'; fi
+done
 rm -f "$KVS_PATH/admin/include/setup.php"
 [ "$(get_tables_prefix 2>/dev/null)" = ktvs_ ] || fail "a missing setup.php must fall back to ktvs_"
 
