@@ -18,7 +18,13 @@ touch "$work/docker/kvs-archive/KVS_test.zip"
 # shellcheck disable=SC2329  # Used by child managers.
 chown() { :; }
 # shellcheck disable=SC2329  # Used by child managers.
-docker() { [[ "$1" == ps || "$1" == volume ]]; }
+docker() {
+    if [[ "$1" == "${FAIL_LISTING:-none}" ]]; then
+        [[ $* == *"label=com.docker.compose.project=kvs-unavailable-example"* ]] || return 95
+        return 42
+    fi
+    [[ "$1" == ps || "$1" == volume ]]
+}
 # The primary site reserves the project of the site being added at the given
 # step of that add: after its unlocked check, or once its .env is in place.
 # shellcheck disable=SC2329  # Used by child managers.
@@ -84,3 +90,13 @@ WATCH_DOMAIN=other.example bash "$manager" add other.example > "$work/add.log" 2
 [[ -f "$work/final-check" && $(sort -u "$work/final-check") == locked ]] ||
     { echo "add published without checking its prefix under the route lock"; exit 1; }
 echo "PASS: add and primary-config cannot reserve the same Compose project"
+
+# Empty output from Docker is meaningful only after a successful listing.
+for listing in ps volume; do
+    if FAIL_LISTING=$listing bash "$manager" add unavailable.example > "$work/add.log" 2>&1; then
+        echo "add accepted a failed $listing listing"; exit 1
+    fi
+    grep -Fq 'Could not list' "$work/add.log"
+    grep -Fq 'kvs-unavailable-example' "$work/add.log"
+    [[ ! -e $sites/unavailable.example && ! -e $routes/unavailable.example.caddy && ! -e $KVS_WEBROOT_BASE/unavailable.example ]]
+done

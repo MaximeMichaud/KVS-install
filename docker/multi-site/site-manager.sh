@@ -304,21 +304,19 @@ single_mode_primary_prefix() {
 # Whether any container or volume already belongs to a Compose project of this
 # name. It covers a single-mode primary whose prefix matches, a stopped stack
 # and an earlier site, so add never adopts another stack's containers or
-# volumes by reusing its project name.
+# volumes by reusing its project name. Return 1 if free, 2 on a query error.
 compose_project_exists() {
-    local project="$1"
-    [ -n "$project" ] || return 1
-    if [ -n "$(docker ps -a \
-        --filter "label=com.docker.compose.project=${project}" \
-        --format '{{.ID}}' 2>/dev/null)" ]; then
-        return 0
+    local project="$1" listing
+    if ! listing=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}'); then
+        log_error "Could not list containers of project ${project}" >&2
+        return 2
     fi
-    if [ -n "$(docker volume ls \
-        --filter "label=com.docker.compose.project=${project}" \
-        --format '{{.Name}}' 2>/dev/null)" ]; then
-        return 0
+    [ -z "$listing" ] || return 0
+    if ! listing=$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}'); then
+        log_error "Could not list volumes of project ${project}" >&2
+        return 2
     fi
-    return 1
+    [ -n "$listing" ]
 }
 
 # The directories the containers of a Compose project were created from, one
@@ -463,6 +461,8 @@ ensure_new_site_project_free() {
     # delete the primary's stack.
     if compose_project_exists "$requested_prefix"; then
         log_error "A Docker Compose project named ${requested_prefix} already exists (containers or volumes); refusing to reuse it for ${requested_domain}"
+        return 1
+    elif [ "$?" -ne 1 ]; then
         return 1
     fi
 }
