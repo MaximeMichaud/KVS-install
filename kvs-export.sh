@@ -266,10 +266,10 @@ Options
                       site point to, after checking the list the archive
                       stops with. Without it, only contents, or an entry
                       right under it, linked to a directory on another
-                      disk owned by the site's owner or the user of its
-                      admin/data or tmp (not root), with no further link
-                      out of it, is followed; a link to a device, a FIFO
-                      or a socket always stops the archive
+                      disk owned by the site's owner or by the owner of its
+                      real contents, admin/data or tmp directory (not root),
+                      with no further link out of it, is followed; a link to
+                      a device, a FIFO or a socket always stops the archive
   -y, --yes           Do not ask for confirmation
   -h, --help          Show this help
 

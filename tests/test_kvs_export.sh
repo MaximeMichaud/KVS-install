@@ -4230,6 +4230,9 @@ test_the_usage_is_available_and_bad_options_are_refused() {
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --help || fail "--help must exit 0"
     grep -q "Usage: kvs-export.sh" "$out" || fail "--help must print the usage"
     grep -q -- "--dump-only" "$out" || fail "the usage must document --dump-only"
+    grep -Fq 'real contents, admin/data or tmp directory' "$out" || fail "the usage omits an eligible directory owner"
+    [ "$(grep -Fc 'real `contents`, `admin/data` or `tmp` directory' "$REPO_ROOT/README.md")" -eq 2 ] ||
+        fail "both import descriptions must list the eligible directory owners"
 
     status=0
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" --nonsense || status=$?
