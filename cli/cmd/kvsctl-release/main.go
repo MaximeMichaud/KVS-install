@@ -898,9 +898,17 @@ func manifestCmd(args []string) error {
 		return err
 	}
 	if *minFrom != "" {
-		if err := checkStop(*minFrom, *version, m.Releases); err != nil {
+		// Older installations must pass through this stop. An unlisted stop
+		// would block them in this manifest and every later one that carries
+		// the release unchanged. Record the spelling of the signed entry.
+		stop, err := m.FindVersion(*minFrom)
+		if err != nil {
 			return err
 		}
+		if stop == nil {
+			return missingStop(*minFrom, *version, m.Releases)
+		}
+		*minFrom = stop.Version
 	}
 	// The announcement is what this run says, never a leftover of the
 	// previous manifest: the release that stops announcing a key, once it
@@ -1213,18 +1221,10 @@ func checkRequires(version, minFrom, kvsMin, composeMin, database string) error 
 	return nil
 }
 
-// checkStop wants the stop a release names to be a release of the manifest
-// it is signed into. kvsctl sends every older installation through that
-// version first, and a version no manifest lists can never be installed, so
-// those installations would be blocked by this manifest and by every later
-// one, which carries the release unchanged. releases are the ones the
-// manifest already holds, newest first.
-func checkStop(minFrom, version string, releases []manifest.Release) error {
+// missingStop lists the published releases an operator can use as --min-from.
+func missingStop(minFrom, version string, releases []manifest.Release) error {
 	var older []string
 	for _, r := range releases {
-		if r.Version == minFrom {
-			return nil
-		}
 		if semver.Less(r.Version, version) {
 			older = append(older, r.Version)
 		}

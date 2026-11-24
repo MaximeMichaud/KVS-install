@@ -156,7 +156,11 @@ func cliManifest(ctx context.Context) (*manifest.Manifest, error) {
 // it is named.
 func cliRelease(m *manifest.Manifest, version string) (*manifest.Release, error) {
 	if version != "" {
-		if rel := m.Find(version); rel != nil {
+		rel, err := m.FindVersion(version)
+		if err != nil {
+			return nil, err
+		}
+		if rel != nil {
 			return rel, nil
 		}
 		return nil, fmt.Errorf("version %s is not in the manifest", version)

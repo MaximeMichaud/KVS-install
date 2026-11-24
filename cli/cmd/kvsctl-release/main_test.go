@@ -1722,7 +1722,7 @@ func TestManifestCommandRefusesAStopThatIsNoRelease(t *testing.T) {
 		t.Errorf("a stop with no previous manifest must point at --previous: %v", err)
 	}
 
-	if err := release("26.11.0", site, append(previous, "--min-from", "26.10.1")...); err != nil {
+	if err := release("26.11.0", site, append(previous, "--min-from", " v26.10.1 ")...); err != nil {
 		t.Fatalf("a stop on a published release must be signed: %v", err)
 	}
 	m := readManifest(t, site, dir).Manifest

@@ -807,6 +807,26 @@ func (m *Manifest) Find(version string) *Release {
 	return nil
 }
 
+// FindVersion resolves a user-supplied version to the signed entry. A
+// manifest may retain a leading v or whitespace, but listedOnce ensures
+// that only one entry can have a given semantic version.
+func (m *Manifest) FindVersion(version string) (*Release, error) {
+	if exact := m.Find(version); exact != nil {
+		return exact, nil
+	}
+	want, err := semver.Parse(version)
+	if err != nil {
+		return nil, err
+	}
+	for i := range m.Releases {
+		v, err := semver.Parse(m.Releases[i].Version)
+		if err == nil && v == want {
+			return &m.Releases[i], nil
+		}
+	}
+	return nil, nil
+}
+
 // Between lists the releases newer than from and up to and including to,
 // oldest first, so an upgrade can refuse to skip a step that requires it.
 func (m *Manifest) Between(from, to string) []Release {

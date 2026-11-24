@@ -196,11 +196,13 @@ func TestDefaultManifestURL(t *testing.T) {
 // update-cli installs the build of the latest stable release, or of the
 // release named, a release candidate included.
 func TestCLIRelease(t *testing.T) {
-	m := &manifest.Manifest{Releases: []manifest.Release{{Version: "26.11.0-rc1"}, {Version: "26.10.1"}, {Version: "26.10.0"}}}
+	m := &manifest.Manifest{Releases: []manifest.Release{{Version: "26.11.0-rc1"}, {Version: "26.10.1"}, {Version: "v26.10.0"}}}
 	for _, c := range []struct{ asked, want, err string }{
 		{"", "26.10.1", ""},
 		{"26.11.0-rc1", "26.11.0-rc1", ""},
-		{"26.10.0", "26.10.0", ""},
+		{"v26.11.0-rc1", "26.11.0-rc1", ""},
+		{"26.10.0", "v26.10.0", ""},
+		{"broken", "", `version "broken" is not MAJOR.MINOR.PATCH`},
 		{"26.9.0", "", "version 26.9.0 is not in the manifest"},
 	} {
 		rel, err := cliRelease(m, c.asked)

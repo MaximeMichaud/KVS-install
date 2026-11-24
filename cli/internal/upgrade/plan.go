@@ -45,7 +45,11 @@ func (r *Runner) Plan(ctx context.Context, state *instance.State) (*Plan, error)
 	stable := m.LatestStable()
 	switch {
 	case r.Opts.Version != "":
-		if plan.Target = m.Find(r.Opts.Version); plan.Target == nil {
+		plan.Target, err = m.FindVersion(r.Opts.Version)
+		if err != nil {
+			return nil, fmt.Errorf("--version: %w", err)
+		}
+		if plan.Target == nil {
 			return nil, fmt.Errorf("version %s is not in the manifest", r.Opts.Version)
 		}
 	case (stable == nil || semver.Less(stable.Version, plan.Current)) && semver.IsPrerelease(plan.Current) && m.Find(plan.Current) != nil:

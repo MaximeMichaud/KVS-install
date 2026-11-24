@@ -1619,3 +1619,28 @@ func TestComposeMinimumWithDistributionVersions(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanRequestedVersion(t *testing.T) {
+	s := newStack(t, "", rel{version: "26.10.0"}, rel{version: "26.11.0"}, rel{version: "26.12.0-rc1"})
+	for _, tc := range []struct{ flag, target, wantErr string }{
+		{"v26.11.0", "26.11.0", ""}, {"  v26.12.0-rc1 ", "26.12.0-rc1", ""},
+		{"v26.12.0", "", "not in the manifest"}, {"v26.12", "", "MAJOR.MINOR.PATCH"},
+	} {
+		r := s.runner(func(o *Options) { o.Version = tc.flag })
+		p, err := r.Plan(context.Background(), s.state())
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%q: got %v, want %s", tc.flag, err, tc.wantErr)
+			}
+		} else if err != nil || p.Target.Version != tc.target {
+			t.Errorf("%q: plan %v, err %v", tc.flag, p, err)
+		}
+	}
+	s.release("26.11.0").Version = "v26.11.0"
+	s.writeManifest()
+	_, plan := s.plan(s.runner(func(o *Options) { o.Version = " 26.11.0 " }))
+	if plan.Target.Version != "v26.11.0" {
+		t.Fatal(plan.Target.Version)
+	}
+
+}
