@@ -152,6 +152,7 @@ SITE_TOTAL_MB="0"
 # The report of the directories, parallel arrays, and what stays behind as
 # rsync patterns anchored at the site directory.
 ENTRY_PATHS=()
+ANCESTOR_LINKS=()
 ENTRY_MB=()
 ENTRY_KIND=()
 ENTRY_STATE=()
@@ -1181,19 +1182,56 @@ kvs_measure_jobs() {
     printf '%s' "$jobs"
 }
 
+# Read NUL-delimited starting paths. find -L diagnoses an ancestor loop
+# before evaluating -prune. Open the parents of known loops one level at
+# a time without following links, then batch unaffected siblings into the
+# usual following walk. Depths remain relative to the site; filters holds
+# the caller's find pruning expression (empty for the source inventory).
+kvs_measure_find() {
+    local min=$1 max=$2 path link split
+    local -a roots=() depth=(-mindepth "$min")
+    shift 2
+    [ "$max" -lt 0 ] || depth+=(-maxdepth "$max")
+    while IFS= read -r -d '' path; do
+        split=no
+        for link in ${ANCESTOR_LINKS[@]+"${ANCESTOR_LINKS[@]}"}; do
+            [ "$path" != "$link" ] || continue 2
+            [[ $link != "$path/"* ]] || split=yes
+        done
+        if [ "$split" = yes ]; then
+            if [ "$min" -eq 0 ]; then
+                find -H "$path" -maxdepth 0 ${filters[@]+"${filters[@]}"} "$@" || return 1
+            fi
+            if [ "$max" -ne 0 ]; then
+                find -H "$path" -maxdepth 1 ${filters[@]+"${filters[@]}"} \
+                    ! -path "$(kvs_glob_escape "$path")" -print0 |
+                    kvs_measure_find "$((min > 0 ? min - 1 : 0))" "$((max > 0 ? max - 1 : max))" "$@" || return 1
+            fi
+        else
+            roots+=("$path")
+            if [ "${#roots[@]}" -ge 64 ]; then
+                find -L ${roots[@]+"${roots[@]}"} ${depth[@]+"${depth[@]}"} ${filters[@]+"${filters[@]}"} "$@" || return 1
+                roots=()
+            fi
+        fi
+    done
+    [ "${#roots[@]}" -eq 0 ] || find -L ${roots[@]+"${roots[@]}"} ${depth[@]+"${depth[@]}"} ${filters[@]+"${filters[@]}"} "$@"
+}
+
 # The entries the walk measures: everything three levels down
 # (the id buckets of contents/, admin/*/*, static/*/*) and the files above
 # that level. Together they hold the whole site but the directory inodes
 # above them, a few kilobytes.
 kvs_list_measure_units() {
     local dir="$1" jobs="$2" shallow_pid="" status=0
+    local -a filters=()
     if (( jobs > 1 )); then
-        find -L "$SITE_DIR" -mindepth 1 -maxdepth 2 ! -type d -print0 > "$dir/units" &
+        kvs_measure_find 1 2 ! -type d -print0 < <(printf '%s\0' "$SITE_DIR") > "$dir/units" &
         shallow_pid=$!
     else
-        find -L "$SITE_DIR" -mindepth 1 -maxdepth 2 ! -type d -print0 > "$dir/units" || return 1
+        kvs_measure_find 1 2 ! -type d -print0 < <(printf '%s\0' "$SITE_DIR") > "$dir/units" || return 1
     fi
-    find -L "$SITE_DIR" -mindepth 3 -maxdepth 3 -print0 > "$dir/deep" || status=1
+    kvs_measure_find 3 3 -print0 < <(printf '%s\0' "$SITE_DIR") > "$dir/deep" || status=1
     [ -z "$shallow_pid" ] || wait "$shallow_pid" || status=1
     [ "$status" = 0 ] && cat "$dir/deep" >> "$dir/units"
 }
@@ -1232,8 +1270,8 @@ kvs_transfer_bytes() {
         "$TAR_CMD" -C "$dir/probe" -chf - a b c d | "$TAR_CMD" -C "$dir/unpack" -xf - || return 1
         [ ! "$dir/unpack/a" -ef "$dir/unpack/b" ] || hard=yes
         [ ! "$dir/unpack/c" -ef "$dir/unpack/d" ] || followed=yes
-        find -L "$SITE_DIR" ${filters[@]+"${filters[@]}"} -type d -exec stat -L -c d -- {} + -o \
-            -type f -exec stat -L -c '%d %i %h %s' -- {} + |
+        kvs_measure_find 0 -1 -type d -exec stat -L -c d -- {} + -o \
+            -type f -exec stat -L -c '%d %i %h %s' -- {} + < <(printf '%s\0' "$SITE_DIR") |
             LC_ALL=C awk -v hard="$hard" -v followed="$followed" '
                 $1 == "d" { blocks++; next }
                 ($3 > 1 ? hard : followed) == "yes" && seen[$1 ":" $2]++ { next }
@@ -1306,6 +1344,15 @@ kvs_measure_worker() {
     if [ "$total" -gt 0 ] && du -sLk -0 --files0-from=/dev/null >/dev/null 2>&1; then
         printf 'per-entry\0'
         du -sLk -0 --files0-from="$dir/units" 2>/dev/null || return
+    elif [ "${#ANCESTOR_LINKS[@]}" -gt 0 ]; then
+        [ "$total" -gt 0 ] || return 1
+        printf 'per-entry\0'
+        local unit
+        while IFS= read -r -d '' unit; do
+            size=$(du -sLk "$unit") || return 1
+            printf '%s\t%s\0' "${size%%$'\t'*}" "$unit"
+        done < "$dir/units"
+        size=""
     else
         # Apparent size includes sparse extents; -l charges every name. The
         # unfiltered root can bound the payload but cannot prove its size.
@@ -1356,9 +1403,15 @@ kvs_start_measure() {
         set +m
         IFS= read -r _ || exit 1
         if [ "$session" = yes ]; then
-            exec setsid "$BASH" -o pipefail -c "$(declare -f kvs_list_measure_units kvs_measure_worker kvs_transfer_bytes kvs_root_size_kb kvs_rsync_options kvs_glob_escape)"'
+            export TAR_CMD
+            # shellcheck disable=SC2016  # The session shell unpacks its own arguments.
+            exec setsid "$BASH" -o pipefail -c "$(declare -f kvs_measure_find kvs_list_measure_units kvs_measure_worker kvs_transfer_bytes kvs_root_size_kb kvs_rsync_options kvs_glob_escape)"'
+                count=$1
+                shift
+                ANCESTOR_LINKS=("${@:1:count}")
+                shift "$count"
                 kvs_measure_worker "$@"
-            ' _ "$SITE_DIR" "$MEASURE_DIR" "$@"
+            ' _ "${#ANCESTOR_LINKS[@]}" ${ANCESTOR_LINKS[@]+"${ANCESTOR_LINKS[@]}"} "$SITE_DIR" "$MEASURE_DIR" "$@"
         fi
         kvs_measure_worker "$SITE_DIR" "$MEASURE_DIR" "$@"
     }
@@ -1628,13 +1681,28 @@ kvs_file_mb() {
     fi
 }
 
+# Dereferencing a directory link back to its parent tree would copy that
+# tree again. Compare resolved paths, including when contents is a link.
+kvs_link_to_ancestor() {
+    local target
+    [ -L "$1" ] && kvs_resolve "$1" || return 1
+    target=$KVS_RESOLVED
+    [[ "$SITE_DIR/" != "${target%/}/"* ]] || return 0
+    kvs_resolve "${1%/*}" || return 1
+    [[ "$KVS_RESOLVED/" = "${target%/}/"* ]]
+}
+
 # kvs_entry_kind <relative path>: debuglog, transient, network:<fs>,
-# hidden, extra or kvs.
+# ancestor-link, hidden, extra or kvs.
 kvs_entry_kind() {
     local rel="$1"
     local name="${rel##*/}"
     local fs
 
+    if kvs_link_to_ancestor "$SITE_DIR/$rel"; then
+        printf 'ancestor-link'
+        return 0
+    fi
     if kvs_in_word_list "$rel" "$KVS_DEBUG_LOGS"; then
         printf 'debuglog'
         return 0
@@ -1667,35 +1735,50 @@ kvs_entry_kind() {
     fi
 }
 
+# Validate directory names while they are still NUL-delimited. Only then
+# may sort and the report treat a line as a complete relative path.
+kvs_candidate_directories() {
+    local path rel
+    {
+        find -H "$1" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print0 || {
+            kvs_error "cannot scan candidate directories in $(printf '%q' "$1")"
+            return 1
+        }
+    } |
+        while IFS= read -r -d '' path; do
+            [ -d "$path" ] || continue
+            rel=${path#"$SITE_DIR/"}
+            if kvs_has_control_char "$rel" || [[ "$rel" = *'|'* ]]; then
+                kvs_error "cannot represent directory $(printf '%q' "$rel") in the export plan; rename it before retrying"
+                return 1
+            fi
+            printf '%s\n' "$rel"
+        done | LC_ALL=C sort
+}
+
 # The entries the report lists: the directories at the root, the ones
 # under contents/, the few under admin/ that grow on their own, and the
 # query logs of the debug switch when present.
-kvs_list_entry_candidates() {
-    local path
+kvs_list_entry_candidates() (
     local rel
-
+    set -o pipefail
     {
-        find -L "$SITE_DIR" -mindepth 1 -maxdepth 1 -type d -print 2> /dev/null | LC_ALL=C sort
-        if [ -d "$SITE_DIR/contents" ]; then
-            find -L "$SITE_DIR/contents" -mindepth 1 -maxdepth 1 -type d -print 2> /dev/null | LC_ALL=C sort
+        kvs_candidate_directories "$SITE_DIR" || exit 1
+        if [ -d "$SITE_DIR/contents" ] && ! kvs_link_to_ancestor "$SITE_DIR/contents"; then
+            kvs_candidate_directories "$SITE_DIR/contents" || exit 1
         fi
         for rel in $KVS_REPORTED_DIRS $KVS_TRANSIENT_DIRS; do
             if [ -d "$SITE_DIR/$rel" ]; then
-                printf '%s/%s\n' "$SITE_DIR" "$rel"
+                printf '%s\n' "$rel"
             fi
         done
         for rel in $KVS_DEBUG_LOGS; do
             if [ -f "$SITE_DIR/$rel" ]; then
-                printf '%s/%s\n' "$SITE_DIR" "$rel"
+                printf '%s\n' "$rel"
             fi
         done
-    } < /dev/null | while IFS= read -r path; do
-        rel=${path#"$SITE_DIR/"}
-        if [ -n "$rel" ] && [ "$rel" != "$path" ]; then
-            printf '%s\n' "$rel"
-        fi
-    done | awk '!seen[$0]++'
-}
+    } < /dev/null | awk '!seen[$0]++'
+)
 
 # kvs_entry_index <relative path>: its position in the entry arrays.
 kvs_entry_index() {
@@ -1762,17 +1845,19 @@ kvs_drop_missing_path_options() {
 
 # Decide what travels before measuring the payload.
 kvs_collect_entries() {
-    local rel
+    local candidates rel listing
     local kind
     local state
     local i
 
     kvs_drop_missing_path_options
     ENTRY_PATHS=()
+    ANCESTOR_LINKS=()
     ENTRY_MB=()
     ENTRY_KIND=()
     ENTRY_STATE=()
     EXCLUDE_PATTERNS=()
+    candidates=$(kvs_list_entry_candidates) || return 1
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
         kind=$(kvs_entry_kind "$rel")
@@ -1786,11 +1871,27 @@ kvs_collect_entries() {
         if [ "$kind" != "transient" ] && kvs_path_listed "$rel" ${OPT_INCLUDES[@]+"${OPT_INCLUDES[@]}"}; then
             state="copied"
         fi
+        if [ "$kind" = ancestor-link ]; then
+            ANCESTOR_LINKS+=("$SITE_DIR/$rel")
+            if [ "$state" = copied ] && [ "$OPT_COMMAND" = detect ] && [ "$HAS_RSYNC" = yes ]; then
+                # Ask this rsync about the link using the transfer root.
+                # --dirs lists the operand without recursing if it follows it.
+                listing=$(LC_ALL=C rsync --list-only --dirs --links --copy-unsafe-links --relative --no-implied-dirs \
+                    -- "$SITE_DIR/./$rel" < /dev/null) || { kvs_error "cannot inspect ancestor link $(printf '%q' "$rel") with rsync"; return 1; }
+                case $listing in
+                    l*) ;;
+                    d*) state=excluded ;;
+                    *) kvs_error "unexpected rsync listing for ancestor link $(printf '%q' "$rel")"; return 1 ;;
+                esac
+            else
+                state=excluded
+            fi
+        fi
         ENTRY_PATHS+=("$rel")
         ENTRY_MB+=("")
         ENTRY_KIND+=("$kind")
         ENTRY_STATE+=("$state")
-    done < <(kvs_list_entry_candidates)
+    done <<< "$candidates"
     # An excluded path that is no listed entry (one bucket of contents/, a
     # directory deeper down) still leaves, with its size when the walk
     # counted it apart.
@@ -1805,6 +1906,15 @@ kvs_collect_entries() {
     done
     i=0
     while [ "$i" -lt "${#ENTRY_PATHS[@]}" ]; do
+        if [ "${ENTRY_KIND[$i]}" = ancestor-link ]; then
+            if kvs_entry_has_excluded_parent "$i"; then ENTRY_STATE[i]=excluded; fi
+            if [ "${ENTRY_STATE[$i]}" = excluded ] && [ "$OPT_DUMP_ONLY" != yes ]; then
+                rel=${ENTRY_PATHS[$i]}
+                kvs_link_text "$SITE_DIR/$rel" || { kvs_error "cannot read ancestor link $(printf '%q' "$rel")"; return 1; }
+                printf 'NOTE: ancestor link %q -> %q is excluded. Recreate it in the site directory on the new server with ln -s -- %q %q\n' \
+                    "$rel" "$KVS_LINK_TEXT" "$KVS_LINK_TEXT" "$rel" >&2
+            fi
+        fi
         if [ "${ENTRY_STATE[$i]}" = "excluded" ] && ! kvs_entry_has_excluded_parent "$i"; then
             if [ "${ENTRY_KIND[$i]}" = "transient" ]; then
                 EXCLUDE_PATTERNS+=("/${ENTRY_PATHS[$i]}/*")
@@ -3038,7 +3148,7 @@ kvs_collect() {
     if [ "$measure_site" = "yes" ]; then
         kvs_probe_encoding
         kvs_probe_web_server_config
-        kvs_collect_entries
+        kvs_collect_entries || return 1
         kvs_measure_site
         kvs_fill_entry_sizes
     fi

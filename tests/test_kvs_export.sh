@@ -1375,6 +1375,135 @@ test_excluded_and_included_paths_change_what_travels() {
     pass "excluded and included paths change what travels"
 }
 
+test_entry_plan_refuses_unrepresentable_directories() {
+    local site="$TMP_ROOT/plan-site" archive="$TMP_ROOT/plan.tar" dir
+    make_site "$site"
+    for dir in $'.private\nbackup' $'contents/public\nmedia' $'tab\tname' 'field|separator'; do
+        mkdir -p "$site/$dir"
+        echo sentinel > "$site/$dir/sample"
+        if run_export "$STUB_BIN:$MIN_BIN" "$site.out" "$site.err" -y -o "$archive" archive "$site"; then
+            fail "archived a directory whose name cannot travel in the plan"
+        fi
+        grep -Fq -- "$(printf '%q' "$dir")" "$site.err" || fail "the refusal did not identify the directory"
+        [ ! -e "$archive" ] || fail "published the refused archive"
+        grep 'mariadb-dump argv:' "$STUB_LOG" | grep -Fvq '[--help]' && fail "started the dump before checking the plan"
+        rm -r -- "${site:?}/${dir:?}"
+    done
+    local bin="$TMP_ROOT/plan-bin"
+    mkdir "$bin"
+    cat > "$bin/find" <<'STUB'
+#!/bin/sh
+case " $* " in
+    *' -mindepth 1 -maxdepth 1 '*'-print0 '*) exit 9 ;;
+esac
+exec "$REAL_FIND" "$@"
+STUB
+    chmod +x "$bin/find"
+    if REAL_FIND="$MIN_BIN/find" run_export "$bin:$STUB_BIN:$MIN_BIN" "$site.out" "$site.err" -y -o "$archive" archive "$site"; then
+        fail "a failed directory scan produced an archive"
+    fi
+    [ ! -e "$archive" ] || fail "published an archive after the scan failed"
+    grep -Fq "cannot scan candidate directories in $site" "$site.err" || fail "missing scan error"
+    if [ "$(id -u)" != 0 ]; then
+        chmod 000 "$site/contents"
+        if run_export "$STUB_BIN:$MIN_BIN" "$site.out" "$site.err" detect "$site"; then
+            chmod 700 "$site/contents"
+            fail "accepted an unreadable contents directory"
+        fi
+        chmod 700 "$site/contents"
+        grep -Fq "cannot scan candidate directories in $site/contents" "$site.err" || fail "unreadable scan not identified"
+    fi
+    mkdir "$site/-media"
+    touch "$site/-media/kept"
+    run_export "$STUB_BIN:$MIN_BIN" "$site.out" "$site.err" -y -o "$archive" archive "$site" || fail "ancestor link stopped archive"
+    archive_lists "$archive" -Fxq www/-media/kept || fail "leading dash directory omitted"
+    pass "the entry plan refuses unrepresentable names and incomplete scans"
+}
+
+test_ancestor_links_follow_the_selected_transport() {
+    local site="$TMP_ROOT/ancestor-site" bin="$TMP_ROOT/ancestor-bin" out="$TMP_ROOT/ancestor.out" err="$TMP_ROOT/ancestor.err"
+    local archive="$TMP_ROOT/ancestor.tar" mode path target state dest has_rsync real_rsync i note
+    local -a paths=(current contents/all absolute) targets=(. .. "$site")
+    make_site "$site"
+    mkdir "$bin"
+    ln -s . "$site/current"
+    ln -s .. "$site/contents/all"
+    ln -s "$site" "$site/absolute"
+    # Exercise the worker that runs in a separate shell when available.
+    if command -v setsid >/dev/null; then ln -s "$(command -v setsid)" "$bin/setsid"; fi
+    printf '#!/bin/sh\nshift\nexec "$@"\n' > "$bin/local-rsh"
+    chmod +x "$bin/local-rsh"
+    real_rsync=$(command -v rsync) || real_rsync=""
+    for mode in archive tar rsync; do
+        has_rsync=no
+        if [ "$mode" = rsync ]; then
+            [ -n "$real_rsync" ] || continue
+            ln -s "$real_rsync" "$bin/rsync"
+            has_rsync=yes
+        fi
+        if [ "$mode" = archive ]; then
+            timeout 20 env PATH="$bin:$STUB_BIN:$MIN_BIN" "$BASH" "$EXPORT_SCRIPT" --yes --include current \
+                -o "$archive" archive "$site" >"$out" 2>"$err" || fail "ancestor archive: $(cat "$err")"
+            archive_lists "$archive" -Fxq www/contents/videos/1.mp4 || fail "archive lost the site"
+            if archive_lists "$archive" -Eq '^www/(current|absolute|contents/all)(/|$)'; then fail "archive followed an ancestor"; fi
+        else
+            timeout 20 env PATH="$bin:$STUB_BIN:$MIN_BIN" "$BASH" "$EXPORT_SCRIPT" --include current detect "$site" \
+                >"$out" 2>"$err" || fail "$mode ancestor detection: $(cat "$err")"
+            assert_key "$out" site_size_status exact
+            [[ $(entry_value "$out" contents/videos) =~ ^[0-9]+\| ]] || fail "$mode lost the directory sizes"
+            [ "$(entry_value "$out" absolute)" = "0|ancestor-link|excluded" ] || fail "$mode would follow an absolute ancestor"
+            dest="$TMP_ROOT/ancestor-$mode"
+            mkdir "$dest"
+            # Use the exclusions read by setup and the actual SSH transfer.
+            # Only the remote shell is replaced by a local process.
+            PATH="$bin:$PATH" timeout 20 "$BASH" -eu -c '
+                source "$1/docker/lib/import.sh"
+                eval "$(sed -n "/^import_remote_load_excludes() {/,/^}/p" "$1/docker/setup.sh")"
+                import_remote_load_excludes "$2"
+                import_ssh_rsh() { echo local-rsh; }
+                import_ssh() { sh -s; }
+                IMPORT_REMOTE_PREFIX=(env)
+                IMPORT_TRANSFER_JOBS=1 IMPORT_TRANSFER_RETRIES=0 IMPORT_SSH_TARGET=source.example \
+                    import_remote_files "$3" "$4" "$5" ${IMPORT_EXCLUDE_PATTERNS[@]+"${IMPORT_EXCLUDE_PATTERNS[@]}"}
+            ' _ "$REPO_ROOT" "$out" "$site" "$dest" "$has_rsync" >"$out.copy" 2>&1 || fail "$mode copy: $(cat "$out.copy")"
+            [ -f "$dest/contents/videos/1.mp4" ] || fail "$mode lost the site"
+        fi
+        if grep -Eq 'could not be written or enumerated|unfiltered root|measurement incomplete' "$err"; then
+            fail "$mode fell back when measuring an ancestor link"
+        fi
+        for i in "${!paths[@]}"; do
+            path=${paths[i]}
+            target=${targets[i]}
+            state=excluded
+            if [ "$mode" = rsync ] && [ "$path" != absolute ]; then
+                state=copied
+                [ "$(readlink "$dest/$path")" = "$target" ] || fail "rsync lost the $path link"
+                if grep -Fq "NOTE: ancestor link $path ->" "$err"; then fail "unneeded note for $path"; fi
+            else
+                note="NOTE: ancestor link $path -> $target is excluded. Recreate it in the site directory on the new server with ln -s -- $target $path"
+                [ "$(grep -Fc "$note" "$err")" = 1 ] || fail "$mode must name $path and its target once"
+                if [ "$mode" != archive ] && { [ -e "$dest/$path" ] || [ -L "$dest/$path" ]; }; then fail "$mode copied $path"; fi
+            fi
+            if [ "$mode" != archive ]; then
+                [ "$(entry_value "$out" "$path")" = "0|ancestor-link|$state" ] || fail "$mode plan for $path"
+            fi
+        done
+    done
+    # Old du has no NUL file-list input. It must still measure the safe
+    # units and keep the per-directory report without a root walk.
+    cat > "$bin/du" <<'EOF'
+#!/bin/sh
+case "$*" in *--files0-from=*) exit 1 ;; esac
+exec "$REAL_DU" "$@"
+EOF
+    chmod +x "$bin/du"
+    REAL_DU="$MIN_BIN/du" timeout 20 env PATH="$bin:$MIN_BIN" "$BASH" "$EXPORT_SCRIPT" detect "$site" \
+        >"$out" 2>"$err" || fail "ancestor detection with old du: $(cat "$err")"
+    assert_key "$out" site_size_status exact
+    [[ $(entry_value "$out" contents/videos) =~ ^[0-9]+\| ]] || fail "old du lost the directory sizes"
+    pass "rsync preserves safe ancestor links and dereferencing transfers explain each exclusion"
+}
+
 test_an_unknown_tar_cannot_archive_with_exclusions() {
     local site="$TMP_ROOT/bsd-site" bin="$TMP_ROOT/bsd-bin" archive="$TMP_ROOT/bsd.tar"
     make_site_with_extras "$site"
@@ -1779,12 +1908,18 @@ test_detect_lists_the_links_leading_out_of_the_site() {
     assert_key "$out" external_links_complete yes
     assert_key "$out" external_links_digest "$digest"
 
-    # A directory holding the site (/ at worst) is listed, not walked.
+    # A site transfer excludes its parent. A full local copy still needs
+    # the link reported for review, without walking that parent.
     make_site "$TMP_ROOT/links-holder/site"
     ln -s "$outside/secret" "$TMP_ROOT/links-holder/beside"
     ln -s .. "$TMP_ROOT/links-holder/site/up-there"
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" detect "$TMP_ROOT/links-holder/site" ||
         fail "detect must succeed with a link to a directory holding the site: $(cat "$err")"
+    assert_key "$out" external_links 0
+    assert_key "$out" external_links_complete yes
+    grep -Eq '^exclude_[0-9]+=/up-there$' "$out" || fail "detect must exclude the parent directory link"
+    run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" links "$TMP_ROOT/links-holder/site" ||
+        fail "links must report a parent reached by an unfiltered copy: $(cat "$err")"
     assert_key "$out" external_links 1
     assert_key "$out" external_link_1 "review|directory|up-there -> .."
     assert_key "$out" external_links_complete no
@@ -4309,6 +4444,8 @@ test_a_full_temporary_directory_does_not_shrink_the_site_size
 test_detect_reports_the_entries_and_what_stays_behind
 test_storage_servers_keep_their_columns
 test_excluded_and_included_paths_change_what_travels
+test_entry_plan_refuses_unrepresentable_directories
+test_ancestor_links_follow_the_selected_transport
 test_an_unknown_tar_cannot_archive_with_exclusions
 test_exclusions_reach_a_tar_that_is_not_gnu_tar
 test_named_paths_are_normalised_and_a_missing_one_is_reported
