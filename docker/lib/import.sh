@@ -206,9 +206,8 @@ import_inspect_dump() {
         echo "ERROR: $tool is needed to read $dump" >&2
         return 1
     fi
-    # pipefail: without it only awk's status counts, and a gzip CRC error or
-    # a zstd "premature end" would go unnoticed.
-    if ! result=$(set -o pipefail; import_dump_cat "$dump" | awk -v prefix="$prefix" '
+    local -a statuses
+    if ! result=$(import_dump_cat "$dump" | awk -v prefix="$prefix" '
         BEGIN { tables = 0; initial = ""; statements = 0; completed = "no"; databases = "" }
         /^-- Dump completed/ { completed = "yes"; next }
         NF { completed = "no" }
@@ -237,8 +236,16 @@ import_inspect_dump() {
             initial = value
         }
         END { printf "%d\t%s\t%d\t%s\t%s\n", tables, initial, statements, completed, databases }
-    '); then
-        echo "ERROR: $dump could not be read to the end${tool:+ ($tool reported an error above: the file is corrupt or truncated)}" >&2
+    '
+        statuses=("${PIPESTATUS[@]}")
+        if [ "${statuses[1]}" -ne 0 ]; then
+            echo "ERROR: $dump could not be inspected (awk failed)" >&2
+            exit 1
+        elif [ "${statuses[0]}" -ne 0 ]; then
+            echo "ERROR: $dump could not be read to the end${tool:+ ($tool reported an error above: the file is corrupt or truncated)}" >&2
+            exit 1
+        fi
+    ); then
         return 1
     fi
     printf '%s\n' "$result"

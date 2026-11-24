@@ -726,6 +726,25 @@ SQL
     pass 'dump preparation rejects a failed second stream without leaving a partial import'
 }
 
+test_inspection_names_a_failed_awk() (
+    local dump="$TMP_ROOT/awk.sql.gz"
+    printf 'SELECT 1;\n' | gzip > "$dump"
+    # shellcheck disable=SC2329  # Invoked by the inspection pipeline.
+    awk() { cat >/dev/null; echo partial; return 2; }
+    if import_inspect_dump "$dump" ktvs_ > "$TMP_ROOT/awk.out" 2> "$TMP_ROOT/awk.err"; then
+        fail "inspection accepted an awk failure"
+    fi
+    grep -Fq 'awk failed' "$TMP_ROOT/awk.err" || fail "inspection blamed the dump: $(cat "$TMP_ROOT/awk.err")"
+    [ ! -s "$TMP_ROOT/awk.out" ] || fail "inspection returned a partial result"
+    ! grep -q 'corrupt or truncated' "$TMP_ROOT/awk.err" || fail "inspection described an intact dump as corrupt"
+    # Stop reading before gzip can finish writing its valid stream.
+    dd if=/dev/zero bs=1M count=2 status=none | gzip > "$dump"
+    # shellcheck disable=SC2329  # Called by the inspection pipeline.
+    awk() { return 2; }
+    if import_inspect_dump "$dump" ktvs_ > "$TMP_ROOT/awk.out" 2> "$TMP_ROOT/awk.err"; then fail "accepted a failed parser"; fi
+    grep -q 'awk failed' "$TMP_ROOT/awk.err" || fail "reader SIGPIPE hid the parser failure"
+)
+
 # M3: a CRC-corrupted gzip or a truncated zstd dump decompresses part way
 # and looks complete to the line filters. Inspection must fail, and
 # preparation, with or without the cached inspection setup.sh passes, must
@@ -1274,6 +1293,7 @@ test_setup_and_init_are_wired_for_imports
 test_source_domain_persistence_errors_stop_import
 test_cached_dump_inspection_preserves_output
 test_dump_preparation_stops_after_a_decompression_failure
+test_inspection_names_a_failed_awk
 test_corrupt_or_truncated_compressed_dumps_are_refused
 test_the_staged_dump_is_readable_by_the_database_group_only
 test_the_setup_says_when_imported_events_do_not_run
