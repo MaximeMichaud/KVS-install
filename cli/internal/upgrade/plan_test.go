@@ -1644,3 +1644,24 @@ func TestPlanRequestedVersion(t *testing.T) {
 	}
 
 }
+
+func TestPlanUsesTargetTLSProfiles(t *testing.T) {
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0", extra: []string{"acme", "worker"}})
+	s.recompose("1.1.0", "acme kvs-acme\nworker kvs-worker\n", "acme kvs-acme direct-tls\nworker kvs-worker dragonfly\n")
+	for _, tc := range []struct {
+		provider, profiles string
+		acme               bool
+	}{
+		{"letsencrypt", "dragonfly", true},
+		{"letsencrypt", "dragonfly,direct-tls", true},
+		{"selfsigned", "dragonfly", false},
+	} {
+		s.setEnv("COMPOSE_PROFILES", tc.profiles)
+		s.setEnv("SSL_PROVIDER", tc.provider)
+		_, plan := s.plan(s.runner())
+		pull := pulledServices(plan)
+		if slices.Contains(pull, "acme") != tc.acme || !slices.Contains(pull, "worker") {
+			t.Errorf("%s with %s: pulls %v", tc.provider, tc.profiles, pull)
+		}
+	}
+}

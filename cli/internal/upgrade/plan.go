@@ -759,9 +759,9 @@ func (r *Runner) planBundle(ctx context.Context, plan *Plan, state *instance.Sta
 
 // targetServices lists the services compose runs here once the files of
 // the target are laid. Compose itself reads compose, the compose file of
-// the bundle, with the profiles that COMPOSE_PROFILES of this stack turns
-// on, a setting an upgrade never changes. Each variable the file requires
-// a value of gets a placeholder: the values decide nothing of the list,
+// the bundle, with the profiles the upgrade will use, including direct-tls
+// for an adopted TLS site. Each required variable gets a placeholder:
+// the values decide nothing of the list,
 // and no secret of the .env is passed on. It returns nil when compose
 // could not tell.
 func (r *Runner) targetServices(ctx context.Context, compose []byte) map[string]bool {
@@ -771,7 +771,10 @@ func (r *Runner) targetServices(ctx context.Context, compose []byte) map[string]
 		env[key] = "1"
 	}
 	// Set last, it replaces a placeholder of the same name.
-	env["COMPOSE_PROFILES"] = r.Inst.Env["COMPOSE_PROFILES"]
+	env[composeProfilesKey] = r.Inst.Env[composeProfilesKey]
+	if profiles := directTLSProfiles(r.Inst.Env); profiles != "" {
+		env[composeProfilesKey] = profiles
+	}
 	services, err := dockerx.ServicesOf(ctx, compose, env)
 	if err != nil {
 		return nil
