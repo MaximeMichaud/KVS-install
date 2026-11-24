@@ -281,26 +281,58 @@ holds "$release" "all tags must share a queue separate from branches and let act
     '.concurrency.group == "${{ github.ref_type == '"'"'tag'"'"' && '"'"'release'"'"' || '"'"'release-branch'"'"' }}" and .concurrency["cancel-in-progress"] == false'
 has "$RELEASE" '--ignore-tags . --strip header' "the notes must be one section"
 has "$RELEASE" './.github/scripts/release-notes-range.sh "$TAG"' "the notes must start at the previous stable release"
-grep -Eq '^ +version: v[0-9]+\.[0-9]+\.[0-9]+$' "$RELEASE" || fail "the git-cliff version must be pinned"
-
-# Run the actual selection step: reviewed prose wins, an absent file keeps
-# the generated list, and an empty file must never publish a blank release.
-notes_step=$(jq -er '.jobs.prepare.steps[] | select(.name == "reviewed release notes") | .run' <<<"$release")
+# The earlier action fetched its binary before reviewed notes could be selected.
+holds "$release" "only the verified fallback may install git-cliff" \
+    'all(.jobs.prepare.steps[]; (.uses // "" | startswith("orhun/git-cliff-action@") | not))'
+notes_step=$(jq -er '.jobs.prepare.steps[] | select(.name == "release notes"
+    and .env.TAG == "${{ steps.version.outputs.tag }}" and .env.RANGE == "${{ steps.range.outputs.value }}") | .run' <<<"$release")
 notes_dir=$(mktemp -d "${TMPDIR:-/var/tmp}/kvs-release-notes.XXXXXX")
 trap 'rm -rf "$notes_dir"' EXIT
 (
     cd "$notes_dir"
-    mkdir -p .github/release-notes
-    printf 'Generated commit list\n' > RELEASE_NOTES.md
-    TAG=26.10.2 bash -e -c "$notes_step"
-    grep -Fxq 'Generated commit list' RELEASE_NOTES.md || fail 'absent notes replaced the fallback'
-    printf 'Reviewed operator notes\n' > .github/release-notes/26.10.2.md
-    TAG=26.10.2 bash -e -c "$notes_step"
-    cmp .github/release-notes/26.10.2.md RELEASE_NOTES.md || fail 'reviewed notes were not selected'
-    : > .github/release-notes/26.10.2.md
-    if TAG=26.10.2 bash -e -c "$notes_step"; then fail 'empty reviewed notes were accepted'; fi
+    mkdir -p .github/release-notes bin package/git-cliff-2.14.2
+    export GITHUB_SERVER_URL=https://release.test RUNNER_TEMP="$PWD" TAG=26.10.2 RANGE='refs/tags/26.10.1..refs/tags/26.10.2'
+    export PATH="$PWD/bin:$PATH"
+    cat > bin/curl <<'STUB'
+#!/bin/bash
+set -eu
+echo download >> downloads
+[[ $# = 4 && $1 = -fsSL && $2 = -o && $4 = "$GITHUB_SERVER_URL/orhun/git-cliff/releases/download/v2.14.2/git-cliff-2.14.2-x86_64-unknown-linux-gnu.tar.gz" ]]
+cp fixture.tar.gz "$3"
+STUB
+    cat > package/git-cliff-2.14.2/git-cliff <<'STUB'
+#!/bin/bash
+printf '%s\n' "$@"
+STUB
+    chmod +x bin/curl package/git-cliff-2.14.2/git-cliff
+    tar -czf fixture.tar.gz -C package git-cliff-2.14.2
+    real_tar=$(command -v tar)
+    printf '#!/bin/sh\necho extract >> extractions\nexec "%s" "$@"\n' "$real_tar" > bin/tar
+    chmod +x bin/tar
+    printf 'Reviewed operator notes\n' > ".github/release-notes/$TAG.md"
+    bash -e -c "$notes_step"
+    cmp ".github/release-notes/$TAG.md" RELEASE_NOTES.md
+    : > ".github/release-notes/$TAG.md"
+    if bash -e -c "$notes_step"; then fail 'empty reviewed notes were accepted'; fi
+    [ ! -e downloads ] || fail 'reviewed notes caused a download'
+    rm ".github/release-notes/$TAG.md" RELEASE_NOTES.md
+    if bash -e -c "$notes_step" >log 2>&1; then fail 'incorrect git-cliff checksum was accepted'; fi
+    grep -Fq 'git-cliff archive checksum mismatch' log || fail 'missing checksum diagnostic'
+    [ ! -e extractions ] || fail 'unchecked archive was extracted'
+    # Substitute only the fixture archive's digest, leaving the verifier intact.
+    expected=24f397c733add5390fdceee3a2088588ab0d5f944ce00d34cb7029b888cf2db4
+    fixture=$(sha256sum fixture.tar.gz)
+    checked_step=${notes_step/"$expected"/${fixture%% *}}
+    for range in "$RANGE" ''; do
+        RANGE=$range bash -e -c "$checked_step"
+        {
+            if [ -n "$range" ]; then echo "$range"; fi
+            printf '%s\n' --config cliff.toml --tag "$TAG" --ignore-tags . --strip header
+        } | cmp - RELEASE_NOTES.md
+    done
+    [ "$(wc -l < downloads)" -eq 3 ] && [ "$(wc -l < extractions)" -eq 2 ] || fail 'unexpected download or extraction count'
 )
-echo "PASS: reviewed release notes replace generated notes without allowing an empty release"
+echo "PASS: reviewed notes avoid the download and generated notes require the checked archive"
 
 if grep -n -e '--notes-file' -e 'mariadb-from' "$RELEASE"; then
     fail "the publish job still passes a flag kvsctl-release no longer uses this way"

@@ -114,32 +114,33 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: ./.github/scripts/release-notes-range.sh "$TAG" >> "$GITHUB_OUTPUT"
 
-      # The range decides which commits the notes list. "--ignore-tags ."
-      # makes git-cliff ignore every tag inside it, so they come out as one
-      # section named after this tag, even when another tag sits on the same
-      # commit (a release tagged on the commit of its last candidate, whose
-      # run is started again). The git-cliff version is pinned so the notes
-      # render the way they were checked when cliff.toml last changed.
       - name: release notes
-        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
-        with:
-          version: v2.14.2
-          config: cliff.toml
-          args: ${{ steps.range.outputs.value }} --tag ${{ steps.version.outputs.tag }} --ignore-tags . --strip header
-        env:
-          OUTPUT: RELEASE_NOTES.md
-
-      # Prefer the operator-facing notes reviewed with the tagged commit.
-      # Older tags without a dedicated file keep the linked commit list.
-      - name: reviewed release notes
         env:
           TAG: ${{ steps.version.outputs.tag }}
+          RANGE: ${{ steps.range.outputs.value }}
         run: |
           notes=".github/release-notes/${TAG}.md"
           if [ -f "$notes" ]; then
             test -s "$notes"
             cp "$notes" RELEASE_NOTES.md
+            exit 0
           fi
+
+          # Review the archive checksum with each version bump.
+          version=2.14.2
+          sha=24f397c733add5390fdceee3a2088588ab0d5f944ce00d34cb7029b888cf2db4
+          asset="git-cliff-${version}-x86_64-unknown-linux-gnu.tar.gz"
+          work=$(mktemp -d "$RUNNER_TEMP/git-cliff.XXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          curl -fsSL -o "$work/$asset" "$GITHUB_SERVER_URL/orhun/git-cliff/releases/download/v$version/$asset"
+          if ! printf '%s  %s\n' "$sha" "$work/$asset" | sha256sum -c -; then
+            echo "git-cliff archive checksum mismatch" >&2
+            exit 1
+          fi
+          tar --extract --gzip --file "$work/$asset" --to-stdout --no-anchored git-cliff > "$work/git-cliff"
+          chmod +x "$work/git-cliff"
+          "$work/git-cliff" ${RANGE:+"$RANGE"} --config cliff.toml \
+            --tag "$TAG" --ignore-tags . --strip header > RELEASE_NOTES.md
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
