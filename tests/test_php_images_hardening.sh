@@ -110,6 +110,51 @@ one_instruction_with() {
     printf '%s\n' "$found"
 }
 
+# A curl at the start of a RUN or after a shell operator must name an
+# output file. The next command must check the digest of that same file.
+test_build_downloads_are_checked() {
+    local file instructions
+    for file in "$PHP_DOCKERFILE" "$CRON_DOCKERFILE"; do
+        instructions=$(dockerfile_instructions_with "$file" curl)
+        python3 - "$file" "$instructions" <<'PY'
+import re
+import shlex
+import sys
+
+filename, instructions = sys.argv[1:]
+OPERATOR = re.compile(r"[;&|()]+")
+for line in instructions.splitlines():
+    if not line.startswith("RUN "):
+        continue
+    lexer = shlex.shlex(line[4:], posix=True, punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    words = list(lexer)
+    for i, word in enumerate(words):
+        # A package named curl in an apt-get list is not a command.
+        if word != "curl" or (i > 0 and not OPERATOR.fullmatch(words[i - 1])):
+            continue
+        end = i + 1
+        while end < len(words) and not OPERATOR.fullmatch(words[end]):
+            end += 1
+        args = words[i + 1:end]
+        path = None
+        for j, arg in enumerate(args[:-1]):
+            if arg in ("-o", "--output") or re.fullmatch(r"-[A-Za-z]*o", arg):
+                path = args[j + 1]
+                break
+        if path is None:
+            sys.exit(f"{filename}: a curl download names no output file: {' '.join(args)}")
+        check = words[end:end + 7]
+        if not (len(check) == 7 and check[0] in (";", "&&") and check[1] == "echo"
+                and re.fullmatch(r"\S+ [ *]" + re.escape(path), check[2])
+                and check[3:] == ["|", "sha256sum", "-c", "-"]
+                and (end + 7 == len(words) or words[end + 7] in (";", "&&"))):
+            sys.exit(f"{filename}: missing SHA-256 check immediately after downloading {path}")
+PY
+    done
+    pass "each curl output in the PHP-FPM and cron builds is checked before use"
+}
+
 # Every download of the two builds (the PHP 8.1 security patch, the PECL
 # tarballs, the ionCube loaders and yt-dlp) is one curl command, and a build
 # has no other chance than that command: a 503 of the server, or a
@@ -1032,6 +1077,7 @@ test_setup_takes_back_the_jit_block_it_appended() {
 test_media_files_match_in_both_build_contexts
 test_media_copy_fixtures
 test_both_images_pin_a_download_per_architecture
+test_build_downloads_are_checked
 test_build_downloads_are_retried
 test_ioncube_loader_is_pinned_and_checked
 test_both_images_build_the_ftp_extension
