@@ -1000,6 +1000,9 @@ refuse, and record the current-row timestamp range. MariaDB 11.4 uses a
 is refused before stopping the site or changing its database: restore on
 a compatible series and plan the history migration separately. Archives
 without versioned tables keep format 2 and remain readable as before.
+If the installed dump client lacks the history option introduced in MariaDB
+10.11, backups can still include ordinary tables. A system-versioned
+table requires a client that can include its history.
 Transaction-precise history cannot be exported by `mariadb-dump`; its
 error stops the backup and no incomplete archive is kept. As with any
 logical dump, do not change table definitions while taking a backup.

@@ -962,12 +962,14 @@ func (f *fakeDocker) exec(args []string, stdin []byte) cliResponse {
 		return cliResponse{Stderr: "Error response from daemon: container " + name + " is not running\n", Code: 1}
 	}
 	switch {
+	case slices.Equal(args[2:], []string{"mariadb-dump", "--no-defaults", "--help"}):
+		return cliResponse{Stdout: "  -l, --lock-tables   Lock tables.\n"}
 	case strings.Contains(script, "mariadb-dump"):
 		f.dumpedWith = append(f.dumpedWith, f.runningServices())
 		return cliResponse{Stdout: "-- fake dump\n-- holds " + f.db + "\n"}
 	case strings.Contains(script, "information_schema.engines"):
 		// Every table of the fake takes part in transactions.
-		return cliResponse{Stdout: "0\t\n"}
+		return cliResponse{Stdout: "0\t\t\n"}
 	case strings.Contains(script, "PROCESSLIST"):
 		return cliResponse{}
 	case strings.Contains(script, "information_schema"):

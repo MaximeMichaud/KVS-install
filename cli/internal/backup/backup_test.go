@@ -57,16 +57,20 @@ type server struct {
 func stubServer(t *testing.T, s *server) {
 	t.Helper()
 	stubExec(t, func(ctx context.Context, name string, stdin io.Reader, stdout io.Writer, args ...string) error {
+		if name == "kvs-mariadb" && slices.Equal(args, []string{"mariadb-dump", "--no-defaults", "--help"}) {
+			_, err := io.WriteString(stdout, wantHelp)
+			return err
+		}
 		if name == "kvs-mariadb" && len(args) >= 3 && args[0] == "sh" && args[1] == "-c" {
 			switch script := args[2]; {
 			case script == enginesScript && len(args) == 3:
 				answer := s.engines
 				if answer == "" {
-					answer = "0\t\n"
+					answer = "0\t\t\n"
 				}
 				_, err := io.WriteString(stdout, answer)
 				return err
-			case (script == dumpScript || script == lockedDumpScript) && len(args) == 3 && s.dump != nil:
+			case (script == dumpCommand("--single-transaction", false) || script == dumpCommand("--lock-tables", false)) && len(args) == 3 && s.dump != nil:
 				return s.dump(ctx, script, stdout)
 			case script == restoreScript && len(args) == 3 && s.replay != nil:
 				return s.replay(ctx, stdin)

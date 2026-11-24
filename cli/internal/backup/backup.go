@@ -35,21 +35,21 @@ import (
 // The commands below run inside the MariaDB container. The password comes
 // from the container's environment and never appears in a process list.
 
-// dumpScript dumps the database of the site in one transaction: a snapshot
-// of every table at one point, which never holds the writes of the site.
-const dumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --max-allowed-packet=1G --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
+// dumpCommand takes a transaction snapshot or locks the site's tables.
+// Only a dump of versioned tables needs the history option.
+func dumpCommand(mode string, history bool) string {
+	if history {
+		mode += " --dump-history"
+	}
+	return `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump ` + mode + ` --quick --max-allowed-packet=1G --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
+}
 
-// lockedDumpScript dumps a database that holds tables no transaction
-// covers, MyISAM or Aria ones, which a site imported from an older server
-// keeps: a snapshot would read each of them at another moment, and the
-// archive would hold rows that point at rows it lacks. The dump locks every
-// table of the database at once instead, so it reads them all at one point,
-// as kvs-export.sh does for the same tables. The writes of the site wait
-// until the dump ends and its reads go on. A global lock would also hold
-// the other databases of the server and wait for every running query
-// before it is granted, with the reads queued behind it; stopping the
-// writers would take the whole site down for the length of the dump.
-const lockedDumpScript = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --max-allowed-packet=1G --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + dumpGuard
+// Match option declarations in --help, excluding mentions in descriptions.
+var (
+	dumpLockOption    = regexp.MustCompile(`(?m)^  (?:-., )?--lock-tables(?:[ \t]|$)`)
+	dumpHistoryOption = regexp.MustCompile(`(?m)^  (?:-., )?--dump-history(?:[ \t]|$)`)
+	dumpClientSeries  = regexp.MustCompile(`^(?:mariadb-dump|mysqldump).*?(?:Distrib |from )([0-9]+\.[0-9]+)\.`)
+)
 
 // The open input pipe ties the dump to its caller: disconnecting Docker
 // closes it, even while the dump waits for a server-side table lock.
@@ -482,7 +482,7 @@ func chooseDump(ctx context.Context, in *archiveInput) (string, error) {
 	}
 	line := strings.TrimRight(out.String(), "\r\n")
 	count, engines, _ := strings.Cut(line, "\t")
-	engines, history, _ := strings.Cut(engines, "\t")
+	engines, history, complete := strings.Cut(engines, "\t")
 	if history != "" {
 		year, err := strconv.Atoi(history)
 		if err != nil || (year != 2038 && year != 2106) {
@@ -491,11 +491,26 @@ func chooseDump(ctx context.Context, in *archiveInput) (string, error) {
 		in.historyEndYear = year
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(count))
-	if err != nil || n < 0 {
+	if err != nil || n < 0 || !complete {
 		return "", fmt.Errorf("the engines of the tables in %s could not be read: the database answered %q", in.container, excerpt(line))
 	}
+	out.Reset()
+	if err := execFn(ctx, in.container, nil, &out, "mariadb-dump", "--no-defaults", "--help"); err != nil {
+		return "", fmt.Errorf("read mariadb-dump options: %w", err)
+	}
+	if !dumpLockOption.Match(out.Bytes()) {
+		return "", errors.New("could not read mariadb-dump options from its help output")
+	}
+	supportsHistory := dumpHistoryOption.Match(out.Bytes())
+	if history != "" && !supportsHistory {
+		client := "mariadb-dump"
+		if match := dumpClientSeries.FindStringSubmatch(out.String()); match != nil {
+			client += " from MariaDB " + match[1]
+		}
+		return "", fmt.Errorf("this database has system-versioned tables and %s lacks --dump-history: provide a history-capable mariadb-dump (MariaDB 10.11 or newer) in the stack's MariaDB container before retrying the backup", client)
+	}
 	if n == 0 {
-		return dumpScript, nil
+		return dumpCommand("--single-transaction", supportsHistory), nil
 	}
 	tables := fmt.Sprintf("%d tables", n)
 	if n == 1 {
@@ -505,7 +520,7 @@ func chooseDump(ctx context.Context, in *archiveInput) (string, error) {
 		engines = " (" + engines + ")"
 	}
 	in.say(fmt.Sprintf("the database holds %s without transactions%s: the dump locks every table to read them all at one point, so the writes of the site wait until it ends", tables, engines))
-	return lockedDumpScript, nil
+	return dumpCommand("--lock-tables", supportsHistory), nil
 }
 
 // definitionChangedRe and changedTableRe read a dump that error 1412 ended:

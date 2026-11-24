@@ -25,9 +25,10 @@ import (
 // every table, a replay that stops at the first error, and the connection
 // of a replay that was stopped ended on the server.
 const (
+	wantHelp    = "  -l, --lock-tables   Lock tables.\n"
 	wantEngines = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names -e "SELECT COUNT(*), COALESCE(GROUP_CONCAT(DISTINCT t.engine ORDER BY t.engine SEPARATOR ', '), ''), (SELECT IF(COUNT(*) = 0, '', COALESCE(YEAR(FROM_UNIXTIME(4294967295)), 2038)) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'SYSTEM VERSIONED') FROM information_schema.tables t LEFT JOIN information_schema.engines e ON e.engine = t.engine WHERE t.table_schema = DATABASE() AND t.table_type IN ('BASE TABLE', 'SYSTEM VERSIONED') AND t.engine <> 'MEMORY' AND COALESCE(e.transactions, 'NO') <> 'YES'" "$MARIADB_DATABASE"`
-	wantDump    = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --max-allowed-packet=1G --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + wantDumpGuard
-	wantLocked  = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --max-allowed-packet=1G --dump-history --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + wantDumpGuard
+	wantDump    = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --single-transaction --quick --max-allowed-packet=1G --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + wantDumpGuard
+	wantLocked  = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --lock-tables --quick --max-allowed-packet=1G --routines --triggers --events --default-character-set=utf8mb4 "$MARIADB_DATABASE" &` + wantDumpGuard
 	wantReplay  = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb "$MARIADB_DATABASE"`
 	wantProbe   = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names -e "SELECT COMMAND, TIME_MS, STATE FROM information_schema.PROCESSLIST WHERE ID = IS_USED_LOCK('$1')"`
 	wantEnd     = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --batch --skip-column-names --delimiter=// -e "BEGIN NOT ATOMIC DECLARE id BIGINT UNSIGNED DEFAULT IS_USED_LOCK('$1'); DECLARE CONTINUE HANDLER FOR 1094 BEGIN END; IF id IS NOT NULL THEN EXECUTE IMMEDIATE CONCAT('KILL ', id); END IF; END"`
@@ -93,7 +94,9 @@ func newRecorder(t *testing.T) *recorder {
 		r.mu.Lock()
 		r.ran = append(r.ran, ran{name: name, args: slices.Clone(args)})
 		var answer func(context.Context, io.Reader, io.Writer) error
-		if len(args) >= 3 && args[0] == "sh" && args[1] == "-c" {
+		if slices.Equal(args, []string{"mariadb-dump", "--no-defaults", "--help"}) {
+			answer = r.answers["dump help"]
+		} else if len(args) >= 3 && args[0] == "sh" && args[1] == "-c" {
 			answer = r.answers[args[2]]
 		}
 		r.mu.Unlock()
@@ -102,6 +105,7 @@ func newRecorder(t *testing.T) *recorder {
 		}
 		return answer(ctx, stdin, stdout)
 	})
+	r.answer("dump help", wantHelp)
 	return r
 }
 
@@ -129,10 +133,10 @@ func TestTheCommandsOfABackup(t *testing.T) {
 	cases := []struct {
 		engines, dump, said string
 	}{
-		{"0\t\n", wantDump, ""},
-		{"2\tAria, MyISAM\n", wantLocked, "the database holds 2 tables without transactions (Aria, MyISAM): the dump locks every table to read them all at one point, so the writes of the site wait until it ends"},
-		{"1\tMyISAM\n", wantLocked, "the database holds 1 table without transactions (MyISAM): the dump locks every table to read them all at one point, so the writes of the site wait until it ends"},
-		{"3\n", wantLocked, "the database holds 3 tables without transactions: the dump locks every table to read them all at one point, so the writes of the site wait until it ends"},
+		{"0\t\t\n", wantDump, ""},
+		{"2\tAria, MyISAM\t\n", wantLocked, "the database holds 2 tables without transactions (Aria, MyISAM): the dump locks every table to read them all at one point, so the writes of the site wait until it ends"},
+		{"1\tMyISAM\t\n", wantLocked, "the database holds 1 table without transactions (MyISAM): the dump locks every table to read them all at one point, so the writes of the site wait until it ends"},
+		{"3\t\t\n", wantLocked, "the database holds 3 tables without transactions: the dump locks every table to read them all at one point, so the writes of the site wait until it ends"},
 	}
 	for _, c := range cases {
 		r := newRecorder(t)
@@ -143,7 +147,7 @@ func TestTheCommandsOfABackup(t *testing.T) {
 		if _, err := Create(context.Background(), dir, "0.2.0", "kvs-mariadb", writeEnv(t, dir), "", func(msg string) { reports = append(reports, msg) }); err != nil {
 			t.Fatalf("engines %q: %v (ran %v)", c.engines, err, r.commands())
 		}
-		if got := r.commands(); len(got) != 2 || !got[0].is("kvs-mariadb", "sh", "-c", wantEngines) || !got[1].is("kvs-mariadb", "sh", "-c", c.dump) {
+		if got := r.commands(); len(got) != 3 || !got[0].is("kvs-mariadb", "sh", "-c", wantEngines) || !got[1].is("kvs-mariadb", "mariadb-dump", "--no-defaults", "--help") || !got[2].is("kvs-mariadb", "sh", "-c", c.dump) {
 			t.Errorf("engines %q: ran %v", c.engines, got)
 		}
 		// The compressed size is the compressor's business.
@@ -170,6 +174,7 @@ func TestCreateStopsWhenTheEnginesCannotBeRead(t *testing.T) {
 	plentyOfSpace(t)
 	for answer, want := range map[string]string{
 		"":                           "the engines of the tables in kvs-mariadb could not be read: the test does not know",
+		"0\t":                        "the engines of the tables",
 		"ERROR 1045 (28000): denied": `the engines of the tables in kvs-mariadb could not be read: the database answered "ERROR 1045 (28000): denied"`,
 	} {
 		r := newRecorder(t)
@@ -407,6 +412,69 @@ func TestCreateStartsAgainForADefinitionChangeOnly(t *testing.T) {
 		}
 		if attempts != 1 {
 			t.Errorf("%v: %d dumps, want 1", c.err, attempts)
+		}
+	}
+}
+
+func TestBackupHistoryByClient(t *testing.T) {
+	plentyOfSpace(t)
+	for _, tc := range []struct {
+		series, engines, mode string
+		history, refuse       bool
+	}{
+		{"10.6", "0\t\t", "--single-transaction", false, false},
+		{"10.10", "1\tAria\t", "--lock-tables", false, false},
+		{"10.6", "0\t\t2038", "", false, true},
+		{"10.10", "1\tAria\t2038", "", false, true},
+		{"10.11", "0\t\t2038", "--single-transaction", true, false},
+		{"11.4", "1\tAria\t2038", "--lock-tables", true, false},
+		{"10.6", "0\t\t2038", "--single-transaction", true, false}, // Backported client.
+		{"11.4", "1\tAria\t", "--lock-tables", true, false},
+		{"11.4", "0\t\t2038", "", false, true}, // Older client on a newer server.
+	} {
+		t.Run(tc.series+tc.engines, func(t *testing.T) {
+			r := newRecorder(t)
+			r.answer(wantEngines, tc.engines+"\n")
+			help := "mariadb-dump from " + tc.series + ".1-MariaDB\n" + wantHelp
+			if tc.history {
+				help += "  -H, --dump-history  Include history.\n"
+			} else {
+				help += "  --verbose  List active features such as --dump-history.\n"
+			}
+			r.answer("dump help", help)
+			dump := strings.Replace(wantDump, "--single-transaction", tc.mode, 1)
+			if tc.history {
+				dump = strings.Replace(dump, tc.mode, tc.mode+" --dump-history", 1)
+			}
+			r.answer(dump, "CREATE TABLE t (id INT);\n")
+			dir := t.TempDir()
+			_, err := Create(context.Background(), dir, "1.0.0", "kvs-mariadb", writeEnv(t, dir), "", nil)
+			if tc.refuse {
+				if left, _ := filepath.Glob(filepath.Join(dir, "backup-*")); len(left) != 0 {
+					t.Fatal(left)
+				}
+				if err == nil || !strings.Contains(err.Error(), "MariaDB "+tc.series) || !strings.Contains(err.Error(), "in the stack's MariaDB container") || len(r.commands()) != 2 {
+					t.Fatalf("expected refusal before the dump, got %v, commands %v", err, r.commands())
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestBackupStopsOnIncompleteClientHelp(t *testing.T) {
+	for _, help := range []string{"", "  -H, --dump-history  Supported.\n"} {
+		r := newRecorder(t)
+		r.answer(wantEngines, "0\t\t\n")
+		r.answer("dump help", help)
+		dir := t.TempDir()
+		_, err := Create(context.Background(), dir, "1.0.0", "kvs-mariadb", writeEnv(t, dir), "", nil)
+		if err == nil || !strings.Contains(err.Error(), "mariadb-dump options") {
+			t.Fatalf("%q: %v", help, err)
+		}
+		if left, _ := filepath.Glob(filepath.Join(dir, "backup-*")); len(left) != 0 {
+			t.Fatal(left)
 		}
 	}
 }

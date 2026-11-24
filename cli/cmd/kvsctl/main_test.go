@@ -961,7 +961,8 @@ func TestBackupRecordsTheKVSVersion(t *testing.T) {
 	const docker = `#!/bin/sh
 # docker exec -i <container> sh -c <script>
 case "$6" in
-*information_schema*) printf '0\t\n' ;;
+--help) printf '  -l, --lock-tables   Lock tables.\n' ;;
+*information_schema*) printf '0\t\t\n' ;;
 *mariadb-dump*) printf 'CREATE TABLE t (id int);\n' ;;
 *) echo "unexpected: $*" >&2; exit 1 ;;
 esac

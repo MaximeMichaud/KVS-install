@@ -369,7 +369,7 @@ func (s *stack) holdFirst(cmds ...string) <-chan *heldCommand {
 // dumping matches the docker command that dumps the database, the backup a
 // command takes.
 func dumping(args string) bool {
-	return strings.HasPrefix(args, "exec ") && strings.Contains(args, "mariadb-dump")
+	return strings.HasPrefix(args, "exec ") && strings.Contains(args, `"$MARIADB_ROOT_PASSWORD" mariadb-dump `)
 }
 
 // replaying matches the docker command that replays a dump into the
