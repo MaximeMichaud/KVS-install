@@ -755,7 +755,7 @@ pass 'the transfer of a pass of the files alone receives no dump and keeps the s
 # import_files_only from the inspection to the report, with the containers
 # of the installation running: only docker ps is asked, .env stays as it
 # is, the completed import and the running copy are pointed out.
-extract import_files_only > "$TEST_DIR/files-only.sh"
+extract prompt_read import_files_only > "$TEST_DIR/files-only.sh"
 # shellcheck source=/dev/null
 source "$TEST_DIR/files-only.sh"
 (

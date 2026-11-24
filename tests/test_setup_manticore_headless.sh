@@ -38,6 +38,7 @@ harness="$TEST_DIR/harness.sh"
     echo "add_compose_profile() { :; }"
     echo "remove_compose_profile() { :; }"
     echo "docker() { :; }"
+    extract_function prompt_read
     extract_function select_manticore
 } > "$harness"
 grep -q '^select_manticore() {' "$harness" || fail "select_manticore not found in setup.sh"

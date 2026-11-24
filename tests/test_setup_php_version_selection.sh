@@ -28,6 +28,7 @@ extract_function() {
 functions_file="$TEST_DIR/functions.sh"
 {
     grep -m1 '^readonly SUPPORTED_PHP_VERSIONS=' "$ROOT_DIR/docker/setup.sh"
+    extract_function prompt_read
     extract_function setup_kvs_archive
     extract_function php_version_is_supported
     extract_function version_at_least

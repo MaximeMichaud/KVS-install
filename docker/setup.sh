@@ -2251,7 +2251,7 @@ import_check_completed() {
         echo ""
         echo -e "${YELLOW}An import already completed on ${completed_on}.${NC}"
         echo -n "Import again and replace the database? [y/N]: "
-        read -r answer
+        prompt_read answer
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             VOLUME_CHOICE=1
             return 0
@@ -2592,7 +2592,7 @@ select_import_source() {
         echo "  4) Yes, from the old server over SSH"
         if [[ ! "$IMPORT_CHOICE" =~ ^[1-4]$ ]]; then
             echo -n "Select [1-4] (default: 1): "
-            read -r IMPORT_CHOICE
+            prompt_read IMPORT_CHOICE
             IMPORT_CHOICE=${IMPORT_CHOICE:-1}
         fi
         case "$IMPORT_CHOICE" in
@@ -2621,15 +2621,15 @@ select_import_source() {
                     prompt_read IMPORT_REMOTE_HOST
                 done
                 echo -n "SSH port [22]: "
-                read -r answer
+                prompt_read answer
                 IMPORT_REMOTE_PORT=${answer:-22}
                 echo -n "SSH user [root]: "
-                read -r answer
+                prompt_read answer
                 IMPORT_REMOTE_USER=${answer:-root}
                 echo -n "SSH private key file (empty: your usual keys, or the password ssh asks for): "
-                read -r IMPORT_SSH_KEY
+                prompt_read IMPORT_SSH_KEY
                 echo -n "Site directory on the old server (empty: search for it): "
-                read -r IMPORT_REMOTE_DIR
+                prompt_read IMPORT_REMOTE_DIR
                 ;;
             *)
                 return 0
@@ -3246,7 +3246,7 @@ import_inspect_remote() {
                 exit 1
             fi
             echo -n "Site directory on the old server: "
-            read -r IMPORT_REMOTE_DIR
+            prompt_read IMPORT_REMOTE_DIR
             attempt=$((attempt + 1))
             continue
         fi
@@ -3325,7 +3325,7 @@ import_inspect_remote() {
     fi
     while :; do
         echo -n "Paths to leave behind, space separated (empty: as listed above): "
-        read -r more
+        prompt_read more
         [ -n "$more" ] || break 2
         if import_remote_paths_ok "$more"; then
             IMPORT_EXCLUDE="${IMPORT_EXCLUDE:+$IMPORT_EXCLUDE }$more"
@@ -3466,7 +3466,7 @@ import_check_domain() {
     fi
     if [ "${HEADLESS:-}" != "y" ]; then
         echo -n "Continue anyway? [y/N]: "
-        read -r answer
+        prompt_read answer
         if [[ ! "$answer" =~ ^[Yy]$ ]]; then
             echo "Import cancelled."
             exit 0
@@ -3482,7 +3482,7 @@ import_confirm() {
     echo "If the DNS still points at the old server, choose the self-signed certificate now and run the setup again after the switch."
     [ "${HEADLESS:-}" != "y" ] || return 0
     echo -n "Continue with this site? [Y/n]: "
-    read -r answer
+    prompt_read answer
     if [[ "$answer" =~ ^[Nn]$ ]]; then
         echo "Import cancelled."
         exit 0
@@ -3880,7 +3880,7 @@ import_files_only() {
     fi
     if [ "${HEADLESS:-}" != "y" ]; then
         echo -n "Continue? [Y/n]: "
-        read -r answer
+        prompt_read answer
         if [[ "$answer" =~ ^[Nn]$ ]]; then
             echo "Cancelled."
             exit 0
@@ -4978,7 +4978,7 @@ select_site_prefix() {
         echo "  2) Use legacy: kvs (single-site, containers: kvs-php, kvs-mariadb)"
         echo "  3) Custom prefix"
         echo -n "Select [1-3] (default: 1): "
-        read -r PREFIX_CHOICE
+        prompt_read PREFIX_CHOICE
     fi
 
     case $PREFIX_CHOICE in
@@ -5075,7 +5075,7 @@ if [[ -z "$SSL_CHOICE" ]]; then
         echo "  2) ZeroSSL"
         echo "  3) Self-signed (dev/testing or behind reverse proxy)"
         echo -n "Select SSL provider [1-3] (default: 1): "
-        read -r SSL_CHOICE
+        prompt_read SSL_CHOICE
     fi
 fi
 
@@ -5423,7 +5423,7 @@ select_php_version() {
     choice="$requested"
     if [ -z "$choice" ] && [ "${HEADLESS:-}" != "y" ]; then
         echo -n "PHP version to build [$SUPPORTED_PHP_VERSIONS] (default: $default): "
-        read -r choice
+        prompt_read choice
     fi
     choice=${choice:-$default}
 
@@ -5488,7 +5488,7 @@ select_ioncube() {
         echo "  1) Yes - Run the IonCube loader (required for KVS) (default)"
         echo "  2) No - Disable it (only if you have unencoded KVS)"
         echo -n "Run the IonCube loader? [1-2] (default: 1): "
-        read -r IONCUBE_CHOICE
+        prompt_read IONCUBE_CHOICE
     fi
 
     case $IONCUBE_CHOICE in
@@ -5560,7 +5560,7 @@ choose_mariadb_version() {
                 echo ""
                 echo "Current MariaDB version in .env: ${MARIADB_VERSION}"
                 echo -n "Keep this version? [Y/n]: "
-                read -r KEEP_VERSION
+                prompt_read KEEP_VERSION
             fi
             if [[ "$KEEP_VERSION" =~ ^[Nn]$ ]]; then
                 select_mariadb_version
@@ -5601,7 +5601,7 @@ else
     # Skip prompt in headless mode
     if [[ -z "$SKIP_PRESS_ENTER" ]]; then
         echo -n "Press Enter when ready..."
-        read -r
+        prompt_read
     fi
 
     if ! ls kvs-archive/KVS_*.zip 1>/dev/null 2>&1; then
@@ -5715,7 +5715,7 @@ select_cache() {
             echo "  1) Dragonfly (faster, modern) (default)"
             echo "  2) Memcached (legacy, same as standalone)"
             echo -n "Select cache [1-2] (default: 1): "
-            read -r CACHE_CHOICE
+            prompt_read CACHE_CHOICE
         fi
     fi
 
@@ -6108,7 +6108,7 @@ select_geoip() {
             echo "  2) Yes - Download anyway (redundant but harmless)"
             echo ""
             echo -n "Choice [1]: "
-            read -r CF_GEOIP_OVERRIDE
+            prompt_read CF_GEOIP_OVERRIDE
             CF_GEOIP_OVERRIDE=${CF_GEOIP_OVERRIDE:-1}
             if [ "$CF_GEOIP_OVERRIDE" = "1" ]; then
                 GEOIP_CHOICE=2  # Skip
@@ -6127,7 +6127,7 @@ select_geoip() {
             echo "  2) Skip (not needed if using Cloudflare, or add manually later)"
             echo ""
             echo -n "Choice [1]: "
-            read -r GEOIP_CHOICE
+            prompt_read GEOIP_CHOICE
             GEOIP_CHOICE=${GEOIP_CHOICE:-1}
         fi
     fi
@@ -6190,7 +6190,7 @@ select_manticore() {
             echo "  2) Skip (use default KVS search)"
             echo ""
             echo -n "Choice [2]: "
-            read -r MANTICORE_CHOICE
+            prompt_read MANTICORE_CHOICE
             MANTICORE_CHOICE=${MANTICORE_CHOICE:-2}
         fi
     fi
@@ -6274,7 +6274,7 @@ import_require_empty_volume() {
         echo ""
         echo -e "${YELLOW}The database volume ${volume_name} exists; an import needs an empty one.${NC}"
         echo -n "Delete it before the import? [y/N]: "
-        read -r answer
+        prompt_read answer
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             VOLUME_CHOICE=1
         fi
@@ -6405,7 +6405,7 @@ ask_existing_volume() {
 
             if [[ -z "$VOLUME_CHOICE" ]]; then
                 echo -n "Select [1-3] (default: 3): "
-                read -r VOLUME_CHOICE
+                prompt_read VOLUME_CHOICE
                 VOLUME_CHOICE=${VOLUME_CHOICE:-3}
             fi
 
@@ -6558,7 +6558,7 @@ ask_existing_volume() {
 
             if [[ -z "$VOLUME_CHOICE" ]]; then
                 echo -n "Select [1-3] (default: 3): "
-                read -r VOLUME_CHOICE
+                prompt_read VOLUME_CHOICE
                 VOLUME_CHOICE=${VOLUME_CHOICE:-3}
             fi
 
@@ -6599,7 +6599,7 @@ ask_existing_volume() {
 
             if [[ -z "$VOLUME_CHOICE" ]]; then
                 echo -n "Select [1-3] (default: 3): "
-                read -r VOLUME_CHOICE
+                prompt_read VOLUME_CHOICE
                 VOLUME_CHOICE=${VOLUME_CHOICE:-3}
             fi
 
