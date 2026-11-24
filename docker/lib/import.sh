@@ -3609,6 +3609,51 @@ import_remote_transfer_jobs() {
     printf '%s\n' "$jobs"
 }
 
+# POSIX sh shared by the exclusion probe and the binary transfer.
+import_remote_tar_selection() {
+    cat <<'SH'
+site_tar=tar
+version=$(tar --version 2>&1 </dev/null)
+case $version in
+    *'GNU tar'*|*BusyBox*|*busybox*) ;;
+    *)
+        if command -v gtar >/dev/null 2>&1 && alternate=$(gtar --version 2>/dev/null </dev/null); then
+            case $alternate in *'GNU tar'*) site_tar=gtar; version=$alternate ;; esac
+        fi ;;
+esac
+SH
+}
+
+# Check the old server's matching before a dump, take-over or file copy.
+# A tar accepting --exclude can still silently omit a wanted directory.
+import_remote_tar_exclusions_ok() {
+    {
+        import_remote_tar_selection
+        cat <<'SH'
+case $version in
+    *'GNU tar'*) set -- --wildcards ;;
+    *BusyBox*|*busybox*) set -- ;;
+    *)
+        first=${version%%'
+'*}
+        echo "ERROR: tar reports: $first. Transient directories (tmp and compiled templates) are always left out. Put GNU tar or BusyBox tar first on PATH or install GNU tar as gtar, or install rsync on the old server." >&2
+        exit 2 ;;
+esac
+probe=$(mktemp -d) || exit 2
+trap 'rm -rf -- "$probe"' 0
+mkdir -p "$probe/src/tmp" "$probe/src/other/tmp" "$probe/out" || exit 2
+: > "$probe/src/tmp/member" && : > "$probe/src/other/tmp/member" || exit 2
+if "$site_tar" -C "$probe/src" "$@" '--exclude=./tmp/*' -cf "$probe/archive" . &&
+    "$site_tar" -C "$probe/out" -xf "$probe/archive" &&
+    [ -d "$probe/out/tmp" ] && [ ! -e "$probe/out/tmp/member" ] && [ -f "$probe/out/other/tmp/member" ]; then
+    exit 0
+fi
+echo "ERROR: the old server tar cannot apply --exclude as required; install GNU tar and retry" >&2
+exit 2
+SH
+    } | import_ssh "${IMPORT_REMOTE_PREFIX[@]}" sh -s
+}
+
 # import_remote_files <site directory> <destination> <rsync yes|no> [patterns...]
 # Mirror the site files. rsync when both sides have it (resumable through
 # the partial directory, a repeat only transfers the changes), a tar
@@ -3672,6 +3717,9 @@ import_remote_files() (
     [[ "$retries" =~ ^[0-9]{1,3}$ ]] || retries=8
     [[ "$pause" =~ ^[0-9]{1,3}$ ]] || pause=15
     import_remote_path_check "$dir" || return 1
+    if [ "$use_rsync" != yes ] && [ "${#patterns[@]}" -gt 0 ]; then
+        import_remote_tar_exclusions_ok || return 1
+    fi
     import_private_site_dir "$destination" || return 1
     for pattern in ${patterns[@]+"${patterns[@]}"}; do
         case "$pattern" in
@@ -4012,8 +4060,8 @@ import_remote_files() (
     # The login shell gets only "sh -s". The remote sh interprets status 1
     # while it still knows which tar produced the stream.
     local -a pipe_status=()
-    local remote_tar remote_glob_tar probe=""
-    remote_tar="tar -C $(import_shquote "$dir")"
+    local remote_tar remote_glob_tar
+    remote_tar="\$site_tar -C $(import_shquote "$dir")"
     remote_glob_tar=$remote_tar
     for pattern in ${tar_excludes[@]+"${tar_excludes[@]}"}; do
         remote_tar+=" $pattern"
@@ -4021,25 +4069,13 @@ import_remote_files() (
     for pattern in ${tar_glob_excludes[@]+"${tar_glob_excludes[@]}"}; do
         remote_glob_tar+=" $pattern"
     done
-    if [ "${#tar_excludes[@]}" -gt 0 ]; then
-        # shellcheck disable=SC2016  # The old server's sh expands the probe.
-        probe='probe=$(mktemp -d) || exit 2
-            tar -chf - --exclude=./tmp -C "$probe" . >/dev/null 2>&1
-            status=$?
-            rmdir "$probe" || exit 2
-            if [ "$status" != 0 ]; then
-                echo "ERROR: the old server tar cannot use --exclude; install GNU tar and retry" >&2
-                exit 2
-            fi'
-    fi
-    remote_tar="version=\$(tar --version 2>&1 </dev/null)
+    remote_tar="$(import_remote_tar_selection)
     case \"\$version\" in
         *'GNU tar'*)
             $remote_tar -chf - .
             status=\$?
             [ \"\$status\" != 1 ] || exit 42 ;;
         *)
-            $probe
             $remote_glob_tar -chf - .
             status=\$?
             case \"\$version:\$status\" in

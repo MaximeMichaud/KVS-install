@@ -3330,6 +3330,9 @@ import_inspect_remote() {
         exit 1
     }
     import_remote_load_excludes "$IMPORT_REMOTE_REPORT"
+    if [ "$IMPORT_REMOTE_RSYNC" != yes ] && [ "${#IMPORT_EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
+        import_remote_tar_exclusions_ok || exit 1
+    fi
     IMPORT_SITE_IONCUBE=$(import_kv "$IMPORT_REMOTE_REPORT" ioncube)
     import_save_nginx_config "$IMPORT_REMOTE_REPORT"
     # Reject unsupported source routing before starting the dump or site

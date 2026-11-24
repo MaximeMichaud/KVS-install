@@ -468,7 +468,8 @@ make_tar_stub() {
     mkdir -p "$TAR_BIN"
     cat > "$TAR_BIN/tar" <<EOF
 #!/bin/bash
-"$real_tar" "\$@"
+"$real_tar" "\$@" || exit
+case " \$* " in *" -chf "*) ;; *) exit 0 ;; esac
 printf '%s\n' "\${STUB_TAR_MESSAGE:-tar: a file changed as we read it}" >&2
 exit "\${STUB_TAR_EXIT:-0}"
 EOF
@@ -1374,6 +1375,48 @@ test_excluded_and_included_paths_change_what_travels() {
     pass "excluded and included paths change what travels"
 }
 
+test_an_unknown_tar_cannot_archive_with_exclusions() {
+    local site="$TMP_ROOT/bsd-site" bin="$TMP_ROOT/bsd-bin" archive="$TMP_ROOT/bsd.tar"
+    make_site_with_extras "$site"
+    mkdir "$bin"
+    cat > "$bin/tar" <<'STUB'
+#!/bin/sh
+if [ "$1" = --version ]; then printf '%s\n' 'bsdtar - libarchive' second-banner-line; exit 0; fi
+exit 9
+STUB
+    chmod +x "$bin/tar"
+    if REAL_TAR="$MIN_BIN/tar" run_export "$bin:$STUB_BIN:$MIN_BIN" "$site.out" "$site.err" -y -o "$archive" archive "$site"; then
+        fail "bsdtar accepted a site exclusion"
+    fi
+    grep -q 'bsdtar - libarchive.*tmp and compiled templates.*GNU tar or BusyBox tar.*gtar' "$site.err" || fail "missing tar implementation diagnostic"
+    if grep -q second-banner-line "$site.err"; then fail "printed the whole version banner"; fi
+    [ ! -e "$archive" ] || fail "published an archive with unsupported exclusions"
+    grep 'mariadb-dump argv:' "$STUB_LOG" | grep -Fvq '[--help]' && fail "started the dump before checking tar"
+    ln -s "$MIN_BIN/tar" "$bin/gtar"
+    run_export "$bin:$STUB_BIN:$MIN_BIN" "$site.out" "$site.err" -y -o "$archive" archive "$site" ||
+        fail "GNU gtar did not replace bsdtar"
+    archive_lists "$archive" -Fxq www/tmp/ || fail "gtar omitted the tmp directory"
+    rm "$bin/gtar"
+    cat > "$bin/tar" <<'STUB'
+#!/bin/bash
+args=()
+for arg do
+    if [[ "$arg" = --exclude=* ]]; then arg="--exclude=$TEST_PATTERN"; fi
+    args+=("$arg")
+done
+exec "$REAL_TAR" ${args[@]+"${args[@]}"}
+STUB
+    local pattern
+    for pattern in 'tree/missing/*' 'tree/tmp' '*/tmp/*'; do
+        if REAL_TAR="$MIN_BIN/tar" TEST_PATTERN="$pattern" run_export "$bin:$STUB_BIN:$MIN_BIN" "$site.out" "$site.err" -y -o "$archive" --exclude backup archive "$site"; then
+            fail "accepted incorrect exclusion behavior for $pattern"
+        fi
+        grep -q 'cannot leave the excluded paths out' "$site.err" || fail "missing matching diagnostic"
+        grep 'mariadb-dump argv:' "$STUB_LOG" | grep -Fvq '[--help]' && fail "checked matching after the dump"
+    done
+    pass "tar with unknown exclusion matching is refused before the dump"
+}
+
 # The tar of BusyBox stops on --anchored, --wildcards and --no-wildcards.
 # The stub refuses them as it does and is GNU tar otherwise, which reads a
 # bare exclude the same way: a wildcard pattern matched below any directory.
@@ -1403,7 +1446,8 @@ test_exclusions_reach_a_tar_that_is_not_gnu_tar() {
 #!/bin/sh
 for arg do
     case $arg in
-        --version | --anchored | --no-anchored | --wildcards | --no-wildcards)
+        --version) echo "BusyBox tar" >&2; exit 1 ;;
+        --anchored | --no-anchored | --wildcards | --no-wildcards)
             echo "tar: unrecognized option '$arg'" >&2
             exit 1 ;;
         --exclude=*)
@@ -1450,7 +1494,7 @@ EOF
             rm -f "$archive"
             REAL_TAR="$MIN_BIN/tar" run_export "$bin:$STUB_BIN:$MIN_BIN" "$out" "$err" -y -o "$archive" \
                 --exclude backup --exclude 'b\q' --include .c1 archive "$site" && fail "$kind tar: a tar without --exclude must stop the export"
-            grep -q "^ERROR: the tar of this server is not GNU tar and cannot leave the excluded paths out" "$err" ||
+            grep -q "^ERROR: the tar of this server cannot leave the excluded paths out" "$err" ||
                 fail "$kind tar: the refusal must explain: $(cat "$err")"
             grep -q "unrecognized option\|tar failed" "$err" && fail "$kind tar: the archive was attempted: $(cat "$err")"
             grep 'mariadb-dump argv:' "$STUB_LOG" | grep -Fvq '[--help]' && fail "$kind tar: the refusal came after the dump was started"
@@ -4262,6 +4306,7 @@ test_a_full_temporary_directory_does_not_shrink_the_site_size
 test_detect_reports_the_entries_and_what_stays_behind
 test_storage_servers_keep_their_columns
 test_excluded_and_included_paths_change_what_travels
+test_an_unknown_tar_cannot_archive_with_exclusions
 test_exclusions_reach_a_tar_that_is_not_gnu_tar
 test_named_paths_are_normalised_and_a_missing_one_is_reported
 test_detect_lists_the_links_leading_out_of_the_site

@@ -323,7 +323,7 @@ done
 # before the exporter tries to open a database socket or write a bundle.
 # shellcheck source=/dev/null
 source <(extract kvs-export.sh kvs_select_database_format)
-DB_PASSWORD='' OPT_DATABASE_FORMAT=directory DB_OK=yes DB_DUMP_TOOL=help_dump DB_HOST_RAW=localhost
+TAR_CMD=tar DB_PASSWORD='' OPT_DATABASE_FORMAT=directory DB_OK=yes DB_DUMP_TOOL=help_dump DB_HOST_RAW=localhost
 KVS_VERSION=7.0.0 DB_NAME=site.test TABLES_PREFIX=ktvs_
 help_dump() { echo '--dir --parallel'; }
 kvs_tool_advertises() { return 0; }

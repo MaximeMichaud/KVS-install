@@ -87,7 +87,7 @@ real_tar=$(command -v tar)
 mkdir -p "$TEST_DIR/plain-tar"
 cat > "$TEST_DIR/plain-tar/tar" <<STUB
 #!/bin/sh
-[ "\$1" != --version ] || { echo "tar: unrecognized option '--version'" >&2; exit 1; }
+[ "\$1" != --version ] || { echo "BusyBox tar: unrecognized option '--version'" >&2; exit 1; }
 for word in "\$@"; do
     case "\$word" in
         --wildcards | --no-wildcards | --anchored | --no-anchored)
@@ -142,6 +142,44 @@ if TEST_NO_EXCLUDE=yes run_fallback "$TEST_DIR/status-dest" /tmp; then
 fi
 grep -q 'cannot.*--exclude' "$TEST_DIR/out" || fail "missing exclude diagnostic"
 [ ! -e "$TEST_DIR/site-opened" ] || fail "tar opened the site before checking its options"
+
+# A tar named gtar is an alternative only when it identifies itself as GNU.
+ln -s tar "$remote_bin/gtar"
+TEST_TAR_VERSION=bsdtar import_remote_files "$site" "$TEST_DIR/status-dest" no > "$TEST_DIR/out" 2>&1 ||
+    fail "tar without exclusions must still transfer the site"
+rm -f "$TEST_DIR/site-opened"
+if TEST_TAR_VERSION=bsdtar run_fallback "$TEST_DIR/status-dest" /tmp; then
+    fail "bsdtar accepted with a site exclusion"
+fi
+grep -q 'bsdtar.*tmp and compiled templates.*GNU tar or BusyBox tar.*gtar.*install rsync on the old server' "$TEST_DIR/out" || fail "missing tar implementation diagnostic"
+[ ! -e "$TEST_DIR/site-opened" ] || fail "bsdtar opened the excluded site"
+
+ln -sf "$real_tar" "$remote_bin/gtar"
+TEST_TAR_STATUS=9 TEST_TAR_VERSION=bsdtar run_fallback "$TEST_DIR/gtar-dest" /tmp || fail "GNU gtar did not replace bsdtar"
+cmp "$site/index.php" "$TEST_DIR/gtar-dest/index.php" || fail "gtar did not transfer the site"
+[ ! -e "$TEST_DIR/site-opened" ] || fail "bsdtar opened the site despite GNU gtar"
+rm "$remote_bin/gtar"
+
+# Each tar accepts the option but implements a different wrong match.
+mkdir -p "$TEST_DIR/mismatch"
+cat > "$TEST_DIR/mismatch/tar" <<'STUB'
+#!/bin/bash
+args=()
+for arg do
+    if [[ "$arg" = --exclude=* ]]; then arg="--exclude=$TEST_PATTERN"; fi
+    args+=("$arg")
+done
+exec "$REAL_TAR" "${args[@]}"
+STUB
+chmod +x "$TEST_DIR/mismatch/tar"
+remote_bin="$TEST_DIR/mismatch"
+for pattern in './missing/*' './tmp' '*/tmp/*'; do
+    if REAL_TAR="$real_tar" TEST_PATTERN="$pattern" run_fallback "$TEST_DIR/mismatch-dest" /tmp; then
+        fail "accepted incorrect exclusion behavior for $pattern"
+    fi
+    grep -q 'cannot apply --exclude' "$TEST_DIR/out" || fail "missing matching diagnostic"
+    [ ! -e "$TEST_DIR/mismatch-dest" ] || fail "created the destination before probing tar"
+done
 
 # GNU tar, with the words it was run with: it must keep the command line it
 # always had, with the name as it is under --no-wildcards.

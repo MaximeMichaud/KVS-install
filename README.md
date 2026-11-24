@@ -322,6 +322,8 @@ With `IONCUBE=NO` the archive is treated as unencoded and `KVS_PHP_VERSION` pick
 
 ### Importing an existing site (Docker, experimental)
 
+Archive exports and SSH tar imports always exclude transient directories (tmp and compiled templates). They require GNU tar or BusyBox tar first on PATH, or GNU tar installed as `gtar`. SSH imports can also use rsync on the old server.
+
 An existing KVS site moves into the Docker stack from two inputs: its files and a dump of its database. KVS keeps everything else (videos, members, categories, settings) in that database, so the files alone cannot rebuild a site. The setup takes both from one of three sources:
 
 - **An archive on the new server**, made by `kvs-export.sh` on the old server or by hand: a zip, 7z, tar, tar.gz, tar.zst, tar.xz or tar.bz2 that holds the site directory (the one with `admin/include/setup.php`, at the top or nested) and one dump (`.sql`, `.sql.gz`, `.sql.xz` or `.sql.zst`) next to it, nothing else. The tool the archive needs (`unzip`, `7zip`, `zstd`, `xz-utils` or `bzip2`) is installed when missing, and only that one.

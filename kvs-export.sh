@@ -138,8 +138,10 @@ DB_DIRECTORY_AUTH="site"
 DB_DIRECTORY_ROOT_REASON=""
 SITE_SIZE_MB="0"
 SITE_REQUIRED_MB=""
-# yes or no once kvs_tar_is_gnu has asked the tar of this server.
-TAR_IS_GNU=""
+# The tar implementation used for exclusions and archive status.
+TAR_KIND=""
+TAR_CMD=tar
+TAR_VERSION=""
 SITE_SIZE_STATUS="skipped"
 SITE_SIZE_SECONDS="0"
 SITE_SIZE_ENTRIES="0"
@@ -1227,7 +1229,7 @@ kvs_transfer_bytes() {
             : > "$dir/probe/a" && ln "$dir/probe/a" "$dir/probe/b" &&
             : > "$dir/probe/target" && ln -s target "$dir/probe/c" &&
             ln -s target "$dir/probe/d" || return 1
-        tar -C "$dir/probe" -chf - a b c d | tar -C "$dir/unpack" -xf - || return 1
+        "$TAR_CMD" -C "$dir/probe" -chf - a b c d | "$TAR_CMD" -C "$dir/unpack" -xf - || return 1
         [ ! "$dir/unpack/a" -ef "$dir/unpack/b" ] || hard=yes
         [ ! "$dir/unpack/c" -ef "$dir/unpack/d" ] || followed=yes
         find -L "$SITE_DIR" ${filters[@]+"${filters[@]}"} -type d -exec stat -L -c d -- {} + -o \
@@ -2393,7 +2395,7 @@ kvs_select_database_format() {
     # The bundle is checksummed while it streams: GNU tar hands every member
     # to a command, and GNU head drops the end of the first archive. One
     # command -v for several tools succeeds when any of them exists.
-    if ! kvs_tool_advertises tar --to-command || ! command -v mkfifo >/dev/null 2>&1 ||
+    if ! kvs_tool_advertises "$TAR_CMD" --to-command || ! command -v mkfifo >/dev/null 2>&1 ||
         ! command -v tee >/dev/null 2>&1 || ! command -v cut >/dev/null 2>&1 ||
         [ "$(printf 'kvs' | head -c -1 2>/dev/null)" != kv ]; then
         kvs_directory_refuse "GNU tar and the GNU tools mkfifo, tee, head and cut are required to stream native bundles"
@@ -2641,10 +2643,10 @@ kvs_stream_directory_bundle() {
     # sha256sum run in the bundle directory; the directory entry lands in
     # the private members directory.
     # shellcheck disable=SC2016  # Expanded by the shell tar starts for each member.
-    (cd "$work/members" && exec tar -xf - --to-command='printf "%s  %s\n" "$(sha256sum | cut -c 1-64)" "$TAR_FILENAME"') \
+    (cd "$work/members" && exec "$TAR_CMD" -xf - --to-command='printf "%s  %s\n" "$(sha256sum | cut -c 1-64)" "$TAR_FILENAME"') \
         < "$work/archive" > "$work/sums" &
     hasher=$!
-    tar --format=gnu -b 1 -cf - -C "$bundle" kvs-native-export.manifest data < /dev/null |
+    "$TAR_CMD" --format=gnu -b 1 -cf - -C "$bundle" kvs-native-export.manifest data < /dev/null |
         tee -- "$work/archive" | head -c -1024 || status=1
     wait "$hasher" || status=1
     expected=$((${#DB_DIRECTORY_TABLES[@]} * 2 + 1))
@@ -2658,7 +2660,7 @@ kvs_stream_directory_bundle() {
         return 1
     fi
     mv -- "$work/sums" "$bundle/SHA256SUMS" || return 1
-    tar --format=gnu -b 1 -cf - -C "$bundle" SHA256SUMS < /dev/null
+    "$TAR_CMD" --format=gnu -b 1 -cf - -C "$bundle" SHA256SUMS < /dev/null
 }
 
 kvs_require_dump_tool() {
@@ -2998,6 +3000,7 @@ kvs_collect() {
     local setup_db="$SITE_DIR/admin/include/setup_db.php"
     local version_file="$SITE_DIR/admin/include/version.php"
 
+    kvs_detect_tar
     PROJECT_PATH=$(kvs_config_value "$setup" project_path)
     PROJECT_URL=$(kvs_config_value "$setup" project_url)
     TABLES_PREFIX=$(kvs_config_value "$setup" tables_prefix)
@@ -3091,8 +3094,8 @@ kvs_archive_excludes() {
     local pattern
 
     TAR_EXCLUDES=()
-    kvs_tar_is_gnu
-    if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] && [ "$TAR_IS_GNU" = yes ]; then
+    kvs_detect_tar
+    if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] && [ "$TAR_KIND" = gnu ]; then
         TAR_EXCLUDES=(--anchored)
         # A name matches as it is written; only the "/*" that leaves what
         # a directory holds behind is a wildcard, with the name escaped.
@@ -3116,7 +3119,7 @@ kvs_archive_excludes() {
     # staging www link, and the site behind it, again and again until the
     # disk is full.
     if [ -n "$STAGING_DIR" ]; then
-        if [ "$TAR_IS_GNU" = yes ]; then
+        if [ "$TAR_KIND" = gnu ]; then
             TAR_EXCLUDES+=(--no-anchored "--exclude=${STAGING_DIR##*/}")
         else
             TAR_EXCLUDES+=("--exclude=${STAGING_DIR##*/}")
@@ -3124,14 +3127,24 @@ kvs_archive_excludes() {
     fi
 }
 
-# Whether the tar of this server is GNU tar, asked once, in TAR_IS_GNU. The
+# Identify GNU tar or BusyBox once. The
 # archive options, the reading of its exit status and the check below all
 # depend on it.
-kvs_tar_is_gnu() {
-    [ -z "$TAR_IS_GNU" ] || return 0
-    case $(tar --version 2> /dev/null < /dev/null) in
-        *'GNU tar'*) TAR_IS_GNU=yes ;;
-        *) TAR_IS_GNU=no ;;
+kvs_detect_tar() {
+    local alternate
+    [ -z "$TAR_KIND" ] || return 0
+    TAR_VERSION=$(tar --version 2>&1 < /dev/null) || :
+    case $TAR_VERSION in
+        *'GNU tar'*) TAR_KIND=gnu ;;
+        *BusyBox*|*busybox*) TAR_KIND=busybox ;;
+        *)
+            TAR_KIND=other
+            if command -v gtar >/dev/null 2>&1 && alternate=$(gtar --version 2>/dev/null < /dev/null) &&
+                [[ $alternate = *'GNU tar'* ]]; then
+                TAR_CMD=gtar
+                TAR_KIND=gnu
+            fi
+            ;;
     esac
 }
 
@@ -3139,28 +3152,37 @@ kvs_tar_is_gnu() {
 # directory of the site that is itself named www: www/lib/www/backup would
 # stay behind with it, unseen. For a tar that is not GNU tar, look for such
 # a path among those that travel, and refuse the archive when there is one.
-# Such a tar may also have no --exclude at all (BusyBox is built without it
-# on some systems): it is tried on an empty directory first. Both answers
-# depend on this server, the site and the exclusions alone, so they come
-# before the dump.
+# First verify that the selected tar keeps a directory shell and a nested
+# namesake while omitting the excluded child. Do this before the dump.
 kvs_refuse_unanchored_excludes() {
     local pattern rel tail site found probe status=0
     local -a kept=() clash=()
 
-    kvs_tar_is_gnu
-    [ "$TAR_IS_GNU" = no ] && [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] || return 0
-    if ! probe=$(mktemp -d 2> /dev/null) || ! mkdir "$probe/empty"; then
-        [ -z "$probe" ] || rm -rf -- "$probe"
-        kvs_error "cannot create a temporary directory, set TMPDIR to a writable filesystem"
-        return 1
+    kvs_detect_tar
+    [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ] || return 0
+    local -a match_options=()
+    case $TAR_KIND in
+        gnu) match_options=(--anchored --wildcards) ;;
+        busybox) ;;
+        *) kvs_error "tar reports: ${TAR_VERSION%%$'\n'*}. Transient directories (tmp and compiled templates) are always left out. Put GNU tar or BusyBox tar first on PATH, or install GNU tar as gtar."; return 1 ;;
+    esac
+    probe=$(mktemp -d 2> /dev/null) || { kvs_error "cannot create a temporary directory for the tar probe"; return 1; }
+    if ! {
+        mkdir -p "$probe/tree/tmp" "$probe/tree/other/tmp" "$probe/out" &&
+        : > "$probe/tree/tmp/member" && : > "$probe/tree/other/tmp/member" &&
+        "$TAR_CMD" -cf "$probe/archive" ${match_options[@]+"${match_options[@]}"} '--exclude=tree/tmp/*' -C "$probe" tree &&
+        "$TAR_CMD" -xf "$probe/archive" -C "$probe/out" &&
+        [ -d "$probe/out/tree/tmp" ] && [ ! -e "$probe/out/tree/tmp/member" ] && [ -f "$probe/out/tree/other/tmp/member" ]
+    } 2>/dev/null </dev/null; then
+        status=1
     fi
-    tar -chf - "--exclude=${KVS_ARCHIVE_SITE_DIR}/tmp/*" -C "$probe" empty > /dev/null 2>&1 < /dev/null || status=$?
     rm -rf -- "$probe"
     if [ "$status" != 0 ]; then
-        kvs_error "the tar of this server is not GNU tar and cannot leave the excluded paths out of the archive (it has no --exclude)"
+        kvs_error "the tar of this server cannot leave the excluded paths out while retaining the requested directories (--exclude)"
         kvs_say "Install GNU tar and run the export again."
         return 1
     fi
+    [ "$TAR_KIND" != gnu ] || return 0
     site=$(kvs_glob_escape "$SITE_DIR")
     for pattern in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
         rel=$(kvs_glob_escape "${pattern%/\*}")
@@ -3297,8 +3319,8 @@ kvs_archive_tar_ok() {
         done < "$errfile"
     fi
     [ "$status" -eq 0 ] && return 0
-    kvs_tar_is_gnu
-    [ "$status" -eq 1 ] && [ "$TAR_IS_GNU" = yes ] || return 1
+    kvs_detect_tar
+    [ "$status" -eq 1 ] && [ "$TAR_KIND" = gnu ] || return 1
     kvs_warn "files changed, were removed, or shrank under the site while the archive was read"
     [ -z "$removed" ] || kvs_warn "missing from the archive, removed before tar read them:$removed"
     [ -z "$shrank" ] || kvs_warn "padded with zeros in the archive, they shrank while tar read them:$shrank"
@@ -3986,14 +4008,14 @@ kvs_command_archive() {
         return 1
     fi
     if [ "$output" = "-" ]; then
-        tar -chf - ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null 2> "$STAGING_DIR/tar-stderr"
+        "$TAR_CMD" -chf - ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null 2> "$STAGING_DIR/tar-stderr"
         if ! kvs_archive_tar_ok "$?" "$STAGING_DIR/tar-stderr"; then
             kvs_error "tar failed, the archive on stdout is incomplete"
             return 1
         fi
         return 0
     fi
-    tar -chf "$STAGING_DIR/export" ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null 2> "$STAGING_DIR/tar-stderr"
+    "$TAR_CMD" -chf "$STAGING_DIR/export" ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} -C "$STAGING_DIR" "$KVS_ARCHIVE_SITE_DIR" "$dump_name" "$KVS_MANIFEST_NAME" < /dev/null 2> "$STAGING_DIR/tar-stderr"
     if ! kvs_archive_tar_ok "$?" "$STAGING_DIR/tar-stderr"; then
         kvs_error "tar failed"
         return 1
