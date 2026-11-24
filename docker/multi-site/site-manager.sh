@@ -491,9 +491,16 @@ reload_caddy_locked() {
     log_success "Caddy reloaded"
 }
 
-reload_caddy() (
+reload_caddy_if_running() (
+    local names
     lock_routes || return 1
-    reload_caddy_locked
+    if ! names=$(docker ps --format '{{.Names}}' 8<&-); then
+        log_error "Could not query the running containers to reload Caddy after route removal."
+        return 1
+    fi
+    if grep -Fxq kvs-caddy <<< "$names"; then
+        reload_caddy_locked
+    fi
 )
 
 wait_for_caddy() {
@@ -1989,10 +1996,7 @@ remove_site() {
         fi
     fi
 
-    # Reload Caddy
-    if docker ps --format '{{.Names}}' | grep -Fxq "kvs-caddy"; then
-        reload_caddy
-    fi
+    reload_caddy_if_running || return 1
 
     log_success "Site ${domain} removed completely"
 }
@@ -2176,9 +2180,10 @@ start_caddy() {
 # =============================================================================
 
 stop_caddy() {
+    lock_routes || return 1
     log_info "Stopping Caddy proxy..."
     cd "$SCRIPT_DIR"
-    docker compose -p multi-site -f docker-compose.caddy.yml down
+    docker compose -p multi-site -f docker-compose.caddy.yml down 8<&- || return 1
     log_success "Caddy proxy stopped"
 }
 
