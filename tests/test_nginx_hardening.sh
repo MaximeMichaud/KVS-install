@@ -52,10 +52,6 @@ assert_protected_locations_precede_php() {
 
     php_line=$(line_number "$file" 'location ~ \.php$ {')
     for rule in \
-        'location ~* /blocks/.*\.php$ {' \
-        'location ~* /langs/.*\.php$ {' \
-        'location ~* /template/.*\.php$ {' \
-        'location ~* /tmp/.*\.php$ {' \
         'location ~ /\. {' \
         "$KVS_INTERNAL_PRE_RULE" \
         "$KVS_INTERNAL_POST_RULE"
@@ -760,6 +756,16 @@ for site_config in \
     docker/multi-site/nginx/kvs-caddy.conf.template \
     conf/nginx/conf.d/domain.conf
 do
+    php_line=$(line_number "${ROOT_DIR}/${site_config}" 'location ~ \.php$ {')
+    for directory in blocks langs template tmp; do
+        protected_line=$(line_number "${ROOT_DIR}/${site_config}" "location ~* /${directory}/.*\.php\$ {")
+        ((protected_line < php_line)) || fail "internal PHP rule follows the PHP handler in $site_config"
+        if [[ $site_config == conf/nginx/conf.d/domain.conf ]]; then
+            imported_line=$(line_number "${ROOT_DIR}/${site_config}" 'include globals/kvs.conf;')
+            ((protected_line < imported_line)) || fail "internal PHP rule follows the imported native rewrites"
+        fi
+        assert_location_body "${ROOT_DIR}/${site_config}" "location ~* /${directory}/.*\.php\$ {" 'internal;'
+    done
     assert_kvs_internal_directories_denied_before_php "${ROOT_DIR}/${site_config}"
     assert_internal_dirs_denied_before_assets "${ROOT_DIR}/${site_config}"
     assert_location_body "${ROOT_DIR}/${site_config}" "$KVS_INTERNAL_PRE_RULE" 'deny all;'
@@ -785,13 +791,8 @@ do
     # shellcheck disable=SC2016  # An nginx variable, not a shell one.
     assert_location_body_has "${ROOT_DIR}/${site_config}" 'location ~ \.php$ {' \
         'try_files $fastcgi_script_name =404;'
-    for directory in blocks langs template tmp; do
-        assert_location_body "${ROOT_DIR}/${site_config}" "location ~* /${directory}/.*\.php\$ {" 'internal;'
-    done
 done
-# The standalone site config takes its dotfile and KVS internal locations,
-# and the existing-script check of its PHP handler, from the globals it
-# includes.
+# The standalone site includes the dotfile guard and the existing-script check.
 assert_location_body_has "${ROOT_DIR}/conf/nginx/conf.d/domain.conf" 'location ~ \.php$ {' \
     'include globals/php_fastcgi.conf;'
 # shellcheck disable=SC2016  # An nginx variable, not a shell one.
@@ -799,9 +800,6 @@ grep -Eq '^try_files +\$fastcgi_script_name =404;$' "${ROOT_DIR}/conf/nginx/glob
     fail "the PHP handler of the standalone site config runs scripts that do not exist"
 assert_location_body "${ROOT_DIR}/conf/nginx/globals/security.conf" \
     'location ~ /\.(?!well-known(?:/|$)) {' 'deny all;'
-for directory in blocks langs template tmp; do
-    assert_location_body "${ROOT_DIR}/conf/nginx/globals/kvs.conf" "location ~* /${directory}/.*\.php\$ {" 'internal;'
-done
 
 run_certificate_case neither-present missing
 run_certificate_case certificate-only certificate-only

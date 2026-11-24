@@ -26,6 +26,7 @@ suites=(
     integration_nginx_healthcheck.sh
     integration_internal_site_url.sh
     integration_nginx_import.sh
+    integration_native_rewrite_order.sh
     integration_nginx_log_rotation.sh
     integration_database_runtime.sh
     integration_storage_url_lines.sh
