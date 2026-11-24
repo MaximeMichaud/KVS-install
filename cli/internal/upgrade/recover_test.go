@@ -200,7 +200,7 @@ func TestRecoverAfterAStopBeforeTheTemporaryIsIdentified(t *testing.T) {
 
 func TestRecoverInterruptedRollbackTargetOnly(t *testing.T) {
 	const policy = "docker/policy.xml"
-	for _, kind := range []string{"local", "delivered", "recorded creation"} {
+	for _, kind := range []string{"local", "delivered", "recorded edit", "recorded delivery"} {
 		t.Run(kind, func(t *testing.T) {
 			s := newStack(t, "", rel{version: "1.0.0", files: map[string]string{policy: "delivered"}}, rel{version: "1.1.0"})
 			if err := s.upgrade(s.runner(quick)); err != nil {
@@ -208,17 +208,18 @@ func TestRecoverInterruptedRollbackTargetOnly(t *testing.T) {
 			}
 			s.fresh()
 			step := KindStepStart
-			if kind == "recorded creation" {
+			recorded := strings.HasPrefix(kind, "recorded ")
+			if recorded {
 				step = KindStepDone
 			}
 			s.rep.cut = isStep(step, StepApply)
 			cutRun(t, s.rep, func() { _ = s.rollback(s.runner(quick)) })
 			j := s.journal()
-			if j == nil || !j.Applied || slices.Contains(j.Created, policy) != (kind == "recorded creation") {
+			if j == nil || !j.Applied || slices.Contains(j.Created, policy) != recorded {
 				t.Fatalf("unexpected journal: %+v", j)
 			}
 			data := "local"
-			if kind == "delivered" {
+			if kind == "delivered" || kind == "recorded delivery" {
 				data = "delivered"
 			}
 			p := filepath.Join(s.root, policy)
@@ -230,7 +231,7 @@ func TestRecoverInterruptedRollbackTargetOnly(t *testing.T) {
 				t.Fatal(err)
 			}
 			s.back("1.1.0")
-			if kind == "local" {
+			if data == "local" {
 				if s.file(policy) != data || !strings.Contains(strings.Join(s.rep.notices(), "\n"), "warning: keeping "+policy) {
 					t.Fatalf("policy=%q, notices=%v", s.file(policy), s.rep.notices())
 				}
@@ -1130,5 +1131,114 @@ func TestRecoverQuestionSaysWhatHappensToTheDatabase(t *testing.T) {
 				t.Errorf("database %q, replays %v", db, replays)
 			}
 		})
+	}
+}
+
+func TestRecoverKeepsBlockingEditUntilMoved(t *testing.T) {
+	const parent, child = "conf/extra", "conf/extra/site.conf"
+	s := newStack(t, "", rel{version: "1.0.0", files: map[string]string{child: "delivered"}}, rel{version: "1.1.0", files: map[string]string{parent: "previous"}})
+	if err := s.upgrade(s.runner(quick)); err != nil {
+		t.Fatal(err)
+	}
+	s.fresh()
+	s.rep.cut = isStep(KindStepDone, StepApply)
+	cutRun(t, s.rep, func() { _ = s.rollback(s.runner(quick)) })
+	if j := s.journal(); j == nil || !slices.Contains(j.Created, child) {
+		t.Fatalf("missing creation record: %+v", j)
+	}
+	path := filepath.Join(s.root, child)
+	if err := os.WriteFile(path, []byte("operator edit"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.fresh()
+	err := s.recover(s.runner(quick))
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "move it away") || s.journal() == nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if s.file(child) != "operator edit" {
+		t.Fatal("the edit changed")
+	}
+	if err := os.Rename(path, filepath.Join(s.root, "saved.conf")); err != nil {
+		t.Fatal(err)
+	}
+	s.fresh()
+	if err := s.recover(s.runner(quick)); err != nil {
+		t.Fatal(err)
+	}
+	if s.file(parent) != "previous" || s.file("saved.conf") != "operator edit" || s.journal() != nil {
+		t.Fatal("recovery after moving the edit failed")
+	}
+}
+
+// An upgrade cut after laying its files: the target-only file conf/extra
+// stands where the version being restored needs the directory conf/extra.
+// Edited, it must stay and block with its path; once moved aside, a second
+// recover restores 1.0.0. Unedited, recover removes it in one pass.
+func TestRecoverUpgradeCreationWhereADirectoryReturns(t *testing.T) {
+	const child, parent = "conf/extra/site.conf", "conf/extra"
+	for _, edited := range []bool{false, true} {
+		s := newStack(t, "", rel{version: "1.0.0", files: map[string]string{child: "delivered"}},
+			rel{version: "1.1.0", files: map[string]string{parent: "installed"}})
+		s.cutUpgrade(s.runner(quick), isStep(KindStepDone, StepApply))
+		j := s.journal()
+		if j == nil || !j.Applied || !slices.Contains(j.Created, parent) {
+			t.Fatalf("unexpected journal: %+v", j)
+		}
+		p := filepath.Join(s.root, parent)
+		if edited {
+			if err := os.WriteFile(p, []byte("operator edit"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.fresh()
+		err := s.recover(s.runner(quick))
+		if !edited {
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.back("1.0.0")
+			if s.file(child) != "delivered" {
+				t.Fatalf("child = %q", s.file(child))
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), p) || !strings.Contains(err.Error(), "move it away") || s.journal() == nil || s.file(parent) != "operator edit" {
+			t.Fatalf("recover over an edited creation: %v (file %q)", err, s.file(parent))
+		}
+		if err := os.Rename(p, filepath.Join(s.root, "saved.conf")); err != nil {
+			t.Fatal(err)
+		}
+		s.fresh()
+		if err := s.recover(s.runner(quick)); err != nil {
+			t.Fatal(err)
+		}
+		s.back("1.0.0")
+		if s.file(child) != "delivered" || s.file("saved.conf") != "operator edit" {
+			t.Fatalf("child = %q, saved = %q", s.file(child), s.file("saved.conf"))
+		}
+	}
+}
+
+// A non-blocking edited creation (docker/only-1.1.0.txt, which the target
+// alone ships) stays with a warning and recover finishes.
+func TestRecoverUpgradeKeepsEditedNonBlockingCreation(t *testing.T) {
+	const only = "docker/only-1.1.0.txt"
+	s := newStack(t, "", rel{version: "1.0.0"}, rel{version: "1.1.0"})
+	s.cutUpgrade(s.runner(quick), isStep(KindStepDone, StepApply))
+	if j := s.journal(); j == nil || !slices.Contains(j.Created, only) {
+		t.Fatalf("unexpected journal: %+v", j)
+	}
+	if err := os.WriteFile(filepath.Join(s.root, only), []byte("operator edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.fresh()
+	if err := s.recover(s.runner(quick)); err != nil {
+		t.Fatal(err)
+	}
+	if s.file(only) != "operator edit" || !strings.Contains(strings.Join(s.rep.notices(), "\n"), "warning: keeping "+only) {
+		t.Fatalf("file %q, notices %v", s.file(only), s.rep.notices())
+	}
+	if s.journal() != nil || s.state().Current != "1.0.0" {
+		t.Fatal("recover did not finish")
 	}
 }

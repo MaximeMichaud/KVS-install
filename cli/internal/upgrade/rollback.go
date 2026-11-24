@@ -385,7 +385,7 @@ func (r *Runner) putBack(state *instance.State, j *instance.Journal) error {
 	if j.Action == instance.ActionUpgrade && j.To == j.From {
 		target = r.stagingDir(j.To)
 	}
-	owned := release.RecoveryFiles(r.Inst.Root, target, state.Files, laid, j.Created, r.notice)
+	owned := release.RecoveryFiles(r.Inst.Root, target, state.Files, laid, r.notice)
 	if err := r.syncFiles(prev, state.Files, owned, j); err != nil {
 		return fmt.Errorf("lay the files of %s back: %w", state.Label(j.From), err)
 	}

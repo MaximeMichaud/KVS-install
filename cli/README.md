@@ -158,9 +158,9 @@ removing another entry that took its name, kvsctl first moves the name into
 a `.kvsctl-<number>.d` directory beside it and gives such an entry its name
 back. If that name is taken again, the entry stays in that directory, and
 apply or recovery stops and names it: move the entry away, then run
-`kvsctl recover`. For a target-only file with
-unrecognized contents and no recorded creation, it prints the path and
-keeps the file while restoring the previous version.
+`kvsctl recover`. If a target-only file differs from the delivered bytes, recovery prints its
+path and keeps it, including when the journal records its creation. If it
+blocks restoration, move it aside and run `kvsctl recover` again.
 Run `kvsctl recover` while nothing else writes into the release paths.
 Both bundle readers reject paths needed as both files and directories before
 extraction starts.

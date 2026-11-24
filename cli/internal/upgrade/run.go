@@ -327,8 +327,8 @@ func (r *Runner) stage(ctx context.Context, state *instance.State, plan *Plan) (
 	return dir, files, nil
 }
 
-// syncFiles journals copies both during apply and while undoing it. Only
-// forward publication establishes that the interrupted target created a file.
+// syncFiles journals copies both during apply and while undoing it. Record
+// forward creations for older readers of the same journal format.
 func (r *Runner) syncFiles(dir string, files, previous []string, j *instance.Journal) error {
 	return release.SyncWithJournal(dir, r.Inst.Root, files, previous, &release.SyncJournal{
 		Pending: func(pending release.PendingCopy) error {

@@ -107,7 +107,8 @@ type Journal struct {
 	// Pending is the temporary being made, filled or published: its name
 	// is recorded before the file exists, its inode before it is filled.
 	Pending *release.PendingCopy `json:"pending,omitempty"`
-	// Created lists target-only files successfully published by this run.
+	// Created lists target-only files published by this run. Older format 2
+	// readers use it to identify files to remove when undoing publication.
 	Created []string `json:"created,omitempty"`
 	// ImagesAfter are the variant settings the run writes to .env,
 	// KVS_<SERVICE>_IMAGE to ref@digest and MARIADB_VERSION on a series

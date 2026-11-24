@@ -702,40 +702,34 @@ func Verify(root string, sums map[string]string) (changed []string, err error) {
 // left behind. An absent target-only file needs no unlink, even if someone
 // creates one later. Its empty directories may need to give way to an
 // original file that recovery is about to restore.
-func RecoveryFiles(root, src string, original, target, created []string, notice func(string)) []string {
+func RecoveryFiles(root, src string, original, target []string, notice func(string)) []string {
 	owned := slices.Clone(original)
 	known := map[string]bool{}
 	for _, file := range original {
 		known[file] = true
 	}
-	published := map[string]bool{}
-	for _, file := range created {
-		published[file] = true
-	}
 	for _, file := range target {
 		if known[file] || !IsFile(file) {
 			continue
 		}
-		if !published[file] {
-			got, err := sha256Beneath(root, file)
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOTDIR) {
-				for dir := path.Dir(file); dir != "."; dir = path.Dir(dir) {
-					if known[dir] {
-						pruneParents(root, path.Dir(file), map[string]bool{dir: true})
-						break
-					}
+		got, err := sha256Beneath(root, file)
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOTDIR) {
+			for dir := path.Dir(file); dir != "."; dir = path.Dir(dir) {
+				if known[dir] {
+					pruneParents(root, path.Dir(file), map[string]bool{dir: true})
+					break
 				}
-				continue
 			}
-			if err != nil {
-				notice(fmt.Sprintf("warning: keeping %s because its contents could not be verified: %v", file, err))
-				continue
-			}
-			want, err := sha256Beneath(src, file)
-			if err != nil || got != want {
-				notice(fmt.Sprintf("warning: keeping %s because its contents do not match a verified delivery and its creation was not recorded", file))
-				continue
-			}
+			continue
+		}
+		if err != nil {
+			notice(fmt.Sprintf("warning: keeping %s because its contents could not be verified: %v", file, err))
+			continue
+		}
+		want, err := sha256Beneath(src, file)
+		if err != nil || got != want {
+			notice(fmt.Sprintf("warning: keeping %s because its contents do not match the verified delivery", file))
+			continue
 		}
 		owned = append(owned, file)
 	}
