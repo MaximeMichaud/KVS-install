@@ -170,6 +170,11 @@ release](#a-bad-release) anyway.
 
 ## Cutting a release
 
+At each release, check `GUM_VERSION` in `docker/setup.sh`. Compare
+`GUM_SHA256_X86_64` and `GUM_SHA256_ARM64` with the checksums file
+published with that gum release. When updating gum, change the version
+and both checksums together.
+
 1. **Refresh `docker/images.lock`.**
 
    ```sh
