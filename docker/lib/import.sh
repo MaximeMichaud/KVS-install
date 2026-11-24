@@ -2577,7 +2577,7 @@ import_count_load() {
 # measures allocated blocks instead, so compare like units on both ends.
 import_check_estimated_transfer_space() {
     local destination="$1" reserve="$2" saved_bytes="$3" report="${IMPORT_RESUME_SPACE_REPORT:-}"
-    local total held remaining size status stage=received
+    local total held remaining size status="" stage=received
     local -a du_args=(-sbl)
     shift 3
     if [ -n "$saved_bytes" ]; then
@@ -2588,11 +2588,11 @@ import_check_estimated_transfer_space() {
         size=$(import_kv "$report" site_required_mb)
         [[ "$size" =~ ^[0-9]+$ ]] || size=$(import_kv "$report" site_size_mb)
         status=$(import_kv "$report" site_size_status)
-        if [[ "$size" =~ ^[0-9]+$ && ( "$status" = exact || -z "$status" ) ]]; then
+        if [[ "$size" =~ ^[0-9]+$ && ( "$status" = exact || "$status" = upper_bound || -z "$status" ) ]]; then
             total=$((10#$size * 1048576))
             du_args=(-s -B1)
         else
-            # Use the first pass's upper-bound check and warning for an
+            # Use the first pass's filesystem check and warning for an
             # unknown site size. A files-only pass still needs the raw dump.
             [ "${IMPORT_FILES_ONLY:-no}" != yes ] || stage=pending
             import_remote_free_space_check "$report" "$destination" '' "$stage"
@@ -2610,6 +2610,13 @@ import_check_estimated_transfer_space() {
     remaining=$((total > held ? total - held : 0))
     [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=0
     if ! import_free_space_mb_ok "$(((remaining + 1048575) / 1048576 + reserve))" "$destination"; then
+        # Some filesystems allocate blocks even for an empty directory.
+        if [ "$status" = upper_bound ] && [ "$held" -gt 0 ] &&
+            [ -n "$(find "$destination/." -mindepth 1 -maxdepth 1 -printf x -quit)" ] &&
+            import_free_space_mb_ok "$reserve" "$destination"; then
+            echo "  WARNING: the unfiltered upper bound is only an estimate on this resumed pass; the database reserve fits. Files renamed on the source can still occupy space here." >&2
+            return 0
+        fi
         echo "ERROR: not enough free space under $destination for the estimated $(import_bytes_text "$remaining") left and $(import_mb_text "$reserve") reserved for the database and its dumps, with a tenth of margin" >&2
         return 1
     fi

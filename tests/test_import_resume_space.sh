@@ -123,6 +123,28 @@ rm "$(import_count_file "$resume")"
         if COUNT_STATUS=12 AVAILABLE=1 import_remote_files "$tmp/source" "$resume" "$method" > "$tmp/out" 2>&1; then fail 'ignored an exact source measurement'; fi
         COUNT_STATUS=12 AVAILABLE=22 import_remote_files "$tmp/source" "$resume" "$method" > "$tmp/out" 2>&1 || fail 'exact source measurement fits'
     done
+    # A resumed tar pass needs only the unfiltered bound minus allocated
+    # bytes already present, plus the database reserve.
+    printf 'site_size_status=upper_bound\nsite_size_mb=20\ndb_size_mb=0\n' > "$IMPORT_RESUME_SPACE_REPORT"
+    import_mark_destination "$tmp/empty" "$source_id"
+    if AVAILABLE=10 import_remote_files "$tmp/source" "$tmp/empty" no > "$tmp/out" 2>&1; then
+        fail "an empty marked destination bypassed the upper bound"
+    fi
+    [ ! -e "$tmp/empty/video" ] || fail "an empty marked destination started the transfer"
+    dd if=/dev/zero of="$resume/old-name" bs=1M count=16 status=none
+    echo renamed > "$tmp/source/new-name"
+    AVAILABLE=7 IMPORT_TRANSFER_RESERVE_MB=2 import_remote_files "$tmp/source" "$resume" no > "$tmp/out" 2>&1 ||
+        fail "resumed tar charged the full upper bound: $(cat "$tmp/out")"
+    AVAILABLE=4 IMPORT_TRANSFER_RESERVE_MB=2 import_remote_files "$tmp/source" "$resume" no > "$tmp/out" 2>&1 ||
+        fail "a bound-only shortage on retry must warn"
+    grep -q 'upper bound.*estimate' "$tmp/out" || fail "missing estimate warning"
+    [ -f "$resume/old-name" ] || fail "tar removed the old name"
+    cmp "$tmp/source/new-name" "$resume/new-name" || fail "tar did not copy the renamed file"
+    for free in 1 unknown; do
+        if AVAILABLE=$free IMPORT_TRANSFER_RESERVE_MB=2 import_remote_files "$tmp/source" "$resume" no > "$tmp/out" 2>&1; then
+            fail "resumed tar ignored the database reserve or unreadable free space"
+        fi
+    done
     # With no estimate, keep the ordinary inspection's upper-bound warning.
     printf 'site_size_status=skipped\nsite_fs_used_mb=50\ndb_size_mb=0\n' > "$IMPORT_RESUME_SPACE_REPORT"
     COUNT_STATUS=12 AVAILABLE=1 import_remote_files "$tmp/source" "$resume" no > "$tmp/out" 2>&1 || fail 'unknown size prevented tar'
