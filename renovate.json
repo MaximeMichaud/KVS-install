@@ -25,7 +25,7 @@
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
-        "(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>v?\\d+\\.\\d+\\.\\d+)@(?<currentDigest>sha256:[0-9a-f]{64})"
+        "(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>v?\\d+\\.\\d+(?:\\.\\d+)?)@(?<currentDigest>sha256:[0-9a-f]{64})"
       ],
       "datasourceTemplate": "docker"
     },
@@ -99,12 +99,19 @@
     {
       "description": "The same for the images the workflows run by tag and digest, named one by one",
       "matchManagers": ["custom.regex"],
-      "matchDepNames": ["hadolint/hadolint", "moby/buildkit", "centos"],
+      "matchDepNames": ["hadolint/hadolint", "moby/buildkit", "centos", "mysql"],
       "matchUpdateTypes": ["digest"],
       "groupName": "moved tags",
       "groupSlug": "moved-tags",
       "automerge": false,
       "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Keep the two MySQL dump fixtures on their compatibility versions",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["mysql"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "enabled": false
     },
     {
       "description": "CentOS 7 runs the exporter suite on its Bash 4.2, the oldest Bash the exporter supports: a later CentOS would test a newer one",

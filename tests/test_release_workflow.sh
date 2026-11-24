@@ -164,8 +164,40 @@ for suite in "$ROOT_DIR"/tests/integration_*; do
     grep -Fxq "    \"\$TEST_DIR/$name\"" "$ROOT_DIR/tests/run.sh" && continue
     jq -e --arg run "tests/$name" 'any(.jobs[].steps[]?; (.run // "") | contains($run))' \
         <<<"$docker" >/dev/null && continue
+    jq -e --arg run "tests/$name" 'any(.jobs[].steps[]?; (.run // "") | contains($run))' \
+        <<<"$tests" >/dev/null && continue
     fail "no workflow runs tests/$name: list it in tests/run-integration.sh"
 done
+unconditional_job "$tests" tests.yml mysql-dumps
+unconditional_steps "$tests" tests.yml mysql-dumps
+holds "$tests" "test both source releases with a real dump and required images" \
+    '.jobs["mysql-dumps"] | (.strategy.matrix.source_image | map(split("@")[0]) | sort) == ["mysql:5.7.44","mysql:8.4"]
+     and any(.steps[]; .env.SOURCE_IMAGE == "${{ matrix.source_image }}"
+        and .run == "tests/integration_mysql_dump.sh --pull \"$SOURCE_IMAGE\"")'
+# A cleanup error must not hide the start error or skip later removals.
+(
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    export removals="$work/removals"
+    mkdir "$work/tmp"
+    # shellcheck disable=SC2329  # Exported to the integration suite.
+    docker() {
+        case $1 in
+            info|image) return 0 ;;
+            create) if [[ "$*" == *MYSQL_DATABASE=* ]]; then echo src; else echo dest; fi ;;
+            start) return 37 ;;
+            rm) echo "$*" >> "$removals"; [[ $3 != src ]] || return 19 ;;
+            *) return 99 ;;
+        esac
+    }
+    export -f docker
+    source_image=$(jq -er '.jobs["mysql-dumps"].strategy.matrix.source_image[0]' <<<"$tests")
+    status=0
+    TMPDIR="$work/tmp" bash "$ROOT_DIR/tests/integration_mysql_dump.sh" "$source_image" || status=$?
+    [[ $status == 37 ]] || fail "cleanup changed the start status to $status"
+    printf '%s\n' 'rm -fv src' 'rm -fv dest' | cmp - "$removals"
+    [[ -z $(ls -A "$work/tmp") ]] || fail 'cleanup left the MySQL dump directory behind'
+)
 # An integration run must not report success if its pinned database is absent.
 if storage_image_log=$(
     # shellcheck disable=SC2329  # Exported to the suite.

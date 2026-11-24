@@ -44,7 +44,7 @@ if not workflows:
 problems = []
 pinned = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 comment = re.compile(r"^\s*(?:-\s+)?uses:\s*(\S+)\s+#\s*v?\d+\.\d+\.\d+\s*$")
-image_pin = re.compile(r"^([a-z0-9][a-z0-9._/-]*):(v?\d+\.\d+\.\d+)@(sha256:[0-9a-f]{64})$")
+image_pin = re.compile(r"^([a-z0-9][a-z0-9._/-]*):(v?\d+\.\d+(?:\.\d+)?)@(sha256:[0-9a-f]{64})$")
 renovate = json.loads((root / "renovate.json").read_text(encoding="utf-8"))
 checkouts = 0
 uses_count = 0
@@ -205,6 +205,8 @@ for path in workflows:
         # or as the image key of a mapping.
         run_in = [("container", job.get("container"))]
         run_in += [(f"service {service}", spec) for service, spec in (job.get("services") or {}).items()]
+        matrix = (job.get("strategy") or {}).get("matrix") or {}
+        run_in += [("source_image", image) for image in matrix.get("source_image", [])]
         for what, spec in run_in:
             if spec is None:
                 continue
