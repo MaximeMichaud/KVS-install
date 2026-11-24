@@ -860,9 +860,7 @@ test_the_setup_says_when_imported_events_do_not_run() {
     local lib="$TMP_ROOT/verify-database.sh"
     local fixture statuses scheduler expected output
 
-    awk '$0 == "import_verify_database() {" { capture = 1 } capture { print } capture && /^}$/ { exit }' \
-        "$REPO_ROOT/docker/setup.sh" > "$lib"
-    grep -q 'information_schema.events' "$lib" || fail "import_verify_database must look for events"
+    sed -n '/^import_verify_database() {/,/^}/p; /^import_report_events() {/,/^}/p' "$REPO_ROOT/docker/setup.sh" > "$lib"
     for fixture in 'ENABLED ENABLED DISABLED|OFF|2' 'ENABLED|DISABLED|1' 'DISABLED|OFF|' 'ENABLED|ON|' '|OFF|' 'fail|OFF|'; do
         IFS='|' read -r statuses scheduler expected <<< "$fixture"
         output=$(
@@ -891,6 +889,7 @@ test_the_setup_says_when_imported_events_do_not_run() {
                 esac
             }
             import_verify_database
+            import_report_events
         ) || fail "the verification must pass with events $statuses: $output"
         grep -Fq 'Database imported (3 tables in the dump)' <<< "$output" || fail "the import must be confirmed: $output"
         if [ -n "$expected" ]; then

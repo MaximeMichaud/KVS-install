@@ -121,6 +121,7 @@ case "$*" in
             # default credential to rotate (setup asks as 35-harden does).
             *"FROM information_schema.tables WHERE table_schema='resume.example.com';") echo 1 ;;
             *"SELECT login FROM ktvs_admin_users WHERE user_id=1 AND pass="*) ;;
+            *'FROM information_schema.events WHERE event_schema = DATABASE()'*) echo 2 ;;
             'SELECT 1') echo 1 ;;
             *'FROM information_schema.schemata '*|*'FROM mysql.user '*) echo 1 ;;
             "SHOW TABLES LIKE '%options%';") echo ktvs_options ;;
@@ -267,6 +268,10 @@ make_case "$fixture/success"
 )
 if ! run_case "$fixture/success" no; then
     cat "$fixture/success/output.log" >&2
+    exit 1
+fi
+if [ "$(grep -Fc '2 enabled events, which do not run' "$fixture/success/output.log")" != 1 ]; then
+    echo 'FAIL: resume must print the disabled scheduler notice once' >&2
     exit 1
 fi
 grep -Fxq phpmyadmin-init "$fixture/success/calls"
