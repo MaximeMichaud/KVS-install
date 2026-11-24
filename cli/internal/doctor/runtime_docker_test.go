@@ -14,7 +14,7 @@ import (
 // The database and cron checks against real containers: a PHP-FPM image and
 // a MariaDB image, and a cron image when one is given, all already on this
 // machine (nothing is pulled), on an internal network, through the probes
-// doctor runs. CI does not set these variables; run it by hand:
+// doctor runs. The image workflow sets these variables. To run it locally:
 //
 //	KVSCTL_DOCTOR_PHP_IMAGE=<php image> KVSCTL_DOCTOR_MARIADB_IMAGE=mariadb:<tag> \
 //	KVSCTL_DOCTOR_CRON_IMAGE=<cron image> go test -run RealDocker ./internal/doctor

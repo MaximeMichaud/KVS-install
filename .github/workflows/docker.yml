@@ -15,6 +15,7 @@ on:
       - "tests/integration_cache.py"
       - "tests/integration_cron_health.sh"
       - "cli/internal/doctor/runtime.go"
+      - "cli/internal/doctor/runtime_docker_test.go"
       - "tests/fixtures/cache-probe.php"
       - "cli/internal/upgrade/cache*"
   pull_request:
@@ -27,6 +28,7 @@ on:
       - "tests/integration_cache.py"
       - "tests/integration_cron_health.sh"
       - "cli/internal/doctor/runtime.go"
+      - "cli/internal/doctor/runtime_docker_test.go"
       - "tests/fixtures/cache-probe.php"
       - "cli/internal/upgrade/cache*"
   # docker/images.lock pins every base and runtime image by digest, so an
@@ -213,6 +215,15 @@ jobs:
             image=$(./docker/bin/resolve-bases.sh --get "$backend")
             docker pull --quiet "$image"
           done
+      - name: Check the doctor database and cron probes
+        working-directory: cli
+        env:
+          KVSCTL_DOCTOR_PHP_IMAGE: kvs-install/php:ci
+          KVSCTL_DOCTOR_CRON_IMAGE: kvs-install/cron:ci
+        run: |
+          database=$(../docker/bin/resolve-bases.sh --get mariadb 11.4)
+          docker pull --quiet "$database"
+          KVSCTL_DOCTOR_MARIADB_IMAGE="$database" go test -count=1 -run RealDocker ./internal/doctor
       - name: the cache suite
         env:
           KVS_CACHE_TEST_PHP_IMAGE: kvs-install/php:ci
