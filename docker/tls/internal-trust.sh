@@ -4,7 +4,9 @@
 set -eu
 
 DOMAIN=${DOMAIN:-example.com}
-SSL_PROVIDER=${SSL_PROVIDER:-letsencrypt}
+# Direct-site services receive their provider from Compose. Additional
+# Caddy sites have no direct trust volume or provider setting.
+SSL_PROVIDER=${SSL_PROVIDER:-none}
 TRUST_DIR=${KVS_TLS_TRUST_DIR:-/run/kvs-internal-tls}
 CA_DIR=${KVS_TLS_CA_DIR:-/usr/local/share/ca-certificates}
 CERT_FILE=${KVS_TLS_CERT_FILE:-/etc/nginx/ssl/$DOMAIN/cert.pem}
@@ -43,29 +45,36 @@ self_signed_for_domain() {
 }
 
 publish() (
+    if [ "$SSL_PROVIDER" = none ]; then
+        rm -f "$TRUST_FILE"
+        exit
+    fi
     mkdir -p "$TRUST_DIR"
     candidate=$(mktemp "$TRUST_DIR/.certificate.XXXXXX")
     trap 'rm -f "$candidate"' EXIT
     # An empty publication means no private trust is needed. CA-issued certs
     # keep using the system trust store. Never learn trust from the network.
-    if [ "$SSL_PROVIDER" = selfsigned ]; then
-        openssl x509 -in "$CERT_FILE" -out "$candidate"
-        if ! self_signed_for_domain "$candidate"; then
-            subject=$(openssl x509 -in "$candidate" -noout -subject -nameopt RFC2253)
-            issuer=$(openssl x509 -in "$candidate" -noout -issuer -nameopt RFC2253)
-            if [ "${subject#subject=}" = "${issuer#issuer=}" ]; then
+    openssl x509 -in "$CERT_FILE" -out "$candidate"
+    if ! self_signed_for_domain "$candidate"; then
+        subject=$(openssl x509 -in "$candidate" -noout -subject -nameopt RFC2253)
+        issuer=$(openssl x509 -in "$candidate" -noout -issuer -nameopt RFC2253)
+        if [ "${subject#subject=}" = "${issuer#issuer=}" ]; then
+            if [ "$SSL_PROVIDER" = selfsigned ]; then
                 echo 'ERROR: refusing an invalid self-signed certificate' >&2
                 exit 1
             fi
-            : > "$candidate"
-        elif ! signs_no_certificate "$candidate"; then
-            # nginx replaces such a pair when it starts, so only an nginx
-            # image older than this script gets here. It keeps serving, and
-            # PHP and cron run without the internal trust, rather than trust
-            # this certificate or restart for as long as nginx keeps it.
-            echo 'WARNING: not publishing a self-signed certificate that may sign other certificates; PHP and cron get no internal TLS trust until nginx, on an image of this release, replaces it' >&2
-            : > "$candidate"
+            echo 'WARNING: the ACME fallback does not qualify for internal TLS trust' >&2
         fi
+        : > "$candidate"
+    elif ! signs_no_certificate "$candidate"; then
+        # A public-provider origin can also retain a signing certificate
+        # from an older installation. Leave it outside the trust bundle.
+        if [ "$SSL_PROVIDER" = selfsigned ]; then
+            echo 'WARNING: not publishing a self-signed certificate that may sign other certificates; PHP and cron get no internal TLS trust until nginx, on an image of this release, replaces it' >&2
+        else
+            echo 'WARNING: refusing a signing certificate as ACME fallback trust. Issue a public certificate or replace the fallback with a non-signing leaf.' >&2
+        fi
+        : > "$candidate"
     fi
     chmod 0644 "$candidate"
     if ! cmp -s "$candidate" "$TRUST_FILE"; then
@@ -83,14 +92,18 @@ remove_trust() {
 
 sync_trust() {
     signing_refused=no
-    if [ "$SSL_PROVIDER" != selfsigned ]; then
+    if [ "$SSL_PROVIDER" = none ]; then
         remove_trust
         return $?
     fi
     if [ ! -f "$TRUST_FILE" ]; then
-        remove_trust
-        applied_hash=''
-        return 1
+        if [ "$applied_hash" != missing ]; then
+            remove_trust || return 1
+            applied_hash=missing
+            signing_hash=''
+        fi
+        [ "$SSL_PROVIDER" != selfsigned ]
+        return $?
     fi
     current_hash=$(sha256sum "$TRUST_FILE") || return 1
     [ "$current_hash" != "$applied_hash" ] || return 0
@@ -150,6 +163,12 @@ case "${1:-}" in
         wait_seconds=${KVS_TLS_WAIT_SECONDS:-120}
         case "$wait_seconds" in ''|*[!0-9]*) exit 1 ;; esac
         while ! sync_trust; do
+            if [ "$SSL_PROVIDER" != selfsigned ]; then
+                # Private trust is optional with ACME. Even a stale, invalid
+                # publication must not gate startup once its trust is revoked.
+                remove_trust || exit 1
+                break
+            fi
             if [ "$wait_seconds" -le 0 ]; then
                 if [ "$signing_refused" = yes ]; then
                     # An nginx image older than this script keeps such a
@@ -166,7 +185,7 @@ case "${1:-}" in
             wait_seconds=$((wait_seconds - 1))
             sleep 1
         done
-        if [ "$SSL_PROVIDER" = selfsigned ]; then
+        if [ "$SSL_PROVIDER" != none ]; then
             # Refresh the trust store used by FPM workers and cron CLI tasks.
             # Invalid/missing publications revoke the old trust, never TLS checks.
             (while sleep 2; do sync_trust || true; done) &

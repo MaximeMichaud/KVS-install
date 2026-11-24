@@ -275,17 +275,24 @@ server {
     execute("nginx", "sh", "/usr/local/lib/kvs-tls/internal-trust.sh", "publish")
     eventually(good)
     record("missing publication fails closed and is recoverable")
-    # Public/none modes must remove a previous private trust anchor.
-    for provider in ("letsencrypt", "none"):
+    # An ACME origin still serving this fallback needs its leaf. Caddy
+    # terminates TLS separately, so it removes the direct origin trust.
+    # Caddy mode goes first: the restart after its removal then waits for
+    # the entrypoint to install the trust again, so the first sync of a
+    # restarting entrypoint cannot reinstall it behind a later check.
+    for provider in ("none", "letsencrypt"):
         for service in ("php-fpm", "cron"):
             execute(service, "env", f"SSL_PROVIDER={provider}", "sh",
                     "/usr/local/lib/kvs-tls/internal-trust.sh", "sync")
-            assert execute(service, "test", "-e", "/usr/local/share/ca-certificates/kvs-internal-site.crt",
-                           check=False).returncode != 0
+            installed = "/usr/local/share/ca-certificates/kvs-internal-site.crt"
+            if provider == "none":
+                assert execute(service, "test", "-e", installed, check=False).returncode != 0
+            else:
+                execute(service, "cmp", installed, f"/run/kvs-internal-tls/{DOMAIN}.pem")
         # The running self-signed watcher intentionally restores its own mode.
         compose("restart", "php-fpm", "cron")
         eventually(good)
-    record("public and Caddy modes remove installation-owned private trust")
+    record("ACME mode trusts its fallback leaf and Caddy mode removes direct origin trust")
     execute("nginx", "sh", "-c", f'''
         set -eu
         d=/etc/nginx/ssl/{DOMAIN}

@@ -191,6 +191,10 @@ it validates the replacement before saving the previous files in a private
 `replaced.XXXXXX` directory beside the live pair. It prints that directory
 inside the NGINX container so the operator can recover the files.
 
+If direct ACME issuance is pending, PHP and cron can start before NGINX
+publishes its fallback leaf. They install that leaf when it passes the same
+checks and remove its trust when NGINX publishes the issued certificate.
+
 A retained CA-issued certificate keeps using the normal CA store. To use a
 private development CA, explicitly mount its public `.crt` file under
 `/usr/local/share/ca-certificates/` in both PHP and cron; startup loads it as

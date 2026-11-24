@@ -1164,8 +1164,11 @@ assert_not_contains "$LAST_DIR/docker.calls" 'www.7.0.2.example.org' \
 assert_contains "$LAST_DIR/docker.calls" \
     '--accountemail admin@example.com --server letsencrypt' \
     "Let's Encrypt did not receive the selected account and server"
-assert_contains "$LAST_DIR/docker.calls" 'acme.sh --install-cert' \
-    "the public certificate was not installed"
+assert_before "$LAST_DIR/docker.calls" 'acme.sh --install-cert' 'kvs-nginx nginx -s reload' \
+    "Nginx must reload after the public certificate is installed"
+assert_before "$LAST_DIR/docker.calls" 'kvs-nginx nginx -s reload' \
+    'kvs-nginx sh /usr/local/lib/kvs-tls/internal-trust.sh publish' \
+    "reconfiguration must refresh internal trust after Nginx reloads the issued certificate"
 assert_contains "$LAST_DIR/docker.calls" \
     'compose up -d --force-recreate --no-deps php-fpm cron dragonfly' \
     "PHP, cron, and the active cache were not recreated"

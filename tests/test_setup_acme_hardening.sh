@@ -225,6 +225,9 @@ grep -Fq 'compose exec -T acme acme.sh --install-cert -d example.com' \
     "$TEST_DIR/apex.calls" || fail "the issued apex certificate was not installed"
 grep -Fq 'compose exec -T nginx nginx -s reload' "$TEST_DIR/apex.calls" ||
     fail "Nginx was not reloaded after certificate validation"
+awk '/^compose exec -T nginx nginx -s reload$/ { loaded = 1 }
+    /^compose exec -T nginx sh .*internal-trust.sh publish$/ && loaded { refreshed = 1 }
+    END { exit !refreshed }' "$TEST_DIR/apex.calls" || fail "fallback publication survived ACME installation"
 if ! grep -Fxq 'certificate-pair save' "$TEST_DIR/apex.calls" ||
     ! grep -Fxq 'certificate-pair discard' "$TEST_DIR/apex.calls"; then
     fail "the pair Nginx served was not saved before the install, or its copy was kept"

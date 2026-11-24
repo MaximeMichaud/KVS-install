@@ -65,6 +65,7 @@ case "$*" in
         [ ! -e mariadb/init/10-kvs-import.sql ] || exit 98
         grep -q '^KVS_IMPORT_COMPLETED=' .env || exit 98
         echo start-cron >> "$CALLS" ;;
+    'compose exec -T nginx sh /usr/local/lib/kvs-tls/internal-trust.sh publish') exit 0 ;;
     'compose exec -T nginx nginx -s reload')
         # What a real Nginx does with a new key next to the old certificate.
         if [ "${FAIL_ALL_RELOAD:-no}" = yes ]; then

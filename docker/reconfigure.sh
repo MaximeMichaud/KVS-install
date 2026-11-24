@@ -1766,6 +1766,8 @@ issue_and_install_public_certificate() {
         echo -e "${RED}ERROR: Nginx could not reload the installed certificate${NC}"
         return 1
     fi
+    docker exec "$NGINX_CONTAINER" sh /usr/local/lib/kvs-tls/internal-trust.sh publish ||
+        echo "WARNING: internal TLS trust could not be refreshed after issuance; the Nginx certificate monitor will retry." >&2
 }
 
 # The services recreate_runtime_services recreates: php-fpm, cron and the

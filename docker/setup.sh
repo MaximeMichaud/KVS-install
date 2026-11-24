@@ -7929,6 +7929,8 @@ configure_direct_acme_certificate() {
         setup_restore_certificate_pair
         return 1
     fi
+    docker compose exec -T nginx sh /usr/local/lib/kvs-tls/internal-trust.sh publish ||
+        echo "WARNING: internal TLS trust could not be refreshed after issuance; the Nginx certificate monitor will retry." >&2
     setup_certificate_pair discard || true
     echo -e "${GREEN}SSL certificate installed and validated${NC}"
 }
