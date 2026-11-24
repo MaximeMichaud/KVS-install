@@ -4201,6 +4201,49 @@ test_the_usage_is_available_and_bad_options_are_refused() {
     pass "the usage is available and bad options are refused"
 }
 
+# The compatibility job has Bash and a BusyBox userland. Run the exporter
+# with those applets first and the fixture database clients behind them.
+if [[ ${1:-} == --busybox ]]; then
+    busybox=${2:?pass the BusyBox binary}
+    [[ $(id -u) == 1000 ]] || fail 'the BusyBox export must run as uid 1000'
+    mkdir "$TMP_ROOT/applets"
+    "$busybox" --list > "$TMP_ROOT/list"
+    while IFS= read -r applet; do
+        ln -s "$busybox" "$TMP_ROOT/applets/$applet"
+    done < "$TMP_ROOT/list"
+    export PATH="$TMP_ROOT/applets:$PATH"
+    for tool in tar find du stat mktemp; do
+        [[ $(command -v "$tool") == "$TMP_ROOT/applets/$tool" ]] || fail "missing BusyBox $tool"
+    done
+    make_site "$TMP_ROOT/site"
+    mkdir "$TMP_ROOT/site/tmp"
+    echo transient > "$TMP_ROOT/site/tmp/partial"
+    make_stubs
+    # The Bash image installs its interpreter under /usr/local/bin.
+    sed -i "1s|^#!/bin/bash$|#!$BASH|" "$STUB_BIN"/*
+    # Limit tool discovery to the applets and the database clients. In
+    # particular, a developer's zstd must not change the dump member name.
+    run_export "$TMP_ROOT/applets:$STUB_BIN" "$TMP_ROOT/out" "$TMP_ROOT/err" \
+        -y -o "$TMP_ROOT/export.tar" archive "$TMP_ROOT/site" || fail "$(cat "$TMP_ROOT/err")"
+    tar -tf "$TMP_ROOT/export.tar" | LC_ALL=C sort > "$TMP_ROOT/members"
+    diff -u - "$TMP_ROOT/members" <<'MEMBERS'
+database.sql.gz
+kvs-export.manifest
+www/
+www/admin/
+www/admin/include/
+www/admin/include/setup.php
+www/admin/include/setup_db.php
+www/admin/include/version.php
+www/contents/
+www/contents/videos/
+www/contents/videos/1.mp4
+www/tmp/
+MEMBERS
+    pass 'BusyBox exporter retains the tmp directory and omits its child'
+    exit 0
+fi
+
 make_stubs
 make_min_bin
 make_extra_bin

@@ -152,6 +152,15 @@ unconditional_steps "$tests" tests.yml integration
 holds "$tests" "the integration suites must run as uid 1000, with CI set" \
     'any(.jobs.integration.steps[]; .run == ".github/scripts/as-uid-1000.sh tests/run-integration.sh"
         and (.env.CI | tostring) == "true")'
+unconditional_job "$tests" tests.yml compatibility
+unconditional_steps "$tests" tests.yml compatibility
+holds "$tests" "the exporter must run with BusyBox as uid 1000" \
+    'any(.jobs.compatibility.steps[]; (.run // "") | test("^docker run --rm --network none --user 1000:1000 .* bash:5\\.2@sha256:[a-f0-9]{64} bash tests/test_kvs_export.sh --busybox /bin/busybox$"))'
+holds "$tests" "the parser suite must use the verified PHP 7.4 runtime" \
+    'any(.jobs.compatibility.steps[]; .env.PROJECT_URL_PHP_VERSION == "7.4"
+         and (.run | contains("php:7.4-cli@sha256:"))
+         and (.run | contains("php7.4 -r "+$quote+"exit(PHP_VERSION_ID >= 70400 && PHP_VERSION_ID < 70500 ? 0 : 1);"+$quote))
+         and (.run | endswith("tests/test_install_project_url.sh\n")))' --arg quote "'"
 # Each one runs from tests/run.sh, from the list of tests/run-integration.sh,
 # or from a step of the docker images workflow, on the images it builds: a
 # suite added to tests/ and to none of them would never run.

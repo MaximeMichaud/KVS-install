@@ -164,3 +164,32 @@ jobs:
         env:
           SOURCE_IMAGE: ${{ matrix.source_image }}
         run: tests/integration_mysql_dump.sh --pull "$SOURCE_IMAGE"
+
+  compatibility:
+    name: legacy PHP and BusyBox
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Keep zip, unzip and the installer shell on the runner. Both PHP CLI
+      # names execute the same container binary against the shared fixtures.
+      - name: project URL parser on PHP 7.4
+        env:
+          PROJECT_URL_PHP_VERSION: "7.4"
+        run: |
+          TMPDIR=$(mktemp -d)
+          export TMPDIR
+          user="$(id -u):$(id -g)"
+          container=$(docker run -d --network none --user "$user" -v "$TMPDIR:$TMPDIR" \
+            php:7.4-cli@sha256:620a6b9f4d4feef2210026172570465e9d0c1de79766418d3affd09190a7fda5 sleep infinity)
+          trap 'docker rm -f "$container" >/dev/null; rm -rf "$TMPDIR"' EXIT
+          printf '#!/bin/sh\nexec "%s" exec -i "%s" php "$@"\n' "$(command -v docker)" "$container" > "$TMPDIR/php"
+          chmod +x "$TMPDIR/php"
+          ln -s php "$TMPDIR/php7.4"
+          export PATH="$TMPDIR:$PATH"
+          php7.4 -r 'exit(PHP_VERSION_ID >= 70400 && PHP_VERSION_ID < 70500 ? 0 : 1);'
+          tests/test_install_project_url.sh
+      - name: archive on BusyBox
+        run: docker run --rm --network none --user 1000:1000 -v "$PWD:/src:ro" -w /src bash:5.2@sha256:2cf7ddaf5f6369c16a0359e3bd48e54ada211a2e4e90d87532ad2958d642bdd5 bash tests/test_kvs_export.sh --busybox /bin/busybox

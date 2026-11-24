@@ -25,7 +25,7 @@
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
-        "(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>v?\\d+\\.\\d+(?:\\.\\d+)?)@(?<currentDigest>sha256:[0-9a-f]{64})"
+        "(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>v?\\d+\\.\\d+(?:\\.\\d+)?(?:-cli)?)@(?<currentDigest>sha256:[0-9a-f]{64})"
       ],
       "datasourceTemplate": "docker"
     },
@@ -99,7 +99,7 @@
     {
       "description": "The same for the images the workflows run by tag and digest, named one by one",
       "matchManagers": ["custom.regex"],
-      "matchDepNames": ["hadolint/hadolint", "moby/buildkit", "centos", "mysql"],
+      "matchDepNames": ["hadolint/hadolint", "moby/buildkit", "centos", "mysql", "php", "bash"],
       "matchUpdateTypes": ["digest"],
       "groupName": "moved tags",
       "groupSlug": "moved-tags",
@@ -107,9 +107,9 @@
       "dependencyDashboardApproval": true
     },
     {
-      "description": "Keep the two MySQL dump fixtures on their compatibility versions",
+      "description": "Keep the dump, parser and exporter fixtures on their compatibility versions",
       "matchManagers": ["custom.regex"],
-      "matchDepNames": ["mysql"],
+      "matchDepNames": ["mysql", "php", "bash"],
       "matchUpdateTypes": ["major", "minor", "patch"],
       "enabled": false
     },

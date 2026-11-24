@@ -7,7 +7,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 KVS_WWW_ROOT="$work/www"
 DOMAIN=example.test
-export PHP=8.3
+export PHP=${PROJECT_URL_PHP_VERSION:-8.3}
 site="$KVS_WWW_ROOT/$DOMAIN"
 export KVS_NGINX_DIR="$work/nginx" KVS_ARCHIVE_DIR="$work/archives"
 mkdir -p "$site/admin/include" "$KVS_ARCHIVE_DIR" "$KVS_NGINX_DIR/globals"
@@ -273,7 +273,9 @@ for statement in \
   "if (true) { $target = 'second' and strlen('x'); }" "if (true) $target = \$url or exit;" \
   "if (true): $target = \$url xor \$x; endif;" \
   "[\"{\$key}\" => $target] = ['k' => 'second'];" "[\"\${key}\" => $target] = ['k' => 'second'];" \
-  "foreach ([#[Pure] fn() => 1] as $target) {}"; do
+  "foreach ([
+#[Pure]
+fn() => 1] as $target) {}"; do
   printf '%s\n' '<?php' "$main" "$statement" >"$file"
   php -l "$file" >/dev/null || fail "fixture does not parse: $statement"
   refuse ambiguous "$statement"
