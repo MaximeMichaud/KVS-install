@@ -33,6 +33,21 @@ assert_file_contains() {
   grep -Fq "$pattern" "$file" || fail "$message"
 }
 
+test_script_on_standard_input_is_refused() {
+  local temp_dir output status=0
+  temp_dir=$(mktemp -d)
+  trap 'rm -rf "$temp_dir"' RETURN
+  output=$(bash -s -- --help < <(cat "$INSTALLER") 2>"$temp_dir/err") || status=$?
+  assert_equal 1 "$status" "script on standard input must fail" || return 1
+  assert_equal "" "$output" "the refusal must leave stdout empty" || return 1
+  grep -Fq "save the script to a file and run 'sudo bash kvs-install.sh'" "$temp_dir/err" ||
+    fail "missing instructions on stderr: $(cat "$temp_dir/err")" || return 1
+
+  output=$(bash <(cat "$INSTALLER") --help </dev/null) &&
+    [[ $output == *"Usage: bash kvs-install.sh"* ]] ||
+    fail "process substitution must still run main with redirected input" || return 1
+}
+
 test_install_failure_stops_pipeline() {
   local temp_dir
   local status
@@ -2311,6 +2326,7 @@ test_the_installer_says_it_needs_bash() {
 }
 
 failures=0
+run_test "script on standard input is refused" test_script_on_standard_input_is_refused || failures=$((failures + 1))
 test_import_source_given_needs_no_archive() {
   (
     unset IMPORT_REMOTE_HOST IMPORT_ARCHIVE IMPORT_SITE_DIR IMPORT_CHOICE

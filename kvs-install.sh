@@ -3938,6 +3938,11 @@ main() {
   fi
 }
 
+if [[ -z ${BASH_SOURCE[0]:-} ]]; then
+  echo "kvs-install.sh: save the script to a file and run 'sudo bash kvs-install.sh'." >&2
+  exit 1
+fi
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   main "$@"
 fi
