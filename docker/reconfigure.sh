@@ -1396,20 +1396,11 @@ sync_direct_tls_profile() {
     fi
 }
 
-nginx_certificate_matches_provider() {
-    local expected_provider="$1"
-    local include_www=false
-
-    if include_www_for_domain; then
-        include_www=true
-    fi
-    docker exec \
-        -e KVS_CERT_DOMAIN="$DOMAIN" \
-        -e KVS_CERT_INCLUDE_WWW="$include_www" \
-        -e KVS_CERT_PROVIDER="$expected_provider" \
-        "$NGINX_CONTAINER" sh -c '
-            cert="/etc/nginx/ssl/${KVS_CERT_DOMAIN}/cert.pem"
-            key="/etc/nginx/ssl/${KVS_CERT_DOMAIN}/key.pem"
+nginx_certificate_check_script() {
+    # shellcheck disable=SC2016  # Evaluated by sh inside nginx.
+    printf '%s\n' '
+            cert=${1:-/etc/nginx/ssl/${KVS_CERT_DOMAIN}/cert.pem}
+            key=${2:-/etc/nginx/ssl/${KVS_CERT_DOMAIN}/key.pem}
             [ -s "$cert" ] && [ -s "$key" ] || exit 1
             san_entries=$(
                 openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null |
@@ -1475,7 +1466,10 @@ nginx_certificate_matches_provider() {
                     ;;
                 selfsigned)
                     [ "$subject" = "$issuer" ] || exit 1
-                    openssl verify -check_ss_sig -CAfile "$cert" "$cert" \
+                    constraints=$(openssl x509 -in "$cert" -noout -ext basicConstraints) || exit 1
+                    [ "$(printf "%s\n" "$constraints" | sed "1d" | tr -d " \t")" = CA:FALSE ] || exit 1
+                    openssl x509 -in "$cert" -noout -purpose | grep -Fxq "SSL server CA : No" || exit 1
+                    openssl verify -check_ss_sig -no-CApath -purpose sslserver -verify_hostname "$KVS_CERT_DOMAIN" -CAfile "$cert" "$cert" \
                         >/dev/null 2>&1 || exit 1
                     ;;
                 *) exit 1 ;;
@@ -1483,22 +1477,55 @@ nginx_certificate_matches_provider() {
             cert_public_key=$(openssl x509 -in "$cert" -pubkey -noout) || exit 1
             private_public_key=$(openssl pkey -in "$key" -pubout -passin pass:) || exit 1
             [ "$cert_public_key" = "$private_public_key" ]
-        ' >/dev/null 2>&1
+        '
 }
 
-generate_self_signed_certificate() {
-    local certificate_san="DNS:${DOMAIN}"
+nginx_certificate_matches_provider() {
+    local expected_provider="$1"
+    local include_www=false
 
     if include_www_for_domain; then
-        certificate_san="${certificate_san},DNS:www.${DOMAIN}"
+        include_www=true
     fi
     docker exec \
         -e KVS_CERT_DOMAIN="$DOMAIN" \
+        -e KVS_CERT_INCLUDE_WWW="$include_www" \
+        -e KVS_CERT_PROVIDER="$expected_provider" \
+        "$NGINX_CONTAINER" sh -c "$(nginx_certificate_check_script)" >/dev/null 2>&1
+}
+
+prepare_self_signed_certificate() {
+    local certificate_san="DNS:${DOMAIN}"
+
+    local include_www=false
+    if include_www_for_domain; then
+        include_www=true
+        certificate_san="${certificate_san},DNS:www.${DOMAIN}"
+    fi
+    docker compose run --rm --no-deps -T --entrypoint sh \
+        -e KVS_CERT_DOMAIN="$DOMAIN" \
+        -e KVS_CERT_INCLUDE_WWW="$include_www" \
         -e KVS_CERT_SAN="$certificate_san" \
-        "$NGINX_CONTAINER" sh -c '
+        nginx -c '
             set -eu
             target_dir="/etc/nginx/ssl/${KVS_CERT_DOMAIN}"
-            mkdir -p "$target_dir"
+            umask 077
+            for directory in /etc/nginx/ssl "$target_dir"; do
+                if [ -L "$directory" ]; then echo "Refusing linked TLS directory: $directory" >&2; exit 1; fi
+                if [ ! -d "$directory" ]; then mkdir "$directory"; fi
+                unsafe=$(find "$directory" -maxdepth 0 \
+                    \( ! -uid "$(id -u)" -o -perm /022 \) -print)
+                if [ -n "$unsafe" ]; then echo "Unsafe TLS directory: $directory" >&2; exit 1; fi
+            done
+            for file in cert.pem key.pem; do
+                path=$target_dir/$file
+                if [ -e "$path" ] && [ ! -f "$path" ]; then
+                    echo "TLS path is not a regular file: $path" >&2; exit 1
+                fi
+            done
+            if KVS_CERT_PROVIDER=selfsigned sh -c "$1" sh "$target_dir/cert.pem" "$target_dir/key.pem" >/dev/null 2>&1; then
+                exit 0
+            fi
             staging_dir=$(mktemp -d "${target_dir}/.selfsigned.XXXXXX")
             cleanup_staging() { rm -rf "$staging_dir"; }
             trap cleanup_staging EXIT INT TERM
@@ -1511,9 +1538,34 @@ generate_self_signed_certificate() {
                 -addext "subjectAltName=${KVS_CERT_SAN}" >/dev/null 2>&1
             chmod 600 "${staging_dir}/key.pem"
             chmod 644 "${staging_dir}/cert.pem"
+            KVS_CERT_PROVIDER=selfsigned sh -c "$1" sh "$staging_dir/cert.pem" "$staging_dir/key.pem"
+            if [ -f "$target_dir/key.pem" ] || [ -L "$target_dir/key.pem" ] ||
+                [ -f "$target_dir/cert.pem" ] || [ -L "$target_dir/cert.pem" ]; then
+                backup=$(mktemp -d "$target_dir/replaced.XXXXXX")
+                for file in cert.pem key.pem; do
+                    if [ -f "$target_dir/$file" ]; then
+                        cp -L "$target_dir/$file" "$backup/$file"
+                        chmod 600 "$backup/$file"
+                    elif [ -L "$target_dir/$file" ]; then
+                        cp -P "$target_dir/$file" "$backup/$file"
+                        echo "Saving dangling TLS link: $target_dir/$file" >&2
+                    fi
+                done
+                echo "Previous TLS files saved in $backup"
+            fi
+            if [ -f "$target_dir/key.pem" ] || [ -L "$target_dir/key.pem" ]; then
+                ln -P "$target_dir/key.pem" "$staging_dir/old-key"
+            fi
             mv -f "${staging_dir}/key.pem" "${target_dir}/key.pem"
-            mv -f "${staging_dir}/cert.pem" "${target_dir}/cert.pem"
-        '
+            if ! mv -f "${staging_dir}/cert.pem" "${target_dir}/cert.pem"; then
+                if [ -e "$staging_dir/old-key" ] || [ -L "$staging_dir/old-key" ]; then
+                    mv -f "$staging_dir/old-key" "$target_dir/key.pem"
+                else
+                    rm -f "$target_dir/key.pem"
+                fi
+                exit 1
+            fi
+        ' sh "$(nginx_certificate_check_script)"
 }
 
 configure_multi_route() {
@@ -1971,15 +2023,15 @@ if [ "$MODE" = "multi" ]; then
         echo -e "${GREEN}Caddy public TLS selected${NC}"
     fi
 elif [ "$SSL_PROVIDER" = "selfsigned" ]; then
+    # The entrypoint can regenerate an invalid or signing pair at startup.
+    # Prepare the effective mount before starting even a stopped origin.
+    if ! prepare_self_signed_certificate; then
+        echo -e "${RED}ERROR: Could not prepare the self-signed certificate${NC}"
+        exit 1
+    fi
     if ! docker compose up -d --force-recreate --no-deps nginx >/dev/null; then
         echo -e "${RED}ERROR: Could not recreate Nginx${NC}"
         exit 1
-    fi
-    if ! nginx_certificate_matches_provider selfsigned; then
-        if ! generate_self_signed_certificate; then
-            echo -e "${RED}ERROR: Could not generate the self-signed certificate${NC}"
-            exit 1
-        fi
     fi
     if ! nginx_certificate_matches_provider selfsigned; then
         echo -e "${RED}ERROR: Self-signed certificate validation failed${NC}"

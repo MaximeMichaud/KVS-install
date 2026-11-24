@@ -186,6 +186,11 @@ directory does not replace it: it publishes no trust and says so, and PHP and
 cron start without the internal trust (after waiting two minutes when the old
 publication is still there) until NGINX runs an image of the same release.
 
+When `reconfigure.sh` explicitly switches a direct site to self-signed TLS,
+it validates the replacement before saving the previous files in a private
+`replaced.XXXXXX` directory beside the live pair. It prints that directory
+inside the NGINX container so the operator can recover the files.
+
 A retained CA-issued certificate keeps using the normal CA store. To use a
 private development CA, explicitly mount its public `.crt` file under
 `/usr/local/share/ca-certificates/` in both PHP and cron; startup loads it as

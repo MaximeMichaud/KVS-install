@@ -580,6 +580,9 @@ case "${1:-}" in
         exit "${MOCK_RM_STATUS:-0}"
         ;;
     compose)
+        if [[ "$joined" == *' --entrypoint sh '* && "$joined" == *' KVS_CERT_SAN='*' nginx -c '* ]]; then
+            exit "${MOCK_GENERATE_STATUS:-0}"
+        fi
         # Nginx (and acme with it) on one side, the application services on
         # the other, each with its own sequence of results.
         if [[ "$joined" == *' nginx '* ]]; then
@@ -676,9 +679,6 @@ case "${1:-}" in
         if [[ "$joined" == *' KVS_CERT_PROVIDER='*' kvs-nginx sh -c '* ]]; then
             next_status MOCK_CERT_RESULTS certificate-check-count
             exit "$NEXT_STATUS"
-        fi
-        if [[ "$joined" == *' KVS_CERT_SAN='*' kvs-nginx sh -c '* ]]; then
-            exit "${MOCK_GENERATE_STATUS:-0}"
         fi
         if [[ "$joined" == *' kvs-nginx nginx -t '* ]]; then
             next_status MOCK_NGINX_TEST_RESULTS nginx-test-count
@@ -1423,7 +1423,7 @@ create_fixture selfsigned
 set_env_value "$TEST_ROOT/selfsigned" SSL_PROVIDER selfsigned
 set_env_value "$TEST_ROOT/selfsigned" COMPOSE_PROFILES \
     'dragonfly,direct-tls,direct-tls'
-run_case selfsigned MOCK_ACME_PRESENT=true MOCK_CERT_RESULTS=1,0
+run_case selfsigned MOCK_ACME_PRESENT=true MOCK_CERT_RESULTS=0
 assert_success "self-signed transition"
 assert_eq dragonfly "$(sed -n 's/^COMPOSE_PROFILES=//p' "$LAST_DIR/.env")" \
     "direct TLS profile removal"
@@ -1441,6 +1441,13 @@ assert_contains "$LAST_DIR/docker.calls" 'mariadb-query tls-skip-0' \
     "self-signed TLS did not enable certificate verification"
 assert_contains "$LAST_DIR/docker.calls" 'kvs-cron php -r' \
     "cron TLS trust was not checked"
+
+create_fixture selfsigned-staging-failure
+set_env_value "$TEST_ROOT/selfsigned-staging-failure" SSL_PROVIDER selfsigned
+run_case selfsigned-staging-failure MOCK_GENERATE_STATUS=1
+assert_failure "staging must finish before nginx starts"
+assert_not_contains "$LAST_DIR/docker.calls" 'docker compose up -d --force-recreate --no-deps nginx' \
+    "nginx could replace the existing files after staging failed"
 
 create_fixture selfsigned-untrusted
 set_env_value "$TEST_ROOT/selfsigned-untrusted" SSL_PROVIDER selfsigned
@@ -2212,8 +2219,7 @@ assert_contains "$LAST_DIR/docker.calls" \
     "R3: Nginx and acme were recreated without --no-deps"
 assert_not_contains "$LAST_DIR/docker.calls" 'compose-recreated-dependency' \
     "R3: the public Nginx recreation recreated MariaDB"
-run_case r3-no-deps-selfsigned MOCK_INITIAL_MARIADB_VERSION=11.8 \
-    MOCK_CERT_RESULTS=1,0
+run_case r3-no-deps-selfsigned MOCK_INITIAL_MARIADB_VERSION=11.8
 assert_success "R3: self-signed reconfiguration with an edited MARIADB_VERSION"
 assert_contains "$LAST_DIR/docker.calls" \
     'docker-text compose up -d --force-recreate --no-deps nginx' \
