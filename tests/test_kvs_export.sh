@@ -48,6 +48,11 @@ pass() {
     echo "ok $TESTS_RUN - $1"
 }
 
+# Read to EOF even after a match so gzip can finish and verify the trailer.
+dump_contains() {
+    gzip -dc < "$1" | grep -F -- "$2" > /dev/null
+}
+
 # archive_lists <archive> <grep options and pattern>: grep over the whole
 # listing of the archive. Piped straight from tar, a grep -q that leaves at
 # its first match closes the pipe tar still writes to, and under pipefail
@@ -3133,7 +3138,7 @@ test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent() {
     assert_key "$out" db_ok yes
 
     run_export "$bin:$MIN_BIN" "$out" "$err" dump "$site" || fail "the dump must work with mysqldump"
-    gzip -dc < "$out" | grep -Fq -- '-- Dump completed' || fail "mysqldump must produce the dump"
+    dump_contains "$out" '-- Dump completed' || fail "mysqldump must produce the dump"
     pass "the mysql tools are used when the mariadb ones are absent"
 }
 
@@ -3183,6 +3188,17 @@ test_the_archive_holds_the_site_the_dump_and_the_manifest() {
     grep -q "Archive written: $archive" "$err" || fail "the archive path must be reported: $(cat "$err")"
     grep -q "IMPORT_ARCHIVE=" "$err" || fail "the next step must be explained"
     pass "the archive holds the site, the dump and the manifest"
+}
+
+test_dump_checks_read_the_whole_stream() {
+    local dump="$TMP_ROOT/long.sql.gz"
+
+    awk 'BEGIN { print "first row"; for (i = 0; i < 65536; i++) print "another row" }' | gzip > "$dump"
+    dump_contains "$dump" 'first row' || fail "missing first row of a long dump"
+    if dump_contains "$dump" 'absent row'; then fail "found a row absent from the dump"; fi
+    truncate -s -1 "$dump"
+    if dump_contains "$dump" 'first row' 2>/dev/null; then fail "accepted a truncated dump"; fi
+    pass "dump checks read to the end and reject incomplete streams"
 }
 
 # A listing longer than a pipe holds, with the name looked for at its
@@ -3370,13 +3386,13 @@ test_dump_only_writes_a_dump_next_to_the_archive() {
     [ "$status" -eq 0 ] || fail "--dump-only must succeed: $(cat "$err")"
     produced=$(find "$work" -maxdepth 1 -type f -name 'example.com-kvs-export-*.sql.gz')
     [ -n "$produced" ] || fail "the dump must be named after the domain and the date: $(find "$work")"
-    gzip -dc < "$produced" | grep -Fq 'CREATE TABLE `ktvs_options`' || fail "the dump must hold the tables"
+    dump_contains "$produced" 'CREATE TABLE `ktvs_options`' || fail "the dump must hold the tables"
     [ ! -s "$out" ] || fail "--dump-only into a file must print nothing on stdout"
     find "$work" -maxdepth 1 -name '*.tar' | grep -q . && fail "--dump-only must not write an archive"
 
     run_export "$STUB_BIN:$MIN_BIN" "$out" "$err" -y --dump-only -o - "$site" ||
         fail "--dump-only with -o - must succeed"
-    gzip -dc < "$out" | grep -Fq -- '-- Dump completed' || fail "the dump must reach stdout with -o -"
+    dump_contains "$out" '-- Dump completed' || fail "the dump must reach stdout with -o -"
     pass "--dump-only writes a dump next to the archive"
 }
 
@@ -3590,7 +3606,7 @@ EOF
                 else
                     [ "$status" -eq 0 ] || fail "$kind replacement failed: $(cat "$err")"
                     if [ "$kind" = dump ]; then
-                        gzip -dc "$output" | grep -Fq -- '-- Dump completed' || fail 'replacement dump is incomplete'
+                        dump_contains "$output" '-- Dump completed' || fail 'replacement dump is incomplete'
                     else
                         tar -xOf "$output" database.sql.gz | gzip -dc | grep -F -- '-- Dump completed' > /dev/null ||
                             fail 'replacement archive is incomplete'
@@ -3793,7 +3809,7 @@ EOF
     run_export "$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" --yes --no-size --gzip --dump-only \
         --output "$work/export" "$site" || fail "old cp could not replace a dump: $(cat "$work/stderr")"
     [ "$(stat -c '%u:%g:%a' "$work/export")" = "$expected" ] || fail "old cp lost ownership or mode"
-    gzip -dc "$work/export" | grep -Fq -- '-- Dump completed' || fail "old cp did not publish the new data"
+    dump_contains "$work/export" '-- Dump completed' || fail "old cp did not publish the new data"
 
     # A chmod that succeeds without applying the mode must not publish.
     mkdir "$work/no-change"
@@ -3857,7 +3873,7 @@ EOF
         run_export "$work/acl-bin:$work/bin:$STUB_BIN:$MIN_BIN" "$work/stdout" "$work/stderr" \
             --yes --no-size --gzip --dump-only --output "$work/export" "$site" || fail "old cp with ACL tools failed"
         [ "$(getfacl -cpn -- "$work/export")" = "$before" ] || fail "replacement changed the extended ACL"
-        gzip -dc "$work/export" | grep -Fq -- '-- Dump completed' || fail "replacement kept the old data"
+        dump_contains "$work/export" '-- Dump completed' || fail "replacement kept the old data"
 
         setfacl -b -- "$work/export"
         setfacl -dm u:65534:r-- "$work"
@@ -4124,7 +4140,7 @@ test_the_script_works_when_bash_reads_it_from_stdin() {
     PATH="$STUB_BIN:$MIN_BIN" "$BASH" -s -- dump "$site" \
         < "$EXPORT_SCRIPT" > "$out" 2> "$err" || status=$?
     [ "$status" -eq 0 ] || fail "the dump must run from stdin too: $(cat "$err")"
-    gzip -dc < "$out" | grep -Fq -- '-- Dump completed' || fail "the dump must be complete when read from stdin"
+    dump_contains "$out" '-- Dump completed' || fail "the dump must be complete when read from stdin"
     pass "the script works when bash reads it from stdin"
 }
 
@@ -4227,6 +4243,7 @@ test_views_are_dumped_apart_when_the_tables_are_locked
 test_versioned_tables_are_refused_before_any_export_is_written
 test_the_mysql_tools_are_used_when_the_mariadb_ones_are_absent
 test_the_archive_holds_the_site_the_dump_and_the_manifest
+test_dump_checks_read_the_whole_stream
 test_archive_listing_checks_read_the_whole_listing
 test_the_archive_can_be_written_on_stdout
 test_a_file_changing_under_the_site_is_a_warning_not_a_failure
